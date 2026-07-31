@@ -441,6 +441,17 @@ fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(Paragraph::new(Line::from(text)).wrap(Wrap { trim: false }), inner);
 }
 
+fn git_status_color(status: crate::git_status::FileStatus) -> Color {
+    use crate::git_status::FileStatus;
+    match status {
+        FileStatus::Modified => Color::Yellow,
+        FileStatus::Added => Color::Green,
+        FileStatus::Deleted => Color::Red,
+        FileStatus::Renamed => Color::Cyan,
+        FileStatus::Untracked => Color::Gray,
+    }
+}
+
 fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::FileTree;
     let block = Block::default()
@@ -448,13 +459,15 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(focused_border_style(focused));
 
+    let paths = app.file_tree.visible_paths();
     let items: Vec<ListItem> = app
         .file_tree
         .visible
         .iter()
-        .map(|entry| {
+        .zip(paths.iter())
+        .map(|(entry, path)| {
             if entry.is_up {
-                return ListItem::new(Line::from("  .."));
+                return ListItem::new(Line::from("   .."));
             }
             let indent = "  ".repeat(entry.depth);
             let icon = if entry.is_dir {
@@ -462,8 +475,12 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "  "
             };
+            let dot = match path.as_ref().and_then(|p| app.git_status.get(p)) {
+                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(*status))),
+                None => Span::raw(" "),
+            };
             let label = format!("{indent}{icon}{}", entry.name);
-            ListItem::new(Line::from(label))
+            ListItem::new(Line::from(vec![dot, Span::raw(label)]))
         })
         .collect();
 

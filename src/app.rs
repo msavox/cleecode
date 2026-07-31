@@ -50,6 +50,7 @@ pub struct App {
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
+    pub git_status: std::collections::HashMap<PathBuf, crate::git_status::FileStatus>,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
 }
@@ -119,6 +120,7 @@ impl App {
         let t2 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
         let available_venvs = discover_venvs(&root);
+        let git_status = crate::git_status::compute(&root);
         Ok(App {
             file_tree: FileTree::new(root.clone()),
             root,
@@ -144,6 +146,7 @@ impl App {
             resize_mode: false,
             dragging: None,
             available_venvs,
+            git_status,
             bg_tx,
             bg_rx,
         })
@@ -272,6 +275,7 @@ impl App {
             self.status_message = msg;
         }
         self.file_tree.refresh();
+        self.git_status = crate::git_status::compute(&self.root);
     }
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {

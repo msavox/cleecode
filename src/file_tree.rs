@@ -136,6 +136,16 @@ impl FileTree {
         self.rebuild_visible();
     }
 
+    /// Absolute path for each row in `visible`, in the same order (None for the
+    /// synthetic ".." row). Lets callers look up per-file annotations (e.g. git status)
+    /// without holding two overlapping borrows of `FileTree` at once.
+    pub fn visible_paths(&self) -> Vec<Option<PathBuf>> {
+        self.visible
+            .iter()
+            .map(|entry| if entry.is_up { None } else { Some(self.node_at(&entry.node_index).path.clone()) })
+            .collect()
+    }
+
     pub fn has_parent(&self) -> bool {
         self.root.path.parent().is_some()
     }

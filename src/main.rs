@@ -3,6 +3,7 @@ mod clipboard;
 mod dnd;
 mod editor;
 mod file_tree;
+mod git_status;
 mod highlight;
 mod i18n;
 mod menu;
