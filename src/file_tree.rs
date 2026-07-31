@@ -27,12 +27,8 @@ impl FileNode {
         }
     }
 
-    fn load_children(&mut self) {
-        if self.loaded {
-            return;
-        }
-        self.loaded = true;
-        let mut entries: Vec<PathBuf> = match fs::read_dir(&self.path) {
+    fn read_sorted_entries(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
             Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
             Err(_) => Vec::new(),
         };
@@ -50,7 +46,15 @@ impl FileNode {
                     .cmp(&b.file_name().unwrap_or_default().to_string_lossy().to_lowercase()),
             }
         });
-        self.children = entries.into_iter().map(FileNode::new).collect();
+        entries
+    }
+
+    fn load_children(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.loaded = true;
+        self.children = Self::read_sorted_entries(&self.path).into_iter().map(FileNode::new).collect();
     }
 
     /// Expands the node (loading its children on first use). No-op if already expanded.
@@ -60,6 +64,31 @@ impl FileNode {
         }
         self.load_children();
         self.expanded = true;
+    }
+
+    /// Re-reads this node's directory listing if it was already loaded, keeping
+    /// existing children (and recursing into expanded ones) so external changes on
+    /// disk (files created/removed by another process) show up without disturbing
+    /// the user's current expand/collapse state.
+    fn refresh(&mut self) {
+        if !self.loaded {
+            return;
+        }
+        let entries = Self::read_sorted_entries(&self.path);
+        let mut old_children = std::mem::take(&mut self.children);
+        let mut new_children = Vec::with_capacity(entries.len());
+        for path in entries {
+            if let Some(pos) = old_children.iter().position(|c| c.path == path) {
+                let mut kept = old_children.remove(pos);
+                if kept.expanded {
+                    kept.refresh();
+                }
+                new_children.push(kept);
+            } else {
+                new_children.push(FileNode::new(path));
+            }
+        }
+        self.children = new_children;
     }
 }
 
@@ -98,6 +127,13 @@ impl FileTree {
         };
         tree.rebuild_visible();
         tree
+    }
+
+    /// Re-reads directory contents on disk for the root and every currently
+    /// expanded/loaded folder, then recomputes the visible row list.
+    pub fn refresh(&mut self) {
+        self.root.refresh();
+        self.rebuild_visible();
     }
 
     pub fn has_parent(&self) -> bool {

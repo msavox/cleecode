@@ -254,6 +254,7 @@ impl App {
         if let Some(msg) = self.editor_mut().check_external_changes(lang) {
             self.status_message = msg;
         }
+        self.file_tree.refresh();
     }
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {
