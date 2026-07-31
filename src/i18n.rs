@@ -64,6 +64,7 @@ pub enum Key {
     MenuRun,
     ItemRunFile,
     ItemToggleSplitView,
+    ItemToggleHiddenFiles,
     ToolbarRun,
     ToolbarVenvNone,
     PanelFile,
@@ -199,6 +200,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleSplitView) => "Split editor",
         (Lang::It, ItemToggleSplitView) => "Editor affiancati",
+
+        (Lang::En, ItemToggleHiddenFiles) => "Hidden files",
+        (Lang::It, ItemToggleHiddenFiles) => "File nascosti",
 
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",

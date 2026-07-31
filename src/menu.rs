@@ -30,6 +30,7 @@ pub enum MenuAction {
     ToggleResizeMode,
     RunFile,
     ToggleSplitView,
+    ToggleHiddenFiles,
 }
 
 pub struct MenuItemDef {
@@ -86,6 +87,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
                 item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+T")),
+                item(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
             ],
         },
         MenuDef {

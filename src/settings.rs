@@ -31,6 +31,12 @@ pub struct Settings {
     // Python scripts, e.g. ".venv". None means "system python".
     #[serde(default)]
     pub active_venv: Option<String>,
+    #[serde(default = "default_true")]
+    pub show_hidden_files: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_run_commands() -> std::collections::HashMap<String, String> {
@@ -70,6 +76,7 @@ impl Default for Settings {
             terminal_on_right: false,
             run_commands: default_run_commands(),
             active_venv: None,
+            show_hidden_files: true,
         }
     }
 }

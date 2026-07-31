@@ -158,8 +158,12 @@ impl App {
         let (git_status_tx, git_status_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
+        let settings = Settings::load();
+        let mut file_tree = FileTree::new(root.clone());
+        file_tree.show_hidden = settings.show_hidden_files;
+        file_tree.rebuild_visible();
         Ok(App {
-            file_tree: FileTree::new(root.clone()),
+            file_tree,
             root,
             editors: vec![Editor::empty()],
             active_editor: 0,
@@ -172,7 +176,7 @@ impl App {
             should_quit: false,
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
-            settings: Settings::load(),
+            settings,
             show_settings: false,
             settings_selected: 0,
             highlighter: Highlighter::new(),
@@ -478,10 +482,17 @@ impl App {
 
     fn set_root(&mut self, new_root: PathBuf) {
         self.file_tree = FileTree::new(new_root.clone());
+        self.file_tree.show_hidden = self.settings.show_hidden_files;
+        self.file_tree.rebuild_visible();
         self.root = new_root;
         self.available_venvs = discover_venvs(&self.root);
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
         self.status_message = i18n::msg_project_folder(self.settings.lang, &self.root.display().to_string());
+    }
+
+    fn toggle_hidden_files(&mut self) {
+        self.settings.show_hidden_files = !self.settings.show_hidden_files;
+        self.file_tree.toggle_hidden();
     }
 
     pub fn new_terminal(&mut self) {
@@ -813,6 +824,7 @@ impl App {
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
+            MenuAction::ToggleHiddenFiles => self.toggle_hidden_files(),
         }
     }
 
@@ -983,6 +995,7 @@ impl App {
                     self.show_delete_confirm = true;
                 }
             }
+            KeyCode::Char('h') | KeyCode::Char('H') => self.toggle_hidden_files(),
             _ => {}
         }
     }

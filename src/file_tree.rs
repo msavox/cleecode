@@ -113,6 +113,7 @@ pub struct FileTree {
     pub root: FileNode,
     pub selected: usize,
     pub visible: Vec<VisibleEntry>,
+    pub show_hidden: bool,
 }
 
 impl FileTree {
@@ -124,6 +125,7 @@ impl FileTree {
             root,
             selected: 0,
             visible: Vec::new(),
+            show_hidden: true,
         };
         tree.rebuild_visible();
         tree
@@ -167,15 +169,23 @@ impl FileTree {
             });
         }
         let mut stack: Vec<usize> = Vec::new();
-        Self::walk(&self.root, 0, &mut stack, &mut self.visible);
+        Self::walk(&self.root, 0, &mut stack, &mut self.visible, self.show_hidden);
         if self.selected >= self.visible.len() && !self.visible.is_empty() {
             self.selected = self.visible.len() - 1;
         }
     }
 
-    fn walk(node: &FileNode, depth: usize, path: &mut Vec<usize>, out: &mut Vec<VisibleEntry>) {
+    pub fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.rebuild_visible();
+    }
+
+    fn walk(node: &FileNode, depth: usize, path: &mut Vec<usize>, out: &mut Vec<VisibleEntry>, show_hidden: bool) {
         // root itself is not shown as a row; only its children are shown starting at depth 0
         for (i, child) in node.children.iter().enumerate() {
+            if !show_hidden && child.name.starts_with('.') {
+                continue;
+            }
             path.push(i);
             out.push(VisibleEntry {
                 depth,
@@ -186,7 +196,7 @@ impl FileTree {
                 is_up: false,
             });
             if child.is_dir && child.expanded {
-                Self::walk(child, depth + 1, path, out);
+                Self::walk(child, depth + 1, path, out, show_hidden);
             }
             path.pop();
         }
