@@ -38,7 +38,7 @@ fn item(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> M
 pub fn menu_defs() -> Vec<MenuDef> {
     vec![
         MenuDef {
-            title_key: Key::MenuCliCode,
+            title_key: Key::MenuCleeCode,
             items: vec![
                 item(Key::ItemAbout, MenuAction::ShowAbout, None),
                 item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("F4")),

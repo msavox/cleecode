@@ -28,7 +28,7 @@ impl Default for Lang {
 
 #[derive(Clone, Copy)]
 pub enum Key {
-    MenuCliCode,
+    MenuCleeCode,
     MenuFile,
     MenuEdit,
     MenuView,
@@ -73,8 +73,8 @@ pub enum Key {
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
     match (lang, key) {
-        (Lang::En, MenuCliCode) => "CliCode",
-        (Lang::It, MenuCliCode) => "CliCode",
+        (Lang::En, MenuCleeCode) => "CleeCode",
+        (Lang::It, MenuCleeCode) => "CleeCode",
 
         (Lang::En, MenuFile) => "File",
         (Lang::It, MenuFile) => "File",
@@ -109,8 +109,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemCloseTerminal) => "Close terminal",
         (Lang::It, ItemCloseTerminal) => "Chiudi terminale",
 
-        (Lang::En, ItemAbout) => "About clicode",
-        (Lang::It, ItemAbout) => "Informazioni su clicode",
+        (Lang::En, ItemAbout) => "About CleeCode",
+        (Lang::It, ItemAbout) => "Informazioni su CleeCode",
 
         (Lang::En, ItemCopy) => "Copy",
         (Lang::It, ItemCopy) => "Copia",
