@@ -33,8 +33,6 @@ pub struct App {
     pub terminals: Vec<TerminalPanel>,
     pub active_terminal: usize,
     pub focus: Focus,
-    pub show_sidebar: bool,
-    pub show_terminal: bool,
     pub should_quit: bool,
     pub status_message: String,
     pub editor_viewport: (usize, usize),
@@ -49,9 +47,50 @@ pub struct App {
     pub splash_started: Instant,
     pub show_delete_confirm: bool,
     pub delete_target: Option<PathBuf>,
+    pub resize_mode: bool,
+    pub dragging: Option<DragTarget>,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DragTarget {
+    Sidebar,
+    TerminalHeight,
+}
+
+#[derive(Clone, Copy)]
+pub struct LayoutPreset {
+    pub show_sidebar: bool,
+    pub show_terminal: bool,
+    pub sidebar_width: u16,
+    pub terminal_pct: u16,
+    pub terminal_on_right: bool,
+}
+
+pub const PRESET_CLASSIC: LayoutPreset = LayoutPreset {
+    show_sidebar: true,
+    show_terminal: true,
+    sidebar_width: 30,
+    terminal_pct: 35,
+    terminal_on_right: false,
+};
+
+pub const PRESET_WIDE: LayoutPreset = LayoutPreset {
+    show_sidebar: false,
+    show_terminal: true,
+    sidebar_width: 30,
+    terminal_pct: 45,
+    terminal_on_right: true,
+};
+
+pub const PRESET_TRIPLE: LayoutPreset = LayoutPreset {
+    show_sidebar: true,
+    show_terminal: true,
+    sidebar_width: 26,
+    terminal_pct: 35,
+    terminal_on_right: true,
+};
 
 fn within(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
@@ -71,12 +110,10 @@ impl App {
             terminals: vec![t1, t2],
             active_terminal: 0,
             focus: Focus::FileTree,
-            show_sidebar: true,
-            show_terminal: true,
             should_quit: false,
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
-            settings: Settings::default(),
+            settings: Settings::load(),
             show_settings: false,
             settings_selected: 0,
             highlighter: Highlighter::new(),
@@ -87,6 +124,8 @@ impl App {
             splash_started: Instant::now(),
             show_delete_confirm: false,
             delete_target: None,
+            resize_mode: false,
+            dragging: None,
             bg_tx,
             bg_rx,
         })
@@ -308,7 +347,7 @@ impl App {
             Ok(t) => {
                 self.terminals.push(t);
                 self.active_terminal = self.terminals.len() - 1;
-                self.show_terminal = true;
+                self.settings.show_terminal = true;
                 self.focus = Focus::Terminal;
                 self.status_message = i18n::msg_new_terminal(lang, self.terminals.len());
             }
@@ -341,10 +380,10 @@ impl App {
 
     fn cycle_focus(&mut self, forward: bool) {
         let mut order = vec![Focus::FileTree, Focus::Editor, Focus::Terminal];
-        if !self.show_sidebar {
+        if !self.settings.show_sidebar {
             order.retain(|f| *f != Focus::FileTree);
         }
-        if !self.show_terminal {
+        if !self.settings.show_terminal {
             order.retain(|f| *f != Focus::Terminal);
         }
         if order.is_empty() {
@@ -367,6 +406,10 @@ impl App {
         }
         if self.show_delete_confirm {
             self.handle_delete_confirm_key(key);
+            return;
+        }
+        if self.resize_mode {
+            self.handle_resize_key(key);
             return;
         }
         if self.show_settings {
@@ -394,7 +437,7 @@ impl App {
                 return;
             }
             KeyCode::F(3) => {
-                if self.show_terminal {
+                if self.settings.show_terminal {
                     self.focus = Focus::Terminal;
                 }
                 return;
@@ -415,6 +458,10 @@ impl App {
                 self.editor_mut().toggle_fold();
                 return;
             }
+            KeyCode::F(8) => {
+                self.resize_mode = !self.resize_mode;
+                return;
+            }
             KeyCode::PageDown if ctrl => {
                 self.cycle_terminal(true);
                 return;
@@ -428,15 +475,15 @@ impl App {
                 return;
             }
             KeyCode::Char('e') if ctrl => {
-                self.show_sidebar = !self.show_sidebar;
-                if !self.show_sidebar && self.focus == Focus::FileTree {
+                self.settings.show_sidebar = !self.settings.show_sidebar;
+                if !self.settings.show_sidebar && self.focus == Focus::FileTree {
                     self.cycle_focus(true);
                 }
                 return;
             }
             KeyCode::Char('t') if ctrl => {
-                self.show_terminal = !self.show_terminal;
-                if !self.show_terminal && self.focus == Focus::Terminal {
+                self.settings.show_terminal = !self.settings.show_terminal;
+                if !self.settings.show_terminal && self.focus == Focus::Terminal {
                     self.cycle_focus(true);
                 }
                 return;
@@ -475,14 +522,14 @@ impl App {
     fn run_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::ToggleSidebar => {
-                self.show_sidebar = !self.show_sidebar;
-                if !self.show_sidebar && self.focus == Focus::FileTree {
+                self.settings.show_sidebar = !self.settings.show_sidebar;
+                if !self.settings.show_sidebar && self.focus == Focus::FileTree {
                     self.cycle_focus(true);
                 }
             }
             MenuAction::ToggleTerminal => {
-                self.show_terminal = !self.show_terminal;
-                if !self.show_terminal && self.focus == Focus::Terminal {
+                self.settings.show_terminal = !self.settings.show_terminal;
+                if !self.settings.show_terminal && self.focus == Focus::Terminal {
                     self.cycle_focus(true);
                 }
             }
@@ -511,6 +558,16 @@ impl App {
                 self.editor_mut().outdent_selection(tab_size);
             }
             MenuAction::ToggleFold => self.editor_mut().toggle_fold(),
+            MenuAction::CloseFile => self.close_active_editor(),
+            MenuAction::NextTab => self.cycle_editor(true),
+            MenuAction::PrevTab => self.cycle_editor(false),
+            MenuAction::NextTerminal => self.cycle_terminal(true),
+            MenuAction::PrevTerminal => self.cycle_terminal(false),
+            MenuAction::LayoutClassic => self.apply_layout_preset(PRESET_CLASSIC),
+            MenuAction::LayoutWide => self.apply_layout_preset(PRESET_WIDE),
+            MenuAction::LayoutTriple => self.apply_layout_preset(PRESET_TRIPLE),
+            MenuAction::ToggleTerminalSide => self.settings.terminal_on_right = !self.settings.terminal_on_right,
+            MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
         }
     }
 
@@ -522,6 +579,92 @@ impl App {
                 self.delete_target = None;
                 self.status_message = i18n::msg_delete_cancelled(self.settings.lang);
             }
+        }
+    }
+
+    fn handle_resize_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(8) | KeyCode::Enter => self.resize_mode = false,
+            KeyCode::Left => {
+                self.settings.sidebar_width = self.settings.sidebar_width.saturating_sub(2);
+                self.settings.clamp_layout();
+            }
+            KeyCode::Right => {
+                self.settings.sidebar_width = self.settings.sidebar_width.saturating_add(2);
+                self.settings.clamp_layout();
+            }
+            KeyCode::Up => {
+                self.settings.terminal_pct = self.settings.terminal_pct.saturating_sub(5);
+                self.settings.clamp_layout();
+            }
+            KeyCode::Down => {
+                self.settings.terminal_pct = self.settings.terminal_pct.saturating_add(5);
+                self.settings.clamp_layout();
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_layout_preset(&mut self, preset: LayoutPreset) {
+        self.settings.show_sidebar = preset.show_sidebar;
+        self.settings.show_terminal = preset.show_terminal;
+        self.settings.sidebar_width = preset.sidebar_width;
+        self.settings.terminal_pct = preset.terminal_pct;
+        self.settings.terminal_on_right = preset.terminal_on_right;
+        self.settings.clamp_layout();
+    }
+
+    fn try_start_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
+        if let Some(sidebar) = areas.sidebar {
+            let border_x = sidebar.x + sidebar.width;
+            if row >= sidebar.y && row < sidebar.y + sidebar.height && (col == border_x.saturating_sub(1) || col == border_x) {
+                self.dragging = Some(DragTarget::Sidebar);
+                return true;
+            }
+        }
+        if let Some(term_areas) = &areas.terminals {
+            if let Some(first) = term_areas.first() {
+                if self.settings.terminal_on_right {
+                    let border_x = first.x;
+                    if row >= first.y && col + 1 >= border_x && col <= border_x + 1 {
+                        self.dragging = Some(DragTarget::TerminalHeight);
+                        return true;
+                    }
+                } else {
+                    let border_y = first.y;
+                    if col >= first.x && (row + 1 == border_y || row == border_y) {
+                        self.dragging = Some(DragTarget::TerminalHeight);
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn continue_drag(&mut self, col: u16, row: u16, full: Rect) {
+        match self.dragging {
+            Some(DragTarget::Sidebar) => {
+                self.settings.sidebar_width = col;
+                self.settings.clamp_layout();
+            }
+            Some(DragTarget::TerminalHeight) => {
+                let main_top = 1u16;
+                let main_bottom = full.height.saturating_sub(1);
+                let main_height = main_bottom.saturating_sub(main_top).max(1);
+                if self.settings.terminal_on_right {
+                    let main_right = full.width;
+                    let main_left = if self.settings.show_sidebar { self.settings.sidebar_width } else { 0 };
+                    let main_width = main_right.saturating_sub(main_left).max(1);
+                    let term_cols_from_right = main_right.saturating_sub(col);
+                    self.settings.terminal_pct = ((term_cols_from_right as u32 * 100) / main_width as u32) as u16;
+                } else {
+                    let term_rows_from_bottom = main_bottom.saturating_sub(row);
+                    self.settings.terminal_pct = ((term_rows_from_bottom as u32 * 100) / main_height as u32) as u16;
+                }
+                self.settings.clamp_layout();
+            }
+            None => {}
         }
     }
 
@@ -607,6 +750,7 @@ impl App {
                 }
             }
             KeyCode::Char('w') if ctrl => self.close_active_editor(),
+            KeyCode::Char('d') if ctrl => self.close_active_editor(),
             KeyCode::Char('c') if ctrl => self.copy_selection(),
             KeyCode::Char('x') if ctrl => self.cut_selection(),
             KeyCode::Char('v') if ctrl => self.paste_clipboard(),
@@ -706,6 +850,9 @@ impl App {
                     self.mouse_menu_bar_click(col);
                     return;
                 }
+                if self.try_start_drag(col, row, areas) {
+                    return;
+                }
                 if let Some(sidebar) = areas.sidebar {
                     if within(sidebar, col, row) {
                         self.focus = Focus::FileTree;
@@ -738,6 +885,14 @@ impl App {
                         }
                     }
                 }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.dragging.is_some() {
+                    self.continue_drag(col, row, full);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging = None;
             }
             MouseEventKind::ScrollUp => self.scroll(col, row, areas, -3),
             MouseEventKind::ScrollDown => self.scroll(col, row, areas, 3),

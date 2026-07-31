@@ -1,7 +1,12 @@
 use crate::i18n::{self, Key, Lang};
+use serde::{Deserialize, Serialize};
 
 pub const SETTINGS_COUNT: usize = 9;
 
+pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
+pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
+
+#[derive(Serialize, Deserialize)]
 pub struct Settings {
     pub show_line_numbers: bool,
     pub syntax_highlighting: bool,
@@ -12,6 +17,12 @@ pub struct Settings {
     pub auto_indent: bool,
     pub mouse_enabled: bool,
     pub lang: Lang,
+    // Layout: persisted alongside the rest so a preferred workspace shape survives restarts.
+    pub show_sidebar: bool,
+    pub show_terminal: bool,
+    pub sidebar_width: u16,
+    pub terminal_pct: u16,
+    pub terminal_on_right: bool,
 }
 
 impl Default for Settings {
@@ -26,7 +37,46 @@ impl Default for Settings {
             auto_indent: true,
             mouse_enabled: true,
             lang: Lang::default(),
+            show_sidebar: true,
+            show_terminal: true,
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right: false,
         }
+    }
+}
+
+fn config_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config").join("cleecode").join("settings.toml"))
+}
+
+impl Settings {
+    /// Loads persisted settings from disk, falling back to defaults if there's nothing
+    /// saved yet or the file can't be read/parsed.
+    pub fn load() -> Self {
+        config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Best-effort save; silently does nothing if the config dir can't be created/written.
+    pub fn save(&self) {
+        let Some(path) = config_path() else { return };
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        if let Ok(text) = toml::to_string_pretty(self) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    pub fn clamp_layout(&mut self) {
+        self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
+        self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
     }
 }
 

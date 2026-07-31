@@ -17,6 +17,16 @@ pub enum MenuAction {
     Indent,
     Outdent,
     ToggleFold,
+    CloseFile,
+    NextTab,
+    PrevTab,
+    NextTerminal,
+    PrevTerminal,
+    LayoutClassic,
+    LayoutWide,
+    LayoutTriple,
+    ToggleTerminalSide,
+    ToggleResizeMode,
 }
 
 pub struct MenuItemDef {
@@ -48,7 +58,12 @@ pub fn menu_defs() -> Vec<MenuDef> {
         },
         MenuDef {
             title_key: Key::MenuFile,
-            items: vec![item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S"))],
+            items: vec![
+                item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
+                item(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
+                item(Key::ItemNextTab, MenuAction::NextTab, Some("Ctrl+Right")),
+                item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Ctrl+Left")),
+            ],
         },
         MenuDef {
             title_key: Key::MenuEdit,
@@ -70,10 +85,22 @@ pub fn menu_defs() -> Vec<MenuDef> {
             ],
         },
         MenuDef {
+            title_key: Key::MenuLayout,
+            items: vec![
+                item(Key::ItemLayoutClassic, MenuAction::LayoutClassic, None),
+                item(Key::ItemLayoutWide, MenuAction::LayoutWide, None),
+                item(Key::ItemLayoutTriple, MenuAction::LayoutTriple, None),
+                item(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
+                item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("F8")),
+            ],
+        },
+        MenuDef {
             title_key: Key::MenuTerminal,
             items: vec![
                 item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
                 item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
+                item(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+PgDn")),
+                item(Key::ItemPrevTerminal, MenuAction::PrevTerminal, Some("Ctrl+PgUp")),
             ],
         },
     ]

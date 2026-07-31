@@ -16,7 +16,35 @@ pub struct Areas {
     pub status: Rect,
 }
 
-pub fn compute_layout(full: Rect, show_sidebar: bool, show_terminal: bool, terminal_count: usize) -> Areas {
+pub struct LayoutParams {
+    pub show_sidebar: bool,
+    pub show_terminal: bool,
+    pub terminal_count: usize,
+    pub sidebar_width: u16,
+    pub terminal_pct: u16,
+    pub terminal_on_right: bool,
+}
+
+impl LayoutParams {
+    pub fn from_app(app: &App) -> Self {
+        LayoutParams {
+            show_sidebar: app.settings.show_sidebar,
+            show_terminal: app.settings.show_terminal,
+            terminal_count: app.terminals.len(),
+            sidebar_width: app.settings.sidebar_width,
+            terminal_pct: app.settings.terminal_pct,
+            terminal_on_right: app.settings.terminal_on_right,
+        }
+    }
+}
+
+fn terminal_panes(area: Rect, count: usize, direction: Direction) -> Vec<Rect> {
+    let n = count.max(1);
+    let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage((100 / n) as u16)).collect();
+    Layout::default().direction(direction).constraints(constraints).split(area).to_vec()
+}
+
+pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
@@ -25,34 +53,49 @@ pub fn compute_layout(full: Rect, show_sidebar: bool, show_terminal: bool, termi
     let main_area = outer[1];
     let status = outer[2];
 
-    let (main_top, terminals) = if show_terminal {
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(main_area);
-        let term_row = v[1];
-        let n = terminal_count.max(1);
-        let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage((100 / n) as u16)).collect();
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(constraints)
-            .split(term_row);
-        (v[0], Some(cols.to_vec()))
+    if p.terminal_on_right {
+        let (sidebar, rest) = if p.show_sidebar {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(p.sidebar_width), Constraint::Min(1)])
+                .split(main_area);
+            (Some(h[0]), h[1])
+        } else {
+            (None, main_area)
+        };
+        let (editor, terminals) = if p.show_terminal {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
+                .split(rest);
+            (h[0], Some(terminal_panes(h[1], p.terminal_count, Direction::Vertical)))
+        } else {
+            (rest, None)
+        };
+        Areas { menu_bar, sidebar, editor, terminals, status }
     } else {
-        (main_area, None)
-    };
+        let (main_top, terminals) = if p.show_terminal {
+            let v = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
+                .split(main_area);
+            (v[0], Some(terminal_panes(v[1], p.terminal_count, Direction::Horizontal)))
+        } else {
+            (main_area, None)
+        };
 
-    let (sidebar, editor) = if show_sidebar {
-        let h = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(30), Constraint::Min(1)])
-            .split(main_top);
-        (Some(h[0]), h[1])
-    } else {
-        (None, main_top)
-    };
+        let (sidebar, editor) = if p.show_sidebar {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(p.sidebar_width), Constraint::Min(1)])
+                .split(main_top);
+            (Some(h[0]), h[1])
+        } else {
+            (None, main_top)
+        };
 
-    Areas { menu_bar, sidebar, editor, terminals, status }
+        Areas { menu_bar, sidebar, editor, terminals, status }
+    }
 }
 
 pub fn inner_rect(r: Rect) -> Rect {
@@ -200,7 +243,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let areas = compute_layout(f.area(), app.show_sidebar, app.show_terminal, app.terminals.len());
+    let params = LayoutParams::from_app(app);
+    let areas = compute_layout(f.area(), &params);
 
     if let Some(sidebar_area) = areas.sidebar {
         draw_file_tree(f, app, sidebar_area);
@@ -699,7 +743,16 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let text = Line::from(Span::raw(app.status_message.clone()));
-    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::Gray));
+    let msg = if app.resize_mode {
+        i18n::t(app.settings.lang, Key::ResizeModeHint).to_string()
+    } else {
+        app.status_message.clone()
+    };
+    let style = if app.resize_mode {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let paragraph = Paragraph::new(Line::from(Span::raw(msg))).style(style);
     f.render_widget(paragraph, area);
 }

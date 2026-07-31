@@ -51,7 +51,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 Event::Mouse(mouse) => {
                     let size = terminal.size()?;
                     let full = Rect::new(0, 0, size.width, size.height);
-                    let areas = ui::compute_layout(full, app.show_sidebar, app.show_terminal, app.terminals.len());
+                    let params = ui::LayoutParams::from_app(&app);
+                    let areas = ui::compute_layout(full, &params);
                     app.handle_mouse(mouse, &areas, full);
                 }
                 Event::Paste(text) => app.handle_paste(text),
@@ -73,5 +74,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         }
     }
 
+    app.settings.save();
     Ok(())
 }

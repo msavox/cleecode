@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Lang {
     En,
     It,
@@ -48,6 +48,18 @@ pub enum Key {
     ItemIndent,
     ItemOutdent,
     ItemToggleFold,
+    ItemCloseFile,
+    ItemNextTab,
+    ItemPrevTab,
+    ItemNextTerminal,
+    ItemPrevTerminal,
+    MenuLayout,
+    ItemLayoutClassic,
+    ItemLayoutWide,
+    ItemLayoutTriple,
+    ItemToggleTerminalSide,
+    ItemToggleResizeMode,
+    ResizeModeHint,
     PanelFile,
     SettingsTitle,
     AboutTitle,
@@ -133,6 +145,42 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleFold) => "Fold/Unfold",
         (Lang::It, ItemToggleFold) => "Comprimi/Espandi blocco",
+
+        (Lang::En, ItemCloseFile) => "Close file",
+        (Lang::It, ItemCloseFile) => "Chiudi file",
+
+        (Lang::En, ItemNextTab) => "Next tab",
+        (Lang::It, ItemNextTab) => "Tab successiva",
+
+        (Lang::En, ItemPrevTab) => "Previous tab",
+        (Lang::It, ItemPrevTab) => "Tab precedente",
+
+        (Lang::En, ItemNextTerminal) => "Next terminal",
+        (Lang::It, ItemNextTerminal) => "Terminale successivo",
+
+        (Lang::En, ItemPrevTerminal) => "Previous terminal",
+        (Lang::It, ItemPrevTerminal) => "Terminale precedente",
+
+        (Lang::En, MenuLayout) => "Layout",
+        (Lang::It, MenuLayout) => "Layout",
+
+        (Lang::En, ItemLayoutClassic) => "Classic",
+        (Lang::It, ItemLayoutClassic) => "Classico",
+
+        (Lang::En, ItemLayoutWide) => "Wide (2 columns)",
+        (Lang::It, ItemLayoutWide) => "Ampio (2 colonne)",
+
+        (Lang::En, ItemLayoutTriple) => "Triple (3 columns)",
+        (Lang::It, ItemLayoutTriple) => "Triplo (3 colonne)",
+
+        (Lang::En, ItemToggleTerminalSide) => "Terminal on right",
+        (Lang::It, ItemToggleTerminalSide) => "Terminale a destra",
+
+        (Lang::En, ItemToggleResizeMode) => "Resize mode",
+        (Lang::It, ItemToggleResizeMode) => "Modalita ridimensiona",
+
+        (Lang::En, ResizeModeHint) => "Resize mode: ←/→ sidebar width, ↑/↓ terminal size, Esc/Enter to exit",
+        (Lang::It, ResizeModeHint) => "Modalita ridimensiona: ←/→ larghezza sidebar, ↑/↓ dimensione terminale, Esc/Invio per uscire",
 
         (Lang::En, PanelFile) => "Files",
         (Lang::It, PanelFile) => "File",

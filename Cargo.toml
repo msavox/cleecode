@@ -9,6 +9,8 @@ crossterm = "0.29.0"
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
 ropey = "1.6.1"
+serde = { version = "1.0.229", features = ["derive"] }
 shell-words = "1.1.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+toml = "1.1.4"
 vt100 = "0.16.2"
