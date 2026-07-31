@@ -18,6 +18,7 @@ use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
 };
 use ratatui::layout::Rect;
+use settings::Settings;
 use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
 
@@ -41,11 +42,33 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let size = terminal.size()?;
-    let root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
     let file_arg = std::env::args().nth(1);
+
+    // Resume the last workspace (project folder + open tabs) when launched with no
+    // explicit file argument; an argument always takes precedence and starts fresh.
+    let saved = Settings::load();
+    let root = if file_arg.is_none() {
+        saved.last_root.clone().filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
+    } else {
+        cwd.clone()
+    };
+
     let mut app = App::new(root, size.height, size.width)?;
+
     if let Some(path) = file_arg {
         app.open_file_in_tab(std::path::PathBuf::from(path));
+    } else {
+        for path in &saved.last_open_files {
+            if path.exists() {
+                app.open_file_in_tab(path.clone());
+            }
+        }
+        if let Some(active_path) = &saved.last_active_file {
+            if let Some(idx) = app.editors.iter().position(|e| e.path.as_deref() == Some(active_path.as_path())) {
+                app.active_editor = idx;
+            }
+        }
     }
     let mut last_external_check = Instant::now();
 
@@ -86,6 +109,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         }
     }
 
+    // Canonicalize before saving: a path opened via a relative CLI argument would
+    // otherwise be stored as typed, and re-resolve against whatever the *next* launch's
+    // cwd happens to be rather than the file it actually pointed to.
+    let canonical = |p: std::path::PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    app.settings.last_root = Some(canonical(app.root.clone()));
+    app.settings.last_open_files = app.editors.iter().filter_map(|e| e.path.clone()).map(canonical).collect();
+    app.settings.last_active_file = app.editors.get(app.active_editor).and_then(|e| e.path.clone()).map(canonical);
     app.settings.save();
     Ok(())
 }

@@ -33,6 +33,14 @@ pub struct Settings {
     pub active_venv: Option<String>,
     #[serde(default = "default_true")]
     pub show_hidden_files: bool,
+    // Workspace resume: which project folder and which of its files were open, so
+    // launching cleecode with no arguments picks up where the last session left off.
+    #[serde(default)]
+    pub last_root: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub last_open_files: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub last_active_file: Option<std::path::PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -77,6 +85,9 @@ impl Default for Settings {
             run_commands: default_run_commands(),
             active_venv: None,
             show_hidden_files: true,
+            last_root: None,
+            last_open_files: Vec::new(),
+            last_active_file: None,
         }
     }
 }
