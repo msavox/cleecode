@@ -528,9 +528,10 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let left_col = app.editors[idx].left_col;
     let cursor_line = app.editors[idx].cursor_line;
     let sel_range = app.editors[idx].selection_range();
-    let end_line = (top_line + viewport_height).min(total_lines);
+    let visible_rows = app.editors[idx].visible_rows_from(top_line, viewport_height);
+    let cursor_row = visible_rows.iter().position(|&l| l == cursor_line).unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
-    for line_idx in top_line..end_line {
+    for line_idx in visible_rows.iter().copied() {
         let mut spans: Vec<Span> = Vec::new();
         if gutter > 0 {
             let is_current = line_idx == cursor_line;
@@ -541,6 +542,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
             };
             let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
             spans.push(Span::styled(num_text, num_style));
+        }
+        if app.editors[idx].folds.iter().any(|&(s, _)| s == line_idx) {
+            spans.push(Span::styled("▸ ", Style::default().fg(Color::Cyan)));
         }
 
         let raw_spans: Vec<(Style, String)> = if app.settings.syntax_highlighting {
@@ -588,7 +592,7 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
 
     if focused {
         let cursor_x = inner.x + gutter + app.editors[idx].cursor_col.saturating_sub(left_col) as u16;
-        let cursor_y = inner.y + (cursor_line - top_line) as u16;
+        let cursor_y = inner.y + cursor_row as u16;
         f.set_cursor_position((cursor_x, cursor_y));
     }
 }

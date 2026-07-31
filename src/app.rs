@@ -411,6 +411,10 @@ impl App {
                 self.close_active_terminal();
                 return;
             }
+            KeyCode::F(7) => {
+                self.editor_mut().toggle_fold();
+                return;
+            }
             KeyCode::PageDown if ctrl => {
                 self.cycle_terminal(true);
                 return;
@@ -506,6 +510,7 @@ impl App {
                 let tab_size = self.settings.tab_size;
                 self.editor_mut().outdent_selection(tab_size);
             }
+            MenuAction::ToggleFold => self.editor_mut().toggle_fold(),
         }
     }
 
@@ -779,9 +784,9 @@ impl App {
         let gutter = ui::gutter_width(self.editor().rope.len_lines(), self.settings.show_line_numbers);
         let rel_row = (row - inner.y) as usize;
         let rel_col = (col - inner.x) as i32 - gutter as i32;
-        let total_lines = self.editor().rope.len_lines();
         let top_line = self.editor().top_line;
-        let target_line = (top_line + rel_row).min(total_lines.saturating_sub(1));
+        let rows = self.editor().visible_rows_from(top_line, rel_row + 1);
+        let target_line = *rows.last().unwrap_or(&top_line);
         self.editor_mut().cursor_line = target_line;
         if rel_col >= 0 {
             let left_col = self.editor().left_col;

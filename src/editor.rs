@@ -17,6 +17,8 @@ pub struct Editor {
     pub highlighted: Vec<Vec<(Style, String)>>,
     pub syntax_dirty: bool,
     pub selection_anchor: Option<(usize, usize)>,
+    /// Active (collapsed) fold regions as (start_line, end_line), inclusive, sorted by start.
+    pub folds: Vec<(usize, usize)>,
 }
 
 impl Editor {
@@ -33,6 +35,7 @@ impl Editor {
             highlighted: Vec::new(),
             syntax_dirty: true,
             selection_anchor: None,
+            folds: Vec::new(),
         }
     }
 
@@ -51,6 +54,7 @@ impl Editor {
             highlighted: Vec::new(),
             syntax_dirty: true,
             selection_anchor: None,
+            folds: Vec::new(),
         })
     }
 
@@ -81,6 +85,7 @@ impl Editor {
         self.rope = Rope::from_str(&content);
         self.disk_mtime = Some(mtime);
         self.syntax_dirty = true;
+        self.folds.clear();
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor_line = self.cursor_line.min(max_line);
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
@@ -300,6 +305,123 @@ impl Editor {
         }
     }
 
+    /// Whether `line` is currently hidden inside a collapsed fold (i.e. after its start).
+    fn is_hidden(&self, line: usize) -> bool {
+        self.folds.iter().any(|&(s, e)| line > s && line <= e)
+    }
+
+    /// If the cursor ended up inside a collapsed region, snap it back to that fold's
+    /// visible start line so it never becomes invisible.
+    fn clamp_out_of_folds(&mut self) {
+        if let Some(&(s, _)) = self.folds.iter().find(|&&(s, e)| self.cursor_line > s && self.cursor_line <= e) {
+            self.cursor_line = s;
+            self.cursor_col = self.cursor_col.min(self.line_char_len(s));
+        }
+    }
+
+    /// Determines the foldable range starting at `line`, if any: either a brace block
+    /// (`{` ... matching `}`) or, failing that, an indentation-based block (Python-style:
+    /// the following more-indented lines).
+    pub fn foldable_range_at(&self, line: usize) -> Option<(usize, usize)> {
+        let total = self.rope.len_lines();
+        if line >= total {
+            return None;
+        }
+        let text = self.rope.line(line).to_string();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let trimmed_end = text.trim_end();
+
+        if trimmed_end.ends_with('{') {
+            let mut depth = 1i32;
+            let mut l = line + 1;
+            while l < total {
+                let line_text = self.rope.line(l).to_string();
+                for ch in line_text.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return if l > line { Some((line, l)) } else { None };
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                l += 1;
+            }
+            return None;
+        }
+
+        let indent = text.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        let mut l = line + 1;
+        while l < total {
+            let next = self.rope.line(l).to_string();
+            if next.trim().is_empty() {
+                l += 1;
+                continue;
+            }
+            let next_indent = next.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            if next_indent <= indent {
+                return None;
+            }
+            let mut end = l;
+            let mut m = l + 1;
+            while m < total {
+                let t = self.rope.line(m).to_string();
+                if t.trim().is_empty() {
+                    m += 1;
+                    continue;
+                }
+                let ind = t.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+                if ind > indent {
+                    end = m;
+                    m += 1;
+                } else {
+                    break;
+                }
+            }
+            return Some((line, end));
+        }
+        None
+    }
+
+    /// Toggles the fold at the cursor's line: collapses it if foldable and not already
+    /// folded, or expands it if the cursor sits on an active fold's start line.
+    pub fn toggle_fold(&mut self) {
+        let line = self.cursor_line;
+        if let Some(pos) = self.folds.iter().position(|&(s, _)| s == line) {
+            self.folds.remove(pos);
+            return;
+        }
+        if self.is_hidden(line) {
+            return;
+        }
+        if let Some(range) = self.foldable_range_at(line) {
+            self.folds.push(range);
+            self.folds.sort_by_key(|&(s, _)| s);
+        }
+    }
+
+    /// Walks forward from `start_line`, skipping lines hidden inside collapsed folds,
+    /// yielding up to `max_rows` buffer line indices in the order they'd be rendered.
+    pub fn visible_rows_from(&self, start_line: usize, max_rows: usize) -> Vec<usize> {
+        let mut rows = Vec::new();
+        let mut line = start_line;
+        let total = self.rope.len_lines();
+        while line < total && rows.len() < max_rows {
+            rows.push(line);
+            if let Some(&(_, end)) = self.folds.iter().find(|&&(s, _)| s == line) {
+                line = end + 1;
+            } else {
+                line += 1;
+            }
+        }
+        rows
+    }
+
     pub fn move_left(&mut self) {
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
@@ -307,6 +429,7 @@ impl Editor {
             self.cursor_line -= 1;
             self.cursor_col = self.line_char_len(self.cursor_line);
         }
+        self.clamp_out_of_folds();
     }
 
     pub fn move_right(&mut self) {
@@ -317,6 +440,7 @@ impl Editor {
             self.cursor_line += 1;
             self.cursor_col = 0;
         }
+        self.clamp_out_of_folds();
     }
 
     pub fn move_up(&mut self) {
@@ -324,6 +448,7 @@ impl Editor {
             self.cursor_line -= 1;
             self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
         }
+        self.clamp_out_of_folds();
     }
 
     pub fn move_down(&mut self) {
@@ -331,6 +456,7 @@ impl Editor {
             self.cursor_line += 1;
             self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
         }
+        self.clamp_out_of_folds();
     }
 
     pub fn move_home(&mut self) {
@@ -344,12 +470,14 @@ impl Editor {
     pub fn page_up(&mut self, page: usize) {
         self.cursor_line = self.cursor_line.saturating_sub(page);
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        self.clamp_out_of_folds();
     }
 
     pub fn page_down(&mut self, page: usize) {
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor_line = (self.cursor_line + page).min(max_line);
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        self.clamp_out_of_folds();
     }
 
     pub fn adjust_scroll(&mut self, viewport_height: usize, viewport_width: usize) {
@@ -473,6 +601,54 @@ mod tests {
         ed.cursor_col = 3;
         ed.indent_selection(2);
         assert_eq!(ed.rope.to_string(), "  one\n  two");
+    }
+
+    #[test]
+    fn brace_fold_collapses_and_expands() {
+        let mut ed = Editor::empty();
+        ed.insert_str("fn main() {");
+        ed.insert_newline(false);
+        ed.insert_str("    println!(\"hi\");");
+        ed.insert_newline(false);
+        ed.insert_str("}");
+        ed.cursor_line = 0;
+        assert_eq!(ed.foldable_range_at(0), Some((0, 2)));
+        ed.toggle_fold();
+        assert_eq!(ed.folds, vec![(0, 2)]);
+        assert_eq!(ed.visible_rows_from(0, 10), vec![0]);
+        ed.toggle_fold();
+        assert!(ed.folds.is_empty());
+        assert_eq!(ed.visible_rows_from(0, 10), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn indentation_fold_python_style() {
+        let mut ed = Editor::empty();
+        ed.insert_str("def f():");
+        ed.insert_newline(false);
+        ed.insert_str("    return 1");
+        ed.insert_newline(false);
+        ed.insert_str("x = 2");
+        ed.cursor_line = 0;
+        assert_eq!(ed.foldable_range_at(0), Some((0, 1)));
+        ed.toggle_fold();
+        assert_eq!(ed.visible_rows_from(0, 10), vec![0, 2]);
+    }
+
+    #[test]
+    fn cursor_snaps_out_of_collapsed_fold() {
+        let mut ed = Editor::empty();
+        ed.insert_str("fn main() {");
+        ed.insert_newline(false);
+        ed.insert_str("    a();");
+        ed.insert_newline(false);
+        ed.insert_str("}");
+        ed.cursor_line = 0;
+        ed.toggle_fold();
+        ed.cursor_line = 1;
+        ed.cursor_col = 0;
+        ed.move_right();
+        assert_eq!(ed.cursor_line, 0);
     }
 
     #[test]

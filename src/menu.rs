@@ -16,6 +16,7 @@ pub enum MenuAction {
     SelectAll,
     Indent,
     Outdent,
+    ToggleFold,
 }
 
 pub struct MenuItemDef {
@@ -58,6 +59,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
                 item(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
                 item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
+                item(Key::ItemToggleFold, MenuAction::ToggleFold, Some("F7")),
             ],
         },
         MenuDef {

@@ -47,6 +47,7 @@ pub enum Key {
     ItemSelectAll,
     ItemIndent,
     ItemOutdent,
+    ItemToggleFold,
     PanelFile,
     SettingsTitle,
     AboutTitle,
@@ -129,6 +130,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemOutdent) => "Outdent",
         (Lang::It, ItemOutdent) => "Riduci rientro",
+
+        (Lang::En, ItemToggleFold) => "Fold/Unfold",
+        (Lang::It, ItemToggleFold) => "Comprimi/Espandi blocco",
 
         (Lang::En, PanelFile) => "Files",
         (Lang::It, PanelFile) => "File",
