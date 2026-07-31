@@ -48,12 +48,26 @@ fn insert_with_priority(map: &mut HashMap<PathBuf, FileStatus>, path: PathBuf, s
     }
 }
 
-/// Best-effort `git status` snapshot for `root`, keyed by absolute path. Returns an
-/// empty map (no indicators shown) if `root` isn't inside a git repo or `git` isn't on
-/// PATH; never treated as an error by callers, same convention as the ssh/scp helpers
-/// in dnd.rs.
+/// Best-effort `git status` snapshot, keyed by absolute path. Returns an empty map (no
+/// indicators shown) if `root` isn't inside a git repo or `git` isn't on PATH; never
+/// treated as an error by callers, same convention as the ssh/scp helpers in dnd.rs.
+///
+/// `root` only has to be *somewhere inside* the repo (e.g. after navigating the sidebar
+/// into a subfolder) — `git status` always reports paths relative to the repo's actual
+/// top-level, never relative to the cwd it was invoked from, so that top-level is looked
+/// up separately and used for joining instead of `root`.
 pub fn compute(root: &Path) -> HashMap<PathBuf, FileStatus> {
     let mut result = HashMap::new();
+    let Ok(toplevel_output) =
+        std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).current_dir(root).output()
+    else {
+        return result;
+    };
+    if !toplevel_output.status.success() {
+        return result;
+    }
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&toplevel_output.stdout).trim().to_string());
+
     let Ok(output) = std::process::Command::new("git")
         .args(["status", "--porcelain=v1", "-z"])
         .current_dir(root)
@@ -78,12 +92,12 @@ pub fn compute(root: &Path) -> HashMap<PathBuf, FileStatus> {
             fields.next();
         }
         let status = classify(x, y);
-        let abs_path = root.join(&rel_path);
+        let abs_path = toplevel.join(&rel_path);
         insert_with_priority(&mut result, abs_path.clone(), status);
 
         let mut dir = abs_path.parent();
         while let Some(d) = dir {
-            if !d.starts_with(root) || d == root {
+            if !d.starts_with(&toplevel) || d == toplevel {
                 break;
             }
             insert_with_priority(&mut result, d.to_path_buf(), status);
