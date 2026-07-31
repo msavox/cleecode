@@ -3,6 +3,7 @@ mod clipboard;
 mod dnd;
 mod editor;
 mod file_tree;
+mod font_install;
 mod git_status;
 mod highlight;
 mod i18n;
@@ -17,13 +18,22 @@ use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
 };
 use ratatui::layout::Rect;
-use std::io::stdout;
+use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
+    if std::env::args().any(|a| a == "--install-font") {
+        font_install::install();
+        return Ok(());
+    }
     let mut terminal = ratatui::init();
     crossterm::execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    // Push (save) the terminal's current title, then set our own; tmux/the shell would
+    // otherwise leave their own title showing in the window chrome for the whole session.
+    let _ = write!(stdout(), "\x1b[22;2t\x1b]0;CleeCode\x07");
+    let _ = stdout().flush();
     let result = run(&mut terminal);
+    let _ = write!(stdout(), "\x1b[23;2t");
     let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
     result
@@ -69,6 +79,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         app.poll_splash();
         app.poll_background_messages();
         app.poll_terminal_exits();
+        app.poll_git_status();
 
         if app.should_quit {
             break;

@@ -12,11 +12,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const SPLASH_DURATION: Duration = Duration::from_millis(1800);
+const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(400);
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Focus {
@@ -50,9 +52,33 @@ pub struct App {
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
+    last_tree_click: Option<(usize, Instant)>,
     pub git_status: std::collections::HashMap<PathBuf, crate::git_status::FileStatus>,
+    git_status_tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
+    git_status_rx: Receiver<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
+    git_status_pending: Arc<AtomicBool>,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
+}
+
+/// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
+/// `git status` never blocks the render loop — most visibly, never delays the very first
+/// frame (and thus the embedded terminals) from appearing at startup. `pending` bounds
+/// this to at most one in-flight computation, so a `git status` slower than the poll
+/// interval that drives refreshes doesn't pile up background threads.
+fn spawn_git_status_refresh(
+    root: PathBuf,
+    tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
+    pending: Arc<AtomicBool>,
+) {
+    if pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = crate::git_status::compute(&root);
+        let _ = tx.send(result);
+        pending.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Top-level subdirectories of `root` that look like Python virtualenvs (they carry a
@@ -120,7 +146,9 @@ impl App {
         let t2 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
         let available_venvs = discover_venvs(&root);
-        let git_status = crate::git_status::compute(&root);
+        let (git_status_tx, git_status_rx) = mpsc::channel();
+        let git_status_pending = Arc::new(AtomicBool::new(false));
+        spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
         Ok(App {
             file_tree: FileTree::new(root.clone()),
             root,
@@ -146,7 +174,11 @@ impl App {
             resize_mode: false,
             dragging: None,
             available_venvs,
-            git_status,
+            last_tree_click: None,
+            git_status: std::collections::HashMap::new(),
+            git_status_tx,
+            git_status_rx,
+            git_status_pending,
             bg_tx,
             bg_rx,
         })
@@ -275,7 +307,13 @@ impl App {
             self.status_message = msg;
         }
         self.file_tree.refresh();
-        self.git_status = crate::git_status::compute(&self.root);
+        spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
+    }
+
+    pub fn poll_git_status(&mut self) {
+        while let Ok(status) = self.git_status_rx.try_recv() {
+            self.git_status = status;
+        }
     }
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {
@@ -335,12 +373,50 @@ impl App {
     }
 
     fn close_active_editor(&mut self) {
+        self.close_editor_at(self.active_editor);
+    }
+
+    fn save_active_file(&mut self) {
+        let lang = self.settings.lang;
+        match self.editor_mut().save() {
+            Ok(()) => self.status_message = i18n::msg_saved(lang, &self.editor().title(lang)),
+            Err(e) => self.status_message = i18n::msg_save_error(lang, &e.to_string()),
+        }
+    }
+
+    fn save_all(&mut self) {
+        let lang = self.settings.lang;
+        let mut saved = 0usize;
+        let mut errors = Vec::new();
+        for editor in &mut self.editors {
+            if !editor.dirty || editor.path.is_none() {
+                continue;
+            }
+            match editor.save() {
+                Ok(()) => saved += 1,
+                Err(e) => errors.push(format!("{}: {}", editor.title(lang), e)),
+            }
+        }
+        self.status_message = if errors.is_empty() {
+            i18n::msg_saved_all(lang, saved)
+        } else {
+            i18n::msg_save_all_errors(lang, saved, &errors.join("; "))
+        };
+    }
+
+    fn close_editor_at(&mut self, idx: usize) {
+        if idx >= self.editors.len() {
+            return;
+        }
         if self.editors.len() <= 1 {
             self.editors[0] = Editor::empty();
             self.active_editor = 0;
             return;
         }
-        self.editors.remove(self.active_editor);
+        self.editors.remove(idx);
+        if idx < self.active_editor {
+            self.active_editor -= 1;
+        }
         if self.active_editor >= self.editors.len() {
             self.active_editor = self.editors.len() - 1;
         }
@@ -361,6 +437,8 @@ impl App {
     fn set_root(&mut self, new_root: PathBuf) {
         self.file_tree = FileTree::new(new_root.clone());
         self.root = new_root;
+        self.available_venvs = discover_venvs(&self.root);
+        spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
         self.status_message = i18n::msg_project_folder(self.settings.lang, &self.root.display().to_string());
     }
 
@@ -658,13 +736,8 @@ impl App {
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
-            MenuAction::Save => {
-                let lang = self.settings.lang;
-                match self.editor_mut().save() {
-                    Ok(()) => self.status_message = i18n::msg_saved(lang, &self.editor().title(lang)),
-                    Err(e) => self.status_message = i18n::msg_save_error(lang, &e.to_string()),
-                }
-            }
+            MenuAction::Save => self.save_active_file(),
+            MenuAction::SaveAll => self.save_all(),
             MenuAction::Quit => self.should_quit = true,
             MenuAction::ShowAbout => self.show_about = true,
             MenuAction::Copy => self.copy_selection(),
@@ -835,22 +908,26 @@ impl App {
         }
     }
 
+    fn activate_file_tree_selection(&mut self) {
+        match self.file_tree.activate_selected() {
+            Some(Activation::OpenFile(path)) => self.open_file_in_tab(path),
+            Some(Activation::SetRoot(path)) => self.set_root(path),
+            Some(Activation::NavigateUp) => {
+                if let Some(parent) = self.file_tree.parent_dir() {
+                    self.set_root(parent);
+                }
+            }
+            None => {}
+        }
+    }
+
     fn handle_file_tree_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => self.file_tree.move_selection(-1),
             KeyCode::Down => self.file_tree.move_selection(1),
             KeyCode::Left => self.file_tree.collapse_selected(),
             KeyCode::Right => self.file_tree.expand_selected(),
-            KeyCode::Enter => match self.file_tree.activate_selected() {
-                Some(Activation::OpenFile(path)) => self.open_file_in_tab(path),
-                Some(Activation::SetRoot(path)) => self.set_root(path),
-                Some(Activation::NavigateUp) => {
-                    if let Some(parent) = self.file_tree.parent_dir() {
-                        self.set_root(parent);
-                    }
-                }
-                None => {}
-            },
+            KeyCode::Enter => self.activate_file_tree_selection(),
             KeyCode::Delete => {
                 if let Some(path) = self.file_tree.selected_path() {
                     self.delete_target = Some(path);
@@ -864,14 +941,13 @@ impl App {
     fn handle_editor_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Char('s') if ctrl => {
-                let lang = self.settings.lang;
-                match self.editor_mut().save() {
-                    Ok(()) => self.status_message = i18n::msg_saved(lang, &self.editor().title(lang)),
-                    Err(e) => self.status_message = i18n::msg_save_error(lang, &e.to_string()),
-                }
-            }
+            // Ctrl+Shift+S is indistinguishable from plain Ctrl+S in standard terminal
+            // input (no Kitty keyboard protocol), so Save All uses Alt+S instead — Alt
+            // combos already work reliably via the ESC-prefix menu mnemonics.
+            KeyCode::Char('s') | KeyCode::Char('S') if alt => self.save_all(),
+            KeyCode::Char('s') if ctrl => self.save_active_file(),
             KeyCode::Char('w') if ctrl => self.close_active_editor(),
             KeyCode::Char('d') if ctrl => self.close_active_editor(),
             KeyCode::Char('c') if ctrl => self.copy_selection(),
@@ -983,7 +1059,17 @@ impl App {
                         if row >= inner.y {
                             let idx = (row - inner.y) as usize;
                             if idx < self.file_tree.visible.len() {
+                                let is_double_click = matches!(
+                                    self.last_tree_click,
+                                    Some((last_idx, t)) if last_idx == idx && t.elapsed() < DOUBLE_CLICK_THRESHOLD
+                                );
                                 self.file_tree.selected = idx;
+                                if is_double_click {
+                                    self.last_tree_click = None;
+                                    self.activate_file_tree_selection();
+                                } else {
+                                    self.last_tree_click = Some((idx, Instant::now()));
+                                }
                             }
                         }
                         return;
@@ -1056,9 +1142,13 @@ impl App {
 
     fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect) {
         let rel_col = col.saturating_sub(tab_bar.x);
-        let ranges = ui::tab_ranges(self);
-        for (i, (start, end)) in ranges.iter().enumerate() {
-            if rel_col >= *start && rel_col < *end {
+        let layouts = ui::tab_layouts(self);
+        for (i, layout) in layouts.iter().enumerate() {
+            if rel_col >= layout.close.0 && rel_col < layout.close.1 {
+                self.close_editor_at(i);
+                return;
+            }
+            if rel_col >= layout.full.0 && rel_col < layout.full.1 {
                 self.active_editor = i;
                 self.focus = Focus::Editor;
                 return;

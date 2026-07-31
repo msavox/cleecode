@@ -114,18 +114,32 @@ pub fn split_editor_area(area: Rect) -> (Rect, Rect) {
     (v[0], v[1])
 }
 
-pub fn tab_ranges(app: &App) -> Vec<(u16, u16)> {
+pub struct TabLayout {
+    /// Whole-tab range: clicking anywhere in it (outside `close`) switches to it.
+    pub full: (u16, u16),
+    /// The "×" close glyph's own range within the tab.
+    pub close: (u16, u16),
+}
+
+pub fn tab_layouts(app: &App) -> Vec<TabLayout> {
     let lang = app.settings.lang;
-    let mut ranges = Vec::new();
+    let mut out = Vec::new();
     let mut x = 0u16;
     for editor in &app.editors {
         let dirty = if editor.dirty { "*" } else { "" };
-        let label = format!(" {}{} ", editor.title(lang), dirty);
-        let w = label.chars().count() as u16;
-        ranges.push((x, x + w));
-        x += w;
+        let prefix = format!(" {}{} ", editor.title(lang), dirty);
+        let prefix_w = prefix.chars().count() as u16;
+        let close_start = x + prefix_w;
+        let close_end = close_start + 1;
+        let tab_end = close_end + 1; // trailing space after the × glyph
+        out.push(TabLayout { full: (x, tab_end), close: (close_start, close_end) });
+        x = tab_end;
     }
-    ranges
+    out
+}
+
+pub fn tab_ranges(app: &App) -> Vec<(u16, u16)> {
+    tab_layouts(app).into_iter().map(|t| t.full).collect()
 }
 
 fn run_button_label(lang: Lang) -> String {
@@ -452,6 +466,55 @@ fn git_status_color(status: crate::git_status::FileStatus) -> Color {
     }
 }
 
+/// Icon + color for a file tree row based on its name. Directories are handled by the
+/// caller (they use the expand/collapse chevron instead). Glyphs are Nerd Font Private
+/// Use Area codepoints (same set as nvim-web-devicons) — they need a Nerd Font to render
+/// as icons; CleeCode ships one and can install it via `--install-font` (see main.rs).
+fn file_icon(name: &str) -> (&'static str, Color) {
+    match name.to_lowercase().as_str() {
+        ".gitignore" | ".gitattributes" | ".gitmodules" => return ("\u{e702}", Color::Rgb(245, 77, 39)),
+        ".env" | ".env.local" | ".env.example" => return ("\u{f462}", Color::Rgb(250, 247, 67)),
+        "dockerfile" | "docker-compose.yml" | "docker-compose.yaml" => {
+            return ("\u{f0868}", Color::Rgb(69, 142, 230));
+        }
+        "makefile" => return ("\u{e779}", Color::Rgb(109, 128, 134)),
+        _ => {}
+    }
+    let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "rs" => ("\u{e68b}", Color::Rgb(222, 165, 132)),
+        "py" => ("\u{e606}", Color::Rgb(255, 188, 3)),
+        "js" | "mjs" | "cjs" => ("\u{e60c}", Color::Rgb(203, 203, 65)),
+        "ts" => ("\u{e628}", Color::Rgb(81, 154, 186)),
+        "tsx" => ("\u{e7ba}", Color::Rgb(19, 84, 191)),
+        "jsx" => ("\u{e625}", Color::Rgb(32, 194, 227)),
+        "json" => ("\u{e60b}", Color::Rgb(203, 203, 65)),
+        "yaml" | "yml" => ("\u{e8eb}", Color::Rgb(215, 0, 0)),
+        "toml" => ("\u{e6b2}", Color::Rgb(156, 66, 33)),
+        "md" => ("\u{f48a}", Color::Rgb(221, 221, 221)),
+        "markdown" => ("\u{e609}", Color::Rgb(221, 221, 221)),
+        "html" | "htm" => ("\u{e736}", Color::Rgb(228, 77, 38)),
+        "css" => ("\u{e6b8}", Color::Rgb(102, 51, 153)),
+        "scss" | "sass" => ("\u{e603}", Color::Rgb(245, 83, 133)),
+        "sh" | "fish" => ("\u{e795}", Color::Rgb(77, 90, 94)),
+        "bash" => ("\u{e760}", Color::Rgb(137, 224, 81)),
+        "zsh" => ("\u{e795}", Color::Rgb(137, 224, 81)),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => ("\u{e60d}", Color::Rgb(160, 116, 196)),
+        "svg" => ("\u{f0721}", Color::Rgb(255, 177, 59)),
+        "lock" => ("\u{e672}", Color::Rgb(187, 187, 187)),
+        "sql" => ("\u{e706}", Color::Rgb(218, 216, 216)),
+        "go" => ("\u{e627}", Color::Rgb(0, 173, 216)),
+        "rb" => ("\u{e791}", Color::Rgb(112, 21, 22)),
+        "php" => ("\u{e608}", Color::Rgb(160, 116, 196)),
+        "c" => ("\u{e61e}", Color::Rgb(89, 158, 255)),
+        "h" | "hpp" => ("\u{f0fd}", Color::Rgb(160, 116, 196)),
+        "cpp" | "cc" => ("\u{e61d}", Color::Rgb(81, 154, 186)),
+        "java" => ("\u{e738}", Color::Rgb(204, 62, 68)),
+        "pdf" => ("\u{eaeb}", Color::Rgb(179, 11, 0)),
+        _ => ("\u{f0f6}", Color::Rgb(109, 128, 134)),
+    }
+}
+
 fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::FileTree;
     let block = Block::default()
@@ -460,6 +523,7 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(focused_border_style(focused));
 
     let paths = app.file_tree.visible_paths();
+    let inner_width = inner_rect(area).width as usize;
     let items: Vec<ListItem> = app
         .file_tree
         .visible
@@ -467,20 +531,31 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
         .zip(paths.iter())
         .map(|(entry, path)| {
             if entry.is_up {
-                return ListItem::new(Line::from("   .."));
+                return ListItem::new(Line::from("  .."));
             }
             let indent = "  ".repeat(entry.depth);
-            let icon = if entry.is_dir {
-                if entry.expanded { "▾ " } else { "▸ " }
+            let (icon, icon_color) = if entry.is_dir {
+                (if entry.expanded { "\u{f07c}" } else { "\u{f07b}" }, Color::Rgb(120, 170, 255))
             } else {
-                "  "
+                file_icon(&entry.name)
             };
-            let dot = match path.as_ref().and_then(|p| app.git_status.get(p)) {
+            // indent + icon (1 col) + space (1 col) + name, then right-pad up to the dot.
+            let left_len = indent.chars().count() + 2 + entry.name.chars().count();
+            let dot = path.as_ref().and_then(|p| app.git_status.get(p));
+            let pad = inner_width.saturating_sub(left_len + 1);
+            let mut spans = vec![
+                Span::raw(indent),
+                Span::styled(icon, Style::default().fg(icon_color)),
+                Span::raw(format!(" {}", entry.name)),
+            ];
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(match dot {
                 Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(*status))),
                 None => Span::raw(" "),
-            };
-            let label = format!("{indent}{icon}{}", entry.name);
-            ListItem::new(Line::from(vec![dot, Span::raw(label)]))
+            });
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -578,14 +653,16 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut used = 0u16;
     for (i, editor) in app.editors.iter().enumerate() {
         let dirty = if editor.dirty { "*" } else { "" };
-        let label = format!(" {}{} ", editor.title(lang), dirty);
-        used += label.chars().count() as u16;
+        let prefix = format!(" {}{} ", editor.title(lang), dirty);
+        used += prefix.chars().count() as u16 + 2; // + close glyph + trailing space
         let style = if i == app.active_editor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
         };
-        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(prefix, style));
+        spans.push(Span::styled("\u{2715}", style));
+        spans.push(Span::styled(" ", style));
     }
     let (venv_range, run_range) = toolbar_button_ranges(app, area.width);
     if let Some((start, _)) = venv_range.or(run_range) {
@@ -613,12 +690,8 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
 
     let idx = app.active_editor;
     let focused = app.focus == Focus::Editor;
-    let dirty_marker = if app.editors[idx].dirty { " *" } else { "" };
-    let title = format!(" {}{} ", app.editors[idx].title(app.settings.lang), dirty_marker);
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(focused));
+    // No title here: the open tab right above already shows the filename and dirty marker.
+    let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(focused));
 
     let inner = block.inner(content_area);
     let total_lines = app.editors[idx].rope.len_lines();

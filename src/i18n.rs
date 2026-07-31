@@ -34,6 +34,7 @@ pub enum Key {
     MenuView,
     MenuTerminal,
     ItemSave,
+    ItemSaveAll,
     ItemQuit,
     ItemToggleSidebar,
     ItemToggleTerminal,
@@ -107,6 +108,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemSave) => "Save",
         (Lang::It, ItemSave) => "Salva",
+
+        (Lang::En, ItemSaveAll) => "Save All",
+        (Lang::It, ItemSaveAll) => "Salva tutto",
 
         (Lang::En, ItemQuit) => "Quit",
         (Lang::It, ItemQuit) => "Esci",
@@ -303,6 +307,22 @@ pub fn msg_save_error(lang: Lang, err: &str) -> String {
     match lang {
         Lang::En => format!("Error saving: {err}"),
         Lang::It => format!("Errore salvataggio: {err}"),
+    }
+}
+
+pub fn msg_saved_all(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::En if count == 0 => "Nothing to save".to_string(),
+        Lang::En => format!("Saved {count} file(s)"),
+        Lang::It if count == 0 => "Niente da salvare".to_string(),
+        Lang::It => format!("Salvati {count} file"),
+    }
+}
+
+pub fn msg_save_all_errors(lang: Lang, saved: usize, errors: &str) -> String {
+    match lang {
+        Lang::En => format!("Saved {saved} file(s), errors: {errors}"),
+        Lang::It => format!("Salvati {saved} file, errori: {errors}"),
     }
 }
 

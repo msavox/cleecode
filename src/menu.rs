@@ -5,6 +5,7 @@ pub enum MenuAction {
     ToggleSidebar,
     ToggleTerminal,
     OpenSettings,
+    SaveAll,
     NewTerminal,
     CloseTerminal,
     Save,
@@ -61,6 +62,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuFile,
             items: vec![
                 item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
+                item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Alt+S")),
                 item(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
                 item(Key::ItemNextTab, MenuAction::NextTab, Some("Ctrl+Right")),
                 item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Ctrl+Left")),
