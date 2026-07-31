@@ -23,6 +23,28 @@ pub struct Settings {
     pub sidebar_width: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
+    // Extension (no dot) -> shell command template; "{file}" is replaced with the
+    // active file's shell-quoted absolute path. Hand-editable in settings.toml.
+    #[serde(default = "default_run_commands")]
+    pub run_commands: std::collections::HashMap<String, String>,
+}
+
+fn default_run_commands() -> std::collections::HashMap<String, String> {
+    [
+        ("py", "python3 {file}"),
+        ("sh", "bash {file}"),
+        ("bash", "bash {file}"),
+        ("rb", "ruby {file}"),
+        ("js", "node {file}"),
+        ("ts", "ts-node {file}"),
+        ("m", "octave {file}"),
+        ("pl", "perl {file}"),
+        ("go", "go run {file}"),
+        ("php", "php {file}"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
 
 impl Default for Settings {
@@ -42,6 +64,7 @@ impl Default for Settings {
             sidebar_width: 30,
             terminal_pct: 35,
             terminal_on_right: false,
+            run_commands: default_run_commands(),
         }
     }
 }

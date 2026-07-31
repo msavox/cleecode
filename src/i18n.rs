@@ -60,6 +60,10 @@ pub enum Key {
     ItemToggleTerminalSide,
     ItemToggleResizeMode,
     ResizeModeHint,
+    MenuRun,
+    ItemRunFile,
+    ToolbarRun,
+    ToolbarVenvNone,
     PanelFile,
     SettingsTitle,
     AboutTitle,
@@ -181,6 +185,18 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ResizeModeHint) => "Resize mode: ←/→ sidebar width, ↑/↓ terminal size, Esc/Enter to exit",
         (Lang::It, ResizeModeHint) => "Modalita ridimensiona: ←/→ larghezza sidebar, ↑/↓ dimensione terminale, Esc/Invio per uscire",
+
+        (Lang::En, MenuRun) => "Run",
+        (Lang::It, MenuRun) => "Esegui",
+
+        (Lang::En, ItemRunFile) => "Run current file",
+        (Lang::It, ItemRunFile) => "Esegui file corrente",
+
+        (Lang::En, ToolbarRun) => "Run",
+        (Lang::It, ToolbarRun) => "Esegui",
+
+        (Lang::En, ToolbarVenvNone) => "no venv",
+        (Lang::It, ToolbarVenvNone) => "no venv",
 
         (Lang::En, PanelFile) => "Files",
         (Lang::It, PanelFile) => "File",
@@ -401,5 +417,26 @@ pub fn msg_scp_result(lang: Lang, ok: usize, failed: usize, target: &str) -> Str
         Lang::En => format!("scp: {ok} uploaded, {failed} failed (to {target})"),
         Lang::It if failed == 0 => format!("scp: {ok} elemento/i caricati su {target}"),
         Lang::It => format!("scp: {ok} caricati, {failed} falliti (su {target})"),
+    }
+}
+
+pub fn msg_run_no_file(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Save the file first to run it".to_string(),
+        Lang::It => "Salva il file per poterlo eseguire".to_string(),
+    }
+}
+
+pub fn msg_run_no_command(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!("No run command configured for .{ext} files (edit run_commands in settings.toml)"),
+        Lang::It => format!("Nessun comando configurato per i file .{ext} (modifica run_commands in settings.toml)"),
+    }
+}
+
+pub fn msg_run_started(lang: Lang, terminal_index: usize, command: &str) -> String {
+    match lang {
+        Lang::En => format!("Running in Terminal {}: {command}", terminal_index + 1),
+        Lang::It => format!("Eseguo nel Terminale {}: {command}", terminal_index + 1),
     }
 }

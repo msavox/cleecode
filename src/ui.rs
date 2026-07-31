@@ -128,6 +128,23 @@ pub fn tab_ranges(app: &App) -> Vec<(u16, u16)> {
     ranges
 }
 
+fn run_button_label(lang: Lang) -> String {
+    format!(" \u{25b6} {} ", i18n::t(lang, Key::ToolbarRun))
+}
+
+/// Relative (start, end) column range of the "Run" button within the tab bar row, if the
+/// row is wide enough to show it without overlapping the open tabs.
+pub fn run_button_range(app: &App, area_width: u16) -> Option<(u16, u16)> {
+    let used: u16 = tab_ranges(app).last().map(|(_, e)| *e).unwrap_or(0);
+    let label = run_button_label(app.settings.lang);
+    let w = label.chars().count() as u16;
+    if used + w > area_width {
+        return None;
+    }
+    let start = area_width - w;
+    Some((start, start + w))
+}
+
 pub fn gutter_width(total_lines: usize, show_line_numbers: bool) -> u16 {
     if !show_line_numbers {
         return 0;
@@ -527,15 +544,26 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     let lang = app.settings.lang;
     let mut spans = Vec::new();
+    let mut used = 0u16;
     for (i, editor) in app.editors.iter().enumerate() {
         let dirty = if editor.dirty { "*" } else { "" };
         let label = format!(" {}{} ", editor.title(lang), dirty);
+        used += label.chars().count() as u16;
         let style = if i == app.active_editor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
         };
         spans.push(Span::styled(label, style));
+    }
+    if let Some((start, end)) = run_button_range(app, area.width) {
+        let pad = start.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad as usize)));
+        }
+        let label = run_button_label(lang);
+        debug_assert_eq!(label.chars().count() as u16, end - start);
+        spans.push(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

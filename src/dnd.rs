@@ -56,6 +56,26 @@ pub fn detect_ssh_target(shell_pid: u32) -> Option<String> {
     None
 }
 
+/// Best-effort check for whether a shell has a direct child process running (i.e. is
+/// busy at something other than its prompt). Used to pick an idle terminal for the
+/// editor's Run button; relies on `ps` the same way `detect_ssh_target` does, so it's
+/// never guaranteed to succeed and just falls back to "busy" on any failure.
+pub fn shell_is_busy(shell_pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps").args(["-axo", "pid=,ppid="]).output() else {
+        return true;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let _pid = parts.next();
+        let ppid = parts.next().and_then(|s| s.parse::<u32>().ok());
+        if ppid == Some(shell_pid) {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_ssh_command(cmd: &str) -> Option<String> {
     let mut tokens = cmd.split_whitespace();
     let first = tokens.next()?;

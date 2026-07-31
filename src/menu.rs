@@ -27,6 +27,7 @@ pub enum MenuAction {
     LayoutTriple,
     ToggleTerminalSide,
     ToggleResizeMode,
+    RunFile,
 }
 
 pub struct MenuItemDef {
@@ -93,6 +94,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
                 item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("F8")),
             ],
+        },
+        MenuDef {
+            title_key: Key::MenuRun,
+            items: vec![item(Key::ItemRunFile, MenuAction::RunFile, Some("F10"))],
         },
         MenuDef {
             title_key: Key::MenuTerminal,

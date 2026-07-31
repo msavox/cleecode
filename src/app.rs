@@ -379,6 +379,37 @@ impl App {
         };
     }
 
+    pub fn run_active_file(&mut self) {
+        let lang = self.settings.lang;
+        let Some(path) = self.editor().path.clone() else {
+            self.status_message = i18n::msg_run_no_file(lang);
+            return;
+        };
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let Some(template) = self.settings.run_commands.get(&ext).cloned() else {
+            self.status_message = i18n::msg_run_no_command(lang, &ext);
+            return;
+        };
+        let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
+        let command = template.replace("{file}", &quoted);
+
+        if self.terminals.is_empty() {
+            self.new_terminal();
+        }
+        let idx = self
+            .terminals
+            .iter()
+            .position(|t| t.child_pid().map(|pid| !dnd::shell_is_busy(pid)).unwrap_or(false))
+            .unwrap_or(self.active_terminal.min(self.terminals.len().saturating_sub(1)));
+
+        self.terminals[idx].write_input(command.as_bytes());
+        self.terminals[idx].write_input(b"\r");
+        self.status_message = i18n::msg_run_started(lang, idx, &command);
+    }
+
     fn cycle_focus(&mut self, forward: bool) {
         let mut order = vec![Focus::FileTree, Focus::Editor, Focus::Terminal];
         if !self.settings.show_sidebar {
@@ -471,6 +502,10 @@ impl App {
             }
             KeyCode::F(8) => {
                 self.resize_mode = !self.resize_mode;
+                return;
+            }
+            KeyCode::F(10) => {
+                self.run_active_file();
                 return;
             }
             KeyCode::PageDown if ctrl => {
@@ -597,6 +632,7 @@ impl App {
             MenuAction::LayoutTriple => self.apply_layout_preset(PRESET_TRIPLE),
             MenuAction::ToggleTerminalSide => self.settings.terminal_on_right = !self.settings.terminal_on_right,
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
+            MenuAction::RunFile => self.run_active_file(),
         }
     }
 
@@ -899,7 +935,7 @@ impl App {
                     self.focus = Focus::Editor;
                     let (tab_bar, content) = ui::split_editor_area(areas.editor);
                     if within(tab_bar, col, row) {
-                        self.mouse_tab_click(col);
+                        self.mouse_tab_click(col, tab_bar);
                     } else {
                         self.editor_mut().clear_selection();
                         self.position_cursor_from_click(content, col, row);
@@ -960,13 +996,19 @@ impl App {
         }
     }
 
-    fn mouse_tab_click(&mut self, col: u16) {
+    fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect) {
+        let rel_col = col.saturating_sub(tab_bar.x);
         let ranges = ui::tab_ranges(self);
         for (i, (start, end)) in ranges.iter().enumerate() {
-            if col >= *start && col < *end {
+            if rel_col >= *start && rel_col < *end {
                 self.active_editor = i;
                 self.focus = Focus::Editor;
                 return;
+            }
+        }
+        if let Some((start, end)) = ui::run_button_range(self, tab_bar.width) {
+            if rel_col >= start && rel_col < end {
+                self.run_active_file();
             }
         }
     }
