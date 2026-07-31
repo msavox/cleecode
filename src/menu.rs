@@ -128,6 +128,12 @@ impl MenuBar {
         self.item_index = 0;
     }
 
+    pub fn open_at(&mut self, menu_index: usize) {
+        self.active = true;
+        self.menu_index = menu_index;
+        self.item_index = 0;
+    }
+
     pub fn close(&mut self) {
         self.active = false;
     }

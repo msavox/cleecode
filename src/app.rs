@@ -57,6 +57,7 @@ pub struct App {
 pub enum DragTarget {
     Sidebar,
     TerminalHeight,
+    TextSelection,
 }
 
 #[derive(Clone, Copy)]
@@ -422,6 +423,16 @@ impl App {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        if alt {
+            if let KeyCode::Char(c) = key.code {
+                if let Some(idx) = self.menu_index_for_mnemonic(c) {
+                    self.menu.open_at(idx);
+                    return;
+                }
+            }
+        }
 
         match key.code {
             KeyCode::F(9) => {
@@ -502,6 +513,18 @@ impl App {
         }
     }
 
+    fn menu_index_for_mnemonic(&self, c: char) -> Option<usize> {
+        let target = c.to_ascii_lowercase();
+        let lang = self.settings.lang;
+        self.menu.defs.iter().position(|d| {
+            i18n::t(lang, d.title_key)
+                .chars()
+                .next()
+                .map(|first| first.to_ascii_lowercase() == target)
+                .unwrap_or(false)
+        })
+    }
+
     fn handle_menu_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::F(9) => self.menu.close(),
@@ -513,6 +536,12 @@ impl App {
                 if let Some(action) = self.menu.selected_action() {
                     self.menu.close();
                     self.run_menu_action(action);
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(idx) = self.menu_index_for_mnemonic(c) {
+                    self.menu.menu_index = idx;
+                    self.menu.item_index = 0;
                 }
             }
             _ => {}
@@ -664,7 +693,7 @@ impl App {
                 }
                 self.settings.clamp_layout();
             }
-            None => {}
+            Some(DragTarget::TextSelection) | None => {}
         }
     }
 
@@ -872,7 +901,11 @@ impl App {
                     if within(tab_bar, col, row) {
                         self.mouse_tab_click(col);
                     } else {
+                        self.editor_mut().clear_selection();
                         self.position_cursor_from_click(content, col, row);
+                        let anchor = (self.editor().cursor_line, self.editor().cursor_col);
+                        self.editor_mut().selection_anchor = Some(anchor);
+                        self.dragging = Some(DragTarget::TextSelection);
                     }
                     return;
                 }
@@ -886,11 +919,18 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.dragging.is_some() {
+            MouseEventKind::Drag(MouseButton::Left) => match self.dragging {
+                Some(DragTarget::Sidebar) | Some(DragTarget::TerminalHeight) => {
                     self.continue_drag(col, row, full);
                 }
-            }
+                Some(DragTarget::TextSelection) => {
+                    if within(areas.editor, col, row) {
+                        let (_, content) = ui::split_editor_area(areas.editor);
+                        self.position_cursor_from_click(content, col, row);
+                    }
+                }
+                None => {}
+            },
             MouseEventKind::Up(MouseButton::Left) => {
                 self.dragging = None;
             }

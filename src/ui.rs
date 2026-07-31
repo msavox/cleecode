@@ -278,7 +278,8 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
     let mut used = MENU_LOGO.chars().count() as u16;
     for (i, def) in app.menu.defs.iter().enumerate() {
-        let label = format!(" {} ", i18n::t(lang, def.title_key));
+        let title = i18n::t(lang, def.title_key);
+        let label = format!(" {} ", title);
         used += label.chars().count() as u16;
         let is_open = app.menu.active && app.menu.menu_index == i;
         let mut style = if is_open {
@@ -289,7 +290,12 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         if i == 0 {
             style = style.add_modifier(Modifier::BOLD);
         }
-        spans.push(Span::styled(label, style));
+        let mut chars = title.chars();
+        let mnemonic = chars.next().map(|c| c.to_string()).unwrap_or_default();
+        let rest: String = chars.collect();
+        spans.push(Span::styled(" ", style));
+        spans.push(Span::styled(mnemonic, style.add_modifier(Modifier::UNDERLINED)));
+        spans.push(Span::styled(format!("{} ", rest), style));
     }
     let pad = area.width.saturating_sub(used);
     if pad > 0 {
