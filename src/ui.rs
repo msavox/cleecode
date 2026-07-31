@@ -328,6 +328,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_delete_confirm {
         draw_delete_confirm_modal(f, app, f.area());
     }
+    if app.show_rename {
+        draw_rename_modal(f, app, f.area());
+    }
 }
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -465,6 +468,33 @@ fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(block, rect);
     let text = i18n::msg_confirm_delete(app.settings.lang, &name);
     f.render_widget(Paragraph::new(Line::from(text)).wrap(Wrap { trim: false }), inner);
+}
+
+pub fn rename_modal_rect(full: Rect) -> Rect {
+    centered_rect(60, 6, full)
+}
+
+fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    let rect = rename_modal_rect(full);
+    f.render_widget(Clear, rect);
+    let old_name = app
+        .rename_target
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let block = Block::default()
+        .title(" Rename ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let prompt = i18n::msg_rename_prompt(app.settings.lang, &old_name);
+    let lines = vec![Line::from(prompt), Line::from(Span::styled(app.rename_input.clone(), Style::default().fg(Color::Yellow)))];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let cursor_x = inner.x + app.rename_input.chars().count() as u16;
+    let cursor_y = inner.y + 1;
+    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn git_status_color(status: crate::git_status::FileStatus) -> Color {

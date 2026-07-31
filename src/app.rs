@@ -58,6 +58,9 @@ pub struct App {
     pub splash_started: Instant,
     pub show_delete_confirm: bool,
     pub delete_target: Option<PathBuf>,
+    pub show_rename: bool,
+    pub rename_target: Option<PathBuf>,
+    pub rename_input: String,
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
@@ -187,6 +190,9 @@ impl App {
             splash_started: Instant::now(),
             show_delete_confirm: false,
             delete_target: None,
+            show_rename: false,
+            rename_target: None,
+            rename_input: String::new(),
             resize_mode: false,
             dragging: None,
             available_venvs,
@@ -629,6 +635,10 @@ impl App {
             self.handle_delete_confirm_key(key);
             return;
         }
+        if self.show_rename {
+            self.handle_rename_key(key);
+            return;
+        }
         if self.resize_mode {
             self.handle_resize_key(key);
             return;
@@ -940,6 +950,56 @@ impl App {
         }
     }
 
+    fn start_rename(&mut self) {
+        let Some(path) = self.file_tree.selected_path() else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.rename_target = Some(path);
+        self.rename_input = name;
+        self.show_rename = true;
+    }
+
+    fn handle_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_rename(),
+            KeyCode::Esc => {
+                self.show_rename = false;
+                self.rename_target = None;
+                self.rename_input.clear();
+            }
+            KeyCode::Backspace => {
+                self.rename_input.pop();
+            }
+            KeyCode::Char(c) => self.rename_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn confirm_rename(&mut self) {
+        let lang = self.settings.lang;
+        self.show_rename = false;
+        let Some(old_path) = self.rename_target.take() else { return };
+        let new_name = self.rename_input.trim().to_string();
+        self.rename_input.clear();
+        let old_name = old_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if new_name.is_empty() || new_name == old_name {
+            return;
+        }
+        let Some(parent) = old_path.parent() else { return };
+        let new_path = parent.join(&new_name);
+        match std::fs::rename(&old_path, &new_path) {
+            Ok(()) => {
+                self.file_tree.refresh();
+                for editor in &mut self.editors {
+                    if editor.path.as_deref() == Some(old_path.as_path()) {
+                        editor.path = Some(new_path.clone());
+                    }
+                }
+                self.status_message = i18n::msg_renamed(lang, &old_name, &new_name);
+            }
+            Err(e) => self.status_message = i18n::msg_rename_failed(lang, &old_name, &e.to_string()),
+        }
+    }
+
     fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::F(4) => self.show_settings = false,
@@ -996,6 +1056,7 @@ impl App {
                 }
             }
             KeyCode::Char('h') | KeyCode::Char('H') => self.toggle_hidden_files(),
+            KeyCode::Char('e') | KeyCode::Char('E') => self.start_rename(),
             _ => {}
         }
     }
@@ -1099,6 +1160,12 @@ impl App {
                     self.show_delete_confirm = false;
                     self.delete_target = None;
                     self.status_message = i18n::msg_delete_cancelled(self.settings.lang);
+                    return;
+                }
+                if self.show_rename {
+                    self.show_rename = false;
+                    self.rename_target = None;
+                    self.rename_input.clear();
                     return;
                 }
                 if self.show_settings {

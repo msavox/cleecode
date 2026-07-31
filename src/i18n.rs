@@ -432,6 +432,27 @@ pub fn msg_delete_failed(lang: Lang, name: &str, err: &str) -> String {
     }
 }
 
+pub fn msg_rename_prompt(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Rename '{name}' to (Enter = confirm, Esc = cancel):"),
+        Lang::It => format!("Rinomina '{name}' in (Invio = conferma, Esc = annulla):"),
+    }
+}
+
+pub fn msg_renamed(lang: Lang, old_name: &str, new_name: &str) -> String {
+    match lang {
+        Lang::En => format!("Renamed {old_name} to {new_name}"),
+        Lang::It => format!("Rinominato {old_name} in {new_name}"),
+    }
+}
+
+pub fn msg_rename_failed(lang: Lang, name: &str, err: &str) -> String {
+    match lang {
+        Lang::En => format!("Failed to rename {name}: {err}"),
+        Lang::It => format!("Rinomina di {name} fallita: {err}"),
+    }
+}
+
 pub fn msg_delete_cancelled(lang: Lang) -> String {
     match lang {
         Lang::En => "Delete cancelled".to_string(),
