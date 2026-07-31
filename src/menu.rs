@@ -1,0 +1,130 @@
+use crate::i18n::Key;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    ToggleSidebar,
+    ToggleTerminal,
+    OpenSettings,
+    NewTerminal,
+    CloseTerminal,
+    Save,
+    Quit,
+    ShowAbout,
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    Indent,
+    Outdent,
+}
+
+pub struct MenuItemDef {
+    pub label_key: Key,
+    pub action: MenuAction,
+    /// Keyboard shortcut hint shown right-aligned in the dropdown, if any.
+    /// Key names, not human language, so this is never translated.
+    pub shortcut: Option<&'static str>,
+}
+
+pub struct MenuDef {
+    pub title_key: Key,
+    pub items: Vec<MenuItemDef>,
+}
+
+fn item(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
+    MenuItemDef { label_key, action, shortcut }
+}
+
+pub fn menu_defs() -> Vec<MenuDef> {
+    vec![
+        MenuDef {
+            title_key: Key::MenuCliCode,
+            items: vec![
+                item(Key::ItemAbout, MenuAction::ShowAbout, None),
+                item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("F4")),
+                item(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
+            ],
+        },
+        MenuDef {
+            title_key: Key::MenuFile,
+            items: vec![item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S"))],
+        },
+        MenuDef {
+            title_key: Key::MenuEdit,
+            items: vec![
+                item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
+                item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
+                item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
+                item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
+                item(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
+                item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
+            ],
+        },
+        MenuDef {
+            title_key: Key::MenuView,
+            items: vec![
+                item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
+                item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+T")),
+            ],
+        },
+        MenuDef {
+            title_key: Key::MenuTerminal,
+            items: vec![
+                item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
+                item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
+            ],
+        },
+    ]
+}
+
+pub struct MenuBar {
+    pub active: bool,
+    pub menu_index: usize,
+    pub item_index: usize,
+    pub defs: Vec<MenuDef>,
+}
+
+impl MenuBar {
+    pub fn new() -> Self {
+        MenuBar {
+            active: false,
+            menu_index: 0,
+            item_index: 0,
+            defs: menu_defs(),
+        }
+    }
+
+    pub fn open(&mut self) {
+        self.active = true;
+        self.item_index = 0;
+    }
+
+    pub fn close(&mut self) {
+        self.active = false;
+    }
+
+    pub fn move_menu(&mut self, delta: isize) {
+        let len = self.defs.len() as isize;
+        let mut idx = self.menu_index as isize + delta;
+        idx = ((idx % len) + len) % len;
+        self.menu_index = idx as usize;
+        self.item_index = 0;
+    }
+
+    pub fn move_item(&mut self, delta: isize) {
+        let len = self.defs[self.menu_index].items.len() as isize;
+        if len == 0 {
+            return;
+        }
+        let mut idx = self.item_index as isize + delta;
+        idx = ((idx % len) + len) % len;
+        self.item_index = idx as usize;
+    }
+
+    pub fn selected_action(&self) -> Option<MenuAction> {
+        self.defs[self.menu_index]
+            .items
+            .get(self.item_index)
+            .map(|i| i.action)
+    }
+}

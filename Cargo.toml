@@ -1,0 +1,14 @@
+[package]
+name = "clicode"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = "0.29.0"
+portable-pty = "0.9.0"
+ratatui = "0.30.2"
+ropey = "1.6.1"
+shell-words = "1.1.1"
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+vt100 = "0.16.2"
