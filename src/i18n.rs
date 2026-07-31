@@ -63,6 +63,7 @@ pub enum Key {
     ResizeModeHint,
     MenuRun,
     ItemRunFile,
+    ItemToggleSplitView,
     ToolbarRun,
     ToolbarVenvNone,
     PanelFile,
@@ -195,6 +196,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemRunFile) => "Run current file",
         (Lang::It, ItemRunFile) => "Esegui file corrente",
+
+        (Lang::En, ItemToggleSplitView) => "Split editor",
+        (Lang::It, ItemToggleSplitView) => "Editor affiancati",
 
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",

@@ -1,4 +1,4 @@
-use crate::app::{App, Focus};
+use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
 use crate::menu::MenuBar;
 use crate::settings;
@@ -103,6 +103,18 @@ pub fn inner_rect(r: Rect) -> Rect {
 }
 
 /// Splits the editor column into (tab bar row, remaining content area).
+/// Splits the whole editor region into one (unsplit) or two side-by-side panes. Index 0
+/// is always the left/only pane, index 1 (when present) the right one.
+pub fn editor_pane_rects(area: Rect, split: bool) -> Vec<Rect> {
+    if !split {
+        return vec![area];
+    }
+    let mid = area.width / 2;
+    let left = Rect { width: mid, ..area };
+    let right = Rect { x: area.x + mid, width: area.width - mid, ..area };
+    vec![left, right]
+}
+
 pub fn split_editor_area(area: Rect) -> (Rect, Rect) {
     if area.height <= 1 {
         return (Rect { height: 0, ..area }, area);
@@ -647,7 +659,7 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
     result
 }
 
-fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, show_toolbar: bool) {
     let lang = app.settings.lang;
     let mut spans = Vec::new();
     let mut used = 0u16;
@@ -655,7 +667,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         let dirty = if editor.dirty { "*" } else { "" };
         let prefix = format!(" {}{} ", editor.title(lang), dirty);
         used += prefix.chars().count() as u16 + 2; // + close glyph + trailing space
-        let style = if i == app.active_editor {
+        let style = if i == active_idx {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
@@ -664,7 +676,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("\u{2715}", style));
         spans.push(Span::styled(" ", style));
     }
-    let (venv_range, run_range) = toolbar_button_ranges(app, area.width);
+    let (venv_range, run_range) = if show_toolbar { toolbar_button_ranges(app, area.width) } else { (None, None) };
     if let Some((start, _)) = venv_range.or(run_range) {
         let pad = start.saturating_sub(used);
         if pad > 0 {
@@ -683,13 +695,24 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
+    let panes = editor_pane_rects(area, app.split_view);
+    if panes.len() == 1 {
+        let focused = app.focus == Focus::Editor;
+        draw_editor_pane(f, app, panes[0], app.active_editor, focused, true);
+        return;
+    }
+    let left_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Left;
+    let right_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Right;
+    draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, true);
+    draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, false);
+}
+
+fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, show_toolbar: bool) {
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
-        draw_tab_bar(f, app, tab_bar_area);
+        draw_tab_bar(f, app, tab_bar_area, idx, show_toolbar);
     }
 
-    let idx = app.active_editor;
-    let focused = app.focus == Focus::Editor;
     // No title here: the open tab right above already shows the filename and dirty marker.
     let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(focused));
 
@@ -698,7 +721,9 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let gutter = gutter_width(total_lines, app.settings.show_line_numbers);
     let text_width = inner.width.saturating_sub(gutter) as usize;
     let viewport_height = inner.height as usize;
-    app.editor_viewport = (viewport_height, text_width);
+    if focused {
+        app.editor_viewport = (viewport_height, text_width);
+    }
     app.editors[idx].adjust_scroll(viewport_height, if app.settings.word_wrap { 0 } else { text_width });
 
     if app.editors[idx].syntax_dirty {

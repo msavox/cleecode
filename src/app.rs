@@ -27,11 +27,20 @@ pub enum Focus {
     Terminal,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum EditorPane {
+    Left,
+    Right,
+}
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
     pub editors: Vec<Editor>,
     pub active_editor: usize,
+    pub split_view: bool,
+    pub active_editor_right: usize,
+    pub editor_pane_focus: EditorPane,
     pub terminals: Vec<TerminalPanel>,
     pub active_terminal: usize,
     pub focus: Focus,
@@ -154,6 +163,9 @@ impl App {
             root,
             editors: vec![Editor::empty()],
             active_editor: 0,
+            split_view: false,
+            active_editor_right: 0,
+            editor_pane_focus: EditorPane::Left,
             terminals: vec![t1, t2],
             active_terminal: 0,
             focus: Focus::FileTree,
@@ -293,12 +305,35 @@ impl App {
         });
     }
 
+    /// Which editor the keyboard (and anything else routed through `editor()`/
+    /// `editor_mut()`) currently acts on: the right pane's active tab when split and
+    /// focused there, the left/only pane's otherwise.
+    fn active_editor_index(&self) -> usize {
+        if self.split_view && self.editor_pane_focus == EditorPane::Right {
+            self.active_editor_right.min(self.editors.len().saturating_sub(1))
+        } else {
+            self.active_editor
+        }
+    }
+
     pub fn editor(&self) -> &Editor {
-        &self.editors[self.active_editor]
+        &self.editors[self.active_editor_index()]
     }
 
     pub fn editor_mut(&mut self) -> &mut Editor {
-        &mut self.editors[self.active_editor]
+        let idx = self.active_editor_index();
+        &mut self.editors[idx]
+    }
+
+    pub fn toggle_split_view(&mut self) {
+        self.split_view = !self.split_view;
+        if self.split_view {
+            if self.editors.len() > 1 && self.active_editor_right == self.active_editor {
+                self.active_editor_right = (self.active_editor + 1) % self.editors.len();
+            }
+        } else {
+            self.editor_pane_focus = EditorPane::Left;
+        }
     }
 
     pub fn poll_external_changes(&mut self) {
@@ -411,6 +446,7 @@ impl App {
         if self.editors.len() <= 1 {
             self.editors[0] = Editor::empty();
             self.active_editor = 0;
+            self.active_editor_right = 0;
             return;
         }
         self.editors.remove(idx);
@@ -419,6 +455,12 @@ impl App {
         }
         if self.active_editor >= self.editors.len() {
             self.active_editor = self.editors.len() - 1;
+        }
+        if idx < self.active_editor_right {
+            self.active_editor_right -= 1;
+        }
+        if self.active_editor_right >= self.editors.len() {
+            self.active_editor_right = self.editors.len() - 1;
         }
     }
 
@@ -674,6 +716,12 @@ impl App {
                 self.cycle_focus(true);
                 return;
             }
+            // Ctrl+\ (0x1C, ASCII FS) isn't reliably delivered by every terminal, unlike
+            // Alt+letter which already works via the ESC-prefix mechanism (menu mnemonics).
+            KeyCode::Char('p') | KeyCode::Char('P') if alt => {
+                self.toggle_split_view();
+                return;
+            }
             _ => {}
         }
 
@@ -764,6 +812,7 @@ impl App {
             MenuAction::ToggleTerminalSide => self.settings.terminal_on_right = !self.settings.terminal_on_right,
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
+            MenuAction::ToggleSplitView => self.toggle_split_view(),
         }
     }
 
@@ -947,6 +996,8 @@ impl App {
             // input (no Kitty keyboard protocol), so Save All uses Alt+S instead — Alt
             // combos already work reliably via the ESC-prefix menu mnemonics.
             KeyCode::Char('s') | KeyCode::Char('S') if alt => self.save_all(),
+            KeyCode::Left if alt && self.split_view => self.editor_pane_focus = EditorPane::Left,
+            KeyCode::Right if alt && self.split_view => self.editor_pane_focus = EditorPane::Right,
             KeyCode::Char('s') if ctrl => self.save_active_file(),
             KeyCode::Char('w') if ctrl => self.close_active_editor(),
             KeyCode::Char('d') if ctrl => self.close_active_editor(),
@@ -1075,11 +1126,14 @@ impl App {
                         return;
                     }
                 }
-                if within(areas.editor, col, row) {
+                let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+                if let Some((pane_idx, pane_rect)) = panes.iter().enumerate().find(|(_, r)| within(**r, col, row)) {
+                    let pane_rect = *pane_rect;
                     self.focus = Focus::Editor;
-                    let (tab_bar, content) = ui::split_editor_area(areas.editor);
+                    self.editor_pane_focus = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+                    let (tab_bar, content) = ui::split_editor_area(pane_rect);
                     if within(tab_bar, col, row) {
-                        self.mouse_tab_click(col, tab_bar);
+                        self.mouse_tab_click(col, tab_bar, self.editor_pane_focus);
                     } else {
                         self.editor_mut().clear_selection();
                         self.position_cursor_from_click(content, col, row);
@@ -1105,7 +1159,15 @@ impl App {
                 }
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
-                        let (_, content) = ui::split_editor_area(areas.editor);
+                        // Stay within the pane the drag started in, regardless of which
+                        // pane the pointer is currently over.
+                        let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+                        let pane_rect = if self.split_view && self.editor_pane_focus == EditorPane::Right {
+                            panes.get(1).copied().unwrap_or(areas.editor)
+                        } else {
+                            panes[0]
+                        };
+                        let (_, content) = ui::split_editor_area(pane_rect);
                         self.position_cursor_from_click(content, col, row);
                     }
                 }
@@ -1127,20 +1189,27 @@ impl App {
                 return;
             }
         }
-        if within(areas.editor, col, row) {
-            let (_, content) = ui::split_editor_area(areas.editor);
+        let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+        for (pane_idx, pane_rect) in panes.iter().enumerate() {
+            if !within(*pane_rect, col, row) {
+                continue;
+            }
+            let (_, content) = ui::split_editor_area(*pane_rect);
             if within(content, col, row) {
+                // Scroll whichever pane the pointer is over, independent of focus.
+                let idx = if pane_idx == 0 { self.active_editor } else { self.active_editor_right };
                 if delta < 0 {
-                    self.editor_mut().top_line = self.editor().top_line.saturating_sub((-delta) as usize);
+                    self.editors[idx].top_line = self.editors[idx].top_line.saturating_sub((-delta) as usize);
                 } else {
-                    let max_top = self.editor().rope.len_lines().saturating_sub(1);
-                    self.editor_mut().top_line = (self.editor().top_line + delta as usize).min(max_top);
+                    let max_top = self.editors[idx].rope.len_lines().saturating_sub(1);
+                    self.editors[idx].top_line = (self.editors[idx].top_line + delta as usize).min(max_top);
                 }
             }
+            return;
         }
     }
 
-    fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect) {
+    fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect, pane: EditorPane) {
         let rel_col = col.saturating_sub(tab_bar.x);
         let layouts = ui::tab_layouts(self);
         for (i, layout) in layouts.iter().enumerate() {
@@ -1149,10 +1218,18 @@ impl App {
                 return;
             }
             if rel_col >= layout.full.0 && rel_col < layout.full.1 {
-                self.active_editor = i;
+                match pane {
+                    EditorPane::Left => self.active_editor = i,
+                    EditorPane::Right => self.active_editor_right = i,
+                }
                 self.focus = Focus::Editor;
+                self.editor_pane_focus = pane;
                 return;
             }
+        }
+        // The Run/venv toolbar only renders in the left (or only) pane.
+        if pane != EditorPane::Left {
+            return;
         }
         let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width);
         if let Some((start, end)) = venv_range {
