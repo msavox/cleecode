@@ -27,6 +27,10 @@ pub struct Settings {
     // active file's shell-quoted absolute path. Hand-editable in settings.toml.
     #[serde(default = "default_run_commands")]
     pub run_commands: std::collections::HashMap<String, String>,
+    // Folder name (relative to the project root) of the venv to use when running
+    // Python scripts, e.g. ".venv". None means "system python".
+    #[serde(default)]
+    pub active_venv: Option<String>,
 }
 
 fn default_run_commands() -> std::collections::HashMap<String, String> {
@@ -65,6 +69,7 @@ impl Default for Settings {
             terminal_pct: 35,
             terminal_on_right: false,
             run_commands: default_run_commands(),
+            active_venv: None,
         }
     }
 }

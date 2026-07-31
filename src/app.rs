@@ -49,8 +49,23 @@ pub struct App {
     pub delete_target: Option<PathBuf>,
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
+    pub available_venvs: Vec<String>,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
+}
+
+/// Top-level subdirectories of `root` that look like Python virtualenvs (they carry a
+/// `bin/activate` script). Non-recursive: only scans the project root itself.
+fn discover_venvs(root: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut venvs: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("bin").join("activate").exists())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    venvs.sort();
+    venvs
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,6 +118,7 @@ impl App {
         let t1 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let t2 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
+        let available_venvs = discover_venvs(&root);
         Ok(App {
             file_tree: FileTree::new(root.clone()),
             root,
@@ -127,6 +143,7 @@ impl App {
             delete_target: None,
             resize_mode: false,
             dragging: None,
+            available_venvs,
             bg_tx,
             bg_rx,
         })
@@ -395,6 +412,7 @@ impl App {
             return;
         };
         let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
+        let template = self.apply_venv(&template);
         let command = template.replace("{file}", &quoted);
 
         if self.terminals.is_empty() {
@@ -409,6 +427,41 @@ impl App {
         self.terminals[idx].write_input(command.as_bytes());
         self.terminals[idx].write_input(b"\r");
         self.status_message = i18n::msg_run_started(lang, idx, &command);
+    }
+
+    /// If a venv is selected and the command's program is a python interpreter,
+    /// swaps in the venv's own binary (e.g. "python3" -> ".venv/bin/python3").
+    /// Left untouched for every other program, so custom run_commands entries for
+    /// other languages are unaffected.
+    fn apply_venv(&self, template: &str) -> String {
+        let Some(venv) = &self.settings.active_venv else { return template.to_string() };
+        let Some((program, rest)) = template.split_once(' ') else { return template.to_string() };
+        if !matches!(program, "python" | "python3" | "python2") {
+            return template.to_string();
+        }
+        let venv_bin = self.root.join(venv).join("bin").join(program);
+        if !venv_bin.exists() {
+            return template.to_string();
+        }
+        let quoted = shell_words::quote(&venv_bin.to_string_lossy()).into_owned();
+        format!("{quoted} {rest}")
+    }
+
+    pub fn cycle_venv(&mut self) {
+        if self.available_venvs.is_empty() {
+            return;
+        }
+        let next = match &self.settings.active_venv {
+            None => Some(self.available_venvs[0].clone()),
+            Some(current) => {
+                let pos = self.available_venvs.iter().position(|v| v == current);
+                match pos {
+                    Some(i) if i + 1 < self.available_venvs.len() => Some(self.available_venvs[i + 1].clone()),
+                    _ => None,
+                }
+            }
+        };
+        self.settings.active_venv = next;
     }
 
     fn cycle_focus(&mut self, forward: bool) {
@@ -1007,7 +1060,14 @@ impl App {
                 return;
             }
         }
-        if let Some((start, end)) = ui::run_button_range(self, tab_bar.width) {
+        let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width);
+        if let Some((start, end)) = venv_range {
+            if rel_col >= start && rel_col < end {
+                self.cycle_venv();
+                return;
+            }
+        }
+        if let Some((start, end)) = run_range {
             if rel_col >= start && rel_col < end {
                 self.run_active_file();
             }

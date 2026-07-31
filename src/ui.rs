@@ -132,17 +132,31 @@ fn run_button_label(lang: Lang) -> String {
     format!(" \u{25b6} {} ", i18n::t(lang, Key::ToolbarRun))
 }
 
-/// Relative (start, end) column range of the "Run" button within the tab bar row, if the
-/// row is wide enough to show it without overlapping the open tabs.
-pub fn run_button_range(app: &App, area_width: u16) -> Option<(u16, u16)> {
-    let used: u16 = tab_ranges(app).last().map(|(_, e)| *e).unwrap_or(0);
-    let label = run_button_label(app.settings.lang);
-    let w = label.chars().count() as u16;
-    if used + w > area_width {
-        return None;
+fn venv_button_label(app: &App) -> String {
+    match &app.settings.active_venv {
+        Some(name) => format!(" venv: {name} \u{25be} "),
+        None => format!(" {} \u{25be} ", i18n::t(app.settings.lang, Key::ToolbarVenvNone)),
     }
-    let start = area_width - w;
-    Some((start, start + w))
+}
+
+/// Relative (start, end) ranges for the right-aligned toolbar buttons that fit within
+/// `area_width` without overlapping the open tabs: the venv selector (dropped first if
+/// there isn't room for both) and the Run button.
+pub fn toolbar_button_ranges(app: &App, area_width: u16) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
+    let used: u16 = tab_ranges(app).last().map(|(_, e)| *e).unwrap_or(0);
+    let run_w = run_button_label(app.settings.lang).chars().count() as u16;
+    let venv_w = venv_button_label(app).chars().count() as u16;
+
+    if used + venv_w + run_w <= area_width {
+        let run_start = area_width - run_w;
+        let venv_start = run_start - venv_w;
+        (Some((venv_start, venv_start + venv_w)), Some((run_start, run_start + run_w)))
+    } else if used + run_w <= area_width {
+        let run_start = area_width - run_w;
+        (None, Some((run_start, run_start + run_w)))
+    } else {
+        (None, None)
+    }
 }
 
 pub fn gutter_width(total_lines: usize, show_line_numbers: bool) -> u16 {
@@ -556,13 +570,19 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         };
         spans.push(Span::styled(label, style));
     }
-    if let Some((start, end)) = run_button_range(app, area.width) {
+    let (venv_range, run_range) = toolbar_button_ranges(app, area.width);
+    if let Some((start, _)) = venv_range.or(run_range) {
         let pad = start.saturating_sub(used);
         if pad > 0 {
             spans.push(Span::raw(" ".repeat(pad as usize)));
         }
+    }
+    if venv_range.is_some() {
+        let label = venv_button_label(app);
+        spans.push(Span::styled(label, Style::default().fg(Color::Gray).bg(Color::DarkGray)));
+    }
+    if run_range.is_some() {
         let label = run_button_label(lang);
-        debug_assert_eq!(label.chars().count() as u16, end - start);
         spans.push(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
