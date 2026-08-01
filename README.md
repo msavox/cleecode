@@ -144,8 +144,9 @@ confirmation), `H` toggles hidden files.
 
 **macOS** is the supported platform — it's where CleeCode is developed, tested and released.
 **Linux and Windows** are written for throughout (paths, clipboard, shell, fonts and venvs
-all have per-OS handling) but are not yet verified on those systems: build from source as
-described above and expect rough edges. CI compile-checks both so the gap stays visible.
+all have per-OS handling) and both compile cleanly in CI, but neither has actually been
+*run* yet — no prebuilt binaries and no runtime testing. Build from source as described
+above, expect rough edges, and please report what breaks.
 
 System-clipboard access goes
 through [arboard](https://github.com/1Password/arboard) (native clipboard on each OS),
