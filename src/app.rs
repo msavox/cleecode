@@ -780,6 +780,7 @@ impl App {
                 let label = format!("{}: {}", menu_title, i18n::t(lang, it.label_key));
                 items.push(crate::picker::PickItem {
                     label,
+                    shortcut: it.shortcut.map(|s| s.to_string()),
                     action: crate::picker::PickAction::Command(it.action),
                 });
             }
@@ -796,7 +797,7 @@ impl App {
             .into_iter()
             .map(|p| {
                 let label = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
-                crate::picker::PickItem { label, action: crate::picker::PickAction::OpenFile(p) }
+                crate::picker::PickItem { label, shortcut: None, action: crate::picker::PickAction::OpenFile(p) }
             })
             .collect();
         self.picker = Some(crate::picker::Picker::new("Open file", items));

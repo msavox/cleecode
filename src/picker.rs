@@ -9,6 +9,9 @@ pub enum PickAction {
 
 pub struct PickItem {
     pub label: String,
+    /// Keyboard shortcut shown right-aligned, so the command palette doubles as a
+    /// cheatsheet. Not part of the fuzzy-matched text.
+    pub shortcut: Option<String>,
     pub action: PickAction,
 }
 
@@ -126,9 +129,9 @@ mod tests {
     #[test]
     fn refilter_orders_by_score() {
         let items = vec![
-            PickItem { label: "File: Save".into(), action: PickAction::Command(MenuAction::Save) },
-            PickItem { label: "File: Save All".into(), action: PickAction::Command(MenuAction::SaveAll) },
-            PickItem { label: "Edit: Copy".into(), action: PickAction::Command(MenuAction::Copy) },
+            PickItem { label: "File: Save".into(), shortcut: None, action: PickAction::Command(MenuAction::Save) },
+            PickItem { label: "File: Save All".into(), shortcut: None, action: PickAction::Command(MenuAction::SaveAll) },
+            PickItem { label: "Edit: Copy".into(), shortcut: None, action: PickAction::Command(MenuAction::Copy) },
         ];
         let mut p = Picker::new("Commands", items);
         p.query = "save".into();

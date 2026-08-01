@@ -608,7 +608,7 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let list_rows = inner.height.saturating_sub(1) as usize;
     // Scroll so the selected row stays visible.
     let start = if p.selected >= list_rows { p.selected + 1 - list_rows } else { 0 };
-    let max_label = inner.width.saturating_sub(2) as usize;
+    let width = inner.width as usize;
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
@@ -616,18 +616,39 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
         Span::styled(p.query.clone(), Style::default().fg(Color::White)),
     ]));
     for (row, &item_idx) in p.filtered.iter().enumerate().skip(start).take(list_rows) {
-        let mut label = p.items[item_idx].label.clone();
-        if label.chars().count() > max_label {
-            label = label.chars().take(max_label.saturating_sub(1)).collect::<String>() + "…";
-        }
+        let item = &p.items[item_idx];
         let selected = row == p.selected;
-        let style = if selected {
+        let row_style = if selected {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::Gray)
         };
+        let sc = item.shortcut.as_deref().unwrap_or("");
+        let sc_w = sc.chars().count();
+        // Reserve room for the right-aligned shortcut, then fit/ellipsize the label.
+        let prefix_w = 2;
+        let sc_gap = if sc_w > 0 { sc_w + 2 } else { 0 };
+        let label_budget = width.saturating_sub(prefix_w + sc_gap);
+        let mut label = item.label.clone();
+        if label.chars().count() > label_budget {
+            label = label.chars().take(label_budget.saturating_sub(1)).collect::<String>() + "…";
+        }
         let prefix = if selected { "▶ " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+        let used = prefix_w + label.chars().count() + sc_w;
+        let pad = width.saturating_sub(used);
+        let mut spans = vec![Span::styled(format!("{prefix}{label}"), row_style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), row_style));
+        }
+        if sc_w > 0 {
+            let sc_style = if selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(sc.to_string(), sc_style));
+        }
+        lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
     f.set_cursor_position((inner.x + 2 + p.query.chars().count() as u16, inner.y));
