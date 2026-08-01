@@ -1213,6 +1213,12 @@ impl App {
                 self.settings.show_menubar = !self.settings.show_menubar;
                 return;
             }
+            // Ctrl+L: macOS-friendly alias for Alt+P (toggle split editor), since Option
+            // isn't Meta by default there. Claimed only outside the terminal pane.
+            KeyCode::Char('l') if ctrl && self.focus != Focus::Terminal => {
+                self.toggle_split_view();
+                return;
+            }
             _ => {}
         }
 

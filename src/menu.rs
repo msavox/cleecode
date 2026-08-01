@@ -124,7 +124,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemLayoutTriple, MenuAction::LayoutTriple, None),
                 item(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
                 item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("F8")),
-                item(Key::ItemToggleSplitView, MenuAction::ToggleSplitView, Some("Alt+P")),
+                item(Key::ItemToggleSplitView, MenuAction::ToggleSplitView, Some("Ctrl+L")),
             ],
         },
         MenuDef {

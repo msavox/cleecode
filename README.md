@@ -68,7 +68,7 @@ font setting at it manually.
 | `F7` | Fold/unfold the block under the cursor |
 | `F8` | Resize mode (arrows to resize, `Esc`/`Enter` to exit) |
 | `F10` | Run the current file |
-| `Alt+P` | Toggle split editor view |
+| `Ctrl+L` / `Alt+P` | Toggle split editor view (`Ctrl+L` outside the terminal; `Alt+P` needs Option-as-Meta on macOS) |
 | `Alt+Left` / `Alt+Right` | Switch focus between split panes |
 | `Alt+S` | Save all files |
 | `Ctrl+E` / `Ctrl+T` | Toggle sidebar / terminal panel |
