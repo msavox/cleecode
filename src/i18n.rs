@@ -73,6 +73,8 @@ pub enum Key {
     SettingsTitle,
     AboutTitle,
     AboutTagline,
+    AboutAuthor,
+    AboutRepo,
     AboutCloseHint,
     SplashTagline,
     SplashSubtitle,
@@ -248,6 +250,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, AboutTagline) => {
             "Una IDE da terminale: editor stile micro con sidebar file, terminali integrati ed evidenziazione sintattica."
         }
+
+        (Lang::En, AboutAuthor) => "Created by Matteo Savoia",
+        (Lang::It, AboutAuthor) => "Creato da Matteo Savoia",
+
+        (Lang::En, AboutRepo) => "github.com/msavox/cleecode",
+        (Lang::It, AboutRepo) => "github.com/msavox/cleecode",
 
         (Lang::En, AboutCloseHint) => "Press Esc or click anywhere to close",
         (Lang::It, AboutCloseHint) => "Premi Esc o clicca per chiudere",

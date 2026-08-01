@@ -359,7 +359,9 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
 }
 
 pub fn about_modal_rect(full: Rect) -> Rect {
-    centered_rect(60, 9, full)
+    // Tall enough for the version, the wrapped tagline (three lines in Italian, the longer
+    // of the two), the author and repository lines, and the close hint.
+    centered_rect(60, 13, full)
 }
 
 pub fn settings_modal_rect(full: Rect) -> Rect {
@@ -595,6 +597,15 @@ fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
         )),
         Line::from(""),
         Line::from(i18n::t(lang, Key::AboutTagline)),
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::t(lang, Key::AboutAuthor),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("{}  ·  MIT", i18n::t(lang, Key::AboutRepo)),
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             i18n::t(lang, Key::AboutCloseHint),

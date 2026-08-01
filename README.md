@@ -4,6 +4,8 @@ A terminal IDE written in Rust: a `micro`-style editor with a file tree sidebar,
 integrated terminals, syntax highlighting, and a classic drop-down menu bar —
 all inside your terminal. No mouse required, but it's there if you want it.
 
+By **Matteo Savoia** ([msavox](https://github.com/msavox)).
+
 ![CleeCode main view](docs/screenshots/main.png)
 
 ## Features
@@ -205,6 +207,10 @@ The terminal pane launches `$SHELL` (falling back to `/bin/bash`) on Unix and `%
 ## Status
 
 Personal project, actively evolving.
+
+## Author
+
+CleeCode is written and maintained by **Matteo Savoia** — [github.com/msavox](https://github.com/msavox).
 
 ## License
 
