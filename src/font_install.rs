@@ -8,7 +8,7 @@ const FONT_FILENAME: &str = "CleeCodeMonoNerdFont-Regular.ttf";
 const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
 /// Installs the bundled font into the user's font directory. Run via
-/// `cleecode --install-font`; never runs implicitly, since touching the user's fonts (and,
+/// `clee --install-font`; never runs implicitly, since touching the user's fonts (and,
 /// on Unix, their terminal config) is the kind of thing that should be an explicit,
 /// visible action rather than a side effect of a normal launch.
 pub fn install() {

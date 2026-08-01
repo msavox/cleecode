@@ -3,6 +3,11 @@ name = "cleecode"
 version = "0.1.0"
 edition = "2024"
 
+# The crate stays "cleecode" but the built command is the shorter "clee".
+[[bin]]
+name = "clee"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3.4.1"
