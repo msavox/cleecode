@@ -75,9 +75,24 @@ The formula builds from source (it pulls Rust as a build dependency), which take
 a minute. Prebuilt macOS binaries for arm64 and x86_64 are attached to each
 [release](https://github.com/msavox/cleecode/releases) if you'd rather not build at all.
 
-### Linux and Windows — experimental binaries, or build it yourself
+### Linux — Homebrew, experimental binaries, or build it yourself
 
-x86_64 builds for both are attached to each
+[Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) works with the same tap, and CI
+verifies that install on Ubuntu on every change to the formula:
+
+```bash
+brew tap msavox/clee
+brew trust msavox/clee
+brew install clee
+```
+
+It builds from source and pulls `libxcb` for clipboard support, so it takes longer than on
+macOS. Note that the *install* is tested; the editor itself has still never been used
+interactively on Linux.
+
+### Prebuilt binaries, or build it yourself
+
+x86_64 builds for Linux and Windows are attached to each
 [release](https://github.com/msavox/cleecode/releases). CI compiles them and checks that they
 start, but nothing interactive has been tested on either platform yet — so they're
 experimental, and bug reports are welcome.
