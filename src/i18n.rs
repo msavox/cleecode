@@ -626,6 +626,13 @@ pub fn msg_run_no_command(lang: Lang, ext: &str) -> String {
     }
 }
 
+pub fn msg_copied_chars(lang: Lang, chars: usize) -> String {
+    match lang {
+        Lang::En => format!("Copied {chars} characters from the terminal"),
+        Lang::It => format!("Copiati {chars} caratteri dal terminale"),
+    }
+}
+
 pub fn msg_run_started(lang: Lang, terminal_index: usize, command: &str) -> String {
     match lang {
         Lang::En => format!("Running in Terminal {}: {command}", terminal_index + 1),

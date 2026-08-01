@@ -117,7 +117,11 @@ pub struct FileTree {
 }
 
 impl FileTree {
-    pub fn new(root_path: PathBuf) -> Self {
+    /// `show_hidden` is a required argument rather than a default the caller patches
+    /// afterwards: the tree is rebuilt from several places (root change, refresh after a file
+    /// operation) and any one of them forgetting to reapply the preference made hidden files
+    /// silently reappear.
+    pub fn new(root_path: PathBuf, show_hidden: bool) -> Self {
         let mut root = FileNode::new(root_path);
         root.load_children();
         root.expanded = true;
@@ -125,7 +129,7 @@ impl FileTree {
             root,
             selected: 0,
             visible: Vec::new(),
-            show_hidden: true,
+            show_hidden,
         };
         tree.rebuild_visible();
         tree
@@ -175,8 +179,10 @@ impl FileTree {
         }
     }
 
-    pub fn toggle_hidden(&mut self) {
-        self.show_hidden = !self.show_hidden;
+    /// Applies the caller's preference, rather than flipping a copy of it, so the tree can't
+    /// end up disagreeing with the setting it is supposed to reflect.
+    pub fn set_show_hidden(&mut self, show_hidden: bool) {
+        self.show_hidden = show_hidden;
         self.rebuild_visible();
     }
 
@@ -322,6 +328,32 @@ mod tests {
         dir
     }
 
+    /// Hidden files must stay hidden across every operation that rebuilds the tree — a
+    /// refresh, or navigating to another folder — which is what made them reappear before.
+    #[test]
+    fn hidden_files_stay_hidden_across_rebuilds() {
+        let dir = setup_dir("hidden_persists");
+        std::fs::create_dir_all(dir.join(".hidden_dir")).unwrap();
+        std::fs::write(dir.join(".hidden_file"), "x").unwrap();
+
+        let mut tree = FileTree::new(dir.clone(), false);
+        let names = |t: &FileTree| t.visible.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert!(!names(&tree).iter().any(|n| n.starts_with('.') && n != ".."), "{:?}", names(&tree));
+
+        tree.refresh();
+        assert!(!names(&tree).iter().any(|n| n.starts_with('.') && n != ".."), "refresh revealed them");
+
+        // Descending into a subfolder is a fresh tree, and it must inherit the preference.
+        let sub = FileTree::new(dir.join("sub"), false);
+        assert!(!names(&sub).iter().any(|n| n.starts_with('.') && n != ".."));
+
+        // And the toggle still works, in both directions.
+        tree.set_show_hidden(true);
+        assert!(names(&tree).contains(&".hidden_file".to_string()));
+        tree.set_show_hidden(false);
+        assert!(!names(&tree).contains(&".hidden_file".to_string()));
+    }
+
     fn up_row_offset(tree: &FileTree) -> usize {
         if tree.has_parent() {
             1
@@ -333,7 +365,7 @@ mod tests {
     #[test]
     fn lists_dirs_before_files_and_expands() {
         let dir = setup_dir("lists_dirs");
-        let mut tree = FileTree::new(dir.clone());
+        let mut tree = FileTree::new(dir.clone(), true);
         let off = up_row_offset(&tree);
         assert_eq!(tree.visible.len(), 2 + off);
         assert!(tree.visible[off].is_dir);
@@ -367,7 +399,7 @@ mod tests {
     #[test]
     fn collapse_resets_visible_list() {
         let dir = setup_dir("collapse");
-        let mut tree = FileTree::new(dir.clone());
+        let mut tree = FileTree::new(dir.clone(), true);
         let off = up_row_offset(&tree);
         tree.selected = off;
         tree.expand_selected();
@@ -381,7 +413,7 @@ mod tests {
     #[test]
     fn up_row_present_when_not_at_filesystem_root() {
         let dir = setup_dir("up_row");
-        let tree = FileTree::new(dir.clone());
+        let tree = FileTree::new(dir.clone(), true);
         assert!(tree.has_parent());
         assert!(tree.visible[0].is_up);
         assert_eq!(tree.parent_dir(), dir.parent().map(|p| p.to_path_buf()));

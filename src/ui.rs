@@ -1241,6 +1241,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
         return;
     }
 
+    let selection = terminal.selection;
     let parser = terminal.parser.lock().unwrap();
     let screen = parser.screen();
     let (screen_rows, screen_cols) = screen.size();
@@ -1278,6 +1279,16 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
                     (c.contents().to_string(), style)
                 }
                 _ => (" ".to_string(), Style::default()),
+            };
+            // Selected cells get the editor's selection colours rather than a reverse-video
+            // flip, which would be invisible on text that is already inverse (a prompt, a
+            // highlighted match). Differing styles also break the span run here, so the
+            // highlight lands on exactly the selected cells.
+            let style = match selection {
+                Some(selection) if selection.contains(row, col) => {
+                    Style::default().fg(Color::Black).bg(Color::LightBlue)
+                }
+                _ => style,
             };
 
             if have_style && style == current_style {

@@ -34,6 +34,68 @@ pub struct TerminalPanel {
     produced_output: Arc<AtomicBool>,
     /// Latches true once the pane has been revealed, so we never hide it again mid-session.
     revealed: bool,
+    /// Text selected in this pane, for copying out of the terminal. The app grabs the mouse,
+    /// so the host terminal's own selection is unavailable while cleecode runs.
+    pub selection: Option<TermSelection>,
+}
+
+/// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
+/// where it started, `cursor` where it currently ends; either may come first on screen.
+/// It flows like text, not as a rectangle: to the end of the first row, then whole rows,
+/// then up to the cursor on the last one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TermSelection {
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+}
+
+impl TermSelection {
+    pub fn new(cell: (u16, u16)) -> Self {
+        TermSelection { anchor: cell, cursor: cell }
+    }
+
+    /// Endpoints in screen order, so callers don't have to care which way it was dragged.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.anchor <= self.cursor { (self.anchor, self.cursor) } else { (self.cursor, self.anchor) }
+    }
+
+    /// True while the selection has never left its starting cell, which is what a plain click
+    /// looks like — the caller drops it instead of treating one character as a selection.
+    pub fn is_single_cell(&self) -> bool {
+        self.anchor == self.cursor
+    }
+
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        let ((start_row, start_col), (end_row, end_col)) = self.ordered();
+        if row < start_row || row > end_row {
+            return false;
+        }
+        let after_start = row > start_row || col >= start_col;
+        let before_end = row < end_row || col <= end_col;
+        after_start && before_end
+    }
+}
+
+/// Builds the selected text row by row. `cell` yields the character at a position (empty for
+/// a blank), which keeps this testable without a real pty. Trailing blanks are trimmed per
+/// row — they are padding on screen, not something anyone means to copy — and rows are joined
+/// with newlines.
+pub fn selected_text(selection: TermSelection, cols: u16, cell: impl Fn(u16, u16) -> String) -> String {
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+    let mut rows = Vec::new();
+    for row in start_row..=end_row {
+        let from = if row == start_row { start_col } else { 0 };
+        let to = if row == end_row { end_col } else { cols.saturating_sub(1) };
+        let mut line = String::new();
+        for col in from..=to.min(cols.saturating_sub(1)) {
+            let contents = cell(row, col);
+            // vt100 reports the second half of a wide character as empty; a blank cell also
+            // comes back empty, and both should read as a space here.
+            line.push_str(if contents.is_empty() { " " } else { &contents });
+        }
+        rows.push(line.trim_end().to_string());
+    }
+    rows.join("\n")
 }
 
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
@@ -213,6 +275,7 @@ impl TerminalPanel {
             last_output_ms,
             produced_output,
             revealed: false,
+            selection: None,
         })
     }
 
@@ -243,6 +306,47 @@ impl TerminalPanel {
     /// pid of the shell process running in this pane, used for best-effort ssh-session detection.
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    /// Starts a selection at `cell`, discarding any previous one.
+    pub fn begin_selection(&mut self, cell: (u16, u16)) {
+        self.selection = Some(TermSelection::new(self.clamp_cell(cell)));
+    }
+
+    /// Moves the loose end of the selection, starting one at the terminal's cursor if there
+    /// isn't one yet — which is what keyboard selection needs.
+    pub fn extend_selection(&mut self, cell: (u16, u16)) {
+        let cell = self.clamp_cell(cell);
+        match &mut self.selection {
+            Some(selection) => selection.cursor = cell,
+            None => self.selection = Some(TermSelection::new(cell)),
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Where the terminal's own cursor is, as the starting point for keyboard selection.
+    pub fn cursor_cell(&self) -> (u16, u16) {
+        self.parser.lock().map(|p| p.screen().cursor_position()).unwrap_or((0, 0))
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let parser = self.parser.lock().ok()?;
+        let screen = parser.screen();
+        let (_, cols) = screen.size();
+        Some(selected_text(selection, cols, |row, col| {
+            screen.cell(row, col).map(|c| c.contents().to_string()).unwrap_or_default()
+        }))
+    }
+
+    /// Keeps a cell inside the screen, so a drag that leaves the pane still selects up to the
+    /// edge instead of being ignored.
+    fn clamp_cell(&self, (row, col): (u16, u16)) -> (u16, u16) {
+        (row.min(self.rows.saturating_sub(1)), col.min(self.cols.saturating_sub(1)))
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -302,6 +406,65 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4x5 screen whose cell contents encode their position, with a blank column so
+    /// trailing-space trimming is exercised.
+    fn grid(row: u16, col: u16) -> String {
+        if col == 4 { String::new() } else { format!("{row}{col}") }
+    }
+
+    #[test]
+    fn selection_flows_like_text_not_as_a_rectangle() {
+        let selection = TermSelection { anchor: (0, 2), cursor: (2, 1) };
+        // First row: from the anchor to the end. Middle rows: everything.
+        assert!(selection.contains(0, 2) && selection.contains(0, 4));
+        assert!(!selection.contains(0, 1), "before the start of the first row");
+        assert!(selection.contains(1, 0) && selection.contains(1, 4));
+        // Last row: up to the cursor only.
+        assert!(selection.contains(2, 1));
+        assert!(!selection.contains(2, 2), "past the end of the last row");
+        assert!(!selection.contains(3, 0), "outside the row range");
+    }
+
+    #[test]
+    fn selection_is_direction_agnostic() {
+        let forward = TermSelection { anchor: (0, 1), cursor: (1, 3) };
+        let backward = TermSelection { anchor: (1, 3), cursor: (0, 1) };
+        assert_eq!(forward.ordered(), backward.ordered());
+        for row in 0..2 {
+            for col in 0..5 {
+                assert_eq!(forward.contains(row, col), backward.contains(row, col), "at {row},{col}");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_text_joins_rows_and_trims_trailing_blanks() {
+        // Two full rows: the blank last column must not survive as trailing whitespace.
+        let selection = TermSelection { anchor: (0, 0), cursor: (1, 4) };
+        assert_eq!(selected_text(selection, 5, grid), "00010203\n10111213");
+    }
+
+    #[test]
+    fn selected_text_respects_the_partial_first_and_last_rows() {
+        let selection = TermSelection { anchor: (0, 2), cursor: (1, 1) };
+        assert_eq!(selected_text(selection, 5, grid), "0203\n1011");
+    }
+
+    #[test]
+    fn selected_text_of_a_single_cell_is_that_cell() {
+        let selection = TermSelection::new((1, 2));
+        assert_eq!(selected_text(selection, 5, grid), "12");
+        // A blank cell yields nothing rather than a stray space.
+        assert_eq!(selected_text(TermSelection::new((1, 4)), 5, grid), "");
+    }
+
+    #[test]
+    fn selected_text_does_not_read_past_the_screen_width() {
+        // A stale selection (e.g. the pane was made narrower) must clamp, not panic.
+        let selection = TermSelection { anchor: (0, 0), cursor: (0, 99) };
+        assert_eq!(selected_text(selection, 5, grid), "00010203");
+    }
 
     fn scan(data: &[u8]) -> Vec<TerminalQuery> {
         let mut s = CsiScanner::default();

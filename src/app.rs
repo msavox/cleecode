@@ -275,6 +275,8 @@ pub enum DragTarget {
     Sidebar,
     TerminalHeight,
     TextSelection,
+    /// Selecting text inside an embedded terminal, in the pane the drag started in.
+    TerminalSelection(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -314,6 +316,17 @@ fn within(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
+/// Screen cell `(row, col)` under a mouse position, relative to a pane's inner area. Positions
+/// outside the area are clamped to its edges, so a drag that wanders off the pane keeps
+/// selecting up to the border instead of being dropped.
+fn cell_at(inner: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let clamp = |v: u16, min: u16, len: u16| v.clamp(min, min + len - 1) - min;
+    Some((clamp(row, inner.y, inner.height), clamp(col, inner.x, inner.width)))
+}
+
 impl App {
     pub fn new(root: PathBuf, term_rows: u16, term_cols: u16) -> Result<Self> {
         let half_cols = (term_cols / 2).max(10);
@@ -325,9 +338,7 @@ impl App {
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
         let settings = Settings::load();
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
-        let mut file_tree = FileTree::new(root.clone());
-        file_tree.show_hidden = settings.show_hidden_files;
-        file_tree.rebuild_visible();
+        let file_tree = FileTree::new(root.clone(), settings.show_hidden_files);
         Ok(App {
             file_tree,
             root,
@@ -454,7 +465,7 @@ impl App {
             }
         }
         if ok > 0 {
-            self.file_tree = FileTree::new(self.root.clone());
+            self.file_tree = FileTree::new(self.root.clone(), self.settings.show_hidden_files);
         }
         let dest_display = dest_dir.display().to_string();
         self.status_message = match last_err {
@@ -843,7 +854,7 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.file_tree = FileTree::new(self.root.clone());
+                self.file_tree = FileTree::new(self.root.clone(), self.settings.show_hidden_files);
                 self.status_message = i18n::msg_created_entry(lang, &dest.display().to_string());
                 if !is_dir {
                     self.open_file_in_tab(dest);
@@ -1004,9 +1015,7 @@ impl App {
     }
 
     fn set_root(&mut self, new_root: PathBuf) {
-        self.file_tree = FileTree::new(new_root.clone());
-        self.file_tree.show_hidden = self.settings.show_hidden_files;
-        self.file_tree.rebuild_visible();
+        self.file_tree = FileTree::new(new_root.clone(), self.settings.show_hidden_files);
         self.root = new_root;
         self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
@@ -1014,8 +1023,10 @@ impl App {
     }
 
     fn toggle_hidden_files(&mut self) {
+        // The setting is the single source of truth; the tree follows it. Flipping both
+        // independently let them drift apart.
         self.settings.show_hidden_files = !self.settings.show_hidden_files;
-        self.file_tree.toggle_hidden();
+        self.file_tree.set_show_hidden(self.settings.show_hidden_files);
     }
 
     pub fn new_terminal(&mut self) {
@@ -1540,7 +1551,8 @@ impl App {
                 }
                 self.settings.clamp_layout();
             }
-            Some(DragTarget::TextSelection) | None => {}
+            // Both are handled where the drag happens, against the pane they started in.
+            Some(DragTarget::TextSelection) | Some(DragTarget::TerminalSelection(_)) | None => {}
         }
     }
 
@@ -1552,7 +1564,7 @@ impl App {
         let result = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
         match result {
             Ok(()) => {
-                self.file_tree = FileTree::new(self.root.clone());
+                self.file_tree = FileTree::new(self.root.clone(), self.settings.show_hidden_files);
                 self.status_message = i18n::msg_deleted(lang, &name);
             }
             Err(e) => self.status_message = i18n::msg_delete_failed(lang, &name, &e.to_string()),
@@ -1800,12 +1812,81 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, key: KeyEvent) {
+        // Shift+arrows select inside the pane instead of reaching the shell, the same role a
+        // terminal emulator plays for the program running in it. Esc drops the selection; every
+        // other key goes through, so the child keeps its own keys.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            let step = match key.code {
+                KeyCode::Left => Some((0, -1)),
+                KeyCode::Right => Some((0, 1)),
+                KeyCode::Up => Some((-1, 0)),
+                KeyCode::Down => Some((1, 0)),
+                _ => None,
+            };
+            if let Some((d_row, d_col)) = step {
+                self.move_terminal_selection(d_row, d_col);
+                return;
+            }
+        }
+        let index = self.active_terminal;
+        if key.code == KeyCode::Esc && self.terminals.get(index).is_some_and(|t| t.selection.is_some()) {
+            if let Some(term) = self.terminals.get_mut(index) {
+                term.clear_selection();
+            }
+            return;
+        }
         let bytes = key_to_bytes(key);
         if !bytes.is_empty() {
             if let Some(term) = self.terminals.get_mut(self.active_terminal) {
                 term.write_input(&bytes);
             }
         }
+    }
+
+    /// Extends the active pane's selection by one cell, anchoring it at the terminal's own
+    /// cursor the first time, then copies it — same rule as finishing a mouse drag.
+    fn move_terminal_selection(&mut self, d_row: i16, d_col: i16) {
+        let index = self.active_terminal;
+        let Some(term) = self.terminals.get_mut(index) else { return };
+        let from = match term.selection {
+            Some(selection) => selection.cursor,
+            None => {
+                let cursor = term.cursor_cell();
+                term.begin_selection(cursor);
+                cursor
+            }
+        };
+        let next = (
+            from.0.saturating_add_signed(d_row),
+            from.1.saturating_add_signed(d_col),
+        );
+        term.extend_selection(next);
+        self.copy_terminal_selection(index);
+    }
+
+    /// Ends a mouse selection: a drag that never left its starting cell is a plain click to
+    /// focus the pane, so it is dropped rather than highlighting (and copying) one character.
+    fn finish_terminal_selection(&mut self, index: usize) {
+        let single = self.terminals.get(index).and_then(|t| t.selection).is_some_and(|s| s.is_single_cell());
+        if single {
+            if let Some(term) = self.terminals.get_mut(index) {
+                term.clear_selection();
+            }
+            return;
+        }
+        self.copy_terminal_selection(index);
+    }
+
+    /// Copies a terminal pane's selection to the system clipboard, reporting how much was
+    /// taken. Silent when the selection is only blank cells, so dragging across empty space
+    /// doesn't wipe the clipboard.
+    fn copy_terminal_selection(&mut self, index: usize) {
+        let Some(text) = self.terminals.get(index).and_then(|t| t.selection_text()) else { return };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.clipboard.set(&text);
+        self.status_message = i18n::msg_copied_chars(self.settings.lang, text.chars().count());
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent, areas: &ui::Areas, full: Rect) {
@@ -1899,6 +1980,15 @@ impl App {
                         if within(*rect, col, row) {
                             self.focus = Focus::Terminal;
                             self.active_terminal = i;
+                            // Start a selection: cleecode captures the mouse, so the host
+                            // terminal's own selection can't be used while it runs.
+                            let inner = ui::inner_rect(*rect);
+                            if let Some(cell) = cell_at(inner, col, row) {
+                                if let Some(term) = self.terminals.get_mut(i) {
+                                    term.begin_selection(cell);
+                                }
+                                self.dragging = Some(DragTarget::TerminalSelection(i));
+                            }
                             return;
                         }
                     }
@@ -1922,9 +2012,24 @@ impl App {
                         self.position_cursor_from_click(content, col, row);
                     }
                 }
+                Some(DragTarget::TerminalSelection(index)) => {
+                    if let Some(rect) = areas.terminals.as_ref().and_then(|t| t.get(index)).copied() {
+                        if let Some(cell) = cell_at(ui::inner_rect(rect), col, row) {
+                            if let Some(term) = self.terminals.get_mut(index) {
+                                term.extend_selection(cell);
+                            }
+                        }
+                    }
+                }
                 None => {}
             },
             MouseEventKind::Up(MouseButton::Left) => {
+                // Completing a selection puts it on the clipboard straight away: there is no
+                // spare key combination in a terminal pane for an explicit copy (Ctrl+C has to
+                // reach the shell as an interrupt).
+                if let Some(DragTarget::TerminalSelection(index)) = self.dragging {
+                    self.finish_terminal_selection(index);
+                }
                 self.dragging = None;
             }
             MouseEventKind::ScrollUp => self.scroll(col, row, areas, -3),
@@ -2156,6 +2261,19 @@ mod tests {
         // Registering the project's own venv by its relative name must not list it twice.
         let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
         assert_eq!(venvs, vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn cell_at_is_relative_to_the_pane_and_clamps_to_it() {
+        let inner = Rect { x: 10, y: 5, width: 4, height: 3 };
+        assert_eq!(cell_at(inner, 10, 5), Some((0, 0)));
+        assert_eq!(cell_at(inner, 12, 6), Some((1, 2)));
+        // Outside the pane clamps to its edges, so a drag that wanders off still selects up
+        // to the border instead of being dropped.
+        assert_eq!(cell_at(inner, 0, 0), Some((0, 0)));
+        assert_eq!(cell_at(inner, 99, 99), Some((2, 3)));
+        // A collapsed pane has no cells to point at.
+        assert_eq!(cell_at(Rect { width: 0, ..inner }, 10, 5), None);
     }
 
     #[test]
