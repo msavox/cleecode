@@ -1,0 +1,139 @@
+use crate::menu::MenuAction;
+use std::path::PathBuf;
+
+/// What a picked entry does when confirmed.
+pub enum PickAction {
+    Command(MenuAction),
+    OpenFile(PathBuf),
+}
+
+pub struct PickItem {
+    pub label: String,
+    pub action: PickAction,
+}
+
+/// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds
+/// the full item list plus the indices (best-scoring first) that match the current query.
+pub struct Picker {
+    pub title: &'static str,
+    pub query: String,
+    pub items: Vec<PickItem>,
+    pub filtered: Vec<usize>,
+    pub selected: usize,
+}
+
+impl Picker {
+    pub fn new(title: &'static str, items: Vec<PickItem>) -> Self {
+        let mut p = Picker { title, query: String::new(), items, filtered: Vec::new(), selected: 0 };
+        p.refilter();
+        p
+    }
+
+    pub fn refilter(&mut self) {
+        if self.query.is_empty() {
+            self.filtered = (0..self.items.len()).collect();
+        } else {
+            let mut scored: Vec<(i32, usize)> = self
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, it)| fuzzy_score(&self.query, &it.label).map(|s| (s, i)))
+                .collect();
+            // Higher score first; ties keep original order for stability.
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+        }
+        self.selected = 0;
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let len = self.filtered.len() as isize;
+        let mut idx = self.selected as isize + delta;
+        idx = ((idx % len) + len) % len;
+        self.selected = idx as usize;
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.refilter();
+    }
+
+    pub fn pop_char(&mut self) {
+        self.query.pop();
+        self.refilter();
+    }
+
+    pub fn selected_action(&self) -> Option<&PickAction> {
+        self.filtered.get(self.selected).and_then(|&i| self.items.get(i)).map(|it| &it.action)
+    }
+}
+
+/// Case-insensitive subsequence fuzzy score, or None if `query` isn't a subsequence of
+/// `text`. Rewards consecutive matches and matches at word starts so "of" ranks
+/// "Open file" above an incidental "o…f…" deeper in a string.
+pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let mut qi = 0usize;
+    let mut score = 0i32;
+    let mut last_match: Option<usize> = None;
+    for (ti, &tc) in t.iter().enumerate() {
+        if qi < q.len() && tc == q[qi] {
+            score += 1;
+            if let Some(lm) = last_match {
+                if ti == lm + 1 {
+                    score += 3; // consecutive
+                }
+            }
+            if ti == 0 || !t[ti - 1].is_alphanumeric() {
+                score += 2; // word start
+            }
+            last_match = Some(ti);
+            qi += 1;
+        }
+    }
+    if qi == q.len() {
+        // Mild preference for shorter labels among equal matches.
+        Some(score - (t.len() as i32) / 20)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subsequence_matches_and_non_matches() {
+        assert!(fuzzy_score("of", "Open file").is_some());
+        assert!(fuzzy_score("xyz", "Open file").is_none());
+    }
+
+    #[test]
+    fn consecutive_and_word_start_rank_higher() {
+        let contiguous = fuzzy_score("open", "Open file").unwrap();
+        let scattered = fuzzy_score("open", "on pen").unwrap();
+        assert!(contiguous > scattered);
+    }
+
+    #[test]
+    fn refilter_orders_by_score() {
+        let items = vec![
+            PickItem { label: "File: Save".into(), action: PickAction::Command(MenuAction::Save) },
+            PickItem { label: "File: Save All".into(), action: PickAction::Command(MenuAction::SaveAll) },
+            PickItem { label: "Edit: Copy".into(), action: PickAction::Command(MenuAction::Copy) },
+        ];
+        let mut p = Picker::new("Commands", items);
+        p.query = "save".into();
+        p.refilter();
+        // Both "Save" entries match; "Copy" doesn't.
+        assert_eq!(p.filtered.len(), 2);
+    }
+}

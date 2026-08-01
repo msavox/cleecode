@@ -168,12 +168,16 @@ fn venv_button_label(app: &App) -> String {
 /// Relative (start, end) ranges for the right-aligned toolbar buttons that fit within
 /// `area_width` without overlapping the open tabs: the venv selector (dropped first if
 /// there isn't room for both) and the Run button.
-pub fn toolbar_button_ranges(app: &App, area_width: u16) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
+pub fn toolbar_button_ranges(
+    app: &App,
+    area_width: u16,
+    with_venv: bool,
+) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
     let used: u16 = tab_ranges(app).last().map(|(_, e)| *e).unwrap_or(0);
     let run_w = run_button_label(app.settings.lang).chars().count() as u16;
     let venv_w = venv_button_label(app).chars().count() as u16;
 
-    if used + venv_w + run_w <= area_width {
+    if with_venv && used + venv_w + run_w <= area_width {
         let run_start = area_width - run_w;
         let venv_start = run_start - venv_w;
         (Some((venv_start, venv_start + venv_w)), Some((run_start, run_start + run_w)))
@@ -342,6 +346,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.find.is_some() {
         draw_find_modal(f, app, f.area());
+    }
+    if app.picker.is_some() {
+        draw_picker_modal(f, app, f.area());
     }
 }
 
@@ -566,6 +573,48 @@ fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
     let title = if app.new_entry_is_dir { "New folder" } else { "New file" };
     let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
     draw_input_modal(f, full, title, prompt, &app.new_entry_input);
+}
+
+fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
+    let Some(p) = app.picker.as_ref() else { return };
+    let width = full.width.saturating_sub(8).min(90).max(20);
+    let height = full.height.saturating_sub(4).min(20).max(4);
+    let rect = centered_rect(width, height, full);
+    f.render_widget(Clear, rect);
+    let title = format!(" {}  ({} matches) ", p.title, p.filtered.len());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let list_rows = inner.height.saturating_sub(1) as usize;
+    // Scroll so the selected row stays visible.
+    let start = if p.selected >= list_rows { p.selected + 1 - list_rows } else { 0 };
+    let max_label = inner.width.saturating_sub(2) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::styled(p.query.clone(), Style::default().fg(Color::White)),
+    ]));
+    for (row, &item_idx) in p.filtered.iter().enumerate().skip(start).take(list_rows) {
+        let mut label = p.items[item_idx].label.clone();
+        if label.chars().count() > max_label {
+            label = label.chars().take(max_label.saturating_sub(1)).collect::<String>() + "…";
+        }
+        let selected = row == p.selected;
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let prefix = if selected { "▶ " } else { "  " };
+        lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+    f.set_cursor_position((inner.x + 2 + p.query.chars().count() as u16, inner.y));
 }
 
 fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -807,7 +856,7 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
     result
 }
 
-fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, show_toolbar: bool) {
+fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_venv: bool) {
     let lang = app.settings.lang;
     let mut spans = Vec::new();
     let mut used = 0u16;
@@ -824,7 +873,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, show_to
         spans.push(Span::styled("\u{2715}", style));
         spans.push(Span::styled(" ", style));
     }
-    let (venv_range, run_range) = if show_toolbar { toolbar_button_ranges(app, area.width) } else { (None, None) };
+    let (venv_range, run_range) = toolbar_button_ranges(app, area.width, with_venv);
     if let Some((start, _)) = venv_range.or(run_range) {
         let pad = start.saturating_sub(used);
         if pad > 0 {
@@ -851,14 +900,16 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let left_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Left;
     let right_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Right;
+    // Both panes get a Run button so either focused file can be run; the (global) venv
+    // selector stays on the left pane only to avoid a redundant, space-hungry duplicate.
     draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, true);
     draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, false);
 }
 
-fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, show_toolbar: bool) {
+fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, with_venv: bool) {
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
-        draw_tab_bar(f, app, tab_bar_area, idx, show_toolbar);
+        draw_tab_bar(f, app, tab_bar_area, idx, with_venv);
     }
 
     // No title here: the open tab right above already shows the filename and dirty marker.

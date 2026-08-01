@@ -41,6 +41,8 @@ pub enum MenuAction {
     GotoLine,
     NewFile,
     NewFolder,
+    CommandPalette,
+    OpenFilePicker,
 }
 
 pub struct MenuItemDef {
@@ -66,6 +68,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuCleeCode,
             items: vec![
                 item(Key::ItemAbout, MenuAction::ShowAbout, None),
+                item(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
                 item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("F4")),
                 item(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
             ],
@@ -73,6 +76,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
         MenuDef {
             title_key: Key::MenuFile,
             items: vec![
+                item(Key::ItemOpenFilePicker, MenuAction::OpenFilePicker, Some("Ctrl+O")),
                 item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
                 item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
                 item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),

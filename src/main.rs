@@ -9,6 +9,7 @@ mod git_status;
 mod highlight;
 mod i18n;
 mod menu;
+mod picker;
 mod settings;
 mod terminal_panel;
 mod ui;

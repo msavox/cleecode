@@ -73,6 +73,8 @@ pub struct App {
     pub unsaved_prompt: Option<UnsavedPrompt>,
     /// In-file find / find-and-replace overlay state, when open.
     pub find: Option<crate::find::FindState>,
+    /// Command palette / file quick-open overlay, when open.
+    pub picker: Option<crate::picker::Picker>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -135,6 +137,35 @@ fn discover_venvs(root: &std::path::Path) -> Vec<String> {
         .collect();
     venvs.sort();
     venvs
+}
+
+/// Collects files under `root` for the quick-open picker, capped so a huge tree can't
+/// stall the UI. Always skips VCS/build dirs; skips dotfiles unless `show_hidden`.
+fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) {
+    const LIMIT: usize = 8000;
+    if out.len() >= LIMIT {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_project_files(&path, out, show_hidden);
+        } else if path.is_file() {
+            out.push(path);
+        }
+        if out.len() >= LIMIT {
+            return;
+        }
+    }
 }
 
 /// Recursively copies `src` to `dest` (file, directory tree, or symlink target),
@@ -244,6 +275,7 @@ impl App {
             rename_input: String::new(),
             unsaved_prompt: None,
             find: None,
+            picker: None,
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -737,6 +769,85 @@ impl App {
         }
     }
 
+    // ---- Command palette / file quick-open ------------------------------------------
+
+    fn open_command_palette(&mut self) {
+        let lang = self.settings.lang;
+        let mut items = Vec::new();
+        for def in crate::menu::menu_defs() {
+            let menu_title = i18n::t(lang, def.title_key);
+            for it in def.items {
+                let label = format!("{}: {}", menu_title, i18n::t(lang, it.label_key));
+                items.push(crate::picker::PickItem {
+                    label,
+                    action: crate::picker::PickAction::Command(it.action),
+                });
+            }
+        }
+        self.picker = Some(crate::picker::Picker::new("Command palette", items));
+    }
+
+    fn open_file_picker(&mut self) {
+        let mut files = Vec::new();
+        collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
+        files.sort();
+        let root = self.root.clone();
+        let items = files
+            .into_iter()
+            .map(|p| {
+                let label = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
+                crate::picker::PickItem { label, action: crate::picker::PickAction::OpenFile(p) }
+            })
+            .collect();
+        self.picker = Some(crate::picker::Picker::new("Open file", items));
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Up => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.move_selection(1);
+                }
+            }
+            KeyCode::Enter => self.execute_picker_selection(),
+            KeyCode::Backspace => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.pop_char();
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.push_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn execute_picker_selection(&mut self) {
+        let mut cmd = None;
+        let mut file = None;
+        if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
+            match action {
+                crate::picker::PickAction::Command(a) => cmd = Some(*a),
+                crate::picker::PickAction::OpenFile(p) => file = Some(p.clone()),
+            }
+        }
+        self.picker = None;
+        if let Some(a) = cmd {
+            self.run_menu_action(a);
+        } else if let Some(p) = file {
+            self.open_file_in_tab(p);
+        }
+    }
+
     fn save_active_file(&mut self) {
         let lang = self.settings.lang;
         match self.editor_mut().save() {
@@ -953,6 +1064,10 @@ impl App {
             self.handle_unsaved_prompt_key(key);
             return;
         }
+        if self.picker.is_some() {
+            self.handle_picker_key(key);
+            return;
+        }
         if self.find.is_some() {
             self.handle_find_key(key);
             return;
@@ -1051,6 +1166,14 @@ impl App {
             }
             KeyCode::Char('q') if ctrl => {
                 self.request_quit();
+                return;
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.open_command_palette();
+                return;
+            }
+            KeyCode::Char('o') if ctrl => {
+                self.open_file_picker();
                 return;
             }
             KeyCode::Char('e') if ctrl => {
@@ -1179,6 +1302,8 @@ impl App {
             MenuAction::GotoLine => self.open_goto(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
+            MenuAction::CommandPalette => self.open_command_palette(),
+            MenuAction::OpenFilePicker => self.open_file_picker(),
         }
     }
 
@@ -1444,10 +1569,15 @@ impl App {
             KeyCode::Right if ctrl => self.move_with_selection(shift, |e| e.move_word_right()),
             KeyCode::Backspace if ctrl => self.editor_mut().delete_word_left(),
             KeyCode::Delete if ctrl => self.editor_mut().delete_word_right(),
-            KeyCode::Char(c) if !ctrl => self.editor_mut().insert_char(c),
+            KeyCode::Char(c) if !ctrl => {
+                let auto_pairs = self.settings.auto_pairs;
+                self.editor_mut().insert_char_pairs(c, auto_pairs);
+            }
             KeyCode::Enter => {
                 let auto_indent = self.settings.auto_indent;
-                self.editor_mut().insert_newline(auto_indent);
+                let auto_pairs = self.settings.auto_pairs;
+                let unit = self.indent_unit();
+                self.editor_mut().newline_smart(auto_indent, auto_pairs, &unit);
             }
             KeyCode::Backspace => self.editor_mut().backspace(),
             KeyCode::Delete => self.editor_mut().delete_forward(),
@@ -1506,6 +1636,15 @@ impl App {
         let lang = self.settings.lang;
         if !self.editor_mut().redo() {
             self.status_message = i18n::t(lang, Key::MsgNothingToRedo).to_string();
+        }
+    }
+
+    /// One indentation step as text: spaces or a tab, per settings.
+    fn indent_unit(&self) -> String {
+        if self.settings.insert_spaces {
+            " ".repeat(self.settings.tab_size)
+        } else {
+            "\t".to_string()
         }
     }
 
@@ -1697,11 +1836,9 @@ impl App {
                 return;
             }
         }
-        // The Run/venv toolbar only renders in the left (or only) pane.
-        if pane != EditorPane::Left {
-            return;
-        }
-        let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width);
+        // Both panes show a Run button; the venv selector only renders in the left/only pane.
+        let with_venv = pane == EditorPane::Left;
+        let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width, with_venv);
         if let Some((start, end)) = venv_range {
             if rel_col >= start && rel_col < end {
                 self.cycle_venv();
@@ -1710,6 +1847,8 @@ impl App {
         }
         if let Some((start, end)) = run_range {
             if rel_col >= start && rel_col < end {
+                // editor_pane_focus was set to `pane` by the click, so this runs the file
+                // focused in the clicked pane (left or right).
                 self.run_active_file();
             }
         }

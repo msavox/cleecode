@@ -98,6 +98,8 @@ pub enum Key {
     ItemGotoLine,
     ItemNewFile,
     ItemNewFolder,
+    ItemCommandPalette,
+    ItemOpenFilePicker,
     MsgNothingToUndo,
     MsgNothingToRedo,
     MsgNoCommentSyntax,
@@ -323,6 +325,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemNewFolder) => "New folder...",
         (Lang::It, ItemNewFolder) => "Nuova cartella...",
+
+        (Lang::En, ItemCommandPalette) => "Command palette...",
+        (Lang::It, ItemCommandPalette) => "Palette comandi...",
+
+        (Lang::En, ItemOpenFilePicker) => "Open file...",
+        (Lang::It, ItemOpenFilePicker) => "Apri file...",
 
         (Lang::En, MsgNothingToUndo) => "Nothing to undo",
         (Lang::It, MsgNothingToUndo) => "Niente da annullare",

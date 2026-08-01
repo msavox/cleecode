@@ -400,6 +400,81 @@ impl Editor {
         self.syntax_dirty = true;
     }
 
+    fn char_before_cursor(&self) -> Option<char> {
+        let idx = self.cursor_char_idx();
+        if idx == 0 {
+            None
+        } else {
+            self.rope.get_char(idx - 1)
+        }
+    }
+
+    fn char_at_cursor(&self) -> Option<char> {
+        self.rope.get_char(self.cursor_char_idx())
+    }
+
+    /// Inserts `ch` with bracket/quote auto-pairing when `auto_pairs` is on: an opening
+    /// bracket inserts its partner and leaves the cursor between them; typing a closing
+    /// bracket right before the matching one steps over it instead of inserting a duplicate.
+    pub fn insert_char_pairs(&mut self, ch: char, auto_pairs: bool) {
+        if !auto_pairs || self.selection_range().is_some() {
+            self.insert_char(ch);
+            return;
+        }
+        // Step over an auto-inserted closer instead of typing a second one.
+        if is_closer(ch) && self.char_at_cursor() == Some(ch) {
+            self.move_right();
+            return;
+        }
+        if let Some(close) = close_partner(ch) {
+            // For quotes, skip pairing next to a word (apostrophes, string suffixes, …).
+            let is_quote = matches!(ch, '"' | '\'' | '`');
+            let touches_word = self.char_before_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false)
+                || self.char_at_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false);
+            if is_quote && touches_word {
+                self.insert_char(ch);
+                return;
+            }
+            self.checkpoint(EditKind::Other);
+            let idx = self.cursor_char_idx();
+            let pair: String = [ch, close].iter().collect();
+            self.rope.insert(idx, &pair);
+            self.cursor_col += 1; // land between the pair
+            self.dirty = true;
+            self.syntax_dirty = true;
+            return;
+        }
+        self.insert_char(ch);
+    }
+
+    /// Inserts a newline, expanding an empty bracket pair the cursor sits inside into a
+    /// three-line block with the middle line indented by `indent_unit` (like most editors
+    /// do when you press Enter between `{` and `}`).
+    pub fn newline_smart(&mut self, auto_indent: bool, auto_pairs: bool, indent_unit: &str) {
+        if auto_pairs {
+            if let (Some(open), Some(close)) = (self.char_before_cursor(), self.char_at_cursor()) {
+                if close_partner(open) == Some(close) && open != '"' && open != '\'' && open != '`' {
+                    let base: String = self
+                        .rope
+                        .line(self.cursor_line)
+                        .chars()
+                        .take_while(|c| *c == ' ' || *c == '\t')
+                        .collect();
+                    let mid = format!("{base}{indent_unit}");
+                    let insertion = format!("\n{mid}\n{base}");
+                    self.checkpoint(EditKind::Other);
+                    let idx = self.cursor_char_idx();
+                    self.rope.insert(idx, &insertion);
+                    self.set_cursor_char_idx(idx + 1 + mid.chars().count());
+                    self.dirty = true;
+                    self.syntax_dirty = true;
+                    return;
+                }
+            }
+        }
+        self.insert_newline(auto_indent);
+    }
+
     /// Inserts a run of text with no newlines (used for space-expanded tabs).
     pub fn insert_str(&mut self, s: &str) {
         self.checkpoint(EditKind::Insert);
@@ -454,6 +529,19 @@ impl Editor {
     pub fn backspace(&mut self) {
         if self.delete_selection() {
             return;
+        }
+        // Delete an empty bracket/quote pair as a unit: backspacing between `(` and `)`
+        // removes both, undoing the auto-pair in one press.
+        if let (Some(open), Some(close)) = (self.char_before_cursor(), self.char_at_cursor()) {
+            if close_partner(open) == Some(close) {
+                self.checkpoint(EditKind::Delete);
+                let idx = self.cursor_char_idx();
+                self.rope.remove(idx - 1..idx + 1);
+                self.cursor_col -= 1;
+                self.dirty = true;
+                self.syntax_dirty = true;
+                return;
+            }
         }
         self.checkpoint(EditKind::Delete);
         if self.cursor_col > 0 {
@@ -931,6 +1019,23 @@ impl Editor {
     }
 }
 
+/// The closing partner for an opening bracket or quote, or None if `ch` doesn't open a pair.
+fn close_partner(ch: char) -> Option<char> {
+    match ch {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        '`' => Some('`'),
+        _ => None,
+    }
+}
+
+fn is_closer(ch: char) -> bool {
+    matches!(ch, ')' | ']' | '}' | '"' | '\'' | '`')
+}
+
 /// Character class for word-wise motion: word chars (identifiers) vs punctuation. Runs of
 /// one class are skipped as a unit; whitespace is handled separately by the callers.
 fn word_class(c: char) -> u8 {
@@ -1213,6 +1318,47 @@ mod tests {
         // Original bytes are untouched.
         assert_eq!(std::fs::read(&path).unwrap(), vec![0u8, 1, 2, 3, 0]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn auto_close_inserts_and_steps_over() {
+        let mut ed = Editor::empty();
+        ed.insert_char_pairs('(', true);
+        assert_eq!(ed.rope.to_string(), "()");
+        assert_eq!(ed.cursor_col, 1); // between the pair
+        // Typing the closing bracket steps over instead of duplicating.
+        ed.insert_char_pairs(')', true);
+        assert_eq!(ed.rope.to_string(), "()");
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    #[test]
+    fn auto_close_backspace_deletes_pair() {
+        let mut ed = Editor::empty();
+        ed.insert_char_pairs('[', true);
+        assert_eq!(ed.rope.to_string(), "[]");
+        ed.backspace();
+        assert_eq!(ed.rope.to_string(), "");
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn quote_not_paired_next_to_word() {
+        let mut ed = Editor::empty();
+        ed.insert_str("dont");
+        ed.insert_char_pairs('\'', true); // apostrophe after a word: no pairing
+        assert_eq!(ed.rope.to_string(), "dont'");
+    }
+
+    #[test]
+    fn newline_smart_expands_brace_block() {
+        let mut ed = Editor::empty();
+        ed.insert_char_pairs('{', true);
+        assert_eq!(ed.rope.to_string(), "{}");
+        ed.newline_smart(true, true, "    ");
+        assert_eq!(ed.rope.to_string(), "{\n    \n}");
+        assert_eq!(ed.cursor_line, 1);
+        assert_eq!(ed.cursor_col, 4);
     }
 
     #[test]

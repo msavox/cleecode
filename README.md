@@ -76,6 +76,8 @@ font setting at it manually.
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
 | `Ctrl+Left/Right` | Move by word (`Shift` extends the selection) |
 | `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
+| `Ctrl+P` | Command palette (fuzzy) |
+| `Ctrl+O` | Quick-open a file (fuzzy) |
 | `Ctrl+F` | Find / replace in the current file |
 | `Ctrl+G` | Go to line |
 | `Ctrl+/` | Toggle line comment on the line/selection |
