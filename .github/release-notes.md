@@ -3,8 +3,14 @@
 **macOS** (Homebrew):
 
 ```bash
-brew install msavox/clee/clee
+brew tap msavox/clee
+brew trust msavox/clee
+brew install clee
 ```
+
+All three steps are needed: Homebrew executes a formula's Ruby on your machine, so it refuses
+to load one from a third-party tap until you trust the source, and tapping does not imply
+trusting.
 
 Or download the archive for your platform from the assets below, unpack it, and put `clee`
 somewhere on your `PATH`.

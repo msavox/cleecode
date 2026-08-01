@@ -32,16 +32,26 @@ all inside your terminal. No mouse required, but it's there if you want it.
 
 ### macOS — Homebrew
 
-Add the tap once, then install by name:
+Add the tap and trust it once, then install by name:
 
 ```bash
 brew tap msavox/clee
+brew trust msavox/clee
 brew install clee
 ```
 
 A tap is just a GitHub repository Homebrew reads formulae from — here
-[msavox/homebrew-clee](https://github.com/msavox/homebrew-clee). Adding it teaches your
-`brew` about `clee`; after that it behaves like any other formula:
+[msavox/homebrew-clee](https://github.com/msavox/homebrew-clee). The `brew trust` step is
+required and is not a formality: a formula is Ruby code that Homebrew executes on your
+machine, so recent versions refuse to load one from a third-party tap until you say you trust
+its source. Without it you get:
+
+```
+Error: Refusing to load formula msavox/clee/clee from untrusted tap msavox/clee.
+```
+
+Tapping alone does not grant that trust — the two are separate steps. Once done, `clee`
+behaves like any other formula:
 
 ```bash
 brew upgrade clee     # update to a newer release
@@ -49,9 +59,10 @@ brew uninstall clee   # remove it
 brew untap msavox/clee
 ```
 
-You can also skip the tap step with the fully qualified name, which works in one command:
+The fully qualified name also works, and skips the tap step — but still needs the trust one:
 
 ```bash
+brew trust msavox/clee
 brew install msavox/clee/clee
 ```
 
