@@ -124,22 +124,25 @@ impl Editor {
         if self.read_only {
             anyhow::bail!("buffer is read-only (binary or undecodable file); not saving");
         }
-        if let Some(path) = &self.path {
-            let mut text = self.rope.to_string();
-            // Drop the internal trailing newline if the file didn't originally have one, so
-            // saving an edit doesn't spuriously append a final newline.
-            if !self.final_newline {
-                if let Some(stripped) = text.strip_suffix('\n') {
-                    text = stripped.to_string();
-                }
+        // A buffer with no file name used to fall through and report success without writing
+        // anything, so "save" on the quit prompt silently discarded the work.
+        let Some(path) = self.path.clone() else {
+            anyhow::bail!("buffer has no file name yet; needs Save As");
+        };
+        let mut text = self.rope.to_string();
+        // Drop the internal trailing newline if the file didn't originally have one, so
+        // saving an edit doesn't spuriously append a final newline.
+        if !self.final_newline {
+            if let Some(stripped) = text.strip_suffix('\n') {
+                text = stripped.to_string();
             }
-            if self.line_ending == LineEnding::Crlf {
-                text = text.replace('\n', "\r\n");
-            }
-            std::fs::write(path, text)?;
-            self.dirty = false;
-            self.disk_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         }
+        if self.line_ending == LineEnding::Crlf {
+            text = text.replace('\n', "\r\n");
+        }
+        std::fs::write(&path, text)?;
+        self.dirty = false;
+        self.disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         Ok(())
     }
 

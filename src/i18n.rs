@@ -34,6 +34,7 @@ pub enum Key {
     MenuView,
     MenuTerminal,
     ItemSave,
+    ItemSaveAs,
     ItemSaveAll,
     ItemQuit,
     ItemToggleSidebar,
@@ -126,6 +127,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemSave) => "Save",
         (Lang::It, ItemSave) => "Salva",
+
+        (Lang::En, ItemSaveAs) => "Save As...",
+        (Lang::It, ItemSaveAs) => "Salva come...",
 
         (Lang::En, ItemSaveAll) => "Save All",
         (Lang::It, ItemSaveAll) => "Salva tutto",
@@ -623,6 +627,27 @@ pub fn msg_run_no_command(lang: Lang, ext: &str) -> String {
     match lang {
         Lang::En => format!("No run command configured for .{ext} files (edit run_commands in settings.toml)"),
         Lang::It => format!("Nessun comando configurato per i file .{ext} (modifica run_commands in settings.toml)"),
+    }
+}
+
+pub fn msg_save_as_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Save as (name or path, relative to the project root):".to_string(),
+        Lang::It => "Salva come (nome o percorso, relativo alla radice del progetto):".to_string(),
+    }
+}
+
+pub fn msg_save_as_exists(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("{path} already exists — choose another name"),
+        Lang::It => format!("{path} esiste già — scegli un altro nome"),
+    }
+}
+
+pub fn msg_saved_all_unnamed(lang: Lang, saved: usize, unnamed: usize) -> String {
+    match lang {
+        Lang::En => format!("Saved {saved} file(s); {unnamed} still need a name (Ctrl+S to name one)"),
+        Lang::It => format!("Salvati {saved} file; {unnamed} senza nome (Ctrl+S per dargliene uno)"),
     }
 }
 

@@ -474,6 +474,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_new_entry {
         draw_new_entry_modal(f, app, f.area());
     }
+    if app.show_save_as {
+        draw_save_as_modal(f, app, f.area());
+    }
     if app.find.is_some() {
         draw_find_modal(f, app, f.area());
     }
@@ -708,6 +711,11 @@ fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
     let title = if app.new_entry_is_dir { "New folder" } else { "New file" };
     let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
     draw_input_modal(f, full, title, prompt, &app.new_entry_input);
+}
+
+fn draw_save_as_modal(f: &mut Frame, app: &App, full: Rect) {
+    let prompt = i18n::msg_save_as_prompt(app.settings.lang);
+    draw_input_modal(f, full, "Save as", &prompt, &app.save_as_input);
 }
 
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {

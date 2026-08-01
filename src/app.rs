@@ -83,6 +83,13 @@ pub struct App {
     pub show_rename: bool,
     pub rename_target: Option<PathBuf>,
     pub rename_input: String,
+    /// Save As box, for a buffer that has never been written to disk.
+    pub show_save_as: bool,
+    pub save_as_input: String,
+    /// Which buffer is being named, and the action that was waiting on the save (quitting, or
+    /// closing the tab) so it can go ahead once the file exists.
+    save_as_target: Option<usize>,
+    save_as_then: Option<UnsavedPrompt>,
     /// When set, an unsaved-changes prompt is up, holding back the given action.
     pub unsaved_prompt: Option<UnsavedPrompt>,
     /// In-file find / find-and-replace overlay state, when open.
@@ -316,6 +323,23 @@ fn within(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
+/// Turns what was typed in the Save As box into a path. A bare name or a relative path hangs
+/// off the project root, an absolute one is taken as it is, and `~` is expanded — the box is
+/// typed by hand, so a home-relative path is a reasonable thing to write. `None` for a name
+/// that is only whitespace.
+fn resolve_save_as_path(input: &str, root: &std::path::Path, home: Option<&std::path::Path>) -> Option<PathBuf> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let expanded = match trimmed.strip_prefix("~/").or(trimmed.strip_prefix("~\\")) {
+        Some(rest) => home?.join(rest),
+        None if trimmed == "~" => home?.to_path_buf(),
+        None => PathBuf::from(trimmed),
+    };
+    Some(if expanded.is_absolute() { expanded } else { root.join(expanded) })
+}
+
 /// Screen cell `(row, col)` under a mouse position, relative to a pane's inner area. Positions
 /// outside the area are clamped to its edges, so a drag that wanders off the pane keeps
 /// selecting up to the border instead of being dropped.
@@ -368,6 +392,10 @@ impl App {
             show_rename: false,
             rename_target: None,
             rename_input: String::new(),
+            show_save_as: false,
+            save_as_input: String::new(),
+            save_as_target: None,
+            save_as_then: None,
             unsaved_prompt: None,
             find: None,
             picker: None,
@@ -629,6 +657,20 @@ impl App {
         let Some(action) = self.unsaved_prompt else { return };
         match key.code {
             KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.unsaved_prompt = None;
+                // An unnamed buffer can't be written yet: ask for a name and let the quit or
+                // the tab close resume from there. Going ahead would throw the work away,
+                // which is exactly what the prompt exists to prevent.
+                let unnamed = match action {
+                    UnsavedPrompt::Quit => self.editors.iter().position(|e| e.dirty && e.path.is_none()),
+                    UnsavedPrompt::CloseTab(idx) => {
+                        Some(idx).filter(|&i| self.editors.get(i).is_some_and(|e| e.path.is_none()))
+                    }
+                };
+                if let Some(idx) = unnamed {
+                    self.begin_save_as(idx, Some(action));
+                    return;
+                }
                 match action {
                     UnsavedPrompt::Quit => self.save_all(),
                     UnsavedPrompt::CloseTab(idx) => {
@@ -637,7 +679,6 @@ impl App {
                         }
                     }
                 }
-                self.unsaved_prompt = None;
                 self.perform_unsaved_action(action);
             }
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -944,7 +985,13 @@ impl App {
         }
     }
 
+    /// A buffer that has never been written has nowhere to save to, so this asks for a name
+    /// rather than reporting a save that didn't happen.
     fn save_active_file(&mut self) {
+        if self.editor().path.is_none() {
+            self.begin_save_as(self.active_editor, None);
+            return;
+        }
         let lang = self.settings.lang;
         match self.editor_mut().save() {
             Ok(()) => self.status_message = i18n::msg_saved(lang, &self.editor().title(lang)),
@@ -955,9 +1002,16 @@ impl App {
     fn save_all(&mut self) {
         let lang = self.settings.lang;
         let mut saved = 0usize;
+        let mut unnamed = 0usize;
         let mut errors = Vec::new();
         for editor in &mut self.editors {
-            if !editor.dirty || editor.path.is_none() {
+            if !editor.dirty {
+                continue;
+            }
+            // Each unnamed buffer needs its own name, which a batch save can't ask for. They
+            // are reported rather than skipped in silence, as they used to be.
+            if editor.path.is_none() {
+                unnamed += 1;
                 continue;
             }
             match editor.save() {
@@ -965,11 +1019,101 @@ impl App {
                 Err(e) => errors.push(format!("{}: {}", editor.title(lang), e)),
             }
         }
-        self.status_message = if errors.is_empty() {
-            i18n::msg_saved_all(lang, saved)
-        } else {
+        self.status_message = if !errors.is_empty() {
             i18n::msg_save_all_errors(lang, saved, &errors.join("; "))
+        } else if unnamed > 0 {
+            i18n::msg_saved_all_unnamed(lang, saved, unnamed)
+        } else {
+            i18n::msg_saved_all(lang, saved)
         };
+    }
+
+    /// Opens the Save As box for buffer `idx`. `then` carries an action that was waiting on
+    /// this save so it can resume afterwards.
+    fn begin_save_as(&mut self, idx: usize, then: Option<UnsavedPrompt>) {
+        self.save_as_target = Some(idx);
+        self.save_as_then = then;
+        self.save_as_input.clear();
+        self.show_save_as = true;
+    }
+
+    fn handle_save_as_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_save_as(),
+            KeyCode::Esc => self.cancel_save_as(),
+            KeyCode::Backspace => {
+                self.save_as_input.pop();
+            }
+            KeyCode::Char(c) => self.save_as_input.push(c),
+            _ => {}
+        }
+    }
+
+    /// Dismissing the box abandons whatever was waiting on it too: a quit must not go through
+    /// on a buffer the user just declined to name.
+    pub fn cancel_save_as(&mut self) {
+        self.show_save_as = false;
+        self.save_as_input.clear();
+        self.save_as_target = None;
+        self.save_as_then = None;
+    }
+
+    fn confirm_save_as(&mut self) {
+        let lang = self.settings.lang;
+        let Some(idx) = self.save_as_target else {
+            self.cancel_save_as();
+            return;
+        };
+        let home = dirs::home_dir();
+        let Some(path) = resolve_save_as_path(&self.save_as_input, &self.root, home.as_deref()) else {
+            return;
+        };
+        // Never overwrite an existing file from a hand-typed name — one typo would destroy it.
+        // The box stays open so the name can be corrected.
+        if path.exists() {
+            self.status_message = i18n::msg_save_as_exists(lang, &path.display().to_string());
+            return;
+        }
+        let then = self.save_as_then;
+        self.show_save_as = false;
+        self.save_as_input.clear();
+        self.save_as_target = None;
+        self.save_as_then = None;
+
+        let Some(editor) = self.editors.get_mut(idx) else { return };
+        editor.path = Some(path.clone());
+        // The name decides the language, so the buffer is re-highlighted on the next frame.
+        editor.syntax_dirty = true;
+        match editor.save() {
+            Ok(()) => {
+                self.status_message = i18n::msg_saved(lang, &path.display().to_string());
+                self.file_tree.refresh();
+                if let Some(then) = then {
+                    self.resume_after_save_as(then);
+                }
+            }
+            Err(e) => {
+                // Leave the buffer unnamed rather than pointing it at a file that isn't there,
+                // and drop the pending action so nothing is discarded.
+                if let Some(editor) = self.editors.get_mut(idx) {
+                    editor.path = None;
+                }
+                self.status_message = i18n::msg_save_error(lang, &e.to_string());
+            }
+        }
+    }
+
+    /// Resumes the action that was waiting on a Save As. Further unnamed dirty buffers are
+    /// asked about one at a time, so quitting only proceeds once nothing is left unwritten.
+    fn resume_after_save_as(&mut self, action: UnsavedPrompt) {
+        if matches!(action, UnsavedPrompt::Quit) {
+            if let Some(next) = self.editors.iter().position(|e| e.dirty && e.path.is_none()) {
+                self.begin_save_as(next, Some(action));
+                return;
+            }
+            self.save_all();
+        }
+        self.perform_unsaved_action(action);
     }
 
     fn close_editor_at(&mut self, idx: usize) {
@@ -1195,6 +1339,12 @@ impl App {
             self.handle_unsaved_prompt_key(key);
             return;
         }
+        // Ahead of the other modals: it can be opened *by* the unsaved-changes prompt, and
+        // until a name is given there is nothing else worth typing at.
+        if self.show_save_as {
+            self.handle_save_as_key(key);
+            return;
+        }
         if self.picker.is_some() {
             self.handle_picker_key(key);
             return;
@@ -1414,6 +1564,8 @@ impl App {
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
             MenuAction::Save => self.save_active_file(),
+            // Deliberately available for a named buffer too, to save a copy under a new name.
+            MenuAction::SaveAs => self.begin_save_as(self.active_editor, None),
             MenuAction::SaveAll => self.save_all(),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
@@ -1918,6 +2070,10 @@ impl App {
                     self.rename_input.clear();
                     return;
                 }
+                if self.show_save_as {
+                    self.cancel_save_as();
+                    return;
+                }
                 if self.show_settings {
                     self.mouse_settings(col, row, full);
                     return;
@@ -1951,6 +2107,14 @@ impl App {
                                     self.last_tree_click = None;
                                     self.activate_file_tree_selection();
                                 } else {
+                                    // A single click on a folder expands or collapses it, the
+                                    // same as Right/Left on the keyboard. Double-click still
+                                    // reroots, and that rebuilds the tree anyway, so this
+                                    // intermediate toggle leaves no trace.
+                                    let entry = &self.file_tree.visible[idx];
+                                    if entry.is_dir && !entry.is_up {
+                                        self.file_tree.toggle_selected();
+                                    }
                                     self.last_tree_click = Some((idx, Instant::now()));
                                 }
                             }
@@ -2261,6 +2425,38 @@ mod tests {
         // Registering the project's own venv by its relative name must not list it twice.
         let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
         assert_eq!(venvs, vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn save_as_path_is_relative_to_the_project_root() {
+        let root = std::path::Path::new("/work/project");
+        let home = std::path::Path::new("/Users/someone");
+        let resolve = |input: &str| resolve_save_as_path(input, root, Some(home));
+
+        assert_eq!(resolve("notes.md"), Some(root.join("notes.md")));
+        assert_eq!(resolve("src/lib.rs"), Some(root.join("src/lib.rs")));
+        // Absolute and home-relative names are taken as written.
+        assert_eq!(resolve("/tmp/out.txt"), Some(PathBuf::from("/tmp/out.txt")));
+        assert_eq!(resolve("~/out.txt"), Some(home.join("out.txt")));
+        // Surrounding whitespace is a typo, not part of the name.
+        assert_eq!(resolve("  notes.md  "), Some(root.join("notes.md")));
+        // Nothing to save to.
+        assert_eq!(resolve(""), None);
+        assert_eq!(resolve("   "), None);
+        // Without a home directory `~` can't be resolved, so it is refused rather than
+        // creating a file literally named "~".
+        assert_eq!(resolve_save_as_path("~/out.txt", root, None), None);
+    }
+
+    #[test]
+    fn saving_a_buffer_with_no_name_fails_instead_of_reporting_success() {
+        // The bug this guards: save() used to return Ok(()) without writing anything, so the
+        // quit prompt's "save" silently discarded the buffer.
+        let mut editor = crate::editor::Editor::empty();
+        editor.insert_char('x');
+        assert!(editor.dirty);
+        assert!(editor.save().is_err(), "an unnamed buffer must not report a successful save");
+        assert!(editor.dirty, "and must stay dirty, so the work is still known to be unsaved");
     }
 
     #[test]

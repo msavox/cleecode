@@ -275,6 +275,24 @@ impl FileTree {
         self.rebuild_visible();
     }
 
+    /// Expands a collapsed folder or collapses an expanded one — what a single mouse click on
+    /// a folder does. Unlike `collapse_selected` it never walks the selection up to the
+    /// parent: a click should only affect the row that was clicked.
+    pub fn toggle_selected(&mut self) {
+        let Some(entry) = self.visible.get(self.selected) else { return };
+        if entry.is_up || !entry.is_dir {
+            return;
+        }
+        let was_expanded = entry.expanded;
+        let entry_index = entry.node_index.clone();
+        if was_expanded {
+            self.node_at_mut(&entry_index).expanded = false;
+        } else {
+            self.node_at_mut(&entry_index).expand();
+        }
+        self.rebuild_visible();
+    }
+
     /// Enter: open a file, make a directory the new tree root, or walk up via "..".
     pub fn activate_selected(&mut self) -> Option<Activation> {
         let entry = self.visible.get(self.selected)?;
@@ -326,6 +344,32 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         std::fs::write(dir.join("sub").join("b.txt"), "b").unwrap();
         dir
+    }
+
+    /// A single click on a folder toggles it, and must not move the selection the way
+    /// `collapse_selected` does when a row isn't an expanded folder.
+    #[test]
+    fn toggle_selected_opens_and_closes_a_folder_in_place() {
+        let dir = setup_dir("toggle_folder");
+        let mut tree = FileTree::new(dir.clone(), true);
+        let off = up_row_offset(&tree);
+        tree.selected = off; // the "sub" folder
+        assert_eq!(tree.visible[off].name, "sub");
+
+        tree.toggle_selected();
+        assert_eq!(tree.visible[off + 1].name, "b.txt", "should have expanded");
+        assert_eq!(tree.selected, off, "selection must stay on the clicked row");
+
+        tree.toggle_selected();
+        assert_eq!(tree.visible[off + 1].name, "a.txt", "should have collapsed again");
+        assert_eq!(tree.selected, off);
+
+        // A file row is not a folder: toggling it does nothing at all.
+        tree.selected = off + 1;
+        let before = tree.visible.len();
+        tree.toggle_selected();
+        assert_eq!(tree.visible.len(), before);
+        assert_eq!(tree.selected, off + 1);
     }
 
     /// Hidden files must stay hidden across every operation that rebuilds the tree — a
