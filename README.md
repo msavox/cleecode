@@ -14,7 +14,7 @@ all inside your terminal. No mouse required, but it's there if you want it.
 - **Run button** — a `▶ Run` button above the editor (also `F10`) pastes a run command for the current file into the first idle terminal; commands are configurable per extension in `settings.toml` (defaults cover Python, Bash, Ruby, Node, Go, PHP, Perl, Octave...)
 - **Venv selector** — next to Run, cycles through Python virtualenvs found at the project root and swaps in that venv's interpreter when running a `.py` file
 - **Multiple terminals** — starts with two side-by-side embedded terminals (real ptys, so `ssh`, `vim`, `claude`, etc. all work); open/close more, auto-clears startup banners, auto-collapses a pane when its shell exits
-- **Menu bar** — a macOS-style `CleeCode` app menu (About / Settings / Quit) plus File / Edit / View / Layout / Run / Terminal; `Alt+<letter>` jumps straight to a menu (underlined mnemonic, Borland/Turbo-Vision style), or open with `F9` and type the letter — a fallback that works even when a terminal swallows Alt combos
+- **Menu bar** — a macOS-style `CleeCode` app menu (About / Settings / Quit) plus File / Edit / View / Layout / Run / Terminal; `Alt+<letter>` jumps straight to a menu (underlined mnemonic, Borland/Turbo-Vision style), or open with `F9` and type the letter — a fallback that works even when a terminal swallows Alt combos. Prefer a cleaner screen? `Ctrl+B` (or `Alt+B`, or View → Menu bar) hides the bar entirely; `F9` still opens the menus (the bar reappears while a menu is open), so nothing becomes unreachable
 - **Resizable workspace layout** — `F8` (arrows to resize) or drag panel borders with the mouse; three built-in presets (Classic, Wide 2-column, Triple 3-column) and a terminal-on-left/right toggle, all persisted across restarts
 - **Settings panel** — line numbers, syntax highlighting, word wrap, tab size, spaces-vs-tabs, whitespace, auto-indent, mouse, language — all live-toggleable
 - **Workspace persistence** — launching with no arguments resumes the last project folder and every file that was open, including which tab was active
@@ -68,6 +68,7 @@ font setting at it manually.
 | `Alt+Left` / `Alt+Right` | Switch focus between split panes |
 | `Alt+S` | Save all files |
 | `Ctrl+E` / `Ctrl+T` | Toggle sidebar / terminal panel |
+| `Ctrl+B` / `Alt+B` | Show/hide the menu bar (`Ctrl+B` outside the terminal; `Alt+B` needs Option-as-Meta on macOS) |
 | `H` (sidebar focused) | Toggle hidden files |
 | `Ctrl+S` | Save |
 | `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |

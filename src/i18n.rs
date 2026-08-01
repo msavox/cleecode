@@ -38,6 +38,7 @@ pub enum Key {
     ItemQuit,
     ItemToggleSidebar,
     ItemToggleTerminal,
+    ItemToggleMenuBar,
     ItemOpenSettings,
     ItemNewTerminal,
     ItemCloseTerminal,
@@ -137,6 +138,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleTerminal) => "Terminal panel",
         (Lang::It, ItemToggleTerminal) => "Pannello terminale",
+
+        (Lang::En, ItemToggleMenuBar) => "Menu bar",
+        (Lang::It, ItemToggleMenuBar) => "Barra dei menu",
 
         (Lang::En, ItemOpenSettings) => "Settings...",
         (Lang::It, ItemOpenSettings) => "Impostazioni...",
@@ -347,6 +351,13 @@ pub fn terminal_title(lang: Lang, index: usize) -> String {
     match lang {
         Lang::En => format!(" Terminal {} ", index + 1),
         Lang::It => format!(" Terminale {} ", index + 1),
+    }
+}
+
+pub fn terminal_starting(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "starting shell…",
+        Lang::It => "avvio shell…",
     }
 }
 

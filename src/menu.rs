@@ -4,6 +4,7 @@ use crate::i18n::Key;
 pub enum MenuAction {
     ToggleSidebar,
     ToggleTerminal,
+    ToggleMenuBar,
     OpenSettings,
     SaveAll,
     NewTerminal,
@@ -111,6 +112,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
                 item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+T")),
+                item(Key::ItemToggleMenuBar, MenuAction::ToggleMenuBar, Some("Ctrl+B")),
                 item(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
             ],
         },

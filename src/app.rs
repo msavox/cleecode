@@ -1200,6 +1200,19 @@ impl App {
                 self.toggle_split_view();
                 return;
             }
+            // Show/hide the menu bar. Alt+B works where the terminal sends Option as Meta;
+            // 'B' is no menu's mnemonic in either language, so it never clashes with the
+            // Alt+<letter> menu-open shortcuts. Ctrl+B is a macOS-friendly alias, since
+            // Terminal.app/iTerm don't send Option as Meta by default — but it's only
+            // claimed outside the terminal pane, so a focused shell/tmux still gets Ctrl+B.
+            KeyCode::Char('b') | KeyCode::Char('B') if alt => {
+                self.settings.show_menubar = !self.settings.show_menubar;
+                return;
+            }
+            KeyCode::Char('b') if ctrl && self.focus != Focus::Terminal => {
+                self.settings.show_menubar = !self.settings.show_menubar;
+                return;
+            }
             _ => {}
         }
 
@@ -1259,6 +1272,7 @@ impl App {
                     self.cycle_focus(true);
                 }
             }
+            MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
@@ -1705,7 +1719,9 @@ impl App {
                     self.mouse_menu(col, row, full);
                     return;
                 }
-                if row == areas.menu_bar.y {
+                // A hidden menu bar collapses to a zero-height row still at y == 0, so guard
+                // on its height or a click on the top editor row would open a phantom menu.
+                if areas.menu_bar.height > 0 && row == areas.menu_bar.y {
                     self.mouse_menu_bar_click(col);
                     return;
                 }
@@ -1903,6 +1919,8 @@ impl App {
             }
             return;
         }
+        // While a menu is open, row 0 always holds the title bar — the real one, or the
+        // overlay shown when the bar is otherwise hidden — so a click there switches menus.
         if row == 0 {
             self.mouse_menu_bar_click(col);
             return;

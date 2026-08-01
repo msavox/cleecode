@@ -2,8 +2,17 @@ use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long the shell's output must be quiet before we consider startup finished and
+/// reveal the pane. The injected `clear` runs as the shell's first interactive command
+/// (after its rc/banner), so by the time output idles the screen is already clean.
+const STARTUP_IDLE: Duration = Duration::from_millis(250);
+/// Safety cap: reveal no matter what after this long, so a shell that keeps its pty busy
+/// (e.g. an rc that launches a long-running program) can't stay blank forever.
+const STARTUP_MAX: Duration = Duration::from_secs(12);
 
 pub struct TerminalPanel {
     master: Box<dyn MasterPty + Send>,
@@ -15,6 +24,14 @@ pub struct TerminalPanel {
     /// Set once the shell's end of the pty closes (process exited, whether via `exit`,
     /// Ctrl+D, a command that dies on Ctrl+C, a crash, or an ssh disconnect).
     pub exited: Arc<AtomicBool>,
+    /// When the pane was spawned, and the last moment the shell produced output (millis
+    /// since `spawn`, written by the reader thread). Used to hide the noisy startup banner
+    /// until the shell settles at a clean prompt.
+    spawn: Instant,
+    last_output_ms: Arc<AtomicU64>,
+    produced_output: Arc<AtomicBool>,
+    /// Latches true once the pane has been revealed, so we never hide it again mid-session.
+    revealed: bool,
 }
 
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
@@ -55,6 +72,12 @@ impl TerminalPanel {
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = Arc::clone(&exited);
 
+        let spawn = Instant::now();
+        let last_output_ms = Arc::new(AtomicU64::new(0));
+        let produced_output = Arc::new(AtomicBool::new(false));
+        let last_output_clone = Arc::clone(&last_output_ms);
+        let produced_clone = Arc::clone(&produced_output);
+
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -63,6 +86,9 @@ impl TerminalPanel {
                     Ok(n) => {
                         let mut p = parser_clone.lock().unwrap();
                         p.process(&buf[..n]);
+                        drop(p);
+                        last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        produced_clone.store(true, Ordering::Relaxed);
                     }
                     Err(_) => break,
                 }
@@ -78,7 +104,28 @@ impl TerminalPanel {
             rows,
             cols,
             exited,
+            spawn,
+            last_output_ms,
+            produced_output,
+            revealed: false,
         })
+    }
+
+    /// Whether the pane should be shown yet. Stays hidden during the shell's startup
+    /// (banner/rc output) and reveals once output has been quiet for `STARTUP_IDLE` — by
+    /// which point the injected `clear` has scrubbed the banner and left a clean prompt.
+    /// Latches, so it only ever transitions hidden -> shown once.
+    pub fn is_ready(&mut self) -> bool {
+        if self.revealed {
+            return true;
+        }
+        let elapsed = self.spawn.elapsed();
+        let produced = self.produced_output.load(Ordering::Relaxed);
+        let idle = elapsed.saturating_sub(Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed)));
+        if elapsed >= STARTUP_MAX || (produced && idle >= STARTUP_IDLE) {
+            self.revealed = true;
+        }
+        self.revealed
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {

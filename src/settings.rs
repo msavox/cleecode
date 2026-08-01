@@ -23,6 +23,10 @@ pub struct Settings {
     pub sidebar_width: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
+    // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
+    // power users can hide it (Alt+B / View menu) and still reach menus via F9 / Alt+<letter>.
+    #[serde(default = "default_true")]
+    pub show_menubar: bool,
     // Extension (no dot) -> shell command template; "{file}" is replaced with the
     // active file's shell-quoted absolute path. Hand-editable in settings.toml.
     #[serde(default = "default_run_commands")]
@@ -85,6 +89,7 @@ impl Default for Settings {
             sidebar_width: 30,
             terminal_pct: 35,
             terminal_on_right: false,
+            show_menubar: true,
             run_commands: default_run_commands(),
             active_venv: None,
             show_hidden_files: true,

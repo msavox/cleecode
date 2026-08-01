@@ -19,6 +19,7 @@ pub struct Areas {
 pub struct LayoutParams {
     pub show_sidebar: bool,
     pub show_terminal: bool,
+    pub show_menubar: bool,
     pub terminal_count: usize,
     pub sidebar_width: u16,
     pub terminal_pct: u16,
@@ -30,6 +31,7 @@ impl LayoutParams {
         LayoutParams {
             show_sidebar: app.settings.show_sidebar,
             show_terminal: app.settings.show_terminal,
+            show_menubar: app.settings.show_menubar,
             terminal_count: app.terminals.len(),
             sidebar_width: app.settings.sidebar_width,
             terminal_pct: app.settings.terminal_pct,
@@ -45,9 +47,10 @@ fn terminal_panes(area: Rect, count: usize, direction: Direction) -> Vec<Rect> {
 }
 
 pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
+    let menu_h = if p.show_menubar { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(menu_h), Constraint::Min(1), Constraint::Length(1)])
         .split(full);
     let menu_bar = outer[0];
     let main_area = outer[1];
@@ -324,6 +327,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_settings_modal(f, app, f.area());
     }
     if app.menu.active {
+        // While a menu is open, show the title bar even if it's normally hidden, so F9
+        // navigation (←/→ between menus) stays visible; drawn as a top-row overlay.
+        if areas.menu_bar.height == 0 {
+            let full = f.area();
+            let bar = Rect { x: full.x, y: full.y, width: full.width, height: 1 };
+            f.render_widget(Clear, bar);
+            draw_menu_bar(f, app, bar);
+        }
         draw_menu_dropdown(f, app, f.area());
     }
     if app.show_about {
@@ -353,6 +364,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Hidden bar collapses to a zero-height row; nothing to paint (menus still reachable
+    // via F9 / Alt+<letter>, whose dropdown anchors to the top independently of this row).
+    if area.height == 0 {
+        return;
+    }
     let lang = app.settings.lang;
     let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
     let mut used = MENU_LOGO.chars().count() as u16;
@@ -1039,6 +1055,28 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     let Some(terminal) = app.terminals.get_mut(index) else { return };
     terminal.resize(rows, cols);
+
+    // Keep the pane clean during shell startup: hide the banner/rc output until the shell
+    // settles, so the user sees an empty pane (then a clean prompt) rather than a banner
+    // that only gets cleared seconds later.
+    if !terminal.is_ready() {
+        f.render_widget(block, area);
+        if inner.height > 0 && inner.width > 0 {
+            let hint = i18n::terminal_starting(app.settings.lang);
+            let hint_w = (hint.chars().count() as u16).min(inner.width);
+            let rect = Rect {
+                x: inner.x + inner.width.saturating_sub(hint_w) / 2,
+                y: inner.y + inner.height / 2,
+                width: hint_w,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                rect,
+            );
+        }
+        return;
+    }
 
     let parser = terminal.parser.lock().unwrap();
     let screen = parser.screen();
