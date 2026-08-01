@@ -32,12 +32,35 @@ all inside your terminal. No mouse required, but it's there if you want it.
 
 ### macOS — Homebrew
 
+Add the tap once, then install by name:
+
+```bash
+brew tap msavox/clee
+brew install clee
+```
+
+A tap is just a GitHub repository Homebrew reads formulae from — here
+[msavox/homebrew-clee](https://github.com/msavox/homebrew-clee). Adding it teaches your
+`brew` about `clee`; after that it behaves like any other formula:
+
+```bash
+brew upgrade clee     # update to a newer release
+brew uninstall clee   # remove it
+brew untap msavox/clee
+```
+
+You can also skip the tap step with the fully qualified name, which works in one command:
+
 ```bash
 brew install msavox/clee/clee
 ```
 
-Prebuilt macOS binaries (arm64 and x86_64) are also attached to each
-[release](https://github.com/msavox/cleecode/releases).
+Those three parts are *user* / *tap* / *formula* — `clee` appears twice only because the tap
+and the command happen to share a name.
+
+The formula builds from source (it pulls Rust as a build dependency), which takes well under
+a minute. Prebuilt macOS binaries for arm64 and x86_64 are attached to each
+[release](https://github.com/msavox/cleecode/releases) if you'd rather not build at all.
 
 ### Linux and Windows — experimental binaries, or build it yourself
 
