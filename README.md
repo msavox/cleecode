@@ -6,6 +6,13 @@ all inside your terminal. No mouse required, but it's there if you want it.
 
 By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
+![CleeCode in action](docs/demo.gif)
+
+*Browsing the tree, running a Python script through the project's venv and an Octave script that
+keeps its interpreter alive, switching workspace layouts, picking a venv, browsing the disk from
+quick-open, and splitting the editor. Recorded from [`docs/demo.tape`](docs/demo.tape), so it can
+be re-recorded rather than re-shot.*
+
 ![CleeCode main view](docs/screenshots/main.png)
 
 ## Features
@@ -230,6 +237,6 @@ CleeCode is written and maintained by **Matteo Savoia** — [github.com/msavox](
 
 ## License
 
-[MIT](LICENSE). The bundled font (`assets/fonts/`) is a renamed Nerd Font-patched build of
+[MIT](LICENSE). The bundled font (`assets/fonts/`) is a Nerd Font-patched build of
 JetBrains Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own
 terms.
