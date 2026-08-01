@@ -10,6 +10,13 @@ class Clee < Formula
 
   depends_on "rust" => :build
 
+  # Homebrew on Linux builds this from source too, and the clipboard integration (arboard)
+  # needs libxcb there — on macOS the system frameworks cover it.
+  on_linux do
+    depends_on "pkgconf" => :build
+    depends_on "libxcb"
+  end
+
   def install
     # Builds the [[bin]] named `clee` (the crate itself is `cleecode`).
     system "cargo", "install", *std_cargo_args

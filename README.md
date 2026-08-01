@@ -46,6 +46,11 @@ x86_64 builds for both are attached to each
 start, but nothing interactive has been tested on either platform yet — so they're
 experimental, and bug reports are welcome.
 
+The Linux binary links dynamically against glibc and libxcb, so a desktop distribution has
+what it needs, but a minimal or headless system may not: install `libxcb1` (Debian/Ubuntu) or
+`libxcb` (Fedora/Arch) if it fails to start. Alpine/musl isn't covered — build from source
+there.
+
 To build instead, you need a [Rust toolchain](https://rustup.rs) (1.85 or newer, for edition
 2024).
 

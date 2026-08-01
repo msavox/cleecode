@@ -19,6 +19,10 @@ and print `--version` — but they have had **no interactive testing at all**. T
 experimental, and please open an issue for whatever breaks. Building from source works too;
 see the README for the system dependencies.
 
+The Linux build links against glibc and libxcb: on a minimal or headless system install
+`libxcb1` (Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it won't start. Alpine/musl and arm64
+aren't covered yet — build from source there.
+
 ## First run
 
 The file-tree icons need a Nerd Font. The bundled one installs with:
