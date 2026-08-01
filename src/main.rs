@@ -45,30 +45,39 @@ fn main() -> Result<()> {
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let size = terminal.size()?;
     let cwd = std::env::current_dir()?;
-    let file_arg = std::env::args().nth(1);
+    let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let arg_is_dir = arg.as_ref().map(|p| p.is_dir()).unwrap_or(false);
 
     // Resume the last workspace (project folder + open tabs) when launched with no
-    // explicit file argument; an argument always takes precedence and starts fresh.
+    // explicit argument; an argument always takes precedence and starts fresh. A directory
+    // argument becomes the project root; a file argument is opened within the current dir.
     let saved = Settings::load();
-    let root = if file_arg.is_none() {
-        saved.last_root.clone().filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
-    } else {
-        cwd.clone()
+    let root = match &arg {
+        Some(p) if p.is_dir() => p.clone(),
+        Some(_) => cwd.clone(),
+        None => saved.last_root.clone().filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone()),
     };
 
     let mut app = App::new(root, size.height, size.width)?;
 
-    if let Some(path) = file_arg {
-        app.open_file_in_tab(std::path::PathBuf::from(path));
-    } else {
-        for path in &saved.last_open_files {
-            if path.exists() {
-                app.open_file_in_tab(path.clone());
+    // Launched with an explicit file/folder: skip the splash and go straight to work.
+    if arg.is_some() {
+        app.show_splash = false;
+    }
+
+    match arg {
+        Some(path) if !arg_is_dir => app.open_file_in_tab(path),
+        Some(_) => {} // directory: already the root, nothing to open
+        None => {
+            for path in &saved.last_open_files {
+                if path.exists() {
+                    app.open_file_in_tab(path.clone());
+                }
             }
-        }
-        if let Some(active_path) = &saved.last_active_file {
-            if let Some(idx) = app.editors.iter().position(|e| e.path.as_deref() == Some(active_path.as_path())) {
-                app.active_editor = idx;
+            if let Some(active_path) = &saved.last_active_file {
+                if let Some(idx) = app.editors.iter().position(|e| e.path.as_deref() == Some(active_path.as_path())) {
+                    app.active_editor = idx;
+                }
             }
         }
     }

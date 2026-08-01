@@ -33,7 +33,11 @@ all inside your terminal. No mouse required, but it's there if you want it.
 cargo build --release
 ./target/release/cleecode              # opens the current directory (or resumes the last workspace)
 ./target/release/cleecode src/main.rs  # opens the current directory with a file pre-opened
+./target/release/cleecode ./some-dir   # opens that directory as the project root
 ```
+
+Launching with a file or folder argument skips the startup splash and goes straight in;
+the splash only shows on a bare `cleecode` (and any key dismisses it early).
 
 ### Nerd Font icons
 
