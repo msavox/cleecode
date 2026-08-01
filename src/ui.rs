@@ -136,59 +136,178 @@ pub struct TabLayout {
     pub close: (u16, u16),
 }
 
-pub fn tab_layouts(app: &App) -> Vec<TabLayout> {
-    let lang = app.settings.lang;
-    let mut out = Vec::new();
-    let mut x = 0u16;
-    for editor in &app.editors {
-        let dirty = if editor.dirty { "*" } else { "" };
-        let prefix = format!(" {}{} ", editor.title(lang), dirty);
-        let prefix_w = prefix.chars().count() as u16;
-        let close_start = x + prefix_w;
-        let close_end = close_start + 1;
-        let tab_end = close_end + 1; // trailing space after the × glyph
-        out.push(TabLayout { full: (x, tab_end), close: (close_start, close_end) });
-        x = tab_end;
-    }
-    out
+/// The arrow glyphs that stand in for tabs scrolled out of view, and the columns they take.
+pub const SCROLL_LEFT_GLYPH: &str = "\u{2039}";
+pub const SCROLL_RIGHT_GLYPH: &str = "\u{203a}";
+const ARROW_W: u16 = 1;
+
+/// Columns kept for the tab strip before the toolbar buttons give up their space. On a
+/// narrow pane (a split view on a small terminal) seeing which files are open matters more
+/// than the buttons, which stay reachable via `F10` and the Run menu.
+const MIN_TAB_STRIP: u16 = 12;
+
+/// The visible slice of a pane's tab strip. Ranges are relative to the tab bar's left edge.
+pub struct TabStrip {
+    /// Index of the leftmost rendered tab, after scrolling to keep the active one in view.
+    pub first: usize,
+    /// One entry per rendered tab, left to right, starting at `first`.
+    pub tabs: Vec<TabLayout>,
+    /// The `‹` glyph, present when tabs are scrolled out of view to the left.
+    pub left_arrow: Option<(u16, u16)>,
+    /// The `›` glyph, present when tabs remain past the right edge.
+    pub right_arrow: Option<(u16, u16)>,
 }
 
-pub fn tab_ranges(app: &App) -> Vec<(u16, u16)> {
-    tab_layouts(app).into_iter().map(|t| t.full).collect()
+impl TabStrip {
+    /// The tab whose range contains `col`, as an index into all open editors.
+    pub fn tab_at(&self, col: u16) -> Option<(usize, &TabLayout)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .find(|(_, t)| col >= t.full.0 && col < t.full.1)
+            .map(|(i, t)| (self.first + i, t))
+    }
+}
+
+/// Width each tab occupies: `" title* "` plus the `×` glyph and a trailing space.
+pub fn tab_widths(app: &App) -> Vec<u16> {
+    let lang = app.settings.lang;
+    app.editors
+        .iter()
+        .map(|editor| {
+            let dirty = if editor.dirty { "*" } else { "" };
+            let prefix = format!(" {}{} ", editor.title(lang), dirty);
+            prefix.chars().count() as u16 + 2 // + close glyph + trailing space
+        })
+        .collect()
+}
+
+/// How many tabs fit from `first` within `width`, plus whether each scroll arrow is needed.
+/// The right arrow only claims a column once there is something hidden behind it, which can
+/// itself push a tab out of view — hence the second pass.
+fn fit_tabs(widths: &[u16], width: u16, first: usize) -> (usize, bool, bool) {
+    let left = first > 0;
+    let count_within = |avail: u16| {
+        let mut used = 0u16;
+        let mut count = 0usize;
+        for w in &widths[first..] {
+            if used + w > avail {
+                break;
+            }
+            used += w;
+            count += 1;
+        }
+        count
+    };
+    let avail = width.saturating_sub(if left { ARROW_W } else { 0 });
+    let count = count_within(avail);
+    if first + count >= widths.len() {
+        return (count, left, false);
+    }
+    (count_within(avail.saturating_sub(ARROW_W)), left, true)
+}
+
+/// Lays out the visible part of the tab strip: scrolled to `offset`, then advanced as far as
+/// needed to keep `active` in view, so the focused file is never the one that is off-screen.
+pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize, active: usize) -> TabStrip {
+    let empty = TabStrip { first: 0, tabs: Vec::new(), left_arrow: None, right_arrow: None };
+    if widths.is_empty() || width == 0 {
+        return empty;
+    }
+    let last = widths.len() - 1;
+    let mut first = offset.min(last).min(active);
+    let (mut count, mut left, mut right) = fit_tabs(widths, width, first);
+    // Walk the window right until the active tab is inside it. `count == 0` means not even
+    // one tab fits, so there is nothing to scroll toward.
+    while count > 0 && active >= first + count && first < last {
+        first += 1;
+        (count, left, right) = fit_tabs(widths, width, first);
+    }
+    if count == 0 {
+        return empty;
+    }
+
+    let mut x = if left { ARROW_W } else { 0 };
+    let mut tabs = Vec::with_capacity(count);
+    for w in &widths[first..first + count] {
+        let close_start = x + w - 2; // the × sits before the trailing space
+        tabs.push(TabLayout { full: (x, x + w), close: (close_start, close_start + 1) });
+        x += w;
+    }
+    TabStrip {
+        first,
+        tabs,
+        left_arrow: left.then_some((0, ARROW_W)),
+        right_arrow: right.then_some((width - ARROW_W, width)),
+    }
 }
 
 fn run_button_label(lang: Lang) -> String {
     format!(" \u{25b6} {} ", i18n::t(lang, Key::ToolbarRun))
 }
 
+/// Short label for a venv in the toolbar. A nickname from `registered_venvs` wins, since it
+/// is what the user chose to call it. Otherwise: an auto-discovered venv is already a bare
+/// folder name, while a registered one is an absolute path whose full form would crowd out
+/// the tab strip, so it shows just the venv folder — prefixed with its parent when the
+/// folder name is a generic one that on its own wouldn't say which venv is active.
+pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) -> String {
+    if let Some(nickname) = registered.iter().find(|r| r.path() == venv).and_then(|r| r.nickname()) {
+        return nickname.to_string();
+    }
+    let path = std::path::Path::new(venv);
+    if !path.is_absolute() {
+        return venv.to_string();
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return venv.to_string();
+    };
+    if matches!(name.as_str(), ".venv" | "venv" | "env" | ".env") {
+        if let Some(parent) = path.parent().and_then(|p| p.file_name()) {
+            return format!("{}/{}", parent.to_string_lossy(), name);
+        }
+    }
+    name
+}
+
 fn venv_button_label(app: &App) -> String {
     match &app.settings.active_venv {
-        Some(name) => format!(" venv: {name} \u{25be} "),
+        Some(name) => format!(" venv: {} \u{25be} ", venv_display_name(name, &app.settings.registered_venvs)),
         None => format!(" {} \u{25be} ", i18n::t(app.settings.lang, Key::ToolbarVenvNone)),
     }
 }
 
 /// Relative (start, end) ranges for the right-aligned toolbar buttons that fit within
-/// `area_width` without overlapping the open tabs: the venv selector (dropped first if
-/// there isn't room for both) and the Run button.
+/// `area_width`: the venv selector (dropped first if there isn't room for both) and the Run
+/// button. Their space is reserved up front, independent of how many tabs are open — the tab
+/// strip scrolls instead of pushing the buttons off the bar — but they yield once fewer than
+/// `MIN_TAB_STRIP` columns would be left for the tabs themselves.
 pub fn toolbar_button_ranges(
     app: &App,
     area_width: u16,
     with_venv: bool,
 ) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
-    let used: u16 = tab_ranges(app).last().map(|(_, e)| *e).unwrap_or(0);
     let run_w = run_button_label(app.settings.lang).chars().count() as u16;
     let venv_w = venv_button_label(app).chars().count() as u16;
 
-    if with_venv && used + venv_w + run_w <= area_width {
+    if with_venv && venv_w + run_w + MIN_TAB_STRIP <= area_width {
         let run_start = area_width - run_w;
         let venv_start = run_start - venv_w;
         (Some((venv_start, venv_start + venv_w)), Some((run_start, run_start + run_w)))
-    } else if used + run_w <= area_width {
+    } else if run_w + MIN_TAB_STRIP <= area_width {
         let run_start = area_width - run_w;
         (None, Some((run_start, run_start + run_w)))
     } else {
         (None, None)
+    }
+}
+
+/// Columns available to the tab strip once the toolbar buttons have taken their place.
+pub fn tab_strip_width(app: &App, area_width: u16, with_venv: bool) -> u16 {
+    let (venv_range, run_range) = toolbar_button_ranges(app, area_width, with_venv);
+    match venv_range.or(run_range) {
+        Some((start, _)) => start,
+        None => area_width,
     }
 }
 
@@ -893,11 +1012,18 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
     result
 }
 
-fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_venv: bool) {
+fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_venv: bool, pane: EditorPane) {
     let lang = app.settings.lang;
     let mut spans = Vec::new();
-    let mut used = 0u16;
-    for (i, editor) in app.editors.iter().enumerate() {
+    let strip_width = tab_strip_width(app, area.width, with_venv);
+    let strip = tab_strip_layout(&tab_widths(app), strip_width, app.tab_offsets[pane.index()], active_idx);
+    let arrow_style = Style::default().fg(Color::Gray).bg(Color::DarkGray);
+    if strip.left_arrow.is_some() {
+        spans.push(Span::styled(SCROLL_LEFT_GLYPH, arrow_style));
+    }
+    let mut used = strip.tabs.first().map(|t| t.full.0).unwrap_or(0);
+    for (offset, editor) in app.editors[strip.first..].iter().take(strip.tabs.len()).enumerate() {
+        let i = strip.first + offset;
         let dirty = if editor.dirty { "*" } else { "" };
         let prefix = format!(" {}{} ", editor.title(lang), dirty);
         used += prefix.chars().count() as u16 + 2; // + close glyph + trailing space
@@ -909,6 +1035,14 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_ve
         spans.push(Span::styled(prefix, style));
         spans.push(Span::styled("\u{2715}", style));
         spans.push(Span::styled(" ", style));
+    }
+    if let Some((start, _)) = strip.right_arrow {
+        let pad = start.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad as usize)));
+        }
+        spans.push(Span::styled(SCROLL_RIGHT_GLYPH, arrow_style));
+        used = start + ARROW_W;
     }
     let (venv_range, run_range) = toolbar_button_ranges(app, area.width, with_venv);
     if let Some((start, _)) = venv_range.or(run_range) {
@@ -932,21 +1066,29 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let panes = editor_pane_rects(area, app.split_view);
     if panes.len() == 1 {
         let focused = app.focus == Focus::Editor;
-        draw_editor_pane(f, app, panes[0], app.active_editor, focused, true);
+        draw_editor_pane(f, app, panes[0], app.active_editor, focused, true, EditorPane::Left);
         return;
     }
     let left_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Left;
     let right_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Right;
     // Both panes get a Run button so either focused file can be run; the (global) venv
     // selector stays on the left pane only to avoid a redundant, space-hungry duplicate.
-    draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, true);
-    draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, false);
+    draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, true, EditorPane::Left);
+    draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, false, EditorPane::Right);
 }
 
-fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, with_venv: bool) {
+fn draw_editor_pane(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    idx: usize,
+    focused: bool,
+    with_venv: bool,
+    pane: EditorPane,
+) {
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
-        draw_tab_bar(f, app, tab_bar_area, idx, with_venv);
+        draw_tab_bar(f, app, tab_bar_area, idx, with_venv, pane);
     }
 
     // No title here: the open tab right above already shows the filename and dirty marker.
@@ -1182,4 +1324,98 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let paragraph = Paragraph::new(Line::from(Span::raw(msg))).style(style);
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Five tabs of 10 columns each.
+    const W: [u16; 5] = [10, 10, 10, 10, 10];
+
+    #[test]
+    fn tab_strip_shows_every_tab_when_they_fit() {
+        let strip = tab_strip_layout(&W, 50, 0, 0);
+        assert_eq!(strip.first, 0);
+        assert_eq!(strip.tabs.len(), 5);
+        assert_eq!(strip.tabs[0].full, (0, 10));
+        assert_eq!(strip.tabs[4].full, (40, 50));
+        // The × sits before the tab's trailing space.
+        assert_eq!(strip.tabs[0].close, (8, 9));
+        assert!(strip.left_arrow.is_none() && strip.right_arrow.is_none());
+    }
+
+    #[test]
+    fn tab_strip_marks_tabs_hidden_to_the_right() {
+        // 25 columns: two whole tabs, and the › arrow claims a column of the leftover.
+        let strip = tab_strip_layout(&W, 25, 0, 0);
+        assert_eq!(strip.tabs.len(), 2);
+        assert_eq!(strip.left_arrow, None);
+        assert_eq!(strip.right_arrow, Some((24, 25)));
+    }
+
+    #[test]
+    fn tab_strip_scrolls_to_keep_the_active_tab_visible() {
+        // Active tab 4 cannot be seen from offset 0 in 25 columns, so the window advances.
+        let strip = tab_strip_layout(&W, 25, 0, 4);
+        let rendered = strip.first..strip.first + strip.tabs.len();
+        assert!(rendered.contains(&4), "active tab must be rendered, got {rendered:?}");
+        // Scrolled off the left, so both arrows show.
+        assert_eq!(strip.left_arrow, Some((0, 1)));
+        assert_eq!(strip.right_arrow, None);
+        // Tabs start after the ‹ arrow.
+        assert_eq!(strip.tabs[0].full.0, 1);
+    }
+
+    #[test]
+    fn tab_strip_never_starts_past_the_active_tab() {
+        // A stale offset (e.g. after switching tabs with the keyboard) must not hide it.
+        let strip = tab_strip_layout(&W, 25, 3, 0);
+        assert_eq!(strip.first, 0);
+        assert_eq!(strip.left_arrow, None);
+    }
+
+    #[test]
+    fn tab_at_maps_columns_to_absolute_indices() {
+        let strip = tab_strip_layout(&W, 25, 2, 2);
+        assert_eq!(strip.first, 2);
+        // Column 1 is the first rendered tab, which is tab 2 overall, not tab 0.
+        assert_eq!(strip.tab_at(1).map(|(i, _)| i), Some(2));
+        assert_eq!(strip.tab_at(11).map(|(i, _)| i), Some(3));
+        // The arrow column belongs to no tab.
+        assert_eq!(strip.tab_at(0).map(|(i, _)| i), None);
+    }
+
+    #[test]
+    fn tab_strip_degrades_without_panicking_when_too_narrow() {
+        assert!(tab_strip_layout(&W, 0, 0, 0).tabs.is_empty());
+        // Narrower than a single tab: nothing is rendered rather than a half-drawn tab.
+        assert!(tab_strip_layout(&W, 4, 0, 0).tabs.is_empty());
+        assert!(tab_strip_layout(&[], 50, 0, 0).tabs.is_empty());
+    }
+
+    #[test]
+    fn venv_label_shortens_absolute_paths() {
+        // Auto-discovered venvs are relative names and stay as they are.
+        assert_eq!(venv_display_name(".venv", &[]), ".venv");
+        // A registered venv shows its own folder, not the whole path.
+        assert_eq!(venv_display_name("/opt/venvs/ml-3.12", &[]), "ml-3.12");
+        // A generic folder name is qualified by its parent, so two registered ".venv"
+        // directories remain distinguishable in the toolbar.
+        assert_eq!(venv_display_name("/work/project-a/.venv", &[]), "project-a/.venv");
+        assert_eq!(venv_display_name("/work/project-a/.venv/", &[]), "project-a/.venv");
+    }
+
+    #[test]
+    fn venv_nickname_wins_over_the_derived_name() {
+        let registered = vec![
+            settings::RegisteredVenv::Named { name: "ml".to_string(), path: "/opt/venvs/ml-3.12".to_string() },
+            settings::RegisteredVenv::Path("/opt/venvs/plain".to_string()),
+        ];
+        assert_eq!(venv_display_name("/opt/venvs/ml-3.12", &registered), "ml");
+        // Registered without a nickname, and venvs that aren't registered at all, keep the
+        // folder-derived label.
+        assert_eq!(venv_display_name("/opt/venvs/plain", &registered), "plain");
+        assert_eq!(venv_display_name("/opt/venvs/other", &registered), "other");
+    }
 }

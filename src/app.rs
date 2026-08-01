@@ -33,6 +33,16 @@ pub enum EditorPane {
     Right,
 }
 
+impl EditorPane {
+    /// Index into per-pane state kept side by side, such as the tab strip's scroll offset.
+    pub fn index(self) -> usize {
+        match self {
+            EditorPane::Left => 0,
+            EditorPane::Right => 1,
+        }
+    }
+}
+
 /// A pending action being held back by the unsaved-changes prompt, so it can be carried
 /// out (or abandoned) once the user decides what to do with the dirty buffer(s).
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -49,6 +59,10 @@ pub struct App {
     pub split_view: bool,
     pub active_editor_right: usize,
     pub editor_pane_focus: EditorPane,
+    /// Leftmost tab rendered in each pane's strip (indexed by `EditorPane::index`), so a long
+    /// list of open files scrolls horizontally instead of running off the edge. Rendering
+    /// still pulls the active tab back into view, so this is a starting point, not a promise.
+    pub tab_offsets: [usize; 2],
     pub terminals: Vec<TerminalPanel>,
     pub active_terminal: usize,
     pub focus: Focus,
@@ -137,6 +151,75 @@ fn discover_venvs(root: &std::path::Path) -> Vec<String> {
         .collect();
     venvs.sort();
     venvs
+}
+
+/// The venvs offered by the selector: those auto-discovered in `root`, plus every
+/// still-existing user-registered absolute path (deduplicated, registered ones last).
+fn available_venvs(root: &std::path::Path, registered: &[crate::settings::RegisteredVenv]) -> Vec<String> {
+    let mut venvs = discover_venvs(root);
+    for r in registered {
+        let path = r.path().to_string();
+        if std::path::Path::new(&path).is_dir() && !venvs.contains(&path) {
+            venvs.push(path);
+        }
+    }
+    venvs
+}
+
+/// Orders version-bearing directory names numerically, so `Octave-10.1.0` ranks above
+/// `Octave-9.2.0` — plain string ordering would pick the older one.
+fn version_key(name: &str) -> Vec<u64> {
+    name.split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+/// Finds the Octave console binary under a Windows `Program Files` directory, where it sits
+/// in a versioned folder (`GNU Octave\Octave-9.2.0\mingw64\bin\octave-cli.exe`) that the
+/// installer does not add to PATH — so a bare `octave-cli` would not resolve. Picks the
+/// newest install. Returns `None` when `program_files` is absent (i.e. off Windows, where
+/// Octave comes from a package manager and is already on PATH).
+fn discover_octave(program_files: Option<&std::path::Path>) -> Option<PathBuf> {
+    let base = program_files?.join("GNU Octave");
+    let mut installs: Vec<PathBuf> = std::fs::read_dir(&base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    installs.sort_by_key(|p| version_key(&p.file_name().unwrap_or_default().to_string_lossy()));
+    installs.reverse();
+    installs.into_iter().find_map(|install| {
+        // Layout differs across releases: newer installs nest the toolchain under mingw64/.
+        ["mingw64", "."]
+            .iter()
+            .map(|mid| install.join(mid).join("bin").join("octave-cli.exe"))
+            .find(|exe| exe.exists())
+    })
+}
+
+/// Swaps a run command's program for an explicitly configured absolute path
+/// (`interpreter_paths` in settings.toml), so interpreters installed outside PATH still run.
+/// Falls back to auto-detecting Octave, the case where this bites by default on Windows.
+/// The template is returned untouched when nothing applies.
+fn resolve_interpreter(
+    template: &str,
+    interpreter_paths: &std::collections::HashMap<String, String>,
+    program_files: Option<&std::path::Path>,
+) -> String {
+    let (program, rest) = template.split_once(' ').unwrap_or((template, ""));
+    let resolved = interpreter_paths
+        .get(program)
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            matches!(program, "octave" | "octave-cli")
+                .then(|| discover_octave(program_files))
+                .flatten()
+        });
+    let Some(path) = resolved else { return template.to_string() };
+    let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
+    if rest.is_empty() { quoted } else { format!("{quoted} {rest}") }
 }
 
 /// Collects files under `root` for the quick-open picker, capped so a huge tree can't
@@ -237,11 +320,11 @@ impl App {
         let t1 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let t2 = TerminalPanel::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
-        let available_venvs = discover_venvs(&root);
         let (git_status_tx, git_status_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
         let settings = Settings::load();
+        let available_venvs = available_venvs(&root, &settings.registered_venvs);
         let mut file_tree = FileTree::new(root.clone());
         file_tree.show_hidden = settings.show_hidden_files;
         file_tree.rebuild_visible();
@@ -253,6 +336,7 @@ impl App {
             split_view: false,
             active_editor_right: 0,
             editor_pane_focus: EditorPane::Left,
+            tab_offsets: [0, 0],
             terminals: vec![t1, t2],
             active_terminal: 0,
             focus: Focus::FileTree,
@@ -900,6 +984,11 @@ impl App {
         if self.active_editor_right >= self.editors.len() {
             self.active_editor_right = self.editors.len() - 1;
         }
+        // Closing tabs shortens the strip, so an offset past the end would blank it out.
+        let last = self.editors.len() - 1;
+        for offset in &mut self.tab_offsets {
+            *offset = (*offset).min(last);
+        }
     }
 
     fn cycle_editor(&mut self, forward: bool) {
@@ -919,7 +1008,7 @@ impl App {
         self.file_tree.show_hidden = self.settings.show_hidden_files;
         self.file_tree.rebuild_visible();
         self.root = new_root;
-        self.available_venvs = discover_venvs(&self.root);
+        self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
         self.status_message = i18n::msg_project_folder(self.settings.lang, &self.root.display().to_string());
     }
@@ -980,13 +1069,39 @@ impl App {
             self.status_message = i18n::msg_run_no_command(lang, &ext);
             return;
         };
-        let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
-        let template = self.apply_venv(&template);
-        let command = template.replace("{file}", &quoted);
-
         if self.terminals.is_empty() {
             self.new_terminal();
         }
+        // A `.m` file when an Octave prompt is already open in one of the terminals: hand the
+        // script to that interpreter with `run(...)`. Starting a second Octave would be slow,
+        // would lose the session's variables, and (with --persist) would leave two sets of
+        // plot windows around. Typing the shell command at an Octave prompt is also just a
+        // syntax error, which is what used to happen.
+        let program = template.split_once(' ').map(|(p, _)| p).unwrap_or(&template);
+        if dnd::is_octave_program(program) {
+            let pids: Vec<Option<u32>> = self.terminals.iter().map(|t| t.child_pid()).collect();
+            if let Some(idx) = dnd::shell_running_octave(&pids) {
+                let command = format!("run({})", dnd::octave_quote(&path.to_string_lossy()));
+                self.terminals[idx].write_input(command.as_bytes());
+                self.terminals[idx].write_input(b"\r");
+                self.status_message = i18n::msg_run_started(lang, idx, &command);
+                return;
+            }
+        }
+        let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
+        // An active venv wins over a configured interpreter path: it is the more specific
+        // choice, and only ever rewrites python programs.
+        let venved = self.apply_venv(&template);
+        let template = if venved == template {
+            resolve_interpreter(
+                &template,
+                &self.settings.interpreter_paths,
+                std::env::var_os("ProgramFiles").map(PathBuf::from).as_deref(),
+            )
+        } else {
+            venved
+        };
+        let command = template.replace("{file}", &quoted);
         let idx = self
             .terminals
             .iter()
@@ -1010,7 +1125,11 @@ impl App {
         }
         // On Windows the venv ships python.exe under Scripts\; elsewhere a bare name under bin/.
         let bin_name = if cfg!(windows) { "python.exe" } else { program };
-        let venv_bin = self.root.join(venv).join(venv_bin_dir()).join(bin_name);
+        // A registered venv is stored as an absolute path; an auto-discovered one is a
+        // folder name relative to the project root.
+        let venv_path = std::path::Path::new(venv);
+        let venv_dir = if venv_path.is_absolute() { venv_path.to_path_buf() } else { self.root.join(venv) };
+        let venv_bin = venv_dir.join(venv_bin_dir()).join(bin_name);
         if !venv_bin.exists() {
             return template.to_string();
         }
@@ -1826,7 +1945,15 @@ impl App {
             if !within(*pane_rect, col, row) {
                 continue;
             }
-            let (_, content) = ui::split_editor_area(*pane_rect);
+            let (tab_bar, content) = ui::split_editor_area(*pane_rect);
+            if within(tab_bar, col, row) {
+                // Over the tab strip the wheel scrolls tabs sideways, one per notch, rather
+                // than scrolling the text underneath.
+                let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+                let step = if delta < 0 { -1 } else { 1 };
+                self.scroll_tabs(pane, step, tab_bar.width, pane == EditorPane::Left);
+                return;
+            }
             if within(content, col, row) {
                 // Scroll whichever pane the pointer is over, independent of focus.
                 let idx = if pane_idx == 0 { self.active_editor } else { self.active_editor_right };
@@ -1843,24 +1970,34 @@ impl App {
 
     fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect, pane: EditorPane) {
         let rel_col = col.saturating_sub(tab_bar.x);
-        let layouts = ui::tab_layouts(self);
-        for (i, layout) in layouts.iter().enumerate() {
-            if rel_col >= layout.close.0 && rel_col < layout.close.1 {
-                self.close_editor_at(i);
+        // Both panes show a Run button; the venv selector only renders in the left/only pane.
+        let with_venv = pane == EditorPane::Left;
+        let strip = self.tab_strip(tab_bar.width, with_venv, pane);
+        if let Some((start, end)) = strip.left_arrow {
+            if rel_col >= start && rel_col < end {
+                self.scroll_tabs(pane, -1, tab_bar.width, with_venv);
                 return;
             }
-            if rel_col >= layout.full.0 && rel_col < layout.full.1 {
+        }
+        if let Some((start, end)) = strip.right_arrow {
+            if rel_col >= start && rel_col < end {
+                self.scroll_tabs(pane, 1, tab_bar.width, with_venv);
+                return;
+            }
+        }
+        if let Some((i, layout)) = strip.tab_at(rel_col) {
+            if rel_col >= layout.close.0 && rel_col < layout.close.1 {
+                self.close_editor_at(i);
+            } else {
                 match pane {
                     EditorPane::Left => self.active_editor = i,
                     EditorPane::Right => self.active_editor_right = i,
                 }
                 self.focus = Focus::Editor;
                 self.editor_pane_focus = pane;
-                return;
             }
+            return;
         }
-        // Both panes show a Run button; the venv selector only renders in the left/only pane.
-        let with_venv = pane == EditorPane::Left;
         let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width, with_venv);
         if let Some((start, end)) = venv_range {
             if rel_col >= start && rel_col < end {
@@ -1875,6 +2012,30 @@ impl App {
                 self.run_active_file();
             }
         }
+    }
+
+    /// The tab strip as currently rendered for `pane`, which is also what a click must be
+    /// mapped against — the stored offset alone isn't enough, since rendering scrolls further
+    /// when needed to keep the active tab visible.
+    fn tab_strip(&self, tab_bar_width: u16, with_venv: bool, pane: EditorPane) -> ui::TabStrip {
+        let active = match pane {
+            EditorPane::Left => self.active_editor,
+            EditorPane::Right => self.active_editor_right,
+        };
+        ui::tab_strip_layout(
+            &ui::tab_widths(self),
+            ui::tab_strip_width(self, tab_bar_width, with_venv),
+            self.tab_offsets[pane.index()],
+            active,
+        )
+    }
+
+    /// Scrolls a pane's tab strip by `delta` tabs, starting from what is on screen rather
+    /// than from the stored offset, so the first step after an auto-scroll doesn't jump.
+    fn scroll_tabs(&mut self, pane: EditorPane, delta: isize, tab_bar_width: u16, with_venv: bool) {
+        let first = self.tab_strip(tab_bar_width, with_venv, pane).first as isize;
+        let last = self.editors.len().saturating_sub(1) as isize;
+        self.tab_offsets[pane.index()] = (first + delta).clamp(0, last) as usize;
     }
 
     fn position_cursor_from_click(&mut self, content_area: Rect, col: u16, row: u16) {
@@ -1952,4 +2113,106 @@ impl App {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cleecode_app_test_{}_{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_venv(root: &std::path::Path, name: &str) -> PathBuf {
+        let venv = root.join(name);
+        std::fs::create_dir_all(venv.join(venv_bin_dir())).unwrap();
+        std::fs::write(venv.join(venv_bin_dir()).join("activate"), "").unwrap();
+        venv
+    }
+
+    #[test]
+    fn available_venvs_merges_discovered_and_registered() {
+        let root = setup_dir("venvs_root");
+        make_venv(&root, ".venv");
+        let elsewhere = setup_dir("venvs_elsewhere");
+        let path = make_venv(&elsewhere, "central").to_string_lossy().into_owned();
+        let registered = crate::settings::RegisteredVenv::Path(path.clone());
+
+        let venvs = available_venvs(&root, std::slice::from_ref(&registered));
+        assert_eq!(venvs, vec![".venv".to_string(), path]);
+
+        // A registered path that no longer exists is dropped, not offered as a dead entry.
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        assert_eq!(available_venvs(&root, &[registered]), vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn available_venvs_does_not_duplicate_a_registered_discovered_venv() {
+        let root = setup_dir("venvs_dup");
+        make_venv(&root, ".venv");
+        // Registering the project's own venv by its relative name must not list it twice.
+        let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
+        assert_eq!(venvs, vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn version_key_orders_numerically_not_lexicographically() {
+        assert!(version_key("Octave-10.1.0") > version_key("Octave-9.2.0"));
+        assert_eq!(version_key("Octave-9.2.0"), vec![9, 2, 0]);
+        assert_eq!(version_key("no-digits"), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn discovers_newest_octave_under_program_files() {
+        let pf = setup_dir("program_files");
+        for version in ["Octave-9.2.0", "Octave-10.1.0"] {
+            let bin = pf.join("GNU Octave").join(version).join("mingw64").join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("octave-cli.exe"), "").unwrap();
+        }
+        let found = discover_octave(Some(&pf)).unwrap();
+        assert!(found.to_string_lossy().contains("Octave-10.1.0"), "got {found:?}");
+
+        // No Program Files (the non-Windows case): nothing to discover, PATH is used instead.
+        assert!(discover_octave(None).is_none());
+        assert!(discover_octave(Some(&setup_dir("program_files_empty"))).is_none());
+    }
+
+    #[test]
+    fn resolve_interpreter_substitutes_configured_path_and_keeps_args() {
+        let dir = setup_dir("interp");
+        let exe = dir.join("octave-cli");
+        std::fs::write(&exe, "").unwrap();
+        let paths: std::collections::HashMap<String, String> =
+            [("octave-cli".to_string(), exe.to_string_lossy().into_owned())].into_iter().collect();
+
+        let out = resolve_interpreter("octave-cli {file}", &paths, None);
+        assert_eq!(out, format!("{} {{file}}", exe.display()));
+
+        // Unconfigured programs, and configured paths that no longer exist, are left alone.
+        assert_eq!(resolve_interpreter("node {file}", &paths, None), "node {file}");
+        let stale: std::collections::HashMap<String, String> =
+            [("node".to_string(), dir.join("missing").to_string_lossy().into_owned())]
+                .into_iter()
+                .collect();
+        assert_eq!(resolve_interpreter("node {file}", &stale, None), "node {file}");
+    }
+
+    #[test]
+    fn resolve_interpreter_quotes_paths_with_spaces() {
+        let dir = setup_dir("interp spaced");
+        let exe = dir.join("octave-cli");
+        std::fs::write(&exe, "").unwrap();
+        let paths: std::collections::HashMap<String, String> =
+            [("octave".to_string(), exe.to_string_lossy().into_owned())].into_iter().collect();
+
+        let out = resolve_interpreter("octave {file}", &paths, None);
+        let (program, rest) = out.rsplit_once(' ').unwrap();
+        assert_eq!(rest, "{file}");
+        // The space in the directory name must survive as one argument for the shell.
+        assert_eq!(shell_words::split(program).unwrap(), vec![exe.to_string_lossy().into_owned()]);
+    }
 }

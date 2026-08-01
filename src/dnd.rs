@@ -70,6 +70,62 @@ pub fn shell_is_busy(shell_pid: u32) -> bool {
     sys.processes().values().any(|p| p.parent() == Some(parent))
 }
 
+/// Program names that mean "an Octave interpreter is sitting at its own prompt in here".
+/// `octave` is a launcher: on macOS it execs `octave-gui` even for a terminal session, and
+/// Windows installs ship `octave-cli.exe`, so all the variants have to be recognised.
+const OCTAVE_PROGRAMS: [&str; 4] = ["octave", "octave-cli", "octave-gui", "octave-launch"];
+
+/// Index of the first shell in `shell_pids` with an Octave prompt running inside it, so a
+/// script can be handed to the interpreter that is already open instead of starting a second
+/// one. Takes a single process-table snapshot for all the shells, since this runs on every
+/// Run of a `.m` file and a refresh is not cheap. Returns `None` if the table can't be read.
+pub fn shell_running_octave(shell_pids: &[Option<u32>]) -> Option<usize> {
+    let sys = process_snapshot();
+    shell_pids
+        .iter()
+        .position(|pid| pid.is_some_and(|pid| has_octave_descendant(&sys, pid)))
+}
+
+/// Whether an Octave interpreter is running under `shell_pid`. Searches descendants rather
+/// than direct children only, because the `octave` launcher can sit between the shell and the
+/// real interpreter.
+fn has_octave_descendant(sys: &sysinfo::System, shell_pid: u32) -> bool {
+    let mut frontier = vec![sysinfo::Pid::from_u32(shell_pid)];
+    let mut visited = 0;
+    // The tree under one shell is tiny; the bound only stops a pathological parent/child
+    // cycle in the snapshot from spinning forever.
+    while let Some(parent) = frontier.pop() {
+        visited += 1;
+        if visited > 64 {
+            break;
+        }
+        for process in sys.processes().values() {
+            if process.parent() != Some(parent) {
+                continue;
+            }
+            if is_octave_program(&process.name().to_string_lossy()) {
+                return true;
+            }
+            frontier.push(process.pid());
+        }
+    }
+    false
+}
+
+/// Whether a program is an Octave interpreter, given either a bare name from a run command
+/// template or a full path to the executable.
+pub fn is_octave_program(program: &str) -> bool {
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = base.strip_suffix(".exe").unwrap_or(base);
+    OCTAVE_PROGRAMS.contains(&stem)
+}
+
+/// Escapes a path for Octave's single-quoted string literals, where the only special
+/// character is the quote itself and it is escaped by doubling.
+pub fn octave_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "''"))
+}
+
 fn parse_ssh_command(cmd: &str) -> Option<String> {
     let mut tokens = cmd.split_whitespace();
     let first = tokens.next()?;
@@ -100,6 +156,27 @@ mod tests {
         let paths = parse_dropped_paths(&text);
         assert_eq!(paths, vec![file]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recognises_every_octave_launcher_variant() {
+        // macOS execs octave-gui even for a terminal session; Windows ships octave-cli.exe.
+        assert!(is_octave_program("octave"));
+        assert!(is_octave_program("octave-cli"));
+        assert!(is_octave_program("octave-gui"));
+        assert!(is_octave_program("octave-cli.exe"));
+        assert!(is_octave_program("/opt/homebrew/bin/octave"));
+        assert!(is_octave_program(r"C:\Program Files\GNU Octave\Octave-10.1.0\mingw64\bin\octave-cli.exe"));
+        // Not Octave, and not a substring match either.
+        assert!(!is_octave_program("python3"));
+        assert!(!is_octave_program("octaveish"));
+    }
+
+    #[test]
+    fn quotes_paths_for_octave_string_literals() {
+        assert_eq!(octave_quote("/tmp/plot.m"), "'/tmp/plot.m'");
+        // A quote in the path is escaped by doubling, so `run(...)` still parses.
+        assert_eq!(octave_quote("/tmp/it's/plot.m"), "'/tmp/it''s/plot.m'");
     }
 
     #[test]
