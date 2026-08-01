@@ -65,6 +65,9 @@ pub enum Key {
     ResizeModeHint,
     MenuRun,
     ItemRunFile,
+    ItemSelectVenv,
+    VenvPickerTitle,
+    VenvRegisterItem,
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
     ToolbarRun,
@@ -222,6 +225,15 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemRunFile) => "Run current file",
         (Lang::It, ItemRunFile) => "Esegui file corrente",
+
+        (Lang::En, ItemSelectVenv) => "Python venv...",
+        (Lang::It, ItemSelectVenv) => "Venv Python...",
+
+        (Lang::En, VenvPickerTitle) => "Python venv",
+        (Lang::It, VenvPickerTitle) => "Venv Python",
+
+        (Lang::En, VenvRegisterItem) => "Add a venv from elsewhere on disk...",
+        (Lang::It, VenvRegisterItem) => "Aggiungi un venv da un altro percorso...",
 
         (Lang::En, ItemToggleSplitView) => "Split editor",
         (Lang::It, ItemToggleSplitView) => "Editor affiancati",
@@ -656,6 +668,41 @@ pub fn msg_saved_all_unnamed(lang: Lang, saved: usize, unnamed: usize) -> String
     match lang {
         Lang::En => format!("Saved {saved} file(s); {unnamed} still need a name (Ctrl+S to name one)"),
         Lang::It => format!("Salvati {saved} file; {unnamed} senza nome (Ctrl+S per dargliene uno)"),
+    }
+}
+
+pub fn msg_venv_selected(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Python venv: {name}"),
+        Lang::It => format!("Venv Python: {name}"),
+    }
+}
+
+pub fn msg_venv_cleared(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Python venv: none (system python)".to_string(),
+        Lang::It => "Venv Python: nessuno (python di sistema)".to_string(),
+    }
+}
+
+pub fn msg_not_a_venv(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("{path} is not a virtualenv (no bin/activate) — not added"),
+        Lang::It => format!("{path} non e un virtualenv (manca bin/activate) — non aggiunto"),
+    }
+}
+
+pub fn msg_venv_path_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Path to the venv (absolute, or ~/... ):".to_string(),
+        Lang::It => "Percorso del venv (assoluto, oppure ~/... ):".to_string(),
+    }
+}
+
+pub fn msg_venv_nickname_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Short name to show in the selector (Enter to skip):".to_string(),
+        Lang::It => "Nome breve da mostrare nel selettore (Invio per saltare):".to_string(),
     }
 }
 

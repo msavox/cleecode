@@ -207,22 +207,40 @@ fn fit_tabs(widths: &[u16], width: u16, first: usize) -> (usize, bool, bool) {
     (count_within(avail.saturating_sub(ARROW_W)), left, true)
 }
 
-/// Lays out the visible part of the tab strip: scrolled to `offset`, then advanced as far as
-/// needed to keep `active` in view, so the focused file is never the one that is off-screen.
-pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize, active: usize) -> TabStrip {
+/// The smallest adjustment to `offset` that brings `active` into view: back to it when it sits
+/// before the window, forward until it fits when it sits after.
+///
+/// Deliberately *not* applied on every render. Doing that made the strip snap back to the
+/// active tab a frame after any manual scroll, so the `‹` arrow appeared to do nothing at all
+/// — scrolling away from the active tab was undone instantly. Callers apply this when the
+/// active tab changes instead, which leaves a deliberate scroll alone.
+pub fn offset_revealing(widths: &[u16], width: u16, offset: usize, active: usize) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    let last = widths.len() - 1;
+    let mut first = offset.min(last);
+    if active <= first {
+        return active.min(last);
+    }
+    loop {
+        let (count, _, _) = fit_tabs(widths, width, first);
+        // `count == 0` means not even one tab fits: there is nothing to scroll toward.
+        if count == 0 || active < first + count || first >= last {
+            return first;
+        }
+        first += 1;
+    }
+}
+
+/// Lays out the visible part of the tab strip, starting at `offset`.
+pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize) -> TabStrip {
     let empty = TabStrip { first: 0, tabs: Vec::new(), left_arrow: None, right_arrow: None };
     if widths.is_empty() || width == 0 {
         return empty;
     }
-    let last = widths.len() - 1;
-    let mut first = offset.min(last).min(active);
-    let (mut count, mut left, mut right) = fit_tabs(widths, width, first);
-    // Walk the window right until the active tab is inside it. `count == 0` means not even
-    // one tab fits, so there is nothing to scroll toward.
-    while count > 0 && active >= first + count && first < last {
-        first += 1;
-        (count, left, right) = fit_tabs(widths, width, first);
-    }
+    let first = offset.min(widths.len() - 1);
+    let (count, left, right) = fit_tabs(widths, width, first);
     if count == 0 {
         return empty;
     }
@@ -358,6 +376,37 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     }
 }
 
+/// Where the venv drop-down hangs: directly under its toolbar button, in the left/only editor
+/// pane's tab bar. `None` when that button isn't on screen, in which case there is nothing to
+/// drop down from. Shared by the renderer and by click handling, so both agree on the rows.
+pub fn venv_dropdown_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
+    let pane = editor_pane_rects(editor_area, app.split_view).first().copied()?;
+    let (tab_bar, _) = split_editor_area(pane);
+    if tab_bar.height == 0 {
+        return None;
+    }
+    // The venv selector only ever renders in the left/only pane, hence with_venv = true.
+    let (venv_range, _) = toolbar_button_ranges(app, tab_bar.width, true);
+    let (start, _) = venv_range?;
+
+    let rows = app.venv_dropdown_rows();
+    let widest = rows
+        .iter()
+        .map(|r| r.label.chars().count() + r.detail.as_ref().map_or(0, |d| d.chars().count() + 3))
+        .max()
+        .unwrap_or(0);
+    // Two for the border, two for the active marker.
+    let width = ((widest + 4) as u16).clamp(20, full.width);
+    let height = (rows.len() as u16 + 2).min(full.height.saturating_sub(tab_bar.y + 1));
+    Some(Rect {
+        // Prefer aligning with the button, but never hang off the right edge.
+        x: (tab_bar.x + start).min(full.width.saturating_sub(width)),
+        y: tab_bar.y + 1,
+        width,
+        height,
+    })
+}
+
 pub fn about_modal_rect(full: Rect) -> Rect {
     // Tall enough for the version, the wrapped tagline (three lines in Italian, the longer
     // of the two), the author and repository lines, and the close hint.
@@ -478,6 +527,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.show_save_as {
         draw_save_as_modal(f, app, f.area());
+    }
+    // Drawn after the panes so it overlays the editor it hangs over.
+    if app.venv_dropdown.is_some() {
+        draw_venv_dropdown(f, app, areas.editor, f.area());
+    }
+    if app.venv_register.is_some() {
+        draw_venv_register_modal(f, app, f.area());
     }
     if app.find.is_some() {
         draw_find_modal(f, app, f.area());
@@ -722,6 +778,48 @@ fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
     let title = if app.new_entry_is_dir { "New folder" } else { "New file" };
     let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
     draw_input_modal(f, full, title, prompt, &app.new_entry_input);
+}
+
+fn draw_venv_dropdown(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
+    let Some(selected) = app.venv_dropdown else { return };
+    let Some(rect) = venv_dropdown_rect(app, editor_area, full) else { return };
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(app.settings.lang, Key::VenvPickerTitle)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let items: Vec<ListItem> = app
+        .venv_dropdown_rows()
+        .into_iter()
+        .map(|row| {
+            let marker = if row.active { "● " } else { "  " };
+            let mut spans = vec![Span::raw(format!("{marker}{}", row.label))];
+            if let Some(detail) = row.detail {
+                spans.push(Span::styled(format!("  {detail}"), Style::default().fg(Color::DarkGray)));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn draw_venv_register_modal(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    let (title, prompt) = match app.venv_register {
+        Some(crate::app::VenvRegisterStep::Path) => ("Add venv (1/2)", i18n::msg_venv_path_prompt(lang)),
+        Some(crate::app::VenvRegisterStep::Nickname) => {
+            ("Add venv (2/2)", i18n::msg_venv_nickname_prompt(lang))
+        }
+        None => return,
+    };
+    draw_input_modal(f, full, title, &prompt, &app.venv_register_input);
 }
 
 fn draw_save_as_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -1035,7 +1133,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_ve
     let lang = app.settings.lang;
     let mut spans = Vec::new();
     let strip_width = tab_strip_width(app, area.width, with_venv);
-    let strip = tab_strip_layout(&tab_widths(app), strip_width, app.tab_offsets[pane.index()], active_idx);
+    let strip = tab_strip_layout(&tab_widths(app), strip_width, app.tab_offsets[pane.index()]);
     let arrow_style = Style::default().fg(Color::Gray).bg(Color::DarkGray);
     if strip.left_arrow.is_some() {
         spans.push(Span::styled(SCROLL_LEFT_GLYPH, arrow_style));
@@ -1107,6 +1205,8 @@ fn draw_editor_pane(
 ) {
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
+        // Only acts when the active tab changed; a manual scroll survives untouched.
+        app.reveal_active_tab(pane, tab_bar_area.width, with_venv);
         draw_tab_bar(f, app, tab_bar_area, idx, with_venv, pane);
     }
 
@@ -1365,7 +1465,7 @@ mod tests {
 
     #[test]
     fn tab_strip_shows_every_tab_when_they_fit() {
-        let strip = tab_strip_layout(&W, 50, 0, 0);
+        let strip = tab_strip_layout(&W, 50, 0);
         assert_eq!(strip.first, 0);
         assert_eq!(strip.tabs.len(), 5);
         assert_eq!(strip.tabs[0].full, (0, 10));
@@ -1378,36 +1478,49 @@ mod tests {
     #[test]
     fn tab_strip_marks_tabs_hidden_to_the_right() {
         // 25 columns: two whole tabs, and the › arrow claims a column of the leftover.
-        let strip = tab_strip_layout(&W, 25, 0, 0);
+        let strip = tab_strip_layout(&W, 25, 0);
         assert_eq!(strip.tabs.len(), 2);
         assert_eq!(strip.left_arrow, None);
         assert_eq!(strip.right_arrow, Some((24, 25)));
     }
 
     #[test]
-    fn tab_strip_scrolls_to_keep_the_active_tab_visible() {
-        // Active tab 4 cannot be seen from offset 0 in 25 columns, so the window advances.
-        let strip = tab_strip_layout(&W, 25, 0, 4);
+    fn revealing_scrolls_forward_to_the_active_tab() {
+        // Tab 4 cannot be seen from offset 0 in 25 columns, so the window advances to it.
+        let offset = offset_revealing(&W, 25, 0, 4);
+        let strip = tab_strip_layout(&W, 25, offset);
         let rendered = strip.first..strip.first + strip.tabs.len();
         assert!(rendered.contains(&4), "active tab must be rendered, got {rendered:?}");
-        // Scrolled off the left, so both arrows show.
+        // Scrolled off the left, so that arrow shows and tabs start after it.
         assert_eq!(strip.left_arrow, Some((0, 1)));
         assert_eq!(strip.right_arrow, None);
-        // Tabs start after the ‹ arrow.
         assert_eq!(strip.tabs[0].full.0, 1);
     }
 
     #[test]
-    fn tab_strip_never_starts_past_the_active_tab() {
-        // A stale offset (e.g. after switching tabs with the keyboard) must not hide it.
-        let strip = tab_strip_layout(&W, 25, 3, 0);
-        assert_eq!(strip.first, 0);
-        assert_eq!(strip.left_arrow, None);
+    fn revealing_scrolls_back_when_the_active_tab_is_behind_the_window() {
+        assert_eq!(offset_revealing(&W, 25, 3, 0), 0);
+        // Already visible: nothing moves.
+        assert_eq!(offset_revealing(&W, 25, 2, 2), 2);
+        assert_eq!(offset_revealing(&[], 25, 0, 0), 0);
+    }
+
+    /// The regression behind "the ‹ arrow does nothing": revealing used to run on every render,
+    /// so scrolling away from the active tab was undone a frame later. Layout must now leave a
+    /// deliberate offset exactly where it is, in both directions.
+    #[test]
+    fn layout_does_not_snap_back_to_the_active_tab() {
+        // Active tab is 4, user scrolled the window left to 1.
+        let strip = tab_strip_layout(&W, 25, 1);
+        assert_eq!(strip.first, 1, "a manual scroll must survive rendering");
+        assert!(!(strip.first..strip.first + strip.tabs.len()).contains(&4));
+        // And one step further left still moves.
+        assert_eq!(tab_strip_layout(&W, 25, 0).first, 0);
     }
 
     #[test]
     fn tab_at_maps_columns_to_absolute_indices() {
-        let strip = tab_strip_layout(&W, 25, 2, 2);
+        let strip = tab_strip_layout(&W, 25, 2);
         assert_eq!(strip.first, 2);
         // Column 1 is the first rendered tab, which is tab 2 overall, not tab 0.
         assert_eq!(strip.tab_at(1).map(|(i, _)| i), Some(2));
@@ -1418,10 +1531,10 @@ mod tests {
 
     #[test]
     fn tab_strip_degrades_without_panicking_when_too_narrow() {
-        assert!(tab_strip_layout(&W, 0, 0, 0).tabs.is_empty());
+        assert!(tab_strip_layout(&W, 0, 0).tabs.is_empty());
         // Narrower than a single tab: nothing is rendered rather than a half-drawn tab.
-        assert!(tab_strip_layout(&W, 4, 0, 0).tabs.is_empty());
-        assert!(tab_strip_layout(&[], 50, 0, 0).tabs.is_empty());
+        assert!(tab_strip_layout(&W, 4, 0).tabs.is_empty());
+        assert!(tab_strip_layout(&[], 50, 0).tabs.is_empty());
     }
 
     #[test]

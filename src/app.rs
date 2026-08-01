@@ -33,6 +33,63 @@ pub enum EditorPane {
     Right,
 }
 
+/// One row of the venv drop-down.
+pub struct VenvRow {
+    pub label: String,
+    /// Full path, shown dimmed after the label when the label alone is ambiguous.
+    pub detail: Option<String>,
+    /// Whether this is the venv currently in use, marked in the list.
+    pub active: bool,
+    pub action: VenvRowAction,
+}
+
+/// The drop-down's rows: "no venv" first, then every available venv, then the register entry.
+/// A free function so the index-to-action mapping a click relies on can be tested without
+/// standing up an App (which would need real ptys).
+fn venv_rows(
+    active: Option<&str>,
+    available: &[String],
+    registered: &[settings::RegisteredVenv],
+    lang: Lang,
+) -> Vec<VenvRow> {
+    let mut rows = vec![VenvRow {
+        label: i18n::t(lang, Key::ToolbarVenvNone).to_string(),
+        detail: None,
+        active: active.is_none(),
+        action: VenvRowAction::Select(None),
+    }];
+    for venv in available {
+        rows.push(VenvRow {
+            label: ui::venv_display_name(venv, registered),
+            // The full path, dimmed, so two venvs with the same folder name stay tellable apart.
+            detail: Some(venv.clone()),
+            active: active == Some(venv.as_str()),
+            action: VenvRowAction::Select(Some(venv.clone())),
+        });
+    }
+    rows.push(VenvRow {
+        label: i18n::t(lang, Key::VenvRegisterItem).to_string(),
+        detail: None,
+        active: false,
+        action: VenvRowAction::Register,
+    });
+    rows
+}
+
+pub enum VenvRowAction {
+    /// Use this venv, or the system python for `None`.
+    Select(Option<String>),
+    /// Open the box that registers a venv from elsewhere on disk.
+    Register,
+}
+
+/// Registering a venv asks for two things in turn: where it is, then what to call it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum VenvRegisterStep {
+    Path,
+    Nickname,
+}
+
 impl EditorPane {
     /// Index into per-pane state kept side by side, such as the tab strip's scroll offset.
     pub fn index(self) -> usize {
@@ -63,6 +120,9 @@ pub struct App {
     /// list of open files scrolls horizontally instead of running off the edge. Rendering
     /// still pulls the active tab back into view, so this is a starting point, not a promise.
     pub tab_offsets: [usize; 2],
+    /// The active tab each pane's offset was last reconciled against, so the strip is only
+    /// scrolled to reveal the active tab when that tab actually changes.
+    tab_revealed: [Option<usize>; 2],
     pub terminals: Vec<TerminalPanel>,
     pub active_terminal: usize,
     pub focus: Focus,
@@ -83,6 +143,13 @@ pub struct App {
     pub show_rename: bool,
     pub rename_target: Option<PathBuf>,
     pub rename_input: String,
+    /// Selected row while the venv drop-down is open under its toolbar button.
+    pub venv_dropdown: Option<usize>,
+    /// Which step the "register a venv" box is on, when it's open.
+    pub venv_register: Option<VenvRegisterStep>,
+    pub venv_register_input: String,
+    /// The path accepted in step one, waiting for its nickname in step two.
+    venv_register_path: Option<PathBuf>,
     /// Save As box, for a buffer that has never been written to disk.
     pub show_save_as: bool,
     pub save_as_input: String,
@@ -148,12 +215,19 @@ pub fn venv_bin_dir() -> &'static str {
 /// Top-level subdirectories of `root` that look like Python virtualenvs (they carry an
 /// `activate` script in their bin/Scripts dir). Non-recursive: only scans the project
 /// root itself.
+/// What makes a directory a virtualenv: an activate script in its executables directory.
+/// Shared by auto-discovery and by the box that registers one by hand, so both agree on what
+/// counts — a path that merely exists is not a venv.
+pub fn is_venv_dir(path: &std::path::Path) -> bool {
+    path.is_dir() && path.join(venv_bin_dir()).join("activate").exists()
+}
+
 fn discover_venvs(root: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
     let mut venvs: Vec<String> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join(venv_bin_dir()).join("activate").exists())
+        .filter(|p| is_venv_dir(p))
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
     venvs.sort();
@@ -372,6 +446,7 @@ impl App {
             active_editor_right: 0,
             editor_pane_focus: EditorPane::Left,
             tab_offsets: [0, 0],
+            tab_revealed: [None, None],
             terminals: vec![t1, t2],
             active_terminal: 0,
             focus: Focus::FileTree,
@@ -392,6 +467,10 @@ impl App {
             show_rename: false,
             rename_target: None,
             rename_input: String::new(),
+            venv_dropdown: None,
+            venv_register: None,
+            venv_register_input: String::new(),
+            venv_register_path: None,
             show_save_as: false,
             save_as_input: String::new(),
             save_as_target: None,
@@ -1292,21 +1371,134 @@ impl App {
         format!("{quoted} {rest}")
     }
 
-    pub fn cycle_venv(&mut self) {
-        if self.available_venvs.is_empty() {
-            return;
-        }
-        let next = match &self.settings.active_venv {
-            None => Some(self.available_venvs[0].clone()),
-            Some(current) => {
-                let pos = self.available_venvs.iter().position(|v| v == current);
-                match pos {
-                    Some(i) if i + 1 < self.available_venvs.len() => Some(self.available_venvs[i + 1].clone()),
-                    _ => None,
-                }
+    /// Opens the venv drop-down under the toolbar button. Replaces cycling blindly to the next
+    /// venv, which with more than two meant clicking until the right one appeared.
+    pub fn open_venv_dropdown(&mut self) {
+        // Start on the entry that is currently active, so Enter alone changes nothing.
+        let selected = match &self.settings.active_venv {
+            None => 0,
+            Some(active) => {
+                self.available_venvs.iter().position(|v| v == active).map(|i| i + 1).unwrap_or(0)
             }
         };
-        self.settings.active_venv = next;
+        self.venv_dropdown = Some(selected);
+    }
+
+    /// The drop-down's rows: "no venv", every available venv, then the register entry. Built in
+    /// one place so what is drawn and what a click resolves to can't disagree.
+    pub fn venv_dropdown_rows(&self) -> Vec<VenvRow> {
+        venv_rows(
+            self.settings.active_venv.as_deref(),
+            &self.available_venvs,
+            &self.settings.registered_venvs,
+            self.settings.lang,
+        )
+    }
+
+    fn handle_venv_dropdown_key(&mut self, key: KeyEvent) {
+        let Some(selected) = self.venv_dropdown else { return };
+        let len = self.venv_dropdown_rows().len();
+        match key.code {
+            KeyCode::Esc => self.venv_dropdown = None,
+            KeyCode::Up => self.venv_dropdown = Some((selected + len - 1) % len),
+            KeyCode::Down => self.venv_dropdown = Some((selected + 1) % len),
+            KeyCode::Enter => self.activate_venv_row(selected),
+            _ => {}
+        }
+    }
+
+    fn activate_venv_row(&mut self, index: usize) {
+        self.venv_dropdown = None;
+        let mut rows = self.venv_dropdown_rows();
+        if index >= rows.len() {
+            return;
+        }
+        match rows.swap_remove(index).action {
+            VenvRowAction::Select(venv) => self.select_venv(venv),
+            VenvRowAction::Register => self.begin_venv_register(),
+        }
+    }
+
+    fn select_venv(&mut self, venv: Option<String>) {
+        let lang = self.settings.lang;
+        self.status_message = match &venv {
+            Some(v) => i18n::msg_venv_selected(lang, &ui::venv_display_name(v, &self.settings.registered_venvs)),
+            None => i18n::msg_venv_cleared(lang),
+        };
+        self.settings.active_venv = venv;
+    }
+
+    /// Step one of registering a venv: ask for its path.
+    fn begin_venv_register(&mut self) {
+        self.venv_register = Some(VenvRegisterStep::Path);
+        self.venv_register_input.clear();
+        self.venv_register_path = None;
+    }
+
+    fn handle_venv_register_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_venv_register(),
+            KeyCode::Esc => self.cancel_venv_register(),
+            KeyCode::Backspace => {
+                self.venv_register_input.pop();
+            }
+            KeyCode::Char(c) => self.venv_register_input.push(c),
+            _ => {}
+        }
+    }
+
+    pub fn cancel_venv_register(&mut self) {
+        self.venv_register = None;
+        self.venv_register_input.clear();
+        self.venv_register_path = None;
+    }
+
+    fn confirm_venv_register(&mut self) {
+        let lang = self.settings.lang;
+        match self.venv_register {
+            Some(VenvRegisterStep::Path) => {
+                // Same resolution as Save As: absolute, or relative to the project root, with
+                // ~ expanded — this box is typed by hand.
+                let home = dirs::home_dir();
+                let Some(path) = resolve_save_as_path(&self.venv_register_input, &self.root, home.as_deref())
+                else {
+                    return;
+                };
+                // Refuse anything that isn't actually a venv, rather than registering a dead
+                // entry that would silently never appear in the list.
+                if !is_venv_dir(&path) {
+                    self.status_message = i18n::msg_not_a_venv(lang, &path.display().to_string());
+                    return;
+                }
+                self.venv_register_path = Some(path);
+                self.venv_register_input.clear();
+                self.venv_register = Some(VenvRegisterStep::Nickname);
+            }
+            Some(VenvRegisterStep::Nickname) => {
+                let Some(path) = self.venv_register_path.take() else {
+                    self.cancel_venv_register();
+                    return;
+                };
+                let path = path.to_string_lossy().into_owned();
+                let nickname = self.venv_register_input.trim().to_string();
+                self.cancel_venv_register();
+
+                let entry = if nickname.is_empty() {
+                    settings::RegisteredVenv::Path(path.clone())
+                } else {
+                    settings::RegisteredVenv::Named { name: nickname, path: path.clone() }
+                };
+                // Registering the same path twice would show it twice in the list.
+                self.settings.registered_venvs.retain(|r| r.path() != path);
+                self.settings.registered_venvs.push(entry);
+                self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
+                // Selecting it is almost certainly why it was just added.
+                self.select_venv(Some(path));
+                // Persisted now rather than at exit, so a crash can't lose the registration.
+                self.settings.save();
+            }
+            None => {}
+        }
     }
 
     fn cycle_focus(&mut self, forward: bool) {
@@ -1343,6 +1535,14 @@ impl App {
         // until a name is given there is nothing else worth typing at.
         if self.show_save_as {
             self.handle_save_as_key(key);
+            return;
+        }
+        if self.venv_dropdown.is_some() {
+            self.handle_venv_dropdown_key(key);
+            return;
+        }
+        if self.venv_register.is_some() {
+            self.handle_venv_register_key(key);
             return;
         }
         if self.picker.is_some() {
@@ -1567,6 +1767,7 @@ impl App {
             // Deliberately available for a named buffer too, to save a copy under a new name.
             MenuAction::SaveAs => self.begin_save_as(self.active_editor, None),
             MenuAction::SaveAll => self.save_all(),
+            MenuAction::SelectVenv => self.open_venv_dropdown(),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
             MenuAction::Copy => self.copy_selection(),
@@ -2074,6 +2275,19 @@ impl App {
                     self.cancel_save_as();
                     return;
                 }
+                if self.venv_register.is_some() {
+                    self.cancel_venv_register();
+                    return;
+                }
+                if self.venv_dropdown.is_some() {
+                    // Inside the list picks a row; anywhere else dismisses it, like the menus.
+                    let rect = ui::venv_dropdown_rect(self, areas.editor, full);
+                    match rect.map(ui::inner_rect).filter(|inner| within(*inner, col, row)) {
+                        Some(inner) => self.activate_venv_row((row - inner.y) as usize),
+                        None => self.venv_dropdown = None,
+                    }
+                    return;
+                }
                 if self.show_settings {
                     self.mouse_settings(col, row, full);
                     return;
@@ -2270,7 +2484,7 @@ impl App {
         let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width, with_venv);
         if let Some((start, end)) = venv_range {
             if rel_col >= start && rel_col < end {
-                self.cycle_venv();
+                self.open_venv_dropdown();
                 return;
             }
         }
@@ -2283,20 +2497,35 @@ impl App {
         }
     }
 
-    /// The tab strip as currently rendered for `pane`, which is also what a click must be
-    /// mapped against — the stored offset alone isn't enough, since rendering scrolls further
-    /// when needed to keep the active tab visible.
+    /// The tab strip exactly as rendered for `pane` — the same call the renderer makes, so a
+    /// click maps to the row the user sees.
     fn tab_strip(&self, tab_bar_width: u16, with_venv: bool, pane: EditorPane) -> ui::TabStrip {
-        let active = match pane {
-            EditorPane::Left => self.active_editor,
-            EditorPane::Right => self.active_editor_right,
-        };
         ui::tab_strip_layout(
             &ui::tab_widths(self),
             ui::tab_strip_width(self, tab_bar_width, with_venv),
             self.tab_offsets[pane.index()],
-            active,
         )
+    }
+
+    /// Brings a pane's active tab into view, but only when the active tab has changed since the
+    /// last time this ran. Doing it every frame is what broke scrolling left: the strip snapped
+    /// back to the active tab immediately, so the `‹` arrow looked dead.
+    pub fn reveal_active_tab(&mut self, pane: EditorPane, tab_bar_width: u16, with_venv: bool) {
+        let active = match pane {
+            EditorPane::Left => self.active_editor,
+            EditorPane::Right => self.active_editor_right,
+        };
+        let slot = pane.index();
+        if self.tab_revealed[slot] == Some(active) {
+            return;
+        }
+        self.tab_offsets[slot] = ui::offset_revealing(
+            &ui::tab_widths(self),
+            ui::tab_strip_width(self, tab_bar_width, with_venv),
+            self.tab_offsets[slot],
+            active,
+        );
+        self.tab_revealed[slot] = Some(active);
     }
 
     /// Scrolls a pane's tab strip by `delta` tabs, starting from what is on screen rather
@@ -2425,6 +2654,33 @@ mod tests {
         // Registering the project's own venv by its relative name must not list it twice.
         let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
         assert_eq!(venvs, vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn venv_dropdown_rows_map_positions_to_actions() {
+        let registered = vec![crate::settings::RegisteredVenv::Named {
+            name: "ml".to_string(),
+            path: "/opt/venvs/ml-3.12".to_string(),
+        }];
+        let available = vec![".venv".to_string(), "/opt/venvs/ml-3.12".to_string()];
+        let rows = venv_rows(Some("/opt/venvs/ml-3.12"), &available, &registered, Lang::En);
+
+        // "no venv", one row per venv, then the register entry.
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0].action, VenvRowAction::Select(None)));
+        assert!(matches!(rows[1].action, VenvRowAction::Select(Some(ref v)) if v == ".venv"));
+        assert!(matches!(rows[3].action, VenvRowAction::Register));
+
+        // The nickname is the label; the path stays as the dimmed detail.
+        assert_eq!(rows[2].label, "ml");
+        assert_eq!(rows[2].detail.as_deref(), Some("/opt/venvs/ml-3.12"));
+        // Exactly the venv in use is marked.
+        assert!(rows[2].active);
+        assert!(!rows[0].active && !rows[1].active && !rows[3].active);
+
+        // With no venv selected, the marker moves to the first row.
+        let rows = venv_rows(None, &available, &registered, Lang::En);
+        assert!(rows[0].active);
     }
 
     #[test]

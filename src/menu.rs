@@ -11,6 +11,7 @@ pub enum MenuAction {
     CloseTerminal,
     Save,
     SaveAs,
+    SelectVenv,
     Quit,
     ShowAbout,
     Copy,
@@ -131,7 +132,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
         },
         MenuDef {
             title_key: Key::MenuRun,
-            items: vec![item(Key::ItemRunFile, MenuAction::RunFile, Some("F10"))],
+            items: vec![
+                item(Key::ItemRunFile, MenuAction::RunFile, Some("F10")),
+                item(Key::ItemSelectVenv, MenuAction::SelectVenv, None),
+            ],
         },
         MenuDef {
             title_key: Key::MenuTerminal,
