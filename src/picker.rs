@@ -15,32 +15,63 @@ pub struct PickItem {
     pub action: PickAction,
 }
 
+/// Which chooser this is, so the owner knows whose list to rebuild as the query changes.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum PickerKind {
+    Commands,
+    Files,
+}
+
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds
 /// the full item list plus the indices (best-scoring first) that match the current query.
 pub struct Picker {
     pub title: &'static str,
+    pub kind: PickerKind,
     pub query: String,
     pub items: Vec<PickItem>,
     pub filtered: Vec<usize>,
     pub selected: usize,
+    /// Matched against instead of `query` when they differ. The file picker browsing the disk
+    /// types a whole path, of which only the trailing fragment should filter the listing.
+    pub filter_override: Option<String>,
+    /// True while the query is being read as a filesystem path rather than a project-file
+    /// search, so the owner only rebuilds the list when the mode actually flips.
+    pub path_mode: bool,
 }
 
 impl Picker {
-    pub fn new(title: &'static str, items: Vec<PickItem>) -> Self {
-        let mut p = Picker { title, query: String::new(), items, filtered: Vec::new(), selected: 0 };
+    pub fn new(title: &'static str, kind: PickerKind, items: Vec<PickItem>) -> Self {
+        let mut p = Picker {
+            title,
+            kind,
+            query: String::new(),
+            items,
+            filtered: Vec::new(),
+            selected: 0,
+            filter_override: None,
+            path_mode: false,
+        };
         p.refilter();
         p
     }
 
+    /// Swaps the candidate list, keeping the query, for a picker whose contents depend on what
+    /// has been typed (browsing directories).
+    pub fn set_items(&mut self, items: Vec<PickItem>) {
+        self.items = items;
+        self.refilter();
+    }
+
     pub fn refilter(&mut self) {
-        if self.query.is_empty() {
+        let needle = self.filter_override.clone().unwrap_or_else(|| self.query.clone());
+        if needle.is_empty() {
             self.filtered = (0..self.items.len()).collect();
         } else {
             let mut scored: Vec<(i32, usize)> = self
                 .items
                 .iter()
                 .enumerate()
-                .filter_map(|(i, it)| fuzzy_score(&self.query, &it.label).map(|s| (s, i)))
+                .filter_map(|(i, it)| fuzzy_score(&needle, &it.label).map(|s| (s, i)))
                 .collect();
             // Higher score first; ties keep original order for stability.
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -133,7 +164,7 @@ mod tests {
             PickItem { label: "File: Save All".into(), shortcut: None, action: PickAction::Command(MenuAction::SaveAll) },
             PickItem { label: "Edit: Copy".into(), shortcut: None, action: PickAction::Command(MenuAction::Copy) },
         ];
-        let mut p = Picker::new("Commands", items);
+        let mut p = Picker::new("Commands", PickerKind::Commands, items);
         p.query = "save".into();
         p.refilter();
         // Both "Save" entries match; "Copy" doesn't.

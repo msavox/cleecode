@@ -397,6 +397,56 @@ fn within(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
+/// Reads a quick-open query as a filesystem path, returning the directory to list and the
+/// fragment to filter its entries by. `None` when the query is an ordinary project-file search:
+/// only a leading `/`, `~`, `./` or `../` means "browse the disk", so typing a plain name still
+/// searches the project.
+///
+/// A query ending in a separator lists that directory whole; otherwise the last component is
+/// treated as what the user is partway through typing.
+fn path_query(query: &str, root: &std::path::Path, home: Option<&std::path::Path>) -> Option<(PathBuf, String)> {
+    let trimmed = query.trim_start();
+    let base: PathBuf = if let Some(rest) = trimmed.strip_prefix("~/") {
+        home?.join(rest)
+    } else if trimmed == "~" || trimmed == "~/" {
+        home?.to_path_buf()
+    } else if trimmed.starts_with('/') {
+        PathBuf::from(trimmed)
+    } else if trimmed.starts_with("./") || trimmed.starts_with("../") {
+        root.join(trimmed)
+    } else {
+        return None;
+    };
+
+    // A trailing separator means the whole thing is the directory to list.
+    if trimmed.ends_with('/') || trimmed == "~" {
+        return Some((base, String::new()));
+    }
+    let fragment = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = base.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("/"));
+    Some((dir, fragment))
+}
+
+/// Directory entries for the quick-open browser: directories first, then files, each
+/// alphabetically, with dotfiles omitted unless `show_hidden`. An unreadable directory yields
+/// nothing rather than an error, since the user may still be typing its name.
+fn list_dir_entries(dir: &std::path::Path, show_hidden: bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            show_hidden
+                || !p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false)
+        })
+        .collect();
+    paths.sort_by_key(|p| {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        (!p.is_dir(), name)
+    });
+    paths
+}
+
 /// Turns what was typed in the Save As box into a path. A bare name or a relative path hangs
 /// off the project root, an absolute one is taken as it is, and `~` is expanded — the box is
 /// typed by hand, so a home-relative path is a reasonable thing to write. `None` for a name
@@ -1000,22 +1050,80 @@ impl App {
                 });
             }
         }
-        self.picker = Some(crate::picker::Picker::new("Command palette", items));
+        self.picker = Some(crate::picker::Picker::new("Command palette", crate::picker::PickerKind::Commands, items));
     }
 
     fn open_file_picker(&mut self) {
+        let items = self.project_file_items();
+        self.picker =
+            Some(crate::picker::Picker::new("Open file (type / or ~ to browse)", crate::picker::PickerKind::Files, items));
+    }
+
+    /// Every file under the project root, the quick-open default: type a few characters to jump
+    /// to one without walking the tree.
+    fn project_file_items(&self) -> Vec<crate::picker::PickItem> {
         let mut files = Vec::new();
         collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
         files.sort();
         let root = self.root.clone();
-        let items = files
+        files
             .into_iter()
             .map(|p| {
                 let label = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
                 crate::picker::PickItem { label, shortcut: None, action: crate::picker::PickAction::OpenFile(p) }
             })
-            .collect();
-        self.picker = Some(crate::picker::Picker::new("Open file", items));
+            .collect()
+    }
+
+    /// Keeps the file picker's list in step with what has been typed. A query starting with `/`,
+    /// `~`, `./` or `../` browses the disk — the project-file list can only ever offer what is
+    /// under the root, which is why opening anything outside it used to be impossible from here.
+    fn refresh_file_picker(&mut self) {
+        let Some(query) = self
+            .picker
+            .as_ref()
+            .filter(|p| p.kind == crate::picker::PickerKind::Files)
+            .map(|p| p.query.clone())
+        else {
+            return;
+        };
+        let home = dirs::home_dir();
+        match path_query(&query, &self.root, home.as_deref()) {
+            Some((dir, fragment)) => {
+                let show_hidden = self.settings.show_hidden_files;
+                let items: Vec<crate::picker::PickItem> = list_dir_entries(&dir, show_hidden)
+                    .into_iter()
+                    .map(|path| {
+                        let is_dir = path.is_dir();
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        crate::picker::PickItem {
+                            // The trailing slash is the only cue that Enter will descend rather
+                            // than open.
+                            label: if is_dir { format!("{name}/") } else { name },
+                            shortcut: None,
+                            action: crate::picker::PickAction::OpenFile(path),
+                        }
+                    })
+                    .collect();
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.path_mode = true;
+                    picker.filter_override = Some(fragment);
+                    picker.set_items(items);
+                }
+            }
+            None => {
+                // Back from browsing to searching the project. Rebuilt only on the transition,
+                // since walking the tree on every keystroke would be wasteful.
+                if self.picker.as_ref().is_some_and(|p| p.path_mode) {
+                    let items = self.project_file_items();
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.path_mode = false;
+                        picker.filter_override = None;
+                        picker.set_items(items);
+                    }
+                }
+            }
+        }
     }
 
     fn handle_picker_key(&mut self, key: KeyEvent) {
@@ -1037,11 +1145,13 @@ impl App {
                 if let Some(p) = self.picker.as_mut() {
                     p.pop_char();
                 }
+                self.refresh_file_picker();
             }
             KeyCode::Char(c) if !ctrl => {
                 if let Some(p) = self.picker.as_mut() {
                     p.push_char(c);
                 }
+                self.refresh_file_picker();
             }
             _ => {}
         }
@@ -1056,11 +1166,23 @@ impl App {
                 crate::picker::PickAction::OpenFile(p) => file = Some(p.clone()),
             }
         }
-        self.picker = None;
         if let Some(a) = cmd {
+            self.picker = None;
             self.run_menu_action(a);
         } else if let Some(p) = file {
-            self.open_file_in_tab(p);
+            // A directory is somewhere to go, not something to open: descend into it and keep
+            // browsing, which is what makes typing a path a usable way to walk the disk.
+            if p.is_dir() {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.query = format!("{}/", p.to_string_lossy().trim_end_matches('/'));
+                }
+                self.refresh_file_picker();
+            } else {
+                self.picker = None;
+                self.open_file_in_tab(p);
+            }
+        } else {
+            self.picker = None;
         }
     }
 
@@ -2654,6 +2776,55 @@ mod tests {
         // Registering the project's own venv by its relative name must not list it twice.
         let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
         assert_eq!(venvs, vec![".venv".to_string()]);
+    }
+
+    #[test]
+    fn path_query_only_triggers_on_a_path_like_query() {
+        let root = std::path::Path::new("/work/project");
+        let home = std::path::Path::new("/Users/someone");
+        let q = |s: &str| path_query(s, root, Some(home));
+
+        // A plain name stays a project-file search, which is the common case.
+        assert_eq!(q("main.rs"), None);
+        assert_eq!(q("src/lib"), None);
+        assert_eq!(q(""), None);
+
+        // Absolute: split into the directory to list and the fragment being typed.
+        assert_eq!(q("/etc/ho"), Some((PathBuf::from("/etc"), "ho".to_string())));
+        // A trailing slash lists that directory whole.
+        assert_eq!(q("/etc/"), Some((PathBuf::from("/etc"), String::new())));
+        // Home-relative and root-relative forms.
+        assert_eq!(q("~/notes"), Some((home.to_path_buf(), "notes".to_string())));
+        assert_eq!(q("~/"), Some((home.to_path_buf(), String::new())));
+        assert_eq!(q("./src/ma"), Some((root.join("./src"), "ma".to_string())));
+        assert_eq!(q("../oth"), Some((PathBuf::from("/work/project/.."), "oth".to_string())));
+        // Without a home directory, `~` can't be resolved and is not treated as a path.
+        assert_eq!(path_query("~/x", root, None), None);
+    }
+
+    #[test]
+    fn list_dir_entries_puts_directories_first_and_hides_dotfiles() {
+        let dir = setup_dir("listing");
+        std::fs::create_dir_all(dir.join("zsub")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden_dir")).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join(".hidden"), "h").unwrap();
+
+        let names = |show_hidden: bool| {
+            list_dir_entries(&dir, show_hidden)
+                .into_iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // The directory sorts before the file even though its name is later alphabetically.
+        assert_eq!(names(false), vec!["zsub".to_string(), "a.txt".to_string()]);
+        let shown = names(true);
+        assert!(shown.contains(&".hidden".to_string()) && shown.contains(&".hidden_dir".to_string()));
+        // Still directories first when hidden entries are shown.
+        assert_eq!(shown[0], ".hidden_dir");
+
+        // An unreadable or missing directory is empty, not an error: the user may still be typing.
+        assert!(list_dir_entries(&dir.join("nope"), true).is_empty());
     }
 
     #[test]
