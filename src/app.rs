@@ -59,10 +59,13 @@ fn venv_rows(
         action: VenvRowAction::Select(None),
     }];
     for venv in available {
+        let label = ui::venv_display_name(venv, registered);
         rows.push(VenvRow {
-            label: ui::venv_display_name(venv, registered),
-            // The full path, dimmed, so two venvs with the same folder name stay tellable apart.
-            detail: Some(venv.clone()),
+            // The full path, dimmed, so two venvs with the same folder name stay tellable
+            // apart — but not when it would just repeat the label, as it does for the plain
+            // project-root venvs.
+            detail: (*venv != label).then(|| venv.clone()),
+            label,
             active: active == Some(venv.as_str()),
             action: VenvRowAction::Select(Some(venv.clone())),
         });
@@ -215,6 +218,14 @@ pub fn venv_bin_dir() -> &'static str {
 /// Top-level subdirectories of `root` that look like Python virtualenvs (they carry an
 /// `activate` script in their bin/Scripts dir). Non-recursive: only scans the project
 /// root itself.
+/// The venv that would actually be used: the remembered one, but only while it is among those
+/// available here. `active_venv` is global, so a project without that venv would otherwise show
+/// it in the toolbar while runs silently used system python.
+pub fn effective_venv<'a>(active: Option<&'a str>, available: &[String]) -> Option<&'a str> {
+    let active = active?;
+    available.iter().any(|v| v == active).then_some(active)
+}
+
 /// What makes a directory a virtualenv: an activate script in its executables directory.
 /// Shared by auto-discovery and by the box that registers one by hand, so both agree on what
 /// counts — a path that merely exists is not a venv.
@@ -2828,6 +2839,18 @@ mod tests {
     }
 
     #[test]
+    fn effective_venv_ignores_one_that_is_not_here() {
+        let available = vec![".venv".to_string(), "/opt/venvs/ml".to_string()];
+        assert_eq!(effective_venv(Some(".venv"), &available), Some(".venv"));
+        assert_eq!(effective_venv(Some("/opt/venvs/ml"), &available), Some("/opt/venvs/ml"));
+        // Remembered from another project, absent here: reported as none, which is what running
+        // a file would actually do.
+        assert_eq!(effective_venv(Some(".venv-old"), &available), None);
+        assert_eq!(effective_venv(Some(".venv"), &[]), None);
+        assert_eq!(effective_venv(None, &available), None);
+    }
+
+    #[test]
     fn venv_dropdown_rows_map_positions_to_actions() {
         let registered = vec![crate::settings::RegisteredVenv::Named {
             name: "ml".to_string(),
@@ -2845,6 +2868,9 @@ mod tests {
         // The nickname is the label; the path stays as the dimmed detail.
         assert_eq!(rows[2].label, "ml");
         assert_eq!(rows[2].detail.as_deref(), Some("/opt/venvs/ml-3.12"));
+        // A project-root venv's label already *is* its path, so it carries no detail to repeat.
+        assert_eq!(rows[1].label, ".venv");
+        assert_eq!(rows[1].detail, None);
         // Exactly the venv in use is marked.
         assert!(rows[2].active);
         assert!(!rows[0].active && !rows[1].active && !rows[3].active);

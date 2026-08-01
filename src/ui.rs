@@ -289,7 +289,10 @@ pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) ->
 }
 
 fn venv_button_label(app: &App) -> String {
-    match &app.settings.active_venv {
+    // The selected venv is remembered globally, so opening a project that doesn't have it left
+    // the button naming a venv that isn't there while runs quietly fell back to system python.
+    // The label follows what would actually be used.
+    match crate::app::effective_venv(app.settings.active_venv.as_deref(), &app.available_venvs) {
         Some(name) => format!(" venv: {} \u{25be} ", venv_display_name(name, &app.settings.registered_venvs)),
         None => format!(" {} \u{25be} ", i18n::t(app.settings.lang, Key::ToolbarVenvNone)),
     }
