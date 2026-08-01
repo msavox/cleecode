@@ -2,6 +2,17 @@
 name = "cleecode"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal IDE: editor with a file-tree sidebar, embedded terminals, syntax highlighting and a run button"
+authors = ["Matteo Savoia"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/msavox/cleecode"
+homepage = "https://github.com/msavox/cleecode"
+keywords = ["editor", "terminal", "tui", "ide", "ratatui"]
+categories = ["text-editors", "command-line-utilities"]
+# Screenshots and CI config aren't needed to build. assets/ must stay: the font is
+# include_bytes!-ed into the binary for --install-font, so excluding it breaks the build.
+exclude = ["docs/", ".github/"]
 
 # The crate stays "cleecode" but the built command is the shorter "clee".
 [[bin]]

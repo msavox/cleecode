@@ -28,13 +28,55 @@ all inside your terminal. No mouse required, but it's there if you want it.
 
 ![Split editor view](docs/screenshots/split.png)
 
-## Getting started
+## Installing
+
+### macOS — Homebrew
+
+```bash
+brew install msavox/clee/clee
+```
+
+Prebuilt macOS binaries (arm64 and x86_64) are also attached to each
+[release](https://github.com/msavox/cleecode/releases).
+
+### Linux and Windows — build it yourself
+
+Prebuilt binaries for these are coming soon; until then, building takes one command. You
+need a [Rust toolchain](https://rustup.rs) (1.85 or newer, for edition 2024).
+
+**Linux.** The clipboard integration needs the X11/xcb development headers:
+
+```bash
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+# Fedora
+sudo dnf install gcc pkgconf-pkg-config libxcb-devel
+# Arch
+sudo pacman -S base-devel libxcb
+
+cargo install --locked --git https://github.com/msavox/cleecode
+```
+
+**Windows.** Install Rust with the MSVC toolchain (rustup's default) plus the *Desktop
+development with C++* workload from the Visual Studio Build Tools, then:
+
+```powershell
+cargo install --locked --git https://github.com/msavox/cleecode
+```
+
+Either way `cargo install` puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so
+make sure that's on your `PATH`. Note that CleeCode is developed and tested on macOS: the
+Linux and Windows code paths are written but not yet exercised on those platforms, so treat
+them as experimental and please report what breaks.
+
+### From a clone
 
 ```bash
 cargo build --release
 ./target/release/clee              # opens the current directory (or resumes the last workspace)
 ./target/release/clee src/main.rs  # opens the current directory with a file pre-opened
 ./target/release/clee ./some-dir   # opens that directory as the project root
+./target/release/clee --help       # usage, --version, --install-font
 ```
 
 Launching with a file or folder argument skips the startup splash and goes straight in;
@@ -100,7 +142,12 @@ confirmation), `H` toggles hidden files.
 
 ## Requirements
 
-Cross-platform: builds and runs on macOS, Linux and Windows. System-clipboard access goes
+**macOS** is the supported platform — it's where CleeCode is developed, tested and released.
+**Linux and Windows** are written for throughout (paths, clipboard, shell, fonts and venvs
+all have per-OS handling) but are not yet verified on those systems: build from source as
+described above and expect rough edges. CI compile-checks both so the gap stays visible.
+
+System-clipboard access goes
 through [arboard](https://github.com/1Password/arboard) (native clipboard on each OS),
 process inspection for the `scp`-on-drop and Run features uses
 [sysinfo](https://github.com/GuillaumeGomez/sysinfo), and config/font paths resolve via
@@ -112,3 +159,9 @@ The terminal pane launches `$SHELL` (falling back to `/bin/bash`) on Unix and `%
 ## Status
 
 Personal project, actively evolving.
+
+## License
+
+[MIT](LICENSE). The bundled font (`assets/fonts/`) is a renamed Nerd Font-patched build of
+JetBrains Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own
+terms.

@@ -24,8 +24,36 @@ use settings::Settings;
 use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
 
+/// One-line usage text, printed for `--help` and by `--version`'s sibling flags. Kept
+/// hand-rolled (rather than pulling in an argument parser) because the whole surface is one
+/// optional path plus two flags.
+const USAGE: &str = "\
+clee — CleeCode, a terminal IDE
+
+USAGE:
+    clee [FILE|DIRECTORY]
+
+    A directory becomes the project root; a file is opened in the current directory.
+    With no argument, the last project folder and its open files are restored.
+
+OPTIONS:
+    --install-font    Install the bundled CleeCodeMono Nerd Font for the current user
+    -h, --help        Print this help
+    -V, --version     Print the version
+";
+
 fn main() -> Result<()> {
-    if std::env::args().any(|a| a == "--install-font") {
+    // Flags are checked before the terminal is taken over, so their output stays visible.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{USAGE}");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("clee {} (cleecode)", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--install-font") {
         font_install::install();
         return Ok(());
     }

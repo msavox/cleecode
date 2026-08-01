@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # macOS is the supported platform, so this one gates.
+  test:
+    name: Build and test (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      - run: cargo test --locked
+      # Smoke-check the flags that don't need a terminal, so a released binary can at
+      # least identify itself (Homebrew's `brew test` relies on --version).
+      - run: ./target/release/clee --version
+      - run: ./target/release/clee --help
+
+  # Linux and Windows are not released yet ("coming soon"), and their cfg-gated code has
+  # never been compiled. These jobs exist to report exactly that, so the gap is visible
+  # without blocking work on macOS.
+  other-platforms:
+    name: Compile check (${{ matrix.os }}, not yet supported)
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Linux needs X11/clipboard headers for arboard; without them the failure would be a
+      # missing system library rather than anything about our code.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - run: cargo check --locked --all-targets
+
+  # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
+  # Adopting either is a repo-wide change, so it stays a deliberate decision.
+  lints:
+    name: Lints (informational)
+    continue-on-error: true
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets
