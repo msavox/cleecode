@@ -76,6 +76,8 @@ font setting at it manually.
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
 | `Ctrl+Left/Right` | Move by word (`Shift` extends the selection) |
 | `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
+| `Ctrl+F` | Find / replace in the current file |
+| `Ctrl+G` | Go to line |
 | `Ctrl+/` | Toggle line comment on the line/selection |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
@@ -84,8 +86,9 @@ font setting at it manually.
 | `Ctrl+PageUp/Down` | Switch terminal |
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse (or jump to parent), `Enter` or a
-double-click opens a file / makes a folder the new root / walks up via `..`, `Delete`
-removes a file (with confirmation), `H` toggles hidden files.
+double-click opens a file / makes a folder the new root / walks up via `..`, `n` / `N`
+create a new file / folder in the selected directory, `E` renames, `Delete` removes (with
+confirmation), `H` toggles hidden files.
 
 ## Requirements
 

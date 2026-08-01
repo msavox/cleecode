@@ -94,6 +94,10 @@ pub enum Key {
     ItemDuplicateLine,
     ItemMoveLineUp,
     ItemMoveLineDown,
+    ItemFind,
+    ItemGotoLine,
+    ItemNewFile,
+    ItemNewFolder,
     MsgNothingToUndo,
     MsgNothingToRedo,
     MsgNoCommentSyntax,
@@ -308,6 +312,18 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemMoveLineDown) => "Move line down",
         (Lang::It, ItemMoveLineDown) => "Sposta riga giù",
 
+        (Lang::En, ItemFind) => "Find / Replace...",
+        (Lang::It, ItemFind) => "Trova / Sostituisci...",
+
+        (Lang::En, ItemGotoLine) => "Go to line...",
+        (Lang::It, ItemGotoLine) => "Vai alla riga...",
+
+        (Lang::En, ItemNewFile) => "New file...",
+        (Lang::It, ItemNewFile) => "Nuovo file...",
+
+        (Lang::En, ItemNewFolder) => "New folder...",
+        (Lang::It, ItemNewFolder) => "Nuova cartella...",
+
         (Lang::En, MsgNothingToUndo) => "Nothing to undo",
         (Lang::It, MsgNothingToUndo) => "Niente da annullare",
 
@@ -344,6 +360,50 @@ pub fn msg_unsaved_choices(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "S = save & continue · Y/Enter = discard · Esc = cancel",
         Lang::It => "S = salva e continua · Y/Invio = scarta · Esc = annulla",
+    }
+}
+
+pub fn msg_find_hint(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Enter/↑↓ next/prev · Tab field · Ctrl+R replace · Ctrl+A all · Esc close",
+        Lang::It => "Invio/↑↓ succ/prec · Tab campo · Ctrl+R sostituisci · Ctrl+A tutti · Esc chiudi",
+    }
+}
+
+pub fn msg_goto_prompt(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Go to line:",
+        Lang::It => "Vai alla riga:",
+    }
+}
+
+pub fn msg_new_entry_prompt(lang: Lang, is_dir: bool) -> &'static str {
+    match (lang, is_dir) {
+        (Lang::En, false) => "New file name:",
+        (Lang::En, true) => "New folder name:",
+        (Lang::It, false) => "Nome nuovo file:",
+        (Lang::It, true) => "Nome nuova cartella:",
+    }
+}
+
+pub fn msg_replaced_all(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::En => format!("Replaced {count} occurrence(s)"),
+        Lang::It => format!("Sostituite {count} occorrenze"),
+    }
+}
+
+pub fn msg_created_entry(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("Created: {path}"),
+        Lang::It => format!("Creato: {path}"),
+    }
+}
+
+pub fn msg_create_entry_error(lang: Lang, err: &str) -> String {
+    match lang {
+        Lang::En => format!("Could not create: {err}"),
+        Lang::It => format!("Impossibile creare: {err}"),
     }
 }
 

@@ -869,6 +869,50 @@ impl Editor {
         self.syntax_dirty = true;
     }
 
+    /// Moves the cursor to the start of `line_1based` (clamped to the document), clearing
+    /// any selection. Used by Go-to-line.
+    pub fn goto_line(&mut self, line_1based: usize) {
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        self.cursor_line = line_1based.saturating_sub(1).min(max_line);
+        self.cursor_col = 0;
+        self.selection_anchor = None;
+        self.folds.clear();
+    }
+
+    /// Selects the absolute char range `[start, end)`, placing the cursor at `end`. Used by
+    /// find to highlight the current match via the normal selection rendering.
+    pub fn select_char_range(&mut self, start: usize, end: usize) {
+        let total = self.rope.len_chars();
+        let start = start.min(total);
+        let end = end.min(total);
+        let sl = self.rope.char_to_line(start);
+        let sc = start - self.rope.line_to_char(sl);
+        let el = self.rope.char_to_line(end);
+        let ec = end - self.rope.line_to_char(el);
+        self.folds.clear();
+        self.selection_anchor = Some((sl, sc));
+        self.cursor_line = el;
+        self.cursor_col = ec;
+    }
+
+    /// Replaces the absolute char range `[start, end)` with `text` as one undo step, leaving
+    /// the cursor just after the inserted text. Used by find-and-replace.
+    pub fn replace_char_range(&mut self, start: usize, end: usize, text: &str) {
+        let total = self.rope.len_chars();
+        let start = start.min(total);
+        let end = end.min(total);
+        if start > end {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        self.rope.remove(start..end);
+        self.rope.insert(start, text);
+        self.selection_anchor = None;
+        self.set_cursor_char_idx(start + text.chars().count());
+        self.dirty = true;
+        self.syntax_dirty = true;
+    }
+
     pub fn adjust_scroll(&mut self, viewport_height: usize, viewport_width: usize) {
         if viewport_height > 0 {
             if self.cursor_line < self.top_line {

@@ -37,6 +37,10 @@ pub enum MenuAction {
     DuplicateLine,
     MoveLineUp,
     MoveLineDown,
+    Find,
+    GotoLine,
+    NewFile,
+    NewFolder,
 }
 
 pub struct MenuItemDef {
@@ -69,6 +73,8 @@ pub fn menu_defs() -> Vec<MenuDef> {
         MenuDef {
             title_key: Key::MenuFile,
             items: vec![
+                item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
+                item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
                 item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
                 item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Alt+S")),
                 item(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
@@ -85,6 +91,8 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
                 item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
+                item(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
+                item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
                 item(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
                 item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
                 item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),

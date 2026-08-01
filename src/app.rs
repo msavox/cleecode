@@ -71,6 +71,15 @@ pub struct App {
     pub rename_input: String,
     /// When set, an unsaved-changes prompt is up, holding back the given action.
     pub unsaved_prompt: Option<UnsavedPrompt>,
+    /// In-file find / find-and-replace overlay state, when open.
+    pub find: Option<crate::find::FindState>,
+    /// Go-to-line prompt state.
+    pub show_goto: bool,
+    pub goto_input: String,
+    /// New file/folder prompt state (created in the tree's selected directory).
+    pub show_new_entry: bool,
+    pub new_entry_is_dir: bool,
+    pub new_entry_input: String,
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
@@ -234,6 +243,12 @@ impl App {
             rename_target: None,
             rename_input: String::new(),
             unsaved_prompt: None,
+            find: None,
+            show_goto: false,
+            goto_input: String::new(),
+            show_new_entry: false,
+            new_entry_is_dir: false,
+            new_entry_input: String::new(),
             resize_mode: false,
             dragging: None,
             available_venvs,
@@ -515,6 +530,213 @@ impl App {
         }
     }
 
+    // ---- Find / replace -------------------------------------------------------------
+
+    fn editor_cursor_char_idx(&self) -> usize {
+        let ed = self.editor();
+        ed.rope.line_to_char(ed.cursor_line) + ed.cursor_col
+    }
+
+    fn open_find(&mut self, _replace: bool) {
+        let mut fs = crate::find::FindState::new();
+        // Seed the query from a single-line selection, the way most editors do.
+        if let Some(sel) = self.editor().selected_text() {
+            if !sel.is_empty() && !sel.contains('\n') {
+                fs.query = sel;
+            }
+        }
+        let text = self.editor().rope.to_string();
+        let from = self.editor_cursor_char_idx();
+        fs.recompute(&text, from);
+        self.find = Some(fs);
+        self.apply_find_selection();
+    }
+
+    /// Recomputes matches after the query changed, biasing the current match to the cursor.
+    fn recompute_find(&mut self) {
+        let text = self.editor().rope.to_string();
+        let from = self.editor_cursor_char_idx();
+        if let Some(f) = self.find.as_mut() {
+            f.recompute(&text, from);
+        }
+        self.apply_find_selection();
+    }
+
+    /// Selects the current match so it's visible via the normal selection highlight.
+    fn apply_find_selection(&mut self) {
+        let Some(m) = self.find.as_ref().and_then(|f| f.current_match()) else { return };
+        self.editor_mut().select_char_range(m.0, m.1);
+    }
+
+    fn replace_current(&mut self) {
+        let (Some(m), replace) = (
+            self.find.as_ref().and_then(|f| f.current_match()),
+            self.find.as_ref().map(|f| f.replace.clone()).unwrap_or_default(),
+        ) else {
+            return;
+        };
+        self.editor_mut().replace_char_range(m.0, m.1, &replace);
+        // Matches shifted; recompute and land on the next one from the edit point.
+        self.recompute_find();
+    }
+
+    fn replace_all(&mut self) {
+        let Some(f) = self.find.as_ref() else { return };
+        if f.query.is_empty() || f.matches.is_empty() {
+            return;
+        }
+        let replace = f.replace.clone();
+        // Replace from the last match backwards so earlier char indices stay valid.
+        let matches: Vec<(usize, usize)> = f.matches.clone();
+        let count = matches.len();
+        for &(s, e) in matches.iter().rev() {
+            self.editor_mut().replace_char_range(s, e, &replace);
+        }
+        let lang = self.settings.lang;
+        self.status_message = i18n::msg_replaced_all(lang, count);
+        self.recompute_find();
+    }
+
+    fn handle_find_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.find = None;
+                self.editor_mut().clear_selection();
+            }
+            KeyCode::Char('a') if ctrl => self.replace_all(),
+            KeyCode::Char('r') if ctrl => self.replace_current(),
+            KeyCode::Enter | KeyCode::Down => {
+                if let Some(f) = self.find.as_mut() {
+                    f.next();
+                }
+                self.apply_find_selection();
+            }
+            KeyCode::Up => {
+                if let Some(f) = self.find.as_mut() {
+                    f.prev();
+                }
+                self.apply_find_selection();
+            }
+            KeyCode::Tab => {
+                if let Some(f) = self.find.as_mut() {
+                    f.focus_replace = !f.focus_replace;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = self.find.as_mut() {
+                    if f.focus_replace {
+                        f.replace.pop();
+                    } else {
+                        f.query.pop();
+                    }
+                }
+                self.recompute_find();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                let mut changed_query = false;
+                if let Some(f) = self.find.as_mut() {
+                    if f.focus_replace {
+                        f.replace.push(c);
+                    } else {
+                        f.query.push(c);
+                        changed_query = true;
+                    }
+                }
+                if changed_query {
+                    self.recompute_find();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- Go to line -----------------------------------------------------------------
+
+    fn open_goto(&mut self) {
+        self.show_goto = true;
+        self.goto_input.clear();
+    }
+
+    fn handle_goto_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_goto = false;
+            }
+            KeyCode::Enter => {
+                if let Ok(line) = self.goto_input.trim().parse::<usize>() {
+                    if line > 0 {
+                        self.editor_mut().goto_line(line);
+                    }
+                }
+                self.show_goto = false;
+            }
+            KeyCode::Backspace => {
+                self.goto_input.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => self.goto_input.push(c),
+            _ => {}
+        }
+    }
+
+    // ---- New file / folder ----------------------------------------------------------
+
+    fn open_new_entry(&mut self, is_dir: bool) {
+        self.show_new_entry = true;
+        self.new_entry_is_dir = is_dir;
+        self.new_entry_input.clear();
+    }
+
+    fn handle_new_entry_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_new_entry = false;
+            }
+            KeyCode::Enter => {
+                self.confirm_new_entry();
+                self.show_new_entry = false;
+            }
+            KeyCode::Backspace => {
+                self.new_entry_input.pop();
+            }
+            KeyCode::Char(c) => self.new_entry_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn confirm_new_entry(&mut self) {
+        let lang = self.settings.lang;
+        let name = self.new_entry_input.trim();
+        if name.is_empty() {
+            return;
+        }
+        let dest = self.file_tree.selected_dir().join(name);
+        let is_dir = self.new_entry_is_dir;
+        let result = if is_dir {
+            std::fs::create_dir_all(&dest)
+        } else {
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Don't clobber an existing file.
+            if dest.exists() {
+                Ok(())
+            } else {
+                std::fs::write(&dest, "")
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.file_tree = FileTree::new(self.root.clone());
+                self.status_message = i18n::msg_created_entry(lang, &dest.display().to_string());
+                if !is_dir {
+                    self.open_file_in_tab(dest);
+                }
+            }
+            Err(e) => self.status_message = i18n::msg_create_entry_error(lang, &e.to_string()),
+        }
+    }
+
     fn save_active_file(&mut self) {
         let lang = self.settings.lang;
         match self.editor_mut().save() {
@@ -731,6 +953,18 @@ impl App {
             self.handle_unsaved_prompt_key(key);
             return;
         }
+        if self.find.is_some() {
+            self.handle_find_key(key);
+            return;
+        }
+        if self.show_goto {
+            self.handle_goto_key(key);
+            return;
+        }
+        if self.show_new_entry {
+            self.handle_new_entry_key(key);
+            return;
+        }
         if self.show_delete_confirm {
             self.handle_delete_confirm_key(key);
             return;
@@ -941,6 +1175,10 @@ impl App {
             MenuAction::DuplicateLine => self.editor_mut().duplicate_line(),
             MenuAction::MoveLineUp => self.editor_mut().move_line_up(),
             MenuAction::MoveLineDown => self.editor_mut().move_line_down(),
+            MenuAction::Find => self.open_find(false),
+            MenuAction::GotoLine => self.open_goto(),
+            MenuAction::NewFile => self.open_new_entry(false),
+            MenuAction::NewFolder => self.open_new_entry(true),
         }
     }
 
@@ -1163,6 +1401,8 @@ impl App {
             }
             KeyCode::Char('h') | KeyCode::Char('H') => self.toggle_hidden_files(),
             KeyCode::Char('e') | KeyCode::Char('E') => self.start_rename(),
+            KeyCode::Char('n') => self.open_new_entry(false),
+            KeyCode::Char('N') => self.open_new_entry(true),
             _ => {}
         }
     }
@@ -1197,6 +1437,8 @@ impl App {
             KeyCode::Char('z') if ctrl => self.editor_undo(),
             KeyCode::Char('y') if ctrl => self.editor_redo(),
             KeyCode::Char('/') if ctrl => self.toggle_comment(),
+            KeyCode::Char('f') if ctrl => self.open_find(false),
+            KeyCode::Char('g') if ctrl => self.open_goto(),
             // Word-wise motion (Ctrl+←/→, Shift extends) and deletion (Ctrl+Backspace/Delete).
             KeyCode::Left if ctrl => self.move_with_selection(shift, |e| e.move_word_left()),
             KeyCode::Right if ctrl => self.move_with_selection(shift, |e| e.move_word_right()),

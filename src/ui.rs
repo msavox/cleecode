@@ -334,6 +334,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
+    if app.show_goto {
+        draw_goto_modal(f, app, f.area());
+    }
+    if app.show_new_entry {
+        draw_new_entry_modal(f, app, f.area());
+    }
+    if app.find.is_some() {
+        draw_find_modal(f, app, f.area());
+    }
 }
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -527,6 +536,83 @@ fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let cursor_x = inner.x + app.rename_input.chars().count() as u16;
     let cursor_y = inner.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Simple single-line input modal shared by Go-to-line and New file/folder.
+fn draw_input_modal(f: &mut Frame, full: Rect, title: &str, prompt: &str, input: &str) {
+    let rect = centered_rect(60, 6, full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(prompt.to_string()),
+        Line::from(Span::styled(input.to_string(), Style::default().fg(Color::Yellow))),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    f.set_cursor_position((inner.x + input.chars().count() as u16, inner.y + 1));
+}
+
+fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    draw_input_modal(f, full, "Go to line", i18n::msg_goto_prompt(lang), &app.goto_input);
+}
+
+fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    let title = if app.new_entry_is_dir { "New folder" } else { "New file" };
+    let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
+    draw_input_modal(f, full, title, prompt, &app.new_entry_input);
+}
+
+fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
+    let Some(fs) = app.find.as_ref() else { return };
+    let lang = app.settings.lang;
+    let rect = centered_rect(72, 7, full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(" Find / Replace ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let count = if fs.query.is_empty() {
+        String::new()
+    } else if fs.matches.is_empty() {
+        "  (no matches)".to_string()
+    } else {
+        format!("  {}/{}", fs.current + 1, fs.matches.len())
+    };
+    let find_marker = if fs.focus_replace { "  " } else { "▶ " };
+    let repl_marker = if fs.focus_replace { "▶ " } else { "  " };
+    let label = Style::default().fg(Color::Gray);
+    let value = Style::default().fg(Color::Yellow);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!("{find_marker}Find:    "), label),
+            Span::styled(fs.query.clone(), value),
+            Span::styled(count, Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{repl_marker}Replace: "), label),
+            Span::styled(fs.replace.clone(), value),
+        ]),
+        Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    // Cursor sits at the end of whichever field is focused.
+    let (row, text_len) = if fs.focus_replace {
+        (1u16, fs.replace.chars().count())
+    } else {
+        (0u16, fs.query.chars().count())
+    };
+    // "▶ Find:    " / "▶ Replace: " prefixes are both 11 columns wide.
+    f.set_cursor_position((inner.x + 11 + text_len as u16, inner.y + row));
 }
 
 fn git_status_color(status: crate::git_status::FileStatus) -> Color {
