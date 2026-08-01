@@ -328,6 +328,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_delete_confirm {
         draw_delete_confirm_modal(f, app, f.area());
     }
+    if app.unsaved_prompt.is_some() {
+        draw_unsaved_modal(f, app, f.area());
+    }
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
@@ -468,6 +471,35 @@ fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(block, rect);
     let text = i18n::msg_confirm_delete(app.settings.lang, &name);
     f.render_widget(Paragraph::new(Line::from(text)).wrap(Wrap { trim: false }), inner);
+}
+
+pub fn unsaved_modal_rect(full: Rect) -> Rect {
+    centered_rect(64, 6, full)
+}
+
+fn draw_unsaved_modal(f: &mut Frame, app: &App, full: Rect) {
+    use crate::app::UnsavedPrompt;
+    let rect = unsaved_modal_rect(full);
+    f.render_widget(Clear, rect);
+    let lang = app.settings.lang;
+    let count = app.editors.iter().filter(|e| e.dirty).count();
+    let detail = match app.unsaved_prompt {
+        Some(UnsavedPrompt::CloseTab(idx)) => {
+            app.editors.get(idx).map(|e| e.title(lang)).unwrap_or_default()
+        }
+        _ => i18n::msg_unsaved_count(lang, count),
+    };
+    let block = Block::default()
+        .title(" Unsaved changes ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(i18n::msg_unsaved_question(lang, &detail)),
+        Line::from(Span::styled(i18n::msg_unsaved_choices(lang), Style::default().fg(Color::Gray))),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 pub fn rename_modal_rect(full: Rect) -> Rect {

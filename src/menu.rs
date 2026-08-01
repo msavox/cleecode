@@ -31,6 +31,12 @@ pub enum MenuAction {
     RunFile,
     ToggleSplitView,
     ToggleHiddenFiles,
+    Undo,
+    Redo,
+    ToggleComment,
+    DuplicateLine,
+    MoveLineUp,
+    MoveLineDown,
 }
 
 pub struct MenuItemDef {
@@ -66,17 +72,23 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
                 item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Alt+S")),
                 item(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
-                item(Key::ItemNextTab, MenuAction::NextTab, Some("Ctrl+Right")),
-                item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Ctrl+Left")),
+                item(Key::ItemNextTab, MenuAction::NextTab, Some("Alt+.")),
+                item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Alt+,")),
             ],
         },
         MenuDef {
             title_key: Key::MenuEdit,
             items: vec![
+                item(Key::ItemUndo, MenuAction::Undo, Some("Ctrl+Z")),
+                item(Key::ItemRedo, MenuAction::Redo, Some("Ctrl+Y")),
                 item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
                 item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
                 item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
+                item(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
+                item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
+                item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),
+                item(Key::ItemMoveLineDown, MenuAction::MoveLineDown, Some("Alt+↓")),
                 item(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
                 item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
                 item(Key::ItemToggleFold, MenuAction::ToggleFold, Some("F7")),

@@ -88,6 +88,15 @@ pub enum Key {
     Off,
     UntitledFile,
     StatusHelp,
+    ItemUndo,
+    ItemRedo,
+    ItemToggleComment,
+    ItemDuplicateLine,
+    ItemMoveLineUp,
+    ItemMoveLineDown,
+    MsgNothingToUndo,
+    MsgNothingToRedo,
+    MsgNoCommentSyntax,
 }
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -280,6 +289,33 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, StatusHelp) => {
             "F9 menu · F1/F2/F3 focus · F4 impostazioni · F5/F6 terminali · Ctrl+S salva · Ctrl+Q esci"
         }
+
+        (Lang::En, ItemUndo) => "Undo",
+        (Lang::It, ItemUndo) => "Annulla",
+
+        (Lang::En, ItemRedo) => "Redo",
+        (Lang::It, ItemRedo) => "Ripeti",
+
+        (Lang::En, ItemToggleComment) => "Toggle comment",
+        (Lang::It, ItemToggleComment) => "Commenta/decommenta",
+
+        (Lang::En, ItemDuplicateLine) => "Duplicate line",
+        (Lang::It, ItemDuplicateLine) => "Duplica riga",
+
+        (Lang::En, ItemMoveLineUp) => "Move line up",
+        (Lang::It, ItemMoveLineUp) => "Sposta riga su",
+
+        (Lang::En, ItemMoveLineDown) => "Move line down",
+        (Lang::It, ItemMoveLineDown) => "Sposta riga giù",
+
+        (Lang::En, MsgNothingToUndo) => "Nothing to undo",
+        (Lang::It, MsgNothingToUndo) => "Niente da annullare",
+
+        (Lang::En, MsgNothingToRedo) => "Nothing to redo",
+        (Lang::It, MsgNothingToRedo) => "Niente da ripetere",
+
+        (Lang::En, MsgNoCommentSyntax) => "No line-comment syntax for this file type",
+        (Lang::It, MsgNoCommentSyntax) => "Nessuna sintassi di commento per questo tipo di file",
     }
 }
 
@@ -287,6 +323,34 @@ pub fn terminal_title(lang: Lang, index: usize) -> String {
     match lang {
         Lang::En => format!(" Terminal {} ", index + 1),
         Lang::It => format!(" Terminale {} ", index + 1),
+    }
+}
+
+pub fn msg_unsaved_count(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::En => format!("{count} file(s) with unsaved changes"),
+        Lang::It => format!("{count} file con modifiche non salvate"),
+    }
+}
+
+pub fn msg_unsaved_question(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("Unsaved changes in {detail}."),
+        Lang::It => format!("Modifiche non salvate in {detail}."),
+    }
+}
+
+pub fn msg_unsaved_choices(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "S = save & continue · Y/Enter = discard · Esc = cancel",
+        Lang::It => "S = salva e continua · Y/Invio = scarta · Esc = annulla",
+    }
+}
+
+pub fn msg_opened_read_only(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Opened {name} (read-only: binary or non-UTF-8)"),
+        Lang::It => format!("Aperto {name} (sola lettura: binario o non-UTF-8)"),
     }
 }
 

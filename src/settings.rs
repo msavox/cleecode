@@ -92,9 +92,25 @@ impl Default for Settings {
     }
 }
 
+fn config_dir() -> Option<std::path::PathBuf> {
+    // Keep the long-standing ~/.config/cleecode location on Unix (macOS included, where it
+    // predates this cross-platform work) rather than moving to ~/Library/Application
+    // Support, so existing settings are still found. On Windows fall back to %APPDATA%.
+    #[cfg(unix)]
+    {
+        match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(xdg) => Some(std::path::PathBuf::from(xdg).join("cleecode")),
+            None => dirs::home_dir().map(|h| h.join(".config").join("cleecode")),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        dirs::config_dir().map(|d| d.join("cleecode"))
+    }
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config").join("cleecode").join("settings.toml"))
+    config_dir().map(|d| d.join("settings.toml"))
 }
 
 impl Settings {

@@ -33,6 +33,14 @@ pub enum EditorPane {
     Right,
 }
 
+/// A pending action being held back by the unsaved-changes prompt, so it can be carried
+/// out (or abandoned) once the user decides what to do with the dirty buffer(s).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum UnsavedPrompt {
+    Quit,
+    CloseTab(usize),
+}
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
@@ -61,6 +69,8 @@ pub struct App {
     pub show_rename: bool,
     pub rename_target: Option<PathBuf>,
     pub rename_input: String,
+    /// When set, an unsaved-changes prompt is up, holding back the given action.
+    pub unsaved_prompt: Option<UnsavedPrompt>,
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
@@ -93,18 +103,48 @@ fn spawn_git_status_refresh(
     });
 }
 
-/// Top-level subdirectories of `root` that look like Python virtualenvs (they carry a
-/// `bin/activate` script). Non-recursive: only scans the project root itself.
+/// Name of the directory holding a virtualenv's executables: `Scripts` on Windows,
+/// `bin` everywhere else. Keeps venv discovery and the interpreter swap portable.
+pub fn venv_bin_dir() -> &'static str {
+    if cfg!(windows) {
+        "Scripts"
+    } else {
+        "bin"
+    }
+}
+
+/// Top-level subdirectories of `root` that look like Python virtualenvs (they carry an
+/// `activate` script in their bin/Scripts dir). Non-recursive: only scans the project
+/// root itself.
 fn discover_venvs(root: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
     let mut venvs: Vec<String> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join("bin").join("activate").exists())
+        .filter(|p| p.is_dir() && p.join(venv_bin_dir()).join("activate").exists())
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
     venvs.sort();
     venvs
+}
+
+/// Recursively copies `src` to `dest` (file, directory tree, or symlink target),
+/// replacing `cp -R` so drag-and-drop copies work identically on every platform.
+fn copy_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dest)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -193,6 +233,7 @@ impl App {
             show_rename: false,
             rename_target: None,
             rename_input: String::new(),
+            unsaved_prompt: None,
             resize_mode: false,
             dragging: None,
             available_venvs,
@@ -276,9 +317,8 @@ impl App {
         for path in &paths {
             let Some(file_name) = path.file_name() else { continue };
             let dest = dest_dir.join(file_name);
-            match std::process::Command::new("cp").arg("-R").arg(path).arg(&dest).status() {
-                Ok(s) if s.success() => ok += 1,
-                Ok(s) => last_err = Some(format!("exit {}", s.code().unwrap_or(-1))),
+            match copy_recursive(path, &dest) {
+                Ok(()) => ok += 1,
                 Err(e) => last_err = Some(e.to_string()),
             }
         }
@@ -379,7 +419,11 @@ impl App {
                     self.active_editor = self.editors.len() - 1;
                 }
                 self.focus = Focus::Editor;
-                self.status_message = i18n::msg_opened(lang, &self.editor().title(lang));
+                self.status_message = if self.editor().is_read_only() {
+                    i18n::msg_opened_read_only(lang, &self.editor().title(lang))
+                } else {
+                    i18n::msg_opened(lang, &self.editor().title(lang))
+                };
             }
             Err(e) => self.status_message = i18n::msg_open_error(lang, &e.to_string()),
         }
@@ -418,7 +462,57 @@ impl App {
     }
 
     fn close_active_editor(&mut self) {
-        self.close_editor_at(self.active_editor);
+        let idx = self.active_editor;
+        // Guard against silently dropping unsaved edits: prompt first if the tab is dirty.
+        if self.editors.get(idx).map(|e| e.dirty).unwrap_or(false) {
+            self.unsaved_prompt = Some(UnsavedPrompt::CloseTab(idx));
+        } else {
+            self.close_editor_at(idx);
+        }
+    }
+
+    /// Quit request from Ctrl+Q or the menu. Holds back the quit behind a prompt if any
+    /// buffer has unsaved changes, so exiting never silently discards work.
+    fn request_quit(&mut self) {
+        if self.editors.iter().any(|e| e.dirty) {
+            self.unsaved_prompt = Some(UnsavedPrompt::Quit);
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Keys for the unsaved-changes prompt: `s` saves then proceeds, `y`/Enter discards and
+    /// proceeds, anything else cancels.
+    fn handle_unsaved_prompt_key(&mut self, key: KeyEvent) {
+        let Some(action) = self.unsaved_prompt else { return };
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                match action {
+                    UnsavedPrompt::Quit => self.save_all(),
+                    UnsavedPrompt::CloseTab(idx) => {
+                        if let Some(ed) = self.editors.get_mut(idx) {
+                            let _ = ed.save();
+                        }
+                    }
+                }
+                self.unsaved_prompt = None;
+                self.perform_unsaved_action(action);
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.unsaved_prompt = None;
+                self.perform_unsaved_action(action);
+            }
+            _ => {
+                self.unsaved_prompt = None;
+            }
+        }
+    }
+
+    fn perform_unsaved_action(&mut self, action: UnsavedPrompt) {
+        match action {
+            UnsavedPrompt::Quit => self.should_quit = true,
+            UnsavedPrompt::CloseTab(idx) => self.close_editor_at(idx),
+        }
     }
 
     fn save_active_file(&mut self) {
@@ -580,7 +674,9 @@ impl App {
         if !matches!(program, "python" | "python3" | "python2") {
             return template.to_string();
         }
-        let venv_bin = self.root.join(venv).join("bin").join(program);
+        // On Windows the venv ships python.exe under Scripts\; elsewhere a bare name under bin/.
+        let bin_name = if cfg!(windows) { "python.exe" } else { program };
+        let venv_bin = self.root.join(venv).join(venv_bin_dir()).join(bin_name);
         if !venv_bin.exists() {
             return template.to_string();
         }
@@ -629,6 +725,10 @@ impl App {
         }
         if self.show_about {
             self.show_about = false;
+            return;
+        }
+        if self.unsaved_prompt.is_some() {
+            self.handle_unsaved_prompt_key(key);
             return;
         }
         if self.show_delete_confirm {
@@ -716,7 +816,7 @@ impl App {
                 return;
             }
             KeyCode::Char('q') if ctrl => {
-                self.should_quit = true;
+                self.request_quit();
                 return;
             }
             KeyCode::Char('e') if ctrl => {
@@ -807,7 +907,7 @@ impl App {
             MenuAction::CloseTerminal => self.close_active_terminal(),
             MenuAction::Save => self.save_active_file(),
             MenuAction::SaveAll => self.save_all(),
-            MenuAction::Quit => self.should_quit = true,
+            MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
             MenuAction::Copy => self.copy_selection(),
             MenuAction::Cut => self.cut_selection(),
@@ -835,6 +935,12 @@ impl App {
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
             MenuAction::ToggleHiddenFiles => self.toggle_hidden_files(),
+            MenuAction::Undo => self.editor_undo(),
+            MenuAction::Redo => self.editor_redo(),
+            MenuAction::ToggleComment => self.toggle_comment(),
+            MenuAction::DuplicateLine => self.editor_mut().duplicate_line(),
+            MenuAction::MoveLineUp => self.editor_mut().move_line_up(),
+            MenuAction::MoveLineDown => self.editor_mut().move_line_down(),
         }
     }
 
@@ -1070,8 +1176,16 @@ impl App {
             // input (no Kitty keyboard protocol), so Save All uses Alt+S instead — Alt
             // combos already work reliably via the ESC-prefix menu mnemonics.
             KeyCode::Char('s') | KeyCode::Char('S') if alt => self.save_all(),
+            // Split-pane focus (only meaningful when split); left unchanged on Alt+←/→.
             KeyCode::Left if alt && self.split_view => self.editor_pane_focus = EditorPane::Left,
             KeyCode::Right if alt && self.split_view => self.editor_pane_focus = EditorPane::Right,
+            // Move the current line up/down; Alt+Shift+↓ duplicates it.
+            KeyCode::Down if alt && shift => self.editor_mut().duplicate_line(),
+            KeyCode::Up if alt => self.editor_mut().move_line_up(),
+            KeyCode::Down if alt => self.editor_mut().move_line_down(),
+            // Editor-tab cycling moved off Ctrl+←/→ (now word motion) to Alt+, / Alt+.
+            KeyCode::Char(',') if alt => self.cycle_editor(false),
+            KeyCode::Char('.') if alt => self.cycle_editor(true),
             KeyCode::Char('s') if ctrl => self.save_active_file(),
             KeyCode::Char('w') if ctrl => self.close_active_editor(),
             KeyCode::Char('d') if ctrl => self.close_active_editor(),
@@ -1079,8 +1193,15 @@ impl App {
             KeyCode::Char('x') if ctrl => self.cut_selection(),
             KeyCode::Char('v') if ctrl => self.paste_clipboard(),
             KeyCode::Char('a') if ctrl => self.select_all(),
-            KeyCode::Right if ctrl => self.cycle_editor(true),
-            KeyCode::Left if ctrl => self.cycle_editor(false),
+            KeyCode::Char('z') | KeyCode::Char('Z') if ctrl && shift => self.editor_redo(),
+            KeyCode::Char('z') if ctrl => self.editor_undo(),
+            KeyCode::Char('y') if ctrl => self.editor_redo(),
+            KeyCode::Char('/') if ctrl => self.toggle_comment(),
+            // Word-wise motion (Ctrl+←/→, Shift extends) and deletion (Ctrl+Backspace/Delete).
+            KeyCode::Left if ctrl => self.move_with_selection(shift, |e| e.move_word_left()),
+            KeyCode::Right if ctrl => self.move_with_selection(shift, |e| e.move_word_right()),
+            KeyCode::Backspace if ctrl => self.editor_mut().delete_word_left(),
+            KeyCode::Delete if ctrl => self.editor_mut().delete_word_right(),
             KeyCode::Char(c) if !ctrl => self.editor_mut().insert_char(c),
             KeyCode::Enter => {
                 let auto_indent = self.settings.auto_indent;
@@ -1128,6 +1249,33 @@ impl App {
             self.editor_mut().clear_selection();
         }
         mv(self.editor_mut());
+        // Moving the cursor ends the current typing run, so a later edit is its own undo step.
+        self.editor_mut().break_undo_coalescing();
+    }
+
+    fn editor_undo(&mut self) {
+        let lang = self.settings.lang;
+        if !self.editor_mut().undo() {
+            self.status_message = i18n::t(lang, Key::MsgNothingToUndo).to_string();
+        }
+    }
+
+    fn editor_redo(&mut self) {
+        let lang = self.settings.lang;
+        if !self.editor_mut().redo() {
+            self.status_message = i18n::t(lang, Key::MsgNothingToRedo).to_string();
+        }
+    }
+
+    fn toggle_comment(&mut self) {
+        let token = crate::editor::comment_token(self.editor().path.as_deref());
+        match token {
+            Some(token) => self.editor_mut().toggle_comment(token),
+            None => {
+                let lang = self.settings.lang;
+                self.status_message = i18n::t(lang, Key::MsgNoCommentSyntax).to_string();
+            }
+        }
     }
 
     fn handle_terminal_key(&mut self, key: KeyEvent) {

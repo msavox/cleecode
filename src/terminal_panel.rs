@@ -17,6 +17,16 @@ pub struct TerminalPanel {
     pub exited: Arc<AtomicBool>,
 }
 
+/// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
+/// `%ComSpec%` on Windows, falling back to `/bin/bash` and `cmd.exe` respectively.
+fn default_shell() -> String {
+    if cfg!(windows) {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
+}
+
 impl TerminalPanel {
     pub fn new(rows: u16, cols: u16, cwd: &Path) -> Result<Self> {
         let pty_system = native_pty_system();
@@ -27,8 +37,7 @@ impl TerminalPanel {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let mut cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(default_shell());
         cmd.cwd(cwd);
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -37,7 +46,8 @@ impl TerminalPanel {
         let mut writer = pair.master.take_writer()?;
         // Queued in the pty's input buffer; the shell consumes it as soon as it starts
         // reading interactively, clearing any startup banner (e.g. fastfetch/neofetch).
-        let _ = writer.write_all(b"clear\r");
+        let clear = if cfg!(windows) { b"cls\r".as_slice() } else { b"clear\r".as_slice() };
+        let _ = writer.write_all(clear);
         let _ = writer.flush();
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));

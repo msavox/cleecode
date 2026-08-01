@@ -45,9 +45,12 @@ Mono, SIL OFL) and can install it for you:
 ./target/release/cleecode --install-font
 ```
 
-This copies the font into `~/Library/Fonts` and points Ghostty's config at it (if
-present); restart your terminal afterwards. If you use a different terminal, or already
-have a Nerd Font configured, just point your terminal's font setting at it manually.
+This copies the font into your per-user font directory (`~/Library/Fonts` on macOS,
+`~/.local/share/fonts` on Linux, `%LOCALAPPDATA%\Microsoft\Windows\Fonts` on Windows). On
+macOS/Linux it also points Ghostty's config at the font if one is present; on Windows it
+registers the font so it's usable right away. Restart your terminal afterwards. If you use
+a different terminal, or already have a Nerd Font configured, just point your terminal's
+font setting at it manually.
 
 ## Key bindings
 
@@ -67,11 +70,17 @@ have a Nerd Font configured, just point your terminal's font setting at it manua
 | `Ctrl+E` / `Ctrl+T` | Toggle sidebar / terminal panel |
 | `H` (sidebar focused) | Toggle hidden files |
 | `Ctrl+S` | Save |
-| `Ctrl+W` / `Ctrl+D` | Close current tab |
-| `Ctrl+Q` | Quit |
+| `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |
+| `Ctrl+Q` | Quit (prompts if any file is unsaved) |
 | `Ctrl+C/X/V/A` | Copy / cut / paste / select all (in the editor) |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
+| `Ctrl+Left/Right` | Move by word (`Shift` extends the selection) |
+| `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
+| `Ctrl+/` | Toggle line comment on the line/selection |
+| `Alt+Up` / `Alt+Down` | Move the current line up / down |
+| `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
-| `Ctrl+Left/Right` | Switch editor tab |
+| `Alt+,` / `Alt+.` | Switch editor tab |
 | `Ctrl+PageUp/Down` | Switch terminal |
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse (or jump to parent), `Enter` or a
@@ -80,11 +89,14 @@ removes a file (with confirmation), `H` toggles hidden files.
 
 ## Requirements
 
-Built and tested on macOS. The system-clipboard integration (`pbcopy`/`pbpaste`), the
-`scp`-on-drop feature, and the `--install-font` Ghostty auto-config are macOS-specific
-niceties; everything else is plain
-[ratatui](https://github.com/ratatui/ratatui)/[crossterm](https://github.com/crossterm-rs/crossterm)
-and should build on Linux too.
+Cross-platform: builds and runs on macOS, Linux and Windows. System-clipboard access goes
+through [arboard](https://github.com/1Password/arboard) (native clipboard on each OS),
+process inspection for the `scp`-on-drop and Run features uses
+[sysinfo](https://github.com/GuillaumeGomez/sysinfo), and config/font paths resolve via
+[dirs](https://github.com/dirs-dev/directories-rs); the UI itself is plain
+[ratatui](https://github.com/ratatui/ratatui)/[crossterm](https://github.com/crossterm-rs/crossterm).
+The terminal pane launches `$SHELL` (falling back to `/bin/bash`) on Unix and `%ComSpec%`
+(`cmd.exe`) on Windows. Developed primarily on macOS.
 
 ## Status
 
