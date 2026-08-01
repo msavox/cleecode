@@ -25,16 +25,16 @@ jobs:
       - run: ./target/release/clee --version
       - run: ./target/release/clee --help
 
-  # Linux and Windows are not released yet ("coming soon"), and their cfg-gated code has
-  # never been compiled. These jobs exist to report exactly that, so the gap is visible
-  # without blocking work on macOS.
+  # Linux and Windows ship as experimental binaries: the code compiles and the binary starts
+  # there, but nothing interactive has been exercised. Non-blocking, so a break on a platform
+  # nobody has run yet doesn't stop work on macOS — the status stays visible either way.
   other-platforms:
-    name: Compile check (${{ matrix.os }}, not yet supported)
+    name: Build and smoke-check (${{ matrix.os }}, experimental)
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022]
+        os: [ubuntu-22.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - run: cargo check --locked --all-targets
+      - run: cargo build --locked --release
+      - run: cargo test --locked
+      # Proves the binary actually starts and resolves its dynamic libraries on this OS.
+      # Both flags return before the TUI is initialised, so no tty is required.
+      - shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/release/clee"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="${bin}.exe"; fi
+          "$bin" --version
+          "$bin" --help
 
   # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
   # Adopting either is a repo-wide change, so it stays a deliberate decision.

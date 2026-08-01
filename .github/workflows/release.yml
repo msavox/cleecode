@@ -17,17 +17,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  macos:
-    name: macOS ${{ matrix.arch }}
-    runs-on: macos-14
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            arch: arm64
-          - target: x86_64-apple-darwin
-            arch: x86_64
+          - label: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            slug: macos-arm64
+            # Runs natively on the runner, so the built binary can be smoke-checked.
+            smoke: true
+          - label: macOS x86_64
+            os: macos-14
+            target: x86_64-apple-darwin
+            slug: macos-x86_64
+            # Cross-built on an arm64 runner, which has no Rosetta: it cannot be run here.
+            smoke: false
+          # Built on the oldest supported Ubuntu image so the glibc it links against is old
+          # enough for current distributions, not just the newest.
+          - label: Linux x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            slug: linux-x86_64
+            smoke: true
+          - label: Windows x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            slug: windows-x86_64
+            smoke: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,35 +58,78 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # arboard links against X11/xcb for clipboard access.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      # Not an interactive test, but it proves the binary starts and that its dynamic
+      # libraries resolve on this OS — which for Linux and Windows is more than we knew
+      # before. Both flags return before the TUI is initialised, so no tty is needed.
+      - name: Smoke-check the binary
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/clee"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="${bin}.exe"; fi
+          "$bin" --version
+          "$bin" --help
+
       - name: Package
         id: package
+        shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          name="clee-${tag}-macos-${{ matrix.arch }}"
-          mkdir -p "dist/${name}"
-          cp "target/${{ matrix.target }}/release/clee" "dist/${name}/"
-          cp README.md LICENSE "dist/${name}/"
-          # The font ships alongside so `--install-font` isn't the only way to get it.
+          name="clee-${tag}-${{ matrix.slug }}"
+          bin="clee"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="clee.exe"; fi
+
           mkdir -p "dist/${name}/fonts"
+          cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          # Ship the font alongside, so --install-font isn't the only way to get it.
           cp assets/fonts/CleeCodeMonoNerdFont-Regular.ttf assets/fonts/OFL.txt "dist/${name}/fonts/"
-          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
-          shasum -a 256 "dist/${name}.tar.gz" | tee "dist/${name}.tar.gz.sha256"
-          echo "archive=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="${name}.zip"
+            7z a -tzip "$archive" "$name" >/dev/null
+          else
+            archive="${name}.tar.gz"
+            tar -czf "$archive" "$name"
+          fi
+
+          # sha256sum on Linux and Git Bash, shasum on macOS.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "${archive}.sha256"
+          else
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          fi
+          cat "${archive}.sha256"
+          echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to the release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          # Create the release on first upload; later matrix jobs just add their files.
+          # The first matrix job to finish creates the release; the rest add their files.
+          # Notes live in a file rather than a heredoc, which inside this indented block
+          # would need its terminator at column zero.
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$tag" --generate-notes
+            gh release create "$tag" --title "$tag" --notes-file .github/release-notes.md
           fi
           gh release upload "$tag" \
             "${{ steps.package.outputs.archive }}" \
@@ -77,7 +140,7 @@ jobs:
   # updated without building anything locally.
   homebrew-checksum:
     name: Homebrew source checksum
-    needs: macos
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - name: Compute sha256 of the tag's source tarball

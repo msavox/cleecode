@@ -39,10 +39,15 @@ brew install msavox/clee/clee
 Prebuilt macOS binaries (arm64 and x86_64) are also attached to each
 [release](https://github.com/msavox/cleecode/releases).
 
-### Linux and Windows — build it yourself
+### Linux and Windows — experimental binaries, or build it yourself
 
-Prebuilt binaries for these are coming soon; until then, building takes one command. You
-need a [Rust toolchain](https://rustup.rs) (1.85 or newer, for edition 2024).
+x86_64 builds for both are attached to each
+[release](https://github.com/msavox/cleecode/releases). CI compiles them and checks that they
+start, but nothing interactive has been tested on either platform yet — so they're
+experimental, and bug reports are welcome.
+
+To build instead, you need a [Rust toolchain](https://rustup.rs) (1.85 or newer, for edition
+2024).
 
 **Linux.** The clipboard integration needs the X11/xcb development headers:
 
@@ -144,9 +149,10 @@ confirmation), `H` toggles hidden files.
 
 **macOS** is the supported platform — it's where CleeCode is developed, tested and released.
 **Linux and Windows** are written for throughout (paths, clipboard, shell, fonts and venvs
-all have per-OS handling) and both compile cleanly in CI, but neither has actually been
-*run* yet — no prebuilt binaries and no runtime testing. Build from source as described
-above, expect rough edges, and please report what breaks.
+all have per-OS handling) and both compile in CI, where the built binary is also
+started to confirm it launches and links correctly. Beyond that they are untested: nobody
+has actually used the editor on either platform. Binaries ship as experimental, and bug
+reports are welcome.
 
 System-clipboard access goes
 through [arboard](https://github.com/1Password/arboard) (native clipboard on each OS),
