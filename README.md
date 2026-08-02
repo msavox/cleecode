@@ -1,38 +1,45 @@
 # CleeCode 🐢
 
-A terminal IDE written in Rust: a `micro`-style editor with a file tree sidebar,
-integrated terminals, syntax highlighting, and a classic drop-down menu bar —
-all inside your terminal. No mouse required, but it's there if you want it.
+A terminal IDE written in Rust: a `micro`-style editor with a file tree sidebar, integrated
+terminals, syntax highlighting, and a classic drop-down menu bar. No mouse required, but it's
+there if you want it.
 
 By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
 ![CleeCode in action](docs/demo.gif)
 
-*Browsing the tree, running a Python script through the project's venv and an Octave script that
-keeps its interpreter alive, switching workspace layouts, picking a venv, browsing the disk from
-quick-open, and splitting the editor. Recorded from [`docs/demo.tape`](docs/demo.tape), so it can
-be re-recorded rather than re-shot.*
+*Recorded from [`docs/demo.tape`](docs/demo.tape).*
 
 ![CleeCode main view](docs/screenshots/main.png)
 
 ## Features
 
-- **Editor** — syntax highlighting (via [syntect](https://github.com/trevorfulton/syntect)), line numbers, multi-file tabs with a click-to-close `×`, mouse and keyboard text selection, copy/cut/paste with the real system clipboard, indent/outdent, auto-indent, word wrap, whitespace display, code folding (`F7`)
-- **Split editor** — `Alt+P` or Layout → Split editor divides the editor column into two independent panes, each with its own tab strip; click either pane (or `Alt+Left`/`Alt+Right`) to move focus between them
-- **File tree sidebar** — a Nerd Font icon and color per file type, folder icons, a right-aligned git status dot (modified/added/deleted/renamed/untracked, rolled up to parent folders), live refresh when files change on disk (even from another process), `H` toggles hidden files, double-click or `Enter` opens a file / makes a folder the new root, `..` walks back up, `Delete` asks for confirmation
-- **Run button** — a `▶ Run` button above the editor (also `F10`) pastes a run command for the current file into the first idle terminal; commands are configurable per extension in `settings.toml` (defaults cover Python, Bash, Ruby, Node, Go, PHP, Perl, Octave...). For interpreters that aren't on `PATH`, map the program to an absolute path under `[interpreter_paths]` (e.g. `octave-cli = "C:\\Program Files\\GNU Octave\\Octave-10.1.0\\mingw64\\bin\\octave-cli.exe"`) — Octave on Windows is auto-detected there even without the entry
-- **Quick open** — `Ctrl+O` fuzzy-searches every file in the project; start the query with `/`, `~`, `./` or `../` and it turns into a filesystem browser instead, listing that directory as you type (directories first, marked with a trailing `/`, `Enter` descends into one) — so files outside the project root are reachable without rerooting the sidebar
-- **Venv selector** — next to Run, a drop-down of the Python virtualenvs found at the project root; picking one swaps in its interpreter when running a `.py` file, and the one in use is marked. *Add a venv from elsewhere on disk…* registers a venv living outside the project (with an optional short nickname to show instead of the path), available in every project from then on and saved immediately to `settings.toml` — hand-editing `registered_venvs` still works. Also on the Run menu and in the command palette
-- **Multiple terminals** — starts with two side-by-side embedded terminals (real ptys, so `ssh`, `vim`, `claude`, etc. all work); open/close more, auto-clears startup banners, auto-collapses a pane when its shell exits
-- **Terminal text selection** — drag with the mouse, or hold `Shift` with the arrow keys, to select terminal output; the selection goes to the system clipboard as soon as it's made (a terminal pane has no free key for an explicit copy — `Ctrl+C` has to reach the shell as an interrupt), and `Esc` clears it. Necessary because cleecode captures the mouse, which suppresses the host terminal's own selection
-- **Menu bar** — a macOS-style `CleeCode` app menu (About / Settings / Quit) plus File / Edit / View / Layout / Run / Terminal; `Alt+<letter>` jumps straight to a menu (underlined mnemonic, Borland/Turbo-Vision style), or open with `F9` and type the letter — a fallback that works even when a terminal swallows Alt combos. Prefer a cleaner screen? `Ctrl+B` (or `Alt+B`, or View → Menu bar) hides the bar entirely; `F9` still opens the menus (the bar reappears while a menu is open), so nothing becomes unreachable
-- **Resizable workspace layout** — `F8` (arrows to resize) or drag panel borders with the mouse; three built-in presets (Classic, Wide 2-column, Triple 3-column) and a terminal-on-left/right toggle, all persisted across restarts
-- **Settings panel** — line numbers, syntax highlighting, word wrap, tab size, spaces-vs-tabs, whitespace, auto-indent, mouse, language — all live-toggleable
-- **Workspace persistence** — launching with no arguments resumes the last project folder and every file that was open, including which tab was active
-- **Save All** — `Alt+S` saves every dirty file at once, alongside per-file `Ctrl+S`
-- **Drag & drop** — drop a file onto the file tree to copy it in; drop it onto a terminal running an active `ssh` session and CleeCode attempts an `scp` upload
-- **Auto-reload** — picks up external changes to the open file without asking, as long as you have no unsaved edits
-- **English by default**, Italian available in Settings → Language (small `i18n` layer, easy to extend)
+- **Editor** — [syntect](https://github.com/trishume/syntect) highlighting, line numbers,
+  multi-file tabs, mouse and keyboard selection, system-clipboard copy/cut/paste, auto-indent,
+  word wrap, whitespace display, code folding (`F7`)
+- **Split editor** — `Alt+P` splits the editor column into two panes, each with its own tab strip
+- **File tree sidebar** — per-type Nerd Font icons, git status dots (rolled up to folders), live
+  refresh on external changes, create/rename/delete, hidden-file toggle (`H`), reroot on a folder
+- **Run button** — `▶ Run` / `F10` pastes a run command for the current file into an idle
+  terminal; configurable per extension in `settings.toml` (Python, Bash, Ruby, Node, Go, PHP,
+  Perl, Octave…). Interpreters off `PATH` go under `[interpreter_paths]`
+- **Quick open** — `Ctrl+O` fuzzy-searches the project; start the query with `/`, `~`, `./` or
+  `../` and it becomes a filesystem browser, so files outside the root are reachable too
+- **Venv selector** — drop-down of the Python virtualenvs at the project root, plus registered
+  venvs from elsewhere on disk (saved to `settings.toml`, available in every project)
+- **Multiple terminals** — real ptys, so `ssh`, `vim`, `claude` all work; open and close panes,
+  auto-collapse on shell exit
+- **Terminal selection** — drag with the mouse or `Shift`+arrows; the selection goes straight to
+  the system clipboard, `Esc` clears it
+- **Menu bar** — macOS-style app menu plus File / Edit / View / Layout / Run / Terminal;
+  `Alt+<letter>` or `F9`. `Ctrl+B` hides the bar without making anything unreachable
+- **Resizable layout** — `F8` or drag the borders; three presets and a terminal-side toggle,
+  persisted across restarts
+- **Settings panel** — line numbers, highlighting, word wrap, tab size, tabs vs spaces,
+  whitespace, auto-indent, mouse, language, all live
+- **Workspace persistence** — a bare `clee` resumes the last project and its open tabs
+- **Also** — `Alt+S` saves all, drag & drop into the tree (or `scp` onto an `ssh` session),
+  auto-reload of externally changed files, English and Italian
 
 ![Layout and Run menus](docs/screenshots/menu.png)
 
@@ -40,9 +47,7 @@ be re-recorded rather than re-shot.*
 
 ## Installing
 
-### macOS — Homebrew
-
-Add the tap and trust it once, then install by name:
+### macOS and Linux — Homebrew
 
 ```bash
 brew tap msavox/clee
@@ -50,70 +55,27 @@ brew trust msavox/clee
 brew install clee
 ```
 
-A tap is just a GitHub repository Homebrew reads formulae from — here
-[msavox/homebrew-clee](https://github.com/msavox/homebrew-clee). The `brew trust` step is
-required and is not a formality: a formula is Ruby code that Homebrew executes on your
-machine, so recent versions refuse to load one from a third-party tap until you say you trust
-its source. Without it you get:
+The `brew trust` step is required, not a formality: a formula is Ruby code Homebrew executes
+locally, so recent versions refuse to load one from a third-party tap until you trust its
+source — tapping alone doesn't grant that. Without it you get `Refusing to load formula
+msavox/clee/clee from untrusted tap`.
 
-```
-Error: Refusing to load formula msavox/clee/clee from untrusted tap msavox/clee.
-```
+The formula builds from source (well under a minute on macOS; longer on Linux, where it also
+pulls `libxcb`). [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap
+and CI verifies that install on Ubuntu, but only the *install* is tested.
 
-Tapping alone does not grant that trust — the two are separate steps. Once done, `clee`
-behaves like any other formula:
+### Prebuilt binaries
 
-```bash
-brew upgrade clee     # update to a newer release
-brew uninstall clee   # remove it
-brew untap msavox/clee
-```
+macOS arm64/x86_64 and x86_64 Linux and Windows builds are attached to each
+[release](https://github.com/msavox/cleecode/releases). Outside macOS they're experimental: CI
+checks they start, nothing more. The Linux binary needs glibc and libxcb — install `libxcb1`
+(Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it fails to start. For Alpine/musl, build from
+source.
 
-The fully qualified name also works, and skips the tap step — but still needs the trust one:
+### From source
 
-```bash
-brew trust msavox/clee
-brew install msavox/clee/clee
-```
-
-Those three parts are *user* / *tap* / *formula* — `clee` appears twice only because the tap
-and the command happen to share a name.
-
-The formula builds from source (it pulls Rust as a build dependency), which takes well under
-a minute. Prebuilt macOS binaries for arm64 and x86_64 are attached to each
-[release](https://github.com/msavox/cleecode/releases) if you'd rather not build at all.
-
-### Linux — Homebrew, experimental binaries, or build it yourself
-
-[Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) works with the same tap, and CI
-verifies that install on Ubuntu on every change to the formula:
-
-```bash
-brew tap msavox/clee
-brew trust msavox/clee
-brew install clee
-```
-
-It builds from source and pulls `libxcb` for clipboard support, so it takes longer than on
-macOS. Note that the *install* is tested; the editor itself has still never been used
-interactively on Linux.
-
-### Prebuilt binaries, or build it yourself
-
-x86_64 builds for Linux and Windows are attached to each
-[release](https://github.com/msavox/cleecode/releases). CI compiles them and checks that they
-start, but nothing interactive has been tested on either platform yet — so they're
-experimental, and bug reports are welcome.
-
-The Linux binary links dynamically against glibc and libxcb, so a desktop distribution has
-what it needs, but a minimal or headless system may not: install `libxcb1` (Debian/Ubuntu) or
-`libxcb` (Fedora/Arch) if it fails to start. Alpine/musl isn't covered — build from source
-there.
-
-To build instead, you need a [Rust toolchain](https://rustup.rs) (1.85 or newer, for edition
-2024).
-
-**Linux.** The clipboard integration needs the X11/xcb development headers:
+Needs a [Rust toolchain](https://rustup.rs) 1.85+ (edition 2024). On Linux the clipboard also
+needs the X11/xcb headers; on Windows, the MSVC toolchain plus *Desktop development with C++*.
 
 ```bash
 # Debian/Ubuntu
@@ -126,53 +88,40 @@ sudo pacman -S base-devel libxcb
 cargo install --locked --git https://github.com/msavox/cleecode
 ```
 
-**Windows.** Install Rust with the MSVC toolchain (rustup's default) plus the *Desktop
-development with C++* workload from the Visual Studio Build Tools, then:
-
-```powershell
-cargo install --locked --git https://github.com/msavox/cleecode
-```
-
-Either way `cargo install` puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so
-make sure that's on your `PATH`. Note that CleeCode is developed and tested on macOS: the
-Linux and Windows code paths are written but not yet exercised on those platforms, so treat
-them as experimental and please report what breaks.
+That puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so make sure it's on your
+`PATH`.
 
 ### From a clone
 
 ```bash
 cargo build --release
-./target/release/clee              # opens the current directory (or resumes the last workspace)
-./target/release/clee src/main.rs  # opens the current directory with a file pre-opened
-./target/release/clee ./some-dir   # opens that directory as the project root
+./target/release/clee              # current directory (or resume the last workspace)
+./target/release/clee src/main.rs  # current directory, with a file pre-opened
+./target/release/clee ./some-dir   # that directory as the project root
 ./target/release/clee --help       # usage, --version, --install-font
 ```
 
-Launching with a file or folder argument skips the startup splash and goes straight in;
-the splash only shows on a bare `clee` (and any key dismisses it early).
+An argument skips the startup splash; the splash only shows on a bare `clee`.
 
 ### Nerd Font icons
 
-The file tree's per-file-type icons need a [Nerd Font](https://www.nerdfonts.com/) to
-render as icons instead of blank boxes. CleeCode bundles one (JetBrainsMono Nerd Font
-Mono, SIL OFL) and can install it for you:
+The file tree's icons need a [Nerd Font](https://www.nerdfonts.com/). CleeCode bundles
+JetBrainsMono Nerd Font Mono and can install it:
 
 ```bash
 ./target/release/clee --install-font
 ```
 
-This copies the font into your per-user font directory (`~/Library/Fonts` on macOS,
-`~/.local/share/fonts` on Linux, `%LOCALAPPDATA%\Microsoft\Windows\Fonts` on Windows). On
-macOS/Linux it also points Ghostty's config at the font if one is present; on Windows it
-registers the font so it's usable right away. Restart your terminal afterwards. If you use
-a different terminal, or already have a Nerd Font configured, just point your terminal's
-font setting at it manually.
+It copies the font into your per-user font directory (`~/Library/Fonts`,
+`~/.local/share/fonts`, or `%LOCALAPPDATA%\Microsoft\Windows\Fonts`), points Ghostty at it if
+present on macOS/Linux, and registers it on Windows. Restart your terminal afterwards — or
+just point your terminal at a Nerd Font you already have.
 
 ## Key bindings
 
 | Key | Action |
 |---|---|
-| `F9` | Open/close the menu bar (then type a letter to jump to a menu) |
+| `F9` | Open/close the menu bar (then a letter to jump to a menu) |
 | `Alt+<letter>` | Jump straight to a menu (see the underlined letter) |
 | `F1` / `F2` / `F3` | Focus file tree / editor / terminal |
 | `F4` | Settings |
@@ -180,63 +129,48 @@ font setting at it manually.
 | `F7` | Fold/unfold the block under the cursor |
 | `F8` | Resize mode (arrows to resize, `Esc`/`Enter` to exit) |
 | `F10` | Run the current file |
-| `Ctrl+L` / `Alt+P` | Toggle split editor view (`Ctrl+L` outside the terminal; `Alt+P` needs Option-as-Meta on macOS) |
+| `Ctrl+L` / `Alt+P` | Toggle split editor (`Alt+P` needs Option-as-Meta on macOS) |
 | `Alt+Left` / `Alt+Right` | Switch focus between split panes |
-| `Alt+S` | Save all files |
+| `Ctrl+S` / `Alt+S` | Save / save all |
 | `Ctrl+E` / `Ctrl+T` | Toggle sidebar / terminal panel |
-| `Ctrl+B` / `Alt+B` | Show/hide the menu bar (`Ctrl+B` outside the terminal; `Alt+B` needs Option-as-Meta on macOS) |
-| `H` (sidebar focused) | Toggle hidden files |
-| `Ctrl+S` | Save |
+| `Ctrl+B` / `Alt+B` | Show/hide the menu bar |
 | `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |
 | `Ctrl+Q` | Quit (prompts if any file is unsaved) |
 | `Ctrl+C/X/V/A` | Copy / cut / paste / select all (in the editor) |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
 | `Ctrl+Left/Right` | Move by word (`Shift` extends the selection) |
 | `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
-| `Ctrl+P` | Command palette (fuzzy) |
-| `Ctrl+O` | Quick-open a file (fuzzy) |
-| `Ctrl+F` | Find / replace in the current file |
-| `Ctrl+G` | Go to line |
-| `Ctrl+/` | Toggle line comment on the line/selection |
+| `Ctrl+P` / `Ctrl+O` | Command palette / quick open (both fuzzy) |
+| `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
+| `Ctrl+/` | Toggle line comment |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
 | `Alt+,` / `Alt+.` | Switch editor tab |
 | `Ctrl+PageUp/Down` | Switch terminal |
 
-In the file tree: `↑↓` move, `→` expand, `←` collapse (or jump to parent), `Enter` or a
-double-click opens a file / makes a folder the new root / walks up via `..`, `n` / `N`
-create a new file / folder in the selected directory, `E` renames, `Delete` removes (with
-confirmation), `H` toggles hidden files.
+In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
+opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `E` renames,
+`Delete` removes with confirmation, `H` toggles hidden files.
 
 ## Requirements
 
-**macOS** is the supported platform — it's where CleeCode is developed, tested and released.
-**Linux and Windows** are written for throughout (paths, clipboard, shell, fonts and venvs
-all have per-OS handling) and both compile in CI, where the built binary is also
-started to confirm it launches and links correctly. Beyond that they are untested: nobody
-has actually used the editor on either platform. Binaries ship as experimental, and bug
-reports are welcome.
+**macOS** is the supported platform — where CleeCode is developed, tested and released.
+**Linux and Windows** are written for throughout (paths, clipboard, shell, fonts, venvs) and
+compile in CI, where the binary is also started to confirm it links and launches. Beyond that
+nobody has used the editor there, so those builds are experimental and bug reports are welcome.
 
-System-clipboard access goes
-through [arboard](https://github.com/1Password/arboard) (native clipboard on each OS),
-process inspection for the `scp`-on-drop and Run features uses
-[sysinfo](https://github.com/GuillaumeGomez/sysinfo), and config/font paths resolve via
-[dirs](https://github.com/dirs-dev/directories-rs); the UI itself is plain
-[ratatui](https://github.com/ratatui/ratatui)/[crossterm](https://github.com/crossterm-rs/crossterm).
-The terminal pane launches `$SHELL` (falling back to `/bin/bash`) on Unix and `%ComSpec%`
-(`cmd.exe`) on Windows. Developed primarily on macOS.
+Built on [ratatui](https://github.com/ratatui/ratatui)/[crossterm](https://github.com/crossterm-rs/crossterm),
+with [arboard](https://github.com/1Password/arboard) for the clipboard,
+[sysinfo](https://github.com/GuillaumeGomez/sysinfo) for the process inspection behind Run and
+`scp`-on-drop, and [dirs](https://github.com/dirs-dev/directories-rs) for config and font paths.
+Terminal panes launch `$SHELL` (falling back to `/bin/bash`) on Unix and `%ComSpec%` on Windows.
 
 ## Status
 
 Personal project, actively evolving.
 
-## Author
-
-CleeCode is written and maintained by **Matteo Savoia** — [github.com/msavox](https://github.com/msavox).
-
 ## License
 
-[MIT](LICENSE). The bundled font (`assets/fonts/`) is a Nerd Font-patched build of
-JetBrains Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own
-terms.
+[MIT](LICENSE). The bundled font (`assets/fonts/`) is a Nerd Font-patched build of JetBrains
+Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own terms.
