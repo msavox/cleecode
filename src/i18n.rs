@@ -42,6 +42,8 @@ pub enum Key {
     ItemToggleMenuBar,
     ItemOpenSettings,
     ItemNewTerminal,
+    ItemNewTerminalTab,
+    ItemCloseTerminalTab,
     ItemCloseTerminal,
     ItemAbout,
     ItemCopy,
@@ -68,6 +70,7 @@ pub enum Key {
     ItemSelectVenv,
     VenvPickerTitle,
     VenvRegisterItem,
+    VenvBrowseItem,
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
     ToolbarRun,
@@ -105,6 +108,8 @@ pub enum Key {
     ItemGotoLine,
     ItemNewFile,
     ItemNewFolder,
+    ItemRename,
+    ItemDelete,
     ItemCommandPalette,
     ItemOpenFilePicker,
     MsgNothingToUndo,
@@ -154,8 +159,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemOpenSettings) => "Settings...",
         (Lang::It, ItemOpenSettings) => "Impostazioni...",
 
-        (Lang::En, ItemNewTerminal) => "New terminal",
-        (Lang::It, ItemNewTerminal) => "Nuovo terminale",
+        (Lang::En, ItemNewTerminal) => "New terminal window",
+        (Lang::It, ItemNewTerminal) => "Nuova finestra terminale",
+        (Lang::En, ItemNewTerminalTab) => "New terminal tab",
+        (Lang::It, ItemNewTerminalTab) => "Nuovo tab terminale",
+        (Lang::En, ItemCloseTerminalTab) => "Close terminal tab",
+        (Lang::It, ItemCloseTerminalTab) => "Chiudi tab terminale",
 
         (Lang::En, ItemCloseTerminal) => "Close terminal",
         (Lang::It, ItemCloseTerminal) => "Chiudi terminale",
@@ -217,8 +226,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemToggleResizeMode) => "Resize mode",
         (Lang::It, ItemToggleResizeMode) => "Modalita ridimensiona",
 
-        (Lang::En, ResizeModeHint) => "Resize mode: ←/→ sidebar width, ↑/↓ terminal size, Esc/Enter to exit",
-        (Lang::It, ResizeModeHint) => "Modalita ridimensiona: ←/→ larghezza sidebar, ↑/↓ dimensione terminale, Esc/Invio per uscire",
+        (Lang::En, ResizeModeHint) => "Resize mode: arrows grow the focused frame, Shift+arrow shrinks, Esc/Enter to exit",
+        (Lang::It, ResizeModeHint) => "Modalita ridimensiona: le frecce allargano il frame sotto focus, Shift+freccia restringe, Esc/Invio per uscire",
 
         (Lang::En, MenuRun) => "Run",
         (Lang::It, MenuRun) => "Esegui",
@@ -234,6 +243,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, VenvRegisterItem) => "Add a venv from elsewhere on disk...",
         (Lang::It, VenvRegisterItem) => "Aggiungi un venv da un altro percorso...",
+        (Lang::En, VenvBrowseItem) => "Browse for a venv folder...",
+        (Lang::It, VenvBrowseItem) => "Sfoglia una cartella venv...",
 
         (Lang::En, ItemToggleSplitView) => "Split editor",
         (Lang::It, ItemToggleSplitView) => "Editor affiancati",
@@ -353,6 +364,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemNewFolder) => "New folder...",
         (Lang::It, ItemNewFolder) => "Nuova cartella...",
+        (Lang::En, ItemRename) => "Rename...",
+        (Lang::It, ItemRename) => "Rinomina...",
+        (Lang::En, ItemDelete) => "Delete...",
+        (Lang::It, ItemDelete) => "Elimina...",
 
         (Lang::En, ItemCommandPalette) => "Command palette...",
         (Lang::It, ItemCommandPalette) => "Palette comandi...",
@@ -503,8 +518,15 @@ pub fn msg_save_all_errors(lang: Lang, saved: usize, errors: &str) -> String {
 
 pub fn msg_new_terminal(lang: Lang, count: usize) -> String {
     match lang {
-        Lang::En => format!("New terminal ({count} total)"),
-        Lang::It => format!("Nuovo terminale ({count} totali)"),
+        Lang::En => format!("New terminal window ({count} total)"),
+        Lang::It => format!("Nuova finestra terminale ({count} totali)"),
+    }
+}
+
+pub fn msg_new_terminal_tab(lang: Lang, tabs: usize) -> String {
+    match lang {
+        Lang::En => format!("New terminal tab ({tabs} in this window)"),
+        Lang::It => format!("Nuovo tab terminale ({tabs} in questa finestra)"),
     }
 }
 
@@ -689,6 +711,13 @@ pub fn msg_not_a_venv(lang: Lang, path: &str) -> String {
     match lang {
         Lang::En => format!("{path} is not a virtualenv (no bin/activate) — not added"),
         Lang::It => format!("{path} non e un virtualenv (manca bin/activate) — non aggiunto"),
+    }
+}
+
+pub fn msg_resize_edge(lang: Lang) -> String {
+    match lang {
+        Lang::En => "That border is the window edge — nothing to resize there".to_string(),
+        Lang::It => "Quel bordo è il bordo della finestra — niente da ridimensionare lì".to_string(),
     }
 }
 

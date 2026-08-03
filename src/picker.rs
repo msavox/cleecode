@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub enum PickAction {
     Command(MenuAction),
     OpenFile(PathBuf),
+    /// A directory in the venv browser: registered if it's a venv, otherwise descended into.
+    VenvDir(PathBuf),
 }
 
 pub struct PickItem {
@@ -20,6 +22,8 @@ pub struct PickItem {
 pub enum PickerKind {
     Commands,
     Files,
+    /// Browsing the disk for a directory to register as a venv.
+    VenvBrowse,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds

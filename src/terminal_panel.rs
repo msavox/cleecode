@@ -403,6 +403,53 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
     }
 }
 
+/// One terminal "window" — a tiled pane in the layout — holding one or more tabbed shells, of
+/// which `active` is the one on screen. A window with a single tab looks exactly like the old
+/// flat terminal, so the tab strip only appears once a second tab is opened.
+pub struct TerminalWindow {
+    pub tabs: Vec<TerminalPanel>,
+    pub active: usize,
+}
+
+impl TerminalWindow {
+    /// A fresh window with a single shell.
+    pub fn new(rows: u16, cols: u16, cwd: &Path) -> Result<Self> {
+        Ok(TerminalWindow { tabs: vec![TerminalPanel::new(rows, cols, cwd)?], active: 0 })
+    }
+
+    pub fn active_tab(&self) -> &TerminalPanel {
+        &self.tabs[self.active]
+    }
+
+    pub fn active_tab_mut(&mut self) -> &mut TerminalPanel {
+        &mut self.tabs[self.active]
+    }
+
+    /// Adds a tab and focuses it — opening a tab is always to switch to it.
+    pub fn add_tab(&mut self, panel: TerminalPanel) {
+        self.tabs.push(panel);
+        self.active = self.tabs.len() - 1;
+    }
+
+    pub fn cycle_tab(&mut self, forward: bool) {
+        let n = self.tabs.len();
+        if n <= 1 {
+            return;
+        }
+        self.active = if forward { (self.active + 1) % n } else { (self.active + n - 1) % n };
+    }
+
+    /// Drops tabs whose shell has exited, keeping `active` in range. Returns whether any tab is
+    /// left — an emptied window is removed by the caller.
+    pub fn reap_exited(&mut self) -> bool {
+        self.tabs.retain(|t| !t.exited.load(Ordering::Relaxed));
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len().saturating_sub(1);
+        }
+        !self.tabs.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

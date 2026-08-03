@@ -4,9 +4,9 @@ use crate::editor::Editor;
 use crate::file_tree::{Activation, FileTree};
 use crate::highlight::Highlighter;
 use crate::i18n::{self, Key, Lang};
-use crate::menu::{MenuAction, MenuBar};
+use crate::menu::{ContextMenu, ContextTarget, MenuAction, MenuBar};
 use crate::settings::{self, Settings};
-use crate::terminal_panel::{key_to_bytes, TerminalPanel};
+use crate::terminal_panel::{key_to_bytes, TerminalPanel, TerminalWindow};
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -71,6 +71,12 @@ fn venv_rows(
         });
     }
     rows.push(VenvRow {
+        label: i18n::t(lang, Key::VenvBrowseItem).to_string(),
+        detail: None,
+        active: false,
+        action: VenvRowAction::Browse,
+    });
+    rows.push(VenvRow {
         label: i18n::t(lang, Key::VenvRegisterItem).to_string(),
         detail: None,
         active: false,
@@ -82,7 +88,9 @@ fn venv_rows(
 pub enum VenvRowAction {
     /// Use this venv, or the system python for `None`.
     Select(Option<String>),
-    /// Open the box that registers a venv from elsewhere on disk.
+    /// Browse the disk for a venv folder, rather than typing its path by hand.
+    Browse,
+    /// Open the box that registers a venv from elsewhere on disk, path typed by hand.
     Register,
 }
 
@@ -126,7 +134,9 @@ pub struct App {
     /// The active tab each pane's offset was last reconciled against, so the strip is only
     /// scrolled to reveal the active tab when that tab actually changes.
     tab_revealed: [Option<usize>; 2],
-    pub terminals: Vec<TerminalPanel>,
+    /// Terminal windows: each is a tiled pane in the layout, holding one or more tabbed shells.
+    pub terminals: Vec<TerminalWindow>,
+    /// Index of the focused window within `terminals`.
     pub active_terminal: usize,
     pub focus: Focus,
     pub should_quit: bool,
@@ -137,6 +147,11 @@ pub struct App {
     pub settings_selected: usize,
     pub highlighter: Highlighter,
     pub menu: MenuBar,
+    /// Right-click / Ctrl+Space pop-up, when open.
+    pub context_menu: Option<ContextMenu>,
+    /// The last full frame rect seen at draw time, so keyboard-opened pop-ups (which don't get
+    /// passed the layout) can still anchor themselves against the current geometry.
+    pub last_full: Rect,
     pub show_about: bool,
     pub clipboard: Clipboard,
     pub show_splash: bool,
@@ -366,9 +381,119 @@ fn copy_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Res
 pub enum DragTarget {
     Sidebar,
     TerminalHeight,
+    /// Dragging the vertical seam between the two editor panes in split view.
+    EditorSplit,
     TextSelection,
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
+}
+
+impl DragTarget {
+    /// Whether this drag is resizing a layout seam (as opposed to selecting text), so the
+    /// focused frame can show its resize highlight while the drag is under way.
+    fn is_layout(self) -> bool {
+        matches!(self, DragTarget::Sidebar | DragTarget::TerminalHeight | DragTarget::EditorSplit)
+    }
+}
+
+/// A side of the focused frame, named by the arrow key that selects it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResizeSide {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The layout scalar a resize nudge moves, with a signed step already folded in (grow/shrink and
+/// terminal orientation accounted for). Applied by the caller, then clamped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResizeCmd {
+    /// Delta in columns for `sidebar_width`.
+    Sidebar(i16),
+    /// Delta in percent for `terminal_pct`.
+    Terminal(i16),
+    /// Delta in percent for `split_pct` (the left pane's share).
+    Split(i16),
+}
+
+/// The layout facts a resize nudge depends on, gathered so the resolver stays a pure, testable
+/// function rather than reaching into `App`.
+pub struct ResizeLayout {
+    pub focus: Focus,
+    pub editor_pane: EditorPane,
+    pub split_view: bool,
+    pub show_sidebar: bool,
+    pub show_terminal: bool,
+    pub terminal_on_right: bool,
+}
+
+const SIDEBAR_STEP: i16 = 2;
+const TERMINAL_STEP: i16 = 5;
+const SPLIT_STEP: i16 = 5;
+
+/// Resolves an arrow nudge on the focused frame to the seam it moves. `None` when the named
+/// border coincides with the window edge — there is nothing there to drag. `grow` pushes the
+/// border outward (the frame gets bigger); `!grow` pulls it inward.
+///
+/// The whole layout has only three movable seams — sidebar↔editor, editor↔terminal, and (in
+/// split view) editor-left↔editor-right — so every frame has at most two of them, always on
+/// sides that the arrow keys can tell apart.
+pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<ResizeCmd> {
+    let s: i16 = if grow { 1 } else { -1 };
+    use ResizeSide::*;
+    match l.focus {
+        Focus::FileTree => match side {
+            // The sidebar's right edge is the sidebar↔editor seam; growing widens the sidebar.
+            Right => Some(ResizeCmd::Sidebar(s * SIDEBAR_STEP)),
+            // Its bottom edge only meets a seam when the terminal is a full-width strip below.
+            Down if l.show_terminal && !l.terminal_on_right => Some(ResizeCmd::Terminal(-s * TERMINAL_STEP)),
+            _ => None,
+        },
+        Focus::Terminal => {
+            if !l.show_terminal {
+                return None;
+            }
+            // The terminal touches the editor on exactly one side, set by its orientation.
+            match (l.terminal_on_right, side) {
+                (true, Left) => Some(ResizeCmd::Terminal(s * TERMINAL_STEP)),
+                (false, Up) => Some(ResizeCmd::Terminal(s * TERMINAL_STEP)),
+                _ => None,
+            }
+        }
+        Focus::Editor => {
+            // Which seams the focused editor region touches depends on whether it is split, and
+            // on which pane holds focus.
+            let (sidebar_left, split_left, split_right, terminal_far) = if l.split_view {
+                match l.editor_pane {
+                    // Left pane: sidebar on its left, the split seam on its right.
+                    EditorPane::Left => (true, false, true, false),
+                    // Right pane: the split seam on its left, the terminal on its far side.
+                    EditorPane::Right => (false, true, false, true),
+                }
+            } else {
+                // Unsplit: from the sidebar seam on the left to the terminal seam on the far side.
+                (true, false, false, true)
+            };
+            match side {
+                Left if sidebar_left && l.show_sidebar => Some(ResizeCmd::Sidebar(-s * SIDEBAR_STEP)),
+                Left if split_left => Some(ResizeCmd::Split(-s * SPLIT_STEP)),
+                Right if split_right => Some(ResizeCmd::Split(s * SPLIT_STEP)),
+                Right if terminal_far && l.show_terminal && l.terminal_on_right => {
+                    Some(ResizeCmd::Terminal(-s * TERMINAL_STEP))
+                }
+                Down if terminal_far && l.show_terminal && !l.terminal_on_right => {
+                    Some(ResizeCmd::Terminal(-s * TERMINAL_STEP))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Adds a signed delta to a layout scalar without wrapping; `clamp_layout` then bounds it.
+fn nudge_u16(v: u16, delta: i16) -> u16 {
+    (v as i32 + delta as i32).clamp(0, u16::MAX as i32) as u16
 }
 
 #[derive(Clone, Copy)]
@@ -438,6 +563,25 @@ fn path_query(query: &str, root: &std::path::Path, home: Option<&std::path::Path
     Some((dir, fragment))
 }
 
+/// Rows for the venv browser: the sub-directories of `dir` only — a file can never be a venv —
+/// each flagged when it is itself a venv, so Enter's meaning (register vs. descend) is visible.
+/// Hidden folders are always included, since the commonest venv of all, `.venv`, is one. A free
+/// function so the listing can be tested without standing up an App.
+fn venv_browse_items(dir: &std::path::Path) -> Vec<crate::picker::PickItem> {
+    list_dir_entries(dir, true)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .map(|path| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            crate::picker::PickItem {
+                label: format!("{name}/"),
+                shortcut: is_venv_dir(&path).then(|| "venv".to_string()),
+                action: crate::picker::PickAction::VenvDir(path),
+            }
+        })
+        .collect()
+}
+
 /// Directory entries for the quick-open browser: directories first, then files, each
 /// alphabetically, with dotfiles omitted unless `show_hidden`. An unreadable directory yields
 /// nothing rather than an error, since the user may still be typing its name.
@@ -489,8 +633,9 @@ fn cell_at(inner: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
 impl App {
     pub fn new(root: PathBuf, term_rows: u16, term_cols: u16) -> Result<Self> {
         let half_cols = (term_cols / 2).max(10);
-        let t1 = TerminalPanel::new(term_rows, half_cols, &root)?;
-        let t2 = TerminalPanel::new(term_rows, half_cols, &root)?;
+        // Two windows side by side to start, each with a single tab — the familiar two-pane view.
+        let t1 = TerminalWindow::new(term_rows, half_cols, &root)?;
+        let t2 = TerminalWindow::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
         let (git_status_tx, git_status_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
@@ -510,6 +655,8 @@ impl App {
             tab_revealed: [None, None],
             terminals: vec![t1, t2],
             active_terminal: 0,
+            context_menu: None,
+            last_full: Rect::new(0, 0, 0, 0),
             focus: Focus::FileTree,
             should_quit: false,
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
@@ -569,12 +716,35 @@ impl App {
         }
     }
 
+    /// The focused window's on-screen tab, if any.
+    pub fn focused_panel(&self) -> Option<&TerminalPanel> {
+        self.terminals.get(self.active_terminal).map(|w| w.active_tab())
+    }
+
+    pub fn focused_panel_mut(&mut self) -> Option<&mut TerminalPanel> {
+        self.terminals.get_mut(self.active_terminal).map(|w| w.active_tab_mut())
+    }
+
+    /// Window `i`'s on-screen tab — the one a click or run targets.
+    fn window_tab(&self, i: usize) -> Option<&TerminalPanel> {
+        self.terminals.get(i).map(|w| w.active_tab())
+    }
+
+    fn window_tab_mut(&mut self, i: usize) -> Option<&mut TerminalPanel> {
+        self.terminals.get_mut(i).map(|w| w.active_tab_mut())
+    }
+
     pub fn poll_terminal_exits(&mut self) {
-        let before = self.terminals.len();
-        self.terminals.retain(|t| !t.exited.load(Ordering::Relaxed));
+        let before: usize = self.terminals.len();
+        // Reap exited tabs within each window, then drop any window left with no tabs.
+        for window in &mut self.terminals {
+            window.reap_exited();
+        }
+        self.terminals.retain(|w| !w.tabs.is_empty());
+        // Never leave the workspace with no terminal at all.
         if self.terminals.is_empty() {
-            if let Ok(t) = TerminalPanel::new(24, 80, &self.root) {
-                self.terminals.push(t);
+            if let Ok(w) = TerminalWindow::new(24, 80, &self.root) {
+                self.terminals.push(w);
             }
         }
         if self.terminals.len() != before {
@@ -607,14 +777,13 @@ impl App {
         let ssh_target = if paths.is_empty() {
             None
         } else {
-            self.terminals
-                .get(self.active_terminal)
+            self.focused_panel()
                 .and_then(|t| t.child_pid())
                 .and_then(dnd::detect_ssh_target)
         };
         if let Some(target) = ssh_target {
             self.scp_paths_background(target, paths);
-        } else if let Some(term) = self.terminals.get_mut(self.active_terminal) {
+        } else if let Some(term) = self.focused_panel_mut() {
             term.write_input(text.as_bytes());
         }
     }
@@ -1089,6 +1258,16 @@ impl App {
     /// Keeps the file picker's list in step with what has been typed. A query starting with `/`,
     /// `~`, `./` or `../` browses the disk — the project-file list can only ever offer what is
     /// under the root, which is why opening anything outside it used to be impossible from here.
+    /// Rebuilds whichever picker is open as its query changes. The command palette is a fixed
+    /// list, so it needs no rebuild.
+    fn refresh_picker(&mut self) {
+        match self.picker.as_ref().map(|p| p.kind) {
+            Some(crate::picker::PickerKind::Files) => self.refresh_file_picker(),
+            Some(crate::picker::PickerKind::VenvBrowse) => self.refresh_venv_browser(),
+            _ => {}
+        }
+    }
+
     fn refresh_file_picker(&mut self) {
         let Some(query) = self
             .picker
@@ -1156,13 +1335,13 @@ impl App {
                 if let Some(p) = self.picker.as_mut() {
                     p.pop_char();
                 }
-                self.refresh_file_picker();
+                self.refresh_picker();
             }
             KeyCode::Char(c) if !ctrl => {
                 if let Some(p) = self.picker.as_mut() {
                     p.push_char(c);
                 }
-                self.refresh_file_picker();
+                self.refresh_picker();
             }
             _ => {}
         }
@@ -1171,15 +1350,27 @@ impl App {
     fn execute_picker_selection(&mut self) {
         let mut cmd = None;
         let mut file = None;
+        let mut venv_dir = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
                 crate::picker::PickAction::OpenFile(p) => file = Some(p.clone()),
+                crate::picker::PickAction::VenvDir(p) => venv_dir = Some(p.clone()),
             }
         }
         if let Some(a) = cmd {
             self.picker = None;
             self.run_menu_action(a);
+        } else if let Some(p) = venv_dir {
+            // A venv folder is the target: register it (then ask for a nickname). Any other
+            // directory is just somewhere to go, so descend and keep browsing.
+            if is_venv_dir(&p) {
+                self.picker = None;
+                self.begin_venv_nickname(p);
+            } else if let Some(picker) = self.picker.as_mut() {
+                picker.query = format!("{}/", p.to_string_lossy().trim_end_matches('/'));
+                self.refresh_venv_browser();
+            }
         } else if let Some(p) = file {
             // A directory is somewhere to go, not something to open: descend into it and keep
             // browsing, which is what makes typing a path a usable way to walk the disk.
@@ -1385,11 +1576,12 @@ impl App {
         self.file_tree.set_show_hidden(self.settings.show_hidden_files);
     }
 
+    /// New terminal *window*: another tiled pane, focused.
     pub fn new_terminal(&mut self) {
         let lang = self.settings.lang;
-        match TerminalPanel::new(24, 80, &self.root) {
-            Ok(t) => {
-                self.terminals.push(t);
+        match TerminalWindow::new(24, 80, &self.root) {
+            Ok(w) => {
+                self.terminals.push(w);
                 self.active_terminal = self.terminals.len() - 1;
                 self.settings.show_terminal = true;
                 self.focus = Focus::Terminal;
@@ -1399,14 +1591,85 @@ impl App {
         }
     }
 
+    /// New terminal *tab*: another shell inside the focused window, sharing its pane. With no
+    /// window open yet, there's nothing to tab into, so this opens a window instead.
+    pub fn new_terminal_tab(&mut self) {
+        let lang = self.settings.lang;
+        if self.terminals.is_empty() {
+            self.new_terminal();
+            return;
+        }
+        match TerminalPanel::new(24, 80, &self.root) {
+            Ok(panel) => {
+                let window = &mut self.terminals[self.active_terminal];
+                window.add_tab(panel);
+                self.settings.show_terminal = true;
+                self.focus = Focus::Terminal;
+                self.status_message = i18n::msg_new_terminal_tab(lang, window.tabs.len());
+            }
+            Err(e) => self.status_message = i18n::msg_terminal_create_error(lang, &e.to_string()),
+        }
+    }
+
+    /// Cycles the tabs of the focused window (Alt+PgUp/PgDn).
+    pub fn cycle_terminal_tab(&mut self, forward: bool) {
+        if let Some(window) = self.terminals.get_mut(self.active_terminal) {
+            window.cycle_tab(forward);
+        }
+    }
+
     pub fn close_active_terminal(&mut self) {
+        self.close_terminal(self.active_terminal);
+    }
+
+    /// Closes the whole terminal window at `index` — every tab in it — keeping the active index
+    /// valid. The last window stays: there is always at least one terminal.
+    pub fn close_terminal(&mut self, index: usize) {
         if self.terminals.len() <= 1 {
             self.status_message = i18n::msg_min_one_terminal(self.settings.lang);
             return;
         }
-        self.terminals.remove(self.active_terminal);
-        if self.active_terminal >= self.terminals.len() {
-            self.active_terminal = self.terminals.len() - 1;
+        if index >= self.terminals.len() {
+            return;
+        }
+        self.terminals.remove(index);
+        // Keep the active index pointing at the same window where possible: shift it left when
+        // a window before it went, and never let it fall off the end.
+        if self.active_terminal > index || self.active_terminal >= self.terminals.len() {
+            self.active_terminal = self.active_terminal.saturating_sub(1);
+        }
+    }
+
+    /// Closes the focused window's on-screen tab (context menu entry).
+    pub fn close_active_terminal_tab(&mut self) {
+        if let Some(window) = self.terminals.get(self.active_terminal) {
+            let tab = window.active;
+            self.close_terminal_tab(self.active_terminal, tab);
+        }
+    }
+
+    /// Closes a single tab within a window. If it was the window's last tab, the window goes too.
+    /// The very last terminal in the workspace is kept — there is always at least one.
+    pub fn close_terminal_tab(&mut self, window_idx: usize, tab_idx: usize) {
+        let total: usize = self.terminals.iter().map(|w| w.tabs.len()).sum();
+        if total <= 1 {
+            self.status_message = i18n::msg_min_one_terminal(self.settings.lang);
+            return;
+        }
+        let Some(window) = self.terminals.get_mut(window_idx) else { return };
+        if tab_idx >= window.tabs.len() {
+            return;
+        }
+        window.tabs.remove(tab_idx);
+        if window.active >= window.tabs.len() {
+            window.active = window.tabs.len().saturating_sub(1);
+        }
+        // A window with no tabs left disappears, like closing it outright.
+        if window.tabs.is_empty() {
+            self.terminals.remove(window_idx);
+            if self.active_terminal > window_idx || self.active_terminal >= self.terminals.len() {
+                self.active_terminal = self.active_terminal.saturating_sub(1);
+            }
         }
     }
 
@@ -1446,11 +1709,15 @@ impl App {
         // syntax error, which is what used to happen.
         let program = template.split_once(' ').map(|(p, _)| p).unwrap_or(&template);
         if dnd::is_octave_program(program) {
-            let pids: Vec<Option<u32>> = self.terminals.iter().map(|t| t.child_pid()).collect();
+            // Only the on-screen tab of each window is a candidate: running a script in a hidden
+            // tab would be invisible and confusing.
+            let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
             if let Some(idx) = dnd::shell_running_octave(&pids) {
                 let command = format!("run({})", dnd::octave_quote(&path.to_string_lossy()));
-                self.terminals[idx].write_input(command.as_bytes());
-                self.terminals[idx].write_input(b"\r");
+                if let Some(term) = self.window_tab_mut(idx) {
+                    term.write_input(command.as_bytes());
+                    term.write_input(b"\r");
+                }
                 self.status_message = i18n::msg_run_started(lang, idx, &command);
                 return;
             }
@@ -1472,11 +1739,13 @@ impl App {
         let idx = self
             .terminals
             .iter()
-            .position(|t| t.child_pid().map(|pid| !dnd::shell_is_busy(pid)).unwrap_or(false))
+            .position(|w| w.active_tab().child_pid().map(|pid| !dnd::shell_is_busy(pid)).unwrap_or(false))
             .unwrap_or(self.active_terminal.min(self.terminals.len().saturating_sub(1)));
 
-        self.terminals[idx].write_input(command.as_bytes());
-        self.terminals[idx].write_input(b"\r");
+        if let Some(term) = self.window_tab_mut(idx) {
+            term.write_input(command.as_bytes());
+            term.write_input(b"\r");
+        }
         self.status_message = i18n::msg_run_started(lang, idx, &command);
     }
 
@@ -1548,7 +1817,47 @@ impl App {
         }
         match rows.swap_remove(index).action {
             VenvRowAction::Select(venv) => self.select_venv(venv),
+            VenvRowAction::Browse => self.begin_venv_browse(),
             VenvRowAction::Register => self.begin_venv_register(),
+        }
+    }
+
+    /// Opens the disk browser for picking a venv folder. Starts in the project root — where a
+    /// per-project venv usually lives — and reuses the quick-open path machinery, so typing
+    /// `/` or `~` walks off elsewhere just as it does there.
+    fn begin_venv_browse(&mut self) {
+        let mut picker = crate::picker::Picker::new(
+            "Browse for a venv (type / or ~ to go elsewhere)",
+            crate::picker::PickerKind::VenvBrowse,
+            Vec::new(),
+        );
+        // A relative marker lists the project root while keeping the query box readable.
+        picker.query = "./".to_string();
+        self.picker = Some(picker);
+        self.refresh_venv_browser();
+    }
+
+    /// Rebuilds the venv browser's listing from what has been typed. Only directories are
+    /// offered — a file can't be a venv — and the ones that actually are venvs are flagged.
+    fn refresh_venv_browser(&mut self) {
+        let Some(query) = self
+            .picker
+            .as_ref()
+            .filter(|p| p.kind == crate::picker::PickerKind::VenvBrowse)
+            .map(|p| p.query.clone())
+        else {
+            return;
+        };
+        let home = dirs::home_dir();
+        // The browser always reads its query as a path, so fall back to the root when what has
+        // been typed doesn't parse as one (e.g. a bare fragment after backspacing the "./").
+        let (dir, fragment) = path_query(&query, &self.root, home.as_deref())
+            .unwrap_or_else(|| (self.root.clone(), String::new()));
+        let items = venv_browse_items(&dir);
+        if let Some(picker) = self.picker.as_mut() {
+            picker.path_mode = true;
+            picker.filter_override = Some(fragment);
+            picker.set_items(items);
         }
     }
 
@@ -1566,6 +1875,14 @@ impl App {
         self.venv_register = Some(VenvRegisterStep::Path);
         self.venv_register_input.clear();
         self.venv_register_path = None;
+    }
+
+    /// The path is already known (picked in the browser and confirmed a venv), so skip step one
+    /// and go straight to naming it — the same second step as the typed-by-hand flow.
+    fn begin_venv_nickname(&mut self, path: PathBuf) {
+        self.venv_register_path = Some(path);
+        self.venv_register_input.clear();
+        self.venv_register = Some(VenvRegisterStep::Nickname);
     }
 
     fn handle_venv_register_key(&mut self, key: KeyEvent) {
@@ -1658,6 +1975,11 @@ impl App {
         }
         if self.show_about {
             self.show_about = false;
+            return;
+        }
+        // The context menu grabs keys ahead of everything else while it's up.
+        if self.context_menu.is_some() {
+            self.handle_context_menu_key(key);
             return;
         }
         if self.unsaved_prompt.is_some() {
@@ -1778,6 +2100,15 @@ impl App {
                 self.cycle_terminal(false);
                 return;
             }
+            // Alt+PgUp/PgDn cycle the tabs of the focused window, mirroring Ctrl+PgUp/Dn for windows.
+            KeyCode::PageDown if alt => {
+                self.cycle_terminal_tab(true);
+                return;
+            }
+            KeyCode::PageUp if alt => {
+                self.cycle_terminal_tab(false);
+                return;
+            }
             KeyCode::Char('q') if ctrl => {
                 self.request_quit();
                 return;
@@ -1797,7 +2128,13 @@ impl App {
                 }
                 return;
             }
+            // Ctrl+T opens a new terminal tab in the focused window (the shell never sees it —
+            // it's an app shortcut). Ctrl+J took over toggling the terminal panel.
             KeyCode::Char('t') if ctrl => {
+                self.new_terminal_tab();
+                return;
+            }
+            KeyCode::Char('j') if ctrl => {
                 self.settings.show_terminal = !self.settings.show_terminal;
                 if !self.settings.show_terminal && self.focus == Focus::Terminal {
                     self.cycle_focus(true);
@@ -1806,6 +2143,11 @@ impl App {
             }
             KeyCode::Tab if ctrl => {
                 self.cycle_focus(true);
+                return;
+            }
+            // Ctrl+Space raises the context menu for whichever frame has focus.
+            KeyCode::Char(' ') if ctrl => {
+                self.open_context_menu_for_focus();
                 return;
             }
             // Ctrl+\ (0x1C, ASCII FS) isn't reliably delivered by every terminal, unlike
@@ -1895,6 +2237,8 @@ impl App {
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
+            MenuAction::NewTerminalTab => self.new_terminal_tab(),
+            MenuAction::CloseTerminalTab => self.close_active_terminal_tab(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
             MenuAction::Save => self.save_active_file(),
             // Deliberately available for a named buffer too, to save a copy under a new name.
@@ -1903,9 +2247,28 @@ impl App {
             MenuAction::SelectVenv => self.open_venv_dropdown(),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
-            MenuAction::Copy => self.copy_selection(),
+            // Copy/Paste follow the focus: from a terminal they act on its selection and input,
+            // so the same menu entries make sense whichever frame raised the context menu.
+            MenuAction::Copy => {
+                if self.focus == Focus::Terminal {
+                    self.copy_terminal_selection(self.active_terminal);
+                } else {
+                    self.copy_selection();
+                }
+            }
             MenuAction::Cut => self.cut_selection(),
-            MenuAction::Paste => self.paste_clipboard(),
+            MenuAction::Paste => {
+                if self.focus == Focus::Terminal {
+                    let text = self.clipboard.get();
+                    if !text.is_empty() {
+                        if let Some(term) = self.focused_panel_mut() {
+                            term.write_input(text.as_bytes());
+                        }
+                    }
+                } else {
+                    self.paste_clipboard();
+                }
+            }
             MenuAction::SelectAll => self.select_all(),
             MenuAction::Indent => {
                 let tab_size = self.settings.tab_size;
@@ -1939,6 +2302,8 @@ impl App {
             MenuAction::GotoLine => self.open_goto(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
+            MenuAction::Rename => self.start_rename(),
+            MenuAction::Delete => self.start_delete(),
             MenuAction::CommandPalette => self.open_command_palette(),
             MenuAction::OpenFilePicker => self.open_file_picker(),
         }
@@ -1956,26 +2321,55 @@ impl App {
     }
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
+        // Shift inverts the gesture: a plain arrow grows the focused frame on that side, Shift
+        // shrinks it. The window-edge sides simply do nothing.
+        let grow = !key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Esc | KeyCode::F(8) | KeyCode::Enter => self.resize_mode = false,
-            KeyCode::Left => {
-                self.settings.sidebar_width = self.settings.sidebar_width.saturating_sub(2);
-                self.settings.clamp_layout();
+            KeyCode::Esc | KeyCode::F(8) | KeyCode::Enter => {
+                self.resize_mode = false;
+                self.settings.save();
             }
-            KeyCode::Right => {
-                self.settings.sidebar_width = self.settings.sidebar_width.saturating_add(2);
-                self.settings.clamp_layout();
-            }
-            KeyCode::Up => {
-                self.settings.terminal_pct = self.settings.terminal_pct.saturating_sub(5);
-                self.settings.clamp_layout();
-            }
-            KeyCode::Down => {
-                self.settings.terminal_pct = self.settings.terminal_pct.saturating_add(5);
-                self.settings.clamp_layout();
-            }
+            KeyCode::Left => self.apply_resize(ResizeSide::Left, grow),
+            KeyCode::Right => self.apply_resize(ResizeSide::Right, grow),
+            KeyCode::Up => self.apply_resize(ResizeSide::Up, grow),
+            KeyCode::Down => self.apply_resize(ResizeSide::Down, grow),
             _ => {}
         }
+    }
+
+    /// Moves the seam on `side` of the focused frame. A no-op (with a brief note) when that
+    /// border is the outer window edge, which can't move.
+    fn apply_resize(&mut self, side: ResizeSide, grow: bool) {
+        let layout = ResizeLayout {
+            focus: self.focus,
+            editor_pane: self.editor_pane_focus,
+            split_view: self.split_view,
+            show_sidebar: self.settings.show_sidebar,
+            show_terminal: self.settings.show_terminal,
+            terminal_on_right: self.settings.terminal_on_right,
+        };
+        match resize_command(&layout, side, grow) {
+            Some(ResizeCmd::Sidebar(d)) => {
+                self.settings.sidebar_width = nudge_u16(self.settings.sidebar_width, d);
+            }
+            Some(ResizeCmd::Terminal(d)) => {
+                self.settings.terminal_pct = nudge_u16(self.settings.terminal_pct, d);
+            }
+            Some(ResizeCmd::Split(d)) => {
+                self.settings.split_pct = nudge_u16(self.settings.split_pct, d);
+            }
+            None => {
+                self.status_message = i18n::msg_resize_edge(self.settings.lang);
+                return;
+            }
+        }
+        self.settings.clamp_layout();
+    }
+
+    /// True while a layout resize is in play — the F8 mode, or a border drag — so the focused
+    /// frame can switch its border to the resize colour.
+    pub fn layout_resize_active(&self) -> bool {
+        self.resize_mode || self.dragging.map(DragTarget::is_layout).unwrap_or(false)
     }
 
     fn apply_layout_preset(&mut self, preset: LayoutPreset) {
@@ -2012,6 +2406,21 @@ impl App {
                 }
             }
         }
+        // The seam between the two editor panes, when split. It's the right pane's left edge;
+        // grabbing it (or the column just left of it) starts a split-ratio drag.
+        if self.split_view {
+            let panes = ui::editor_pane_rects(areas.editor, true, self.settings.split_pct);
+            if let Some(right) = panes.get(1) {
+                let seam_x = right.x;
+                if row >= areas.editor.y
+                    && row < areas.editor.y + areas.editor.height
+                    && (col == seam_x || col + 1 == seam_x)
+                {
+                    self.dragging = Some(DragTarget::EditorSplit);
+                    return true;
+                }
+            }
+        }
         false
     }
 
@@ -2036,6 +2445,16 @@ impl App {
                     self.settings.terminal_pct = ((term_rows_from_bottom as u32 * 100) / main_height as u32) as u16;
                 }
                 self.settings.clamp_layout();
+            }
+            Some(DragTarget::EditorSplit) => {
+                // Turn the cursor's column within the editor region into the left pane's share.
+                let areas = ui::compute_layout(full, &ui::LayoutParams::from_app(self));
+                let editor = areas.editor;
+                if editor.width > 1 && col > editor.x {
+                    let offset = (col - editor.x).min(editor.width);
+                    self.settings.split_pct = ((offset as u32 * 100) / editor.width as u32) as u16;
+                    self.settings.clamp_layout();
+                }
             }
             // Both are handled where the drag happens, against the pane they started in.
             Some(DragTarget::TextSelection) | Some(DragTarget::TerminalSelection(_)) | None => {}
@@ -2063,6 +2482,15 @@ impl App {
         self.rename_target = Some(path);
         self.rename_input = name;
         self.show_rename = true;
+    }
+
+    /// Opens the delete-confirmation prompt for the file-tree selection — the same flow the Delete
+    /// key triggers, reached here from the context menu.
+    fn start_delete(&mut self) {
+        if let Some(path) = self.file_tree.selected_path() {
+            self.delete_target = Some(path);
+            self.show_delete_confirm = true;
+        }
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) {
@@ -2315,15 +2743,15 @@ impl App {
             }
         }
         let index = self.active_terminal;
-        if key.code == KeyCode::Esc && self.terminals.get(index).is_some_and(|t| t.selection.is_some()) {
-            if let Some(term) = self.terminals.get_mut(index) {
+        if key.code == KeyCode::Esc && self.window_tab(index).is_some_and(|t| t.selection.is_some()) {
+            if let Some(term) = self.window_tab_mut(index) {
                 term.clear_selection();
             }
             return;
         }
         let bytes = key_to_bytes(key);
         if !bytes.is_empty() {
-            if let Some(term) = self.terminals.get_mut(self.active_terminal) {
+            if let Some(term) = self.focused_panel_mut() {
                 term.write_input(&bytes);
             }
         }
@@ -2333,7 +2761,7 @@ impl App {
     /// cursor the first time, then copies it — same rule as finishing a mouse drag.
     fn move_terminal_selection(&mut self, d_row: i16, d_col: i16) {
         let index = self.active_terminal;
-        let Some(term) = self.terminals.get_mut(index) else { return };
+        let Some(term) = self.window_tab_mut(index) else { return };
         let from = match term.selection {
             Some(selection) => selection.cursor,
             None => {
@@ -2353,9 +2781,9 @@ impl App {
     /// Ends a mouse selection: a drag that never left its starting cell is a plain click to
     /// focus the pane, so it is dropped rather than highlighting (and copying) one character.
     fn finish_terminal_selection(&mut self, index: usize) {
-        let single = self.terminals.get(index).and_then(|t| t.selection).is_some_and(|s| s.is_single_cell());
+        let single = self.window_tab(index).and_then(|t| t.selection).is_some_and(|s| s.is_single_cell());
         if single {
-            if let Some(term) = self.terminals.get_mut(index) {
+            if let Some(term) = self.window_tab_mut(index) {
                 term.clear_selection();
             }
             return;
@@ -2367,7 +2795,7 @@ impl App {
     /// taken. Silent when the selection is only blank cells, so dragging across empty space
     /// doesn't wipe the clipboard.
     fn copy_terminal_selection(&mut self, index: usize) {
-        let Some(text) = self.terminals.get(index).and_then(|t| t.selection_text()) else { return };
+        let Some(text) = self.window_tab(index).and_then(|t| t.selection_text()) else { return };
         if text.trim().is_empty() {
             return;
         }
@@ -2390,6 +2818,12 @@ impl App {
                 }
                 if self.show_about {
                     self.show_about = false;
+                    return;
+                }
+                // An open context menu intercepts the next click: on an item to run it, elsewhere
+                // to dismiss.
+                if self.context_menu.is_some() {
+                    self.mouse_context_menu(col, row);
                     return;
                 }
                 if self.show_delete_confirm {
@@ -2469,7 +2903,7 @@ impl App {
                         return;
                     }
                 }
-                let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+                let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
                 if let Some((pane_idx, pane_rect)) = panes.iter().enumerate().find(|(_, r)| within(**r, col, row)) {
                     let pane_rect = *pane_rect;
                     self.focus = Focus::Editor;
@@ -2487,15 +2921,47 @@ impl App {
                     return;
                 }
                 if let Some(term_areas) = &areas.terminals {
+                    // The close button lives on the border, outside the inner area, so test it
+                    // before the whole-panel hit — and only when there's more than one terminal,
+                    // matching when the button is actually drawn.
+                    if self.terminals.len() > 1 {
+                        if let Some(i) = term_areas
+                            .iter()
+                            .position(|rect| ui::terminal_close_cell(*rect) == Some((col, row)))
+                        {
+                            self.close_terminal(i);
+                            return;
+                        }
+                    }
                     for (i, rect) in term_areas.iter().enumerate() {
                         if within(*rect, col, row) {
                             self.focus = Focus::Terminal;
                             self.active_terminal = i;
-                            // Start a selection: cleecode captures the mouse, so the host
-                            // terminal's own selection can't be used while it runs.
-                            let inner = ui::inner_rect(*rect);
-                            if let Some(cell) = cell_at(inner, col, row) {
-                                if let Some(term) = self.terminals.get_mut(i) {
+                            // A click on the tabs riding the top border (when the window has more
+                            // than one tab): the tab's ✕ closes it, elsewhere on the tab switches
+                            // to it — rather than starting a text selection.
+                            let tab_count = self.terminals[i].tabs.len();
+                            let window_close = self.terminals.len() > 1;
+                            if tab_count > 1 && row == rect.y {
+                                let strip = ui::terminal_tab_strip_rect(*rect, window_close);
+                                if let Some((t, tab)) = ui::terminal_tab_ranges(strip, tab_count)
+                                    .into_iter()
+                                    .enumerate()
+                                    .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1)
+                                {
+                                    if tab.close == Some(col) {
+                                        self.close_terminal_tab(i, t);
+                                    } else {
+                                        self.terminals[i].active = t;
+                                    }
+                                    return;
+                                }
+                            }
+                            // Otherwise start a selection: cleecode captures the mouse, so the
+                            // host terminal's own selection can't be used while it runs.
+                            let content = ui::terminal_content_rect(*rect);
+                            if let Some(cell) = cell_at(content, col, row) {
+                                if let Some(term) = self.window_tab_mut(i) {
                                     term.begin_selection(cell);
                                 }
                                 self.dragging = Some(DragTarget::TerminalSelection(i));
@@ -2505,15 +2971,30 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Right-click raises the context menu for the frame under the pointer. Modals and
+                // the open menu bar swallow it (nothing to act on there).
+                if self.show_splash
+                    || self.show_about
+                    || self.show_settings
+                    || self.menu.active
+                    || self.context_menu.is_some()
+                {
+                    return;
+                }
+                self.open_context_menu_at(col, row, areas);
+            }
             MouseEventKind::Drag(MouseButton::Left) => match self.dragging {
-                Some(DragTarget::Sidebar) | Some(DragTarget::TerminalHeight) => {
+                Some(DragTarget::Sidebar)
+                | Some(DragTarget::TerminalHeight)
+                | Some(DragTarget::EditorSplit) => {
                     self.continue_drag(col, row, full);
                 }
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
                         // Stay within the pane the drag started in, regardless of which
                         // pane the pointer is currently over.
-                        let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+                        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
                         let pane_rect = if self.split_view && self.editor_pane_focus == EditorPane::Right {
                             panes.get(1).copied().unwrap_or(areas.editor)
                         } else {
@@ -2525,8 +3006,8 @@ impl App {
                 }
                 Some(DragTarget::TerminalSelection(index)) => {
                     if let Some(rect) = areas.terminals.as_ref().and_then(|t| t.get(index)).copied() {
-                        if let Some(cell) = cell_at(ui::inner_rect(rect), col, row) {
-                            if let Some(term) = self.terminals.get_mut(index) {
+                        if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {
+                            if let Some(term) = self.window_tab_mut(index) {
                                 term.extend_selection(cell);
                             }
                         }
@@ -2556,7 +3037,7 @@ impl App {
                 return;
             }
         }
-        let panes = ui::editor_pane_rects(areas.editor, self.split_view);
+        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
         for (pane_idx, pane_rect) in panes.iter().enumerate() {
             if !within(*pane_rect, col, row) {
                 continue;
@@ -2691,6 +3172,113 @@ impl App {
         }
     }
 
+    fn handle_context_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.context_menu = None,
+            KeyCode::Up => {
+                if let Some(m) = self.context_menu.as_mut() {
+                    m.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(m) = self.context_menu.as_mut() {
+                    m.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(action) = self.context_menu.as_ref().and_then(|m| m.selected_action()) {
+                    self.context_menu = None;
+                    self.run_menu_action(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the context menu for the focused frame (Ctrl+Space), anchored near its top-left —
+    /// the layout isn't handed to the key path, so it's recomputed from the last drawn size.
+    fn open_context_menu_for_focus(&mut self) {
+        let areas = ui::compute_layout(self.last_full, &ui::LayoutParams::from_app(self));
+        let (target, rect) = match self.focus {
+            Focus::FileTree => (ContextTarget::Sidebar, areas.sidebar.unwrap_or(self.last_full)),
+            Focus::Terminal => {
+                let rect = areas
+                    .terminals
+                    .as_ref()
+                    .and_then(|t| t.get(self.active_terminal))
+                    .copied()
+                    .unwrap_or(self.last_full);
+                (ContextTarget::Terminal, rect)
+            }
+            Focus::Editor => (ContextTarget::Editor, areas.editor),
+        };
+        self.context_menu = Some(ContextMenu::new(target, (rect.x + 2, rect.y + 1)));
+    }
+
+    /// Right-click: focus the frame under the pointer (selecting the clicked tree row first, so
+    /// Rename/Delete act on it), then raise its context menu at the click.
+    fn open_context_menu_at(&mut self, col: u16, row: u16, areas: &ui::Areas) {
+        if let Some(sidebar) = areas.sidebar {
+            if within(sidebar, col, row) {
+                self.focus = Focus::FileTree;
+                let inner = ui::inner_rect(sidebar);
+                if row >= inner.y {
+                    let idx = (row - inner.y) as usize;
+                    if idx < self.file_tree.visible.len() {
+                        self.file_tree.selected = idx;
+                    }
+                }
+                self.context_menu = Some(ContextMenu::new(ContextTarget::Sidebar, (col, row)));
+                return;
+            }
+        }
+        if within(areas.editor, col, row) {
+            self.focus = Focus::Editor;
+            self.context_menu = Some(ContextMenu::new(ContextTarget::Editor, (col, row)));
+            return;
+        }
+        if let Some(term_areas) = &areas.terminals {
+            if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {
+                self.focus = Focus::Terminal;
+                self.active_terminal = i;
+                self.context_menu = Some(ContextMenu::new(ContextTarget::Terminal, (col, row)));
+            }
+        }
+    }
+
+    /// A click while the context menu is open: run the item under the pointer, or dismiss it.
+    fn mouse_context_menu(&mut self, col: u16, row: u16) {
+        let lang = self.settings.lang;
+        let rect = match self.context_menu.as_ref().map(|m| ui::context_menu_rect(m, lang, self.last_full)) {
+            Some(rect) => rect,
+            None => return,
+        };
+        let inner = ui::inner_rect(rect);
+        if !within(inner, col, row) {
+            self.context_menu = None;
+            return;
+        }
+        // Rows map to items, skipping the separator rules woven between groups.
+        let target = (row - inner.y) as usize;
+        let action = self.context_menu.as_ref().and_then(|m| {
+            let mut display_row = 0;
+            for item in &m.items {
+                if item.new_group {
+                    display_row += 1;
+                }
+                if display_row == target {
+                    return Some(item.action);
+                }
+                display_row += 1;
+            }
+            None
+        });
+        if let Some(action) = action {
+            self.context_menu = None;
+            self.run_menu_action(action);
+        }
+    }
+
     fn mouse_menu_bar_click(&mut self, col: u16) {
         let ranges = ui::menu_title_ranges(&self.menu, self.settings.lang);
         for (i, (start, end)) in ranges.iter().enumerate() {
@@ -2707,13 +3295,24 @@ impl App {
         if within(dropdown, col, row) {
             let inner = ui::inner_rect(dropdown);
             if row >= inner.y {
-                let idx = (row - inner.y) as usize;
-                if idx < self.menu.defs[self.menu.menu_index].items.len() {
-                    self.menu.item_index = idx;
-                    if let Some(action) = self.menu.selected_action() {
-                        self.menu.close();
-                        self.run_menu_action(action);
+                // Separator rules occupy display rows too, so walk the items and
+                // account for the extra row each group opener adds above itself.
+                // A click that lands on a separator maps to no item and is ignored.
+                let target = (row - inner.y) as usize;
+                let mut display_row = 0;
+                for (idx, item) in self.menu.defs[self.menu.menu_index].items.iter().enumerate() {
+                    if item.new_group {
+                        display_row += 1;
                     }
+                    if display_row == target {
+                        self.menu.item_index = idx;
+                        if let Some(action) = self.menu.selected_action() {
+                            self.menu.close();
+                            self.run_menu_action(action);
+                        }
+                        break;
+                    }
+                    display_row += 1;
                 }
             }
             return;
@@ -2839,6 +3438,86 @@ mod tests {
     }
 
     #[test]
+    fn resize_command_maps_focused_borders_to_seams() {
+        use ResizeSide::*;
+        // Classic layout: sidebar left, terminal a full-width strip below, editor unsplit.
+        let classic = ResizeLayout {
+            focus: Focus::Editor,
+            editor_pane: EditorPane::Left,
+            split_view: false,
+            show_sidebar: true,
+            show_terminal: true,
+            terminal_on_right: false,
+        };
+        // Editor grows left by eating the sidebar; shrinking left gives it back.
+        assert_eq!(resize_command(&classic, Left, true), Some(ResizeCmd::Sidebar(-SIDEBAR_STEP)));
+        assert_eq!(resize_command(&classic, Left, false), Some(ResizeCmd::Sidebar(SIDEBAR_STEP)));
+        // Editor grows down by eating the terminal.
+        assert_eq!(resize_command(&classic, Down, true), Some(ResizeCmd::Terminal(-TERMINAL_STEP)));
+        // Right and top are window edges here — nothing to move.
+        assert_eq!(resize_command(&classic, Right, true), None);
+        assert_eq!(resize_command(&classic, Up, true), None);
+
+        // Sidebar focused: its right edge is its width; its bottom meets the terminal strip.
+        let sidebar = ResizeLayout { focus: Focus::FileTree, ..classic_like() };
+        assert_eq!(resize_command(&sidebar, Right, true), Some(ResizeCmd::Sidebar(SIDEBAR_STEP)));
+        assert_eq!(resize_command(&sidebar, Down, true), Some(ResizeCmd::Terminal(-TERMINAL_STEP)));
+        assert_eq!(resize_command(&sidebar, Left, true), None);
+
+        // Terminal on the right: its left edge is the only movable seam.
+        let term_right = ResizeLayout { focus: Focus::Terminal, terminal_on_right: true, ..classic_like() };
+        assert_eq!(resize_command(&term_right, Left, true), Some(ResizeCmd::Terminal(TERMINAL_STEP)));
+        assert_eq!(resize_command(&term_right, Up, true), None);
+
+        // Split view, right pane focused, terminal on the right: left edge is the split seam,
+        // right edge is the terminal seam.
+        let split_right = ResizeLayout {
+            focus: Focus::Editor,
+            editor_pane: EditorPane::Right,
+            split_view: true,
+            terminal_on_right: true,
+            ..classic_like()
+        };
+        assert_eq!(resize_command(&split_right, Left, true), Some(ResizeCmd::Split(-SPLIT_STEP)));
+        assert_eq!(resize_command(&split_right, Right, true), Some(ResizeCmd::Terminal(-TERMINAL_STEP)));
+
+        // Left pane's right edge is the split seam; growing it enlarges the left pane.
+        let split_left = ResizeLayout { editor_pane: EditorPane::Left, ..split_right };
+        assert_eq!(resize_command(&split_left, Right, true), Some(ResizeCmd::Split(SPLIT_STEP)));
+        assert_eq!(resize_command(&split_left, Left, true), Some(ResizeCmd::Sidebar(-SIDEBAR_STEP)));
+    }
+
+    fn classic_like() -> ResizeLayout {
+        ResizeLayout {
+            focus: Focus::Editor,
+            editor_pane: EditorPane::Left,
+            split_view: false,
+            show_sidebar: true,
+            show_terminal: true,
+            terminal_on_right: false,
+        }
+    }
+
+    #[test]
+    fn venv_browse_lists_folders_only_and_flags_venvs() {
+        let dir = setup_dir("venv_browse");
+        make_venv(&dir, ".venv"); // hidden, and the whole reason for the browser
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("readme.md"), "").unwrap();
+
+        let items = venv_browse_items(&dir);
+        // The file is gone; both directories remain, each with a trailing slash.
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec![".venv/", "src/"]);
+
+        // Only the venv carries the "venv" flag, and its action targets the real path.
+        let venv = &items[0];
+        assert_eq!(venv.shortcut.as_deref(), Some("venv"));
+        assert!(matches!(&venv.action, crate::picker::PickAction::VenvDir(p) if p == &dir.join(".venv")));
+        assert_eq!(items[1].shortcut, None);
+    }
+
+    #[test]
     fn effective_venv_ignores_one_that_is_not_here() {
         let available = vec![".venv".to_string(), "/opt/venvs/ml".to_string()];
         assert_eq!(effective_venv(Some(".venv"), &available), Some(".venv"));
@@ -2859,11 +3538,12 @@ mod tests {
         let available = vec![".venv".to_string(), "/opt/venvs/ml-3.12".to_string()];
         let rows = venv_rows(Some("/opt/venvs/ml-3.12"), &available, &registered, Lang::En);
 
-        // "no venv", one row per venv, then the register entry.
-        assert_eq!(rows.len(), 4);
+        // "no venv", one row per venv, then the browse and register entries.
+        assert_eq!(rows.len(), 5);
         assert!(matches!(rows[0].action, VenvRowAction::Select(None)));
         assert!(matches!(rows[1].action, VenvRowAction::Select(Some(ref v)) if v == ".venv"));
-        assert!(matches!(rows[3].action, VenvRowAction::Register));
+        assert!(matches!(rows[3].action, VenvRowAction::Browse));
+        assert!(matches!(rows[4].action, VenvRowAction::Register));
 
         // The nickname is the label; the path stays as the dimmed detail.
         assert_eq!(rows[2].label, "ml");
@@ -2873,7 +3553,7 @@ mod tests {
         assert_eq!(rows[1].detail, None);
         // Exactly the venv in use is marked.
         assert!(rows[2].active);
-        assert!(!rows[0].active && !rows[1].active && !rows[3].active);
+        assert!(!rows[0].active && !rows[1].active && !rows[3].active && !rows[4].active);
 
         // With no venv selected, the marker moves to the first row.
         let rows = venv_rows(None, &available, &registered, Lang::En);

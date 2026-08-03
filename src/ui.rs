@@ -1,6 +1,6 @@
 use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
-use crate::menu::MenuBar;
+use crate::menu::{ContextMenu, MenuBar};
 use crate::settings;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -108,11 +108,14 @@ pub fn inner_rect(r: Rect) -> Rect {
 /// Splits the editor column into (tab bar row, remaining content area).
 /// Splits the whole editor region into one (unsplit) or two side-by-side panes. Index 0
 /// is always the left/only pane, index 1 (when present) the right one.
-pub fn editor_pane_rects(area: Rect, split: bool) -> Vec<Rect> {
+pub fn editor_pane_rects(area: Rect, split: bool, left_pct: u16) -> Vec<Rect> {
     if !split {
         return vec![area];
     }
-    let mid = area.width / 2;
+    // The left pane gets `left_pct` of the width; the right takes the remainder, so no column is
+    // lost to rounding. Both keep at least one column even at the clamp extremes.
+    let mid = ((area.width as u32 * left_pct as u32) / 100) as u16;
+    let mid = mid.clamp(1, area.width.saturating_sub(1));
     let left = Rect { width: mid, ..area };
     let right = Rect { x: area.x + mid, width: area.width - mid, ..area };
     vec![left, right]
@@ -370,7 +373,8 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     let shortcut_width = items.iter().filter_map(|i| i.shortcut).map(|s| s.chars().count()).max().unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
     let width = ((1 + label_width + gap + shortcut_width + 1) as u16).max(18);
-    let height = items.len() as u16 + 2;
+    let separators = items.iter().filter(|i| i.new_group).count() as u16;
+    let height = items.len() as u16 + separators + 2;
     Rect {
         x: x.min(full.width.saturating_sub(width)),
         y: 1,
@@ -379,11 +383,29 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     }
 }
 
+/// Where a context menu hangs: from its anchor, but pulled back so it never spills past the
+/// right or bottom edge. Shared by the renderer and click handling so both agree on the rows.
+pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, full: Rect) -> Rect {
+    let items = &menu.items;
+    let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
+    let shortcut_width = items.iter().filter_map(|i| i.shortcut).map(|s| s.chars().count()).max().unwrap_or(0);
+    let gap = if shortcut_width > 0 { 3 } else { 0 };
+    let width = ((1 + label_width + gap + shortcut_width + 1) as u16).max(18).min(full.width.max(1));
+    let separators = items.iter().filter(|i| i.new_group).count() as u16;
+    let height = (items.len() as u16 + separators + 2).min(full.height.max(1));
+    Rect {
+        x: menu.anchor.0.min(full.width.saturating_sub(width)),
+        y: menu.anchor.1.min(full.height.saturating_sub(height)),
+        width,
+        height,
+    }
+}
+
 /// Where the venv drop-down hangs: directly under its toolbar button, in the left/only editor
 /// pane's tab bar. `None` when that button isn't on screen, in which case there is nothing to
 /// drop down from. Shared by the renderer and by click handling, so both agree on the rows.
 pub fn venv_dropdown_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
-    let pane = editor_pane_rects(editor_area, app.split_view).first().copied()?;
+    let pane = editor_pane_rects(editor_area, app.split_view, app.settings.split_pct).first().copied()?;
     let (tab_bar, _) = split_editor_area(pane);
     if tab_bar.height == 0 {
         return None;
@@ -422,9 +444,14 @@ pub fn settings_modal_rect(full: Rect) -> Rect {
     centered_rect(width, height, full)
 }
 
-fn focused_border_style(is_focused: bool) -> Style {
+/// The colour a frame's border takes while a resize is under way (F8 mode, or a border drag).
+/// Orange, to stand clearly apart from the cyan of ordinary focus.
+const RESIZE_BORDER_COLOR: Color = Color::Rgb(255, 140, 0);
+
+fn focused_border_style(is_focused: bool, resizing: bool) -> Style {
     if is_focused {
-        Style::default().fg(Color::Cyan)
+        let color = if resizing { RESIZE_BORDER_COLOR } else { Color::Cyan };
+        Style::default().fg(color)
     } else {
         Style::default().fg(Color::DarkGray)
     }
@@ -475,6 +502,8 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Remembered for the key path, which opens pop-ups without being handed the layout.
+    app.last_full = f.area();
     if app.show_splash {
         draw_splash(f, app, f.area());
         return;
@@ -544,6 +573,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.picker.is_some() {
         draw_picker_modal(f, app, f.area());
     }
+    // Topmost: the context menu overlays whatever it was raised over.
+    if app.context_menu.is_some() {
+        draw_context_menu(f, app, f.area());
+    }
 }
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -586,24 +619,78 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
     let rect = menu_dropdown_rect(&app.menu, lang, full);
     let inner_width = rect.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = app.menu.defs[app.menu.menu_index]
-        .items
-        .iter()
-        .map(|i| {
-            let label = i18n::t(lang, i.label_key);
-            let line = match i.shortcut {
-                Some(sc) => {
-                    let content_width = inner_width.saturating_sub(2);
-                    let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
-                    format!(" {}{}{} ", label, " ".repeat(pad), sc)
-                }
-                None => format!(" {} ", label),
-            };
-            ListItem::new(line)
-        })
-        .collect();
+    // Separator rules are woven in between real items, so the row a given item
+    // renders on drifts down by one for every group opened above it. Track the
+    // selected item's display row so the highlight lands on the right line.
+    let separator = ListItem::new(Line::from(Span::styled(
+        "─".repeat(inner_width),
+        Style::default().fg(Color::DarkGray),
+    )));
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_row = 0;
+    for (idx, i) in app.menu.defs[app.menu.menu_index].items.iter().enumerate() {
+        if i.new_group {
+            items.push(separator.clone());
+        }
+        if idx == app.menu.item_index {
+            selected_row = items.len();
+        }
+        let label = i18n::t(lang, i.label_key);
+        let line = match i.shortcut {
+            Some(sc) => {
+                let content_width = inner_width.saturating_sub(2);
+                let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
+                format!(" {}{}{} ", label, " ".repeat(pad), sc)
+            }
+            None => format!(" {} ", label),
+        };
+        items.push(ListItem::new(line));
+    }
     let mut state = ListState::default();
-    state.select(Some(app.menu.item_index));
+    state.select(Some(selected_row));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_widget(Clear, rect);
+    f.render_stateful_widget(list, rect, &mut state);
+}
+
+fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    let Some(menu) = app.context_menu.as_ref() else { return };
+    let rect = context_menu_rect(menu, lang, full);
+    let inner_width = rect.width.saturating_sub(2) as usize;
+    // Same separator-aware layout as the menu bar's drop-down: rules between groups shift the
+    // selected item's row down, so track where the highlight should land.
+    let separator = ListItem::new(Line::from(Span::styled(
+        "─".repeat(inner_width),
+        Style::default().fg(Color::DarkGray),
+    )));
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_row = 0;
+    for (idx, i) in menu.items.iter().enumerate() {
+        if i.new_group {
+            items.push(separator.clone());
+        }
+        if idx == menu.selected {
+            selected_row = items.len();
+        }
+        let label = i18n::t(lang, i.label_key);
+        let line = match i.shortcut {
+            Some(sc) => {
+                let content_width = inner_width.saturating_sub(2);
+                let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
+                format!(" {}{}{} ", label, " ".repeat(pad), sc)
+            }
+            None => format!(" {} ", label),
+        };
+        items.push(ListItem::new(line));
+    }
+    let mut state = ListState::default();
+    state.select(Some(selected_row));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
@@ -1005,7 +1092,7 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::PanelFile)))
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused));
+        .border_style(focused_border_style(focused, app.layout_resize_active()));
 
     let paths = app.file_tree.visible_paths();
     let inner_width = inner_rect(area).width as usize;
@@ -1183,7 +1270,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_ve
 }
 
 fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
-    let panes = editor_pane_rects(area, app.split_view);
+    let panes = editor_pane_rects(area, app.split_view, app.settings.split_pct);
     if panes.len() == 1 {
         let focused = app.focus == Focus::Editor;
         draw_editor_pane(f, app, panes[0], app.active_editor, focused, true, EditorPane::Left);
@@ -1214,7 +1301,9 @@ fn draw_editor_pane(
     }
 
     // No title here: the open tab right above already shows the filename and dirty marker.
-    let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(focused));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(focused, app.layout_resize_active()));
 
     let inner = block.inner(content_area);
     let total_lines = app.editors[idx].rope.len_lines();
@@ -1318,6 +1407,87 @@ fn vt100_color(color: vt100::Color) -> Option<Color> {
     }
 }
 
+/// The cell holding a terminal panel's close button — the right-aligned `✕` on its top border,
+/// one column in from the corner. Shared by the renderer and click handling so both agree on
+/// where it is. `None` when the panel is too narrow to carry a title.
+pub fn terminal_close_cell(area: Rect) -> Option<(u16, u16)> {
+    if area.width < 3 {
+        return None;
+    }
+    Some((area.x + area.width - 2, area.y))
+}
+
+/// The area a terminal window's active tab renders into — the whole pane interior. The tab strip
+/// rides the top border (see `terminal_tab_strip_rect`), so it costs no interior row and the
+/// content is simply the interior, keeping selection hit-testing aligned with what is drawn.
+pub fn terminal_content_rect(area: Rect) -> Rect {
+    inner_rect(area)
+}
+
+/// The stretch of the top border a multi-tab window shows its tabs on: from just inside the left
+/// corner, stopping short of the window close button on the right when one is present. Shared by
+/// the renderer and click handling.
+pub fn terminal_tab_strip_rect(area: Rect, window_close: bool) -> Rect {
+    // One cell reserved on the right for the corner; two when the window also carries its own
+    // close button, so the tabs never sit under it.
+    let reserve = if window_close { 2 } else { 1 };
+    Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(1 + reserve),
+        height: 1,
+    }
+}
+
+/// One tab in a terminal window's strip: its whole x-range, and the column of its `✕` close
+/// glyph (absent only when the strip is too narrow to fit it).
+pub struct TermTab {
+    pub full: (u16, u16),
+    pub close: Option<u16>,
+}
+
+/// The tabs laid out along a terminal window's strip, left to right. Each is labelled ` N ✕ `
+/// (1-based number plus a close glyph). Shared by the renderer and click handling, and clipped
+/// to the strip width. Empty when there's a single tab (no strip is shown).
+pub fn terminal_tab_ranges(area: Rect, count: usize) -> Vec<TermTab> {
+    if count <= 1 {
+        return Vec::new();
+    }
+    let mut tabs = Vec::new();
+    let end = area.x + area.width;
+    let mut x = area.x;
+    for n in 1..=count {
+        if x >= end {
+            break;
+        }
+        let digits = n.to_string().len() as u16;
+        let right = (x + digits + 4).min(end); // " N ✕ "
+        let close_x = x + digits + 2; // the ✕ sits after "␠N␠"
+        let close = (close_x < right).then_some(close_x);
+        tabs.push(TermTab { full: (x, right), close });
+        x = right;
+    }
+    tabs
+}
+
+/// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
+/// never reads as an editor tab (those go cyan). Each tab carries a `✕` to close it.
+fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, count: usize, active: usize) {
+    let tabs = terminal_tab_ranges(area, count);
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, tab) in tabs.iter().enumerate() {
+        let budget = (tab.full.1 - tab.full.0) as usize;
+        let label: String = format!(" {} ✕ ", i + 1).chars().take(budget).collect();
+        let style = if i == active {
+            Style::default().fg(Color::Black).bg(Color::Green)
+        } else {
+            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
     let active = app.active_terminal;
     let focus_terminal = app.focus == Focus::Terminal;
@@ -1328,30 +1498,53 @@ fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
 }
 
 fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, focused: bool) {
-    let title = i18n::terminal_title(app.settings.lang, index);
-    let block = Block::default()
-        .title(title)
+    let (tab_count, active_tab) = {
+        let Some(window) = app.terminals.get(index) else { return };
+        (window.tabs.len(), window.active)
+    };
+    let window_close = app.terminals.len() > 1;
+
+    let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused));
-    let inner = block.inner(area);
+        .border_style(focused_border_style(focused, app.layout_resize_active()));
+    // With a single tab the top border just carries the terminal's name; with several, the tabs
+    // ride the border instead (drawn below) and stand in for the title.
+    if tab_count <= 1 {
+        block = block.title(i18n::terminal_title(app.settings.lang, index));
+    }
+    // A close button in the top-right corner, but only when there's another terminal to fall back
+    // to — the last one can't be closed, so offering the button would only mislead. Its cell is
+    // `terminal_close_cell`, kept in step with the right-aligned title here.
+    if window_close {
+        block = block.title_top(
+            Line::from(Span::styled("\u{2715}", Style::default().fg(Color::Red))).right_aligned(),
+        );
+    }
+    // The tab strip rides the top border, so the content is the whole interior.
+    let content = terminal_content_rect(area);
 
-    let rows = inner.height;
-    let cols = inner.width;
+    // The border (and close button) first, then the tabs over the top border, then the contents.
+    f.render_widget(block, area);
+    if tab_count > 1 {
+        let strip = terminal_tab_strip_rect(area, window_close);
+        draw_terminal_tab_strip(f, strip, tab_count, active_tab);
+    }
 
-    let Some(terminal) = app.terminals.get_mut(index) else { return };
+    let rows = content.height;
+    let cols = content.width;
+    let Some(terminal) = app.terminals.get_mut(index).map(|w| w.active_tab_mut()) else { return };
     terminal.resize(rows, cols);
 
     // Keep the pane clean during shell startup: hide the banner/rc output until the shell
     // settles, so the user sees an empty pane (then a clean prompt) rather than a banner
     // that only gets cleared seconds later.
     if !terminal.is_ready() {
-        f.render_widget(block, area);
-        if inner.height > 0 && inner.width > 0 {
+        if content.height > 0 && content.width > 0 {
             let hint = i18n::terminal_starting(app.settings.lang);
-            let hint_w = (hint.chars().count() as u16).min(inner.width);
+            let hint_w = (hint.chars().count() as u16).min(content.width);
             let rect = Rect {
-                x: inner.x + inner.width.saturating_sub(hint_w) / 2,
-                y: inner.y + inner.height / 2,
+                x: content.x + content.width.saturating_sub(hint_w) / 2,
+                y: content.y + content.height / 2,
                 width: hint_w,
                 height: 1,
             };
@@ -1436,11 +1629,11 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
         None
     };
 
-    let paragraph = Paragraph::new(lines).block(block);
-    f.render_widget(paragraph, area);
+    // The border was already drawn; the terminal grid fills the content area below the strip.
+    f.render_widget(Paragraph::new(lines), content);
 
     if let Some((cy, cx)) = cursor_pos {
-        f.set_cursor_position((inner.x + cx, inner.y + cy));
+        f.set_cursor_position((content.x + cx, content.y + cy));
     }
 }
 
@@ -1465,6 +1658,55 @@ mod tests {
 
     /// Five tabs of 10 columns each.
     const W: [u16; 5] = [10, 10, 10, 10, 10];
+
+    #[test]
+    fn context_menu_stays_on_screen() {
+        use crate::menu::{ContextMenu, ContextTarget};
+        let full = Rect { x: 0, y: 0, width: 80, height: 24 };
+        // Anchored comfortably inside: the menu opens exactly there.
+        let m = ContextMenu::new(ContextTarget::Editor, (10, 5));
+        let rect = context_menu_rect(&m, Lang::En, full);
+        assert_eq!((rect.x, rect.y), (10, 5));
+        assert!(rect.x + rect.width <= full.width && rect.y + rect.height <= full.height);
+
+        // Anchored in the far bottom-right: pulled back so it never spills off either edge.
+        let m2 = ContextMenu::new(ContextTarget::Editor, (79, 23));
+        let rect2 = context_menu_rect(&m2, Lang::En, full);
+        assert_eq!(rect2.x + rect2.width, full.width);
+        assert_eq!(rect2.y + rect2.height, full.height);
+    }
+
+    #[test]
+    fn terminal_tabs_only_appear_with_more_than_one() {
+        let area = Rect { x: 5, y: 2, width: 40, height: 10 };
+        // One tab: no strip. The tabs ride the top border, so the content is always the full
+        // interior regardless of tab count.
+        assert!(terminal_tab_ranges(area, 1).is_empty());
+        assert_eq!(terminal_content_rect(area), inner_rect(area));
+
+        // The strip rides the top border row, starting just inside the left corner. With a window
+        // close button present, it stops two cells short of the right edge.
+        let strip = terminal_tab_strip_rect(area, true);
+        assert_eq!((strip.x, strip.y), (6, 2));
+        assert_eq!(strip.x + strip.width, area.x + area.width - 2);
+
+        // Three tabs: ` N ✕ ` (5 cells each) laid left to right, each with a close glyph.
+        let tabs = terminal_tab_ranges(strip, 3);
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[0].full, (6, 11));
+        assert_eq!(tabs[0].close, Some(9));
+        assert_eq!(tabs[1].full, (11, 16));
+        assert_eq!(tabs[1].close, Some(14));
+    }
+
+    #[test]
+    fn terminal_close_cell_sits_top_right_inside_the_corner() {
+        let area = Rect { x: 10, y: 4, width: 20, height: 8 };
+        // One column in from the top-right corner (x+width-1), on the top border row.
+        assert_eq!(terminal_close_cell(area), Some((28, 4)));
+        // Too narrow to carry a title: no button.
+        assert_eq!(terminal_close_cell(Rect { x: 0, y: 0, width: 2, height: 5 }), None);
+    }
 
     #[test]
     fn tab_strip_shows_every_tab_when_they_fit() {

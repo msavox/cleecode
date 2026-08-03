@@ -5,6 +5,9 @@ pub const SETTINGS_COUNT: usize = 9;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
+/// Left pane's share of the editor region when split. Kept away from the extremes so neither
+/// pane can be squeezed to nothing.
+pub const SPLIT_PCT_RANGE: (u16, u16) = (20, 80);
 
 #[derive(Serialize, Deserialize)]
 pub struct Settings {
@@ -23,6 +26,10 @@ pub struct Settings {
     pub sidebar_width: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
+    // Left pane's percentage of the editor region in split view. Defaulted so configs written
+    // before split resizing existed still load, landing on the old fixed 50/50.
+    #[serde(default = "default_split_pct")]
+    pub split_pct: u16,
     // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
     // power users can hide it (Alt+B / View menu) and still reach menus via F9 / Alt+<letter>.
     #[serde(default = "default_true")]
@@ -101,6 +108,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_split_pct() -> u16 {
+    50
+}
+
 /// Octave's plot windows only live as long as the interpreter does, so a plain
 /// `octave script.m` draws the figures and closes them the instant the script ends.
 /// `--persist` stays in the interactive prompt afterwards, leaving the plots on screen and
@@ -147,6 +158,7 @@ impl Default for Settings {
             sidebar_width: 30,
             terminal_pct: 35,
             terminal_on_right: false,
+            split_pct: default_split_pct(),
             show_menubar: true,
             run_commands: default_run_commands(),
             active_venv: None,
@@ -226,6 +238,7 @@ impl Settings {
     pub fn clamp_layout(&mut self) {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
         self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
+        self.split_pct = self.split_pct.clamp(SPLIT_PCT_RANGE.0, SPLIT_PCT_RANGE.1);
     }
 }
 

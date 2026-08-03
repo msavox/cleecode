@@ -4,6 +4,8 @@ use crate::i18n::Key;
 pub enum MenuAction {
     ToggleSidebar,
     ToggleTerminal,
+    NewTerminalTab,
+    CloseTerminalTab,
     ToggleMenuBar,
     OpenSettings,
     SaveAll,
@@ -46,6 +48,8 @@ pub enum MenuAction {
     NewFolder,
     CommandPalette,
     OpenFilePicker,
+    Rename,
+    Delete,
 }
 
 pub struct MenuItemDef {
@@ -54,6 +58,10 @@ pub struct MenuItemDef {
     /// Keyboard shortcut hint shown right-aligned in the dropdown, if any.
     /// Key names, not human language, so this is never translated.
     pub shortcut: Option<&'static str>,
+    /// When true, a separator rule is drawn above this item, opening a new
+    /// visual group. Purely cosmetic: the item stays selectable and keyboard
+    /// navigation is unaffected.
+    pub new_group: bool,
 }
 
 pub struct MenuDef {
@@ -62,7 +70,12 @@ pub struct MenuDef {
 }
 
 fn item(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
-    MenuItemDef { label_key, action, shortcut }
+    MenuItemDef { label_key, action, shortcut, new_group: false }
+}
+
+/// Like `item`, but marks the start of a new group so a separator rule is drawn above it.
+fn group(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
+    MenuItemDef { label_key, action, shortcut, new_group: true }
 }
 
 pub fn menu_defs() -> Vec<MenuDef> {
@@ -71,9 +84,9 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuCleeCode,
             items: vec![
                 item(Key::ItemAbout, MenuAction::ShowAbout, None),
-                item(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
+                group(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
                 item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("F4")),
-                item(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
+                group(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
             ],
         },
         MenuDef {
@@ -82,11 +95,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemOpenFilePicker, MenuAction::OpenFilePicker, Some("Ctrl+O")),
                 item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
                 item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
-                item(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
+                group(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
                 item(Key::ItemSaveAs, MenuAction::SaveAs, None),
                 item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Alt+S")),
-                item(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
-                item(Key::ItemNextTab, MenuAction::NextTab, Some("Alt+.")),
+                group(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
+                group(Key::ItemNextTab, MenuAction::NextTab, Some("Alt+.")),
                 item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Alt+,")),
             ],
         },
@@ -95,28 +108,28 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemUndo, MenuAction::Undo, Some("Ctrl+Z")),
                 item(Key::ItemRedo, MenuAction::Redo, Some("Ctrl+Y")),
-                item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
+                group(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
                 item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
                 item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
-                item(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
+                group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
                 item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
-                item(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
+                group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
                 item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
                 item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),
                 item(Key::ItemMoveLineDown, MenuAction::MoveLineDown, Some("Alt+↓")),
-                item(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
+                group(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
                 item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
-                item(Key::ItemToggleFold, MenuAction::ToggleFold, Some("F7")),
+                group(Key::ItemToggleFold, MenuAction::ToggleFold, Some("F7")),
             ],
         },
         MenuDef {
             title_key: Key::MenuView,
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
-                item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+T")),
+                item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+J")),
                 item(Key::ItemToggleMenuBar, MenuAction::ToggleMenuBar, Some("Ctrl+B")),
-                item(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
+                group(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
             ],
         },
         MenuDef {
@@ -125,7 +138,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemLayoutClassic, MenuAction::LayoutClassic, None),
                 item(Key::ItemLayoutWide, MenuAction::LayoutWide, None),
                 item(Key::ItemLayoutTriple, MenuAction::LayoutTriple, None),
-                item(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
+                group(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
                 item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("F8")),
                 item(Key::ItemToggleSplitView, MenuAction::ToggleSplitView, Some("Ctrl+L")),
             ],
@@ -134,19 +147,86 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuRun,
             items: vec![
                 item(Key::ItemRunFile, MenuAction::RunFile, Some("F10")),
-                item(Key::ItemSelectVenv, MenuAction::SelectVenv, None),
+                group(Key::ItemSelectVenv, MenuAction::SelectVenv, None),
             ],
         },
         MenuDef {
             title_key: Key::MenuTerminal,
             items: vec![
                 item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
+                item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+T")),
                 item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
-                item(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+PgDn")),
+                group(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+PgDn")),
                 item(Key::ItemPrevTerminal, MenuAction::PrevTerminal, Some("Ctrl+PgUp")),
             ],
         },
     ]
+}
+
+/// Which frame a context menu was raised over, so the right item set is offered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContextTarget {
+    Sidebar,
+    Editor,
+    Terminal,
+}
+
+/// A right-click / Ctrl+Space pop-up: a short, context-specific action list anchored where it was
+/// opened. Reuses `MenuItemDef` (labels, shortcuts, group separators) and runs through the same
+/// `run_menu_action` path as the menu bar.
+pub struct ContextMenu {
+    pub items: Vec<MenuItemDef>,
+    pub selected: usize,
+    /// Top-left cell the pop-up hangs from.
+    pub anchor: (u16, u16),
+}
+
+impl ContextMenu {
+    pub fn new(target: ContextTarget, anchor: (u16, u16)) -> Self {
+        ContextMenu { items: context_items(target), selected: 0, anchor }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.items.len() as isize;
+        if len == 0 {
+            return;
+        }
+        self.selected = (((self.selected as isize + delta) % len + len) % len) as usize;
+    }
+
+    pub fn selected_action(&self) -> Option<MenuAction> {
+        self.items.get(self.selected).map(|i| i.action)
+    }
+}
+
+/// The action list for each frame's context menu. Groups (separator rules) follow the same
+/// `group()` convention as the menu bar.
+fn context_items(target: ContextTarget) -> Vec<MenuItemDef> {
+    match target {
+        ContextTarget::Sidebar => vec![
+            item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
+            item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
+            group(Key::ItemRename, MenuAction::Rename, Some("F2")),
+            item(Key::ItemDelete, MenuAction::Delete, Some("Del")),
+        ],
+        ContextTarget::Editor => vec![
+            item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
+            item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
+            item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
+            item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
+            group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
+            group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
+            item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
+        ],
+        ContextTarget::Terminal => vec![
+            item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
+            item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
+            group(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
+            item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+T")),
+            group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, None),
+            item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
+        ],
+    }
 }
 
 pub struct MenuBar {
