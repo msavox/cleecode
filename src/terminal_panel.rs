@@ -37,6 +37,9 @@ pub struct TerminalPanel {
     /// Text selected in this pane, for copying out of the terminal. The app grabs the mouse,
     /// so the host terminal's own selection is unavailable while cleecode runs.
     pub selection: Option<TermSelection>,
+    /// A user-given name for this tab, shown in the tab strip (or the window title when it is the
+    /// only tab) in place of the default "Terminal N".
+    pub name: Option<String>,
 }
 
 /// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
@@ -276,6 +279,7 @@ impl TerminalPanel {
             produced_output,
             revealed: false,
             selection: None,
+            name: None,
         })
     }
 

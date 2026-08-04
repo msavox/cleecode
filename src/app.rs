@@ -147,8 +147,11 @@ pub struct App {
     pub settings_selected: usize,
     pub highlighter: Highlighter,
     pub menu: MenuBar,
-    /// Right-click / Ctrl+Space pop-up, when open.
+    /// Right-click / Shift+F10 pop-up, when open.
     pub context_menu: Option<ContextMenu>,
+    /// Rename box for the focused terminal tab/window, when open.
+    pub show_terminal_rename: bool,
+    pub terminal_rename_input: String,
     /// The last full frame rect seen at draw time, so keyboard-opened pop-ups (which don't get
     /// passed the layout) can still anchor themselves against the current geometry.
     pub last_full: Rect,
@@ -665,6 +668,8 @@ impl App {
             terminals: vec![t1, t2],
             active_terminal: 0,
             context_menu: None,
+            show_terminal_rename: false,
+            terminal_rename_input: String::new(),
             last_full: Rect::new(0, 0, 0, 0),
             focus: Focus::FileTree,
             should_quit: false,
@@ -1649,6 +1654,40 @@ impl App {
         }
     }
 
+    /// Opens the rename box for the focused window's on-screen tab, prefilled with its current
+    /// name. For a single-tab window this renames what shows as the window title.
+    pub fn start_terminal_rename(&mut self) {
+        let Some(panel) = self.focused_panel() else { return };
+        self.terminal_rename_input = panel.name.clone().unwrap_or_default();
+        self.show_terminal_rename = true;
+    }
+
+    fn handle_terminal_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_terminal_rename(),
+            KeyCode::Esc => self.cancel_terminal_rename(),
+            KeyCode::Backspace => {
+                self.terminal_rename_input.pop();
+            }
+            KeyCode::Char(c) => self.terminal_rename_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn confirm_terminal_rename(&mut self) {
+        let name = self.terminal_rename_input.trim().to_string();
+        if let Some(panel) = self.focused_panel_mut() {
+            // An empty name clears it, falling back to the default "Terminal N".
+            panel.name = (!name.is_empty()).then_some(name);
+        }
+        self.cancel_terminal_rename();
+    }
+
+    pub fn cancel_terminal_rename(&mut self) {
+        self.show_terminal_rename = false;
+        self.terminal_rename_input.clear();
+    }
+
     /// Closes the focused window's on-screen tab (context menu entry).
     pub fn close_active_terminal_tab(&mut self) {
         if let Some(window) = self.terminals.get(self.active_terminal) {
@@ -2033,6 +2072,10 @@ impl App {
             self.handle_rename_key(key);
             return;
         }
+        if self.show_terminal_rename {
+            self.handle_terminal_rename_key(key);
+            return;
+        }
         if self.resize_mode {
             self.handle_resize_key(key);
             return;
@@ -2097,6 +2140,12 @@ impl App {
                 self.resize_mode = !self.resize_mode;
                 return;
             }
+            // Shift+F10 is the conventional context-menu key (and, unlike Ctrl+Space, doesn't
+            // clash with macOS input-source switching); plain F10 runs the current file.
+            KeyCode::F(10) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.open_context_menu_for_focus();
+                return;
+            }
             KeyCode::F(10) => {
                 self.run_active_file();
                 return;
@@ -2152,11 +2201,6 @@ impl App {
             }
             KeyCode::Tab if ctrl => {
                 self.cycle_focus(true);
-                return;
-            }
-            // Ctrl+Space raises the context menu for whichever frame has focus.
-            KeyCode::Char(' ') if ctrl => {
-                self.open_context_menu_for_focus();
                 return;
             }
             // Ctrl+\ (0x1C, ASCII FS) isn't reliably delivered by every terminal, unlike
@@ -2248,6 +2292,7 @@ impl App {
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::NewTerminalTab => self.new_terminal_tab(),
             MenuAction::CloseTerminalTab => self.close_active_terminal_tab(),
+            MenuAction::RenameTerminal => self.start_terminal_rename(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
             MenuAction::Save => self.save_active_file(),
             // Deliberately available for a named buffer too, to save a copy under a new name.
@@ -2410,7 +2455,7 @@ impl App {
             let tab_count = self.terminals[i].tabs.len();
             if tab_count > 1 {
                 let strip = ui::terminal_tab_strip_rect(*rect, window_close);
-                let labels = ui::terminal_tab_labels(lang, tab_count);
+                let labels = ui::terminal_tab_labels(&self.terminals[i], lang);
                 if let Some((t, tab)) = ui::terminal_tab_ranges(strip, &labels)
                     .into_iter()
                     .enumerate()
@@ -2936,6 +2981,10 @@ impl App {
                     self.show_rename = false;
                     self.rename_target = None;
                     self.rename_input.clear();
+                    return;
+                }
+                if self.show_terminal_rename {
+                    self.cancel_terminal_rename();
                     return;
                 }
                 if self.show_save_as {

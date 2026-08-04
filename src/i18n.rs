@@ -44,6 +44,7 @@ pub enum Key {
     ItemNewTerminal,
     ItemNewTerminalTab,
     ItemCloseTerminalTab,
+    ItemRenameTerminal,
     ItemCloseTerminal,
     ItemAbout,
     ItemCopy,
@@ -165,6 +166,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemNewTerminalTab) => "Nuovo tab terminale",
         (Lang::En, ItemCloseTerminalTab) => "Close terminal tab",
         (Lang::It, ItemCloseTerminalTab) => "Chiudi tab terminale",
+        (Lang::En, ItemRenameTerminal) => "Rename terminal...",
+        (Lang::It, ItemRenameTerminal) => "Rinomina terminale...",
 
         (Lang::En, ItemCloseTerminal) => "Close terminal",
         (Lang::It, ItemCloseTerminal) => "Chiudi terminale",
@@ -711,6 +714,13 @@ pub fn msg_not_a_venv(lang: Lang, path: &str) -> String {
     match lang {
         Lang::En => format!("{path} is not a virtualenv (no bin/activate) — not added"),
         Lang::It => format!("{path} non e un virtualenv (manca bin/activate) — non aggiunto"),
+    }
+}
+
+pub fn msg_terminal_rename_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "New name for this terminal (empty to reset):".to_string(),
+        Lang::It => "Nuovo nome per questo terminale (vuoto per azzerare):".to_string(),
     }
 }
 

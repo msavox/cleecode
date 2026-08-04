@@ -130,7 +130,14 @@ Sleep 2s
 Escape
 Sleep 600ms
 
-# Two independent panes, each with its own tab strip. The recording ends here rather than
+# Tabbed terminals: Ctrl+T opens tabs inside the focused terminal window. They ride its top
+# border, in green, so they never read as editor tabs.
+Ctrl+t
+Sleep 1500ms
+Ctrl+t
+Sleep 2s
+
+# Two independent editor panes, each with its own tab strip. The recording ends here rather than
 # quitting: a looping GIF should not spend its last seconds on an empty shell.
 Ctrl+l
 Sleep 3s

@@ -17,7 +17,8 @@ By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 - **Editor** — [syntect](https://github.com/trishume/syntect) highlighting, line numbers,
   multi-file tabs, mouse and keyboard selection, system-clipboard copy/cut/paste, auto-indent,
   word wrap, whitespace display, code folding (`F7`)
-- **Split editor** — `Alt+P` splits the editor column into two panes, each with its own tab strip
+- **Split editor** — `Alt+P` splits the editor column into two panes, each with its own tab
+  strip; drag the divider (or use `F8`) to rebalance them
 - **File tree sidebar** — per-type Nerd Font icons, git status dots (rolled up to folders), live
   refresh on external changes, create/rename/delete, hidden-file toggle (`H`), reroot on a folder
 - **Run button** — `▶ Run` / `F10` pastes a run command for the current file into an idle
@@ -26,15 +27,22 @@ By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 - **Quick open** — `Ctrl+O` fuzzy-searches the project; start the query with `/`, `~`, `./` or
   `../` and it becomes a filesystem browser, so files outside the root are reachable too
 - **Venv selector** — drop-down of the Python virtualenvs at the project root, plus registered
-  venvs from elsewhere on disk (saved to `settings.toml`, available in every project)
-- **Multiple terminals** — real ptys, so `ssh`, `vim`, `claude` all work; open and close panes,
-  auto-collapse on shell exit
+  venvs from elsewhere on disk — typed in by path or picked with a folder browser (saved to
+  `settings.toml`, available in every project)
+- **Tabbed terminals** — real ptys, so `ssh`, `vim`, `claude` all work; each terminal window (a
+  tiled pane) holds one or more tabs. New window (`F5`) vs new tab (`Ctrl+T`); close a tab or a
+  whole window from its `✕`; rename a tab or window; drag the seam between windows to rebalance
+  them; auto-collapse on shell exit
 - **Terminal selection** — drag with the mouse or `Shift`+arrows; the selection goes straight to
   the system clipboard, `Esc` clears it
-- **Menu bar** — macOS-style app menu plus File / Edit / View / Layout / Run / Terminal;
-  `Alt+<letter>` or `F9`. `Ctrl+B` hides the bar without making anything unreachable
-- **Resizable layout** — `F8` or drag the borders; three presets and a terminal-side toggle,
-  persisted across restarts
+- **Menu bar** — macOS-style app menu plus File / Edit / View / Layout / Run / Terminal, their
+  entries grouped into sections; `Alt+<letter>` or `F9`. `Ctrl+B` hides the bar without making
+  anything unreachable
+- **Context menus** — right-click or `Shift+F10` on the file tree, editor, or a terminal for its
+  common actions
+- **Resizable layout** — `F8` resize mode (arrows grow the focused frame, `Shift`+arrow shrinks)
+  or drag any inner border with the mouse — sidebar, editor/terminal, the split divider, between
+  terminals; three presets and a terminal-side toggle, persisted across restarts
 - **Settings panel** — line numbers, highlighting, word wrap, tab size, tabs vs spaces,
   whitespace, auto-indent, mouse, language, all live
 - **Workspace persistence** — a bare `clee` resumes the last project and its open tabs
@@ -125,14 +133,15 @@ just point your terminal at a Nerd Font you already have.
 | `Alt+<letter>` | Jump straight to a menu (see the underlined letter) |
 | `F1` / `F2` / `F3` | Focus file tree / editor / terminal |
 | `F4` | Settings |
-| `F5` / `F6` | New / close terminal |
+| `F5` / `F6` | New terminal window / close the window |
+| `Ctrl+T` | New terminal tab (in the focused window) |
 | `F7` | Fold/unfold the block under the cursor |
-| `F8` | Resize mode (arrows to resize, `Esc`/`Enter` to exit) |
+| `F8` | Resize mode (arrows grow the focused frame, `Shift`+arrow shrinks, `Esc`/`Enter` to exit) |
 | `F10` | Run the current file |
 | `Ctrl+L` / `Alt+P` | Toggle split editor (`Alt+P` needs Option-as-Meta on macOS) |
 | `Alt+Left` / `Alt+Right` | Switch focus between split panes |
 | `Ctrl+S` / `Alt+S` | Save / save all |
-| `Ctrl+E` / `Ctrl+T` | Toggle sidebar / terminal panel |
+| `Ctrl+E` / `Ctrl+J` | Toggle sidebar / terminal panel |
 | `Ctrl+B` / `Alt+B` | Show/hide the menu bar |
 | `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |
 | `Ctrl+Q` | Quit (prompts if any file is unsaved) |
@@ -147,7 +156,9 @@ just point your terminal at a Nerd Font you already have.
 | `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
 | `Alt+,` / `Alt+.` | Switch editor tab |
-| `Ctrl+PageUp/Down` | Switch terminal |
+| `Ctrl+PageUp/Down` | Switch terminal window |
+| `Alt+PageUp/Down` | Switch terminal tab |
+| `Shift+F10` / right-click | Context menu for the focused frame |
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
 opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `E` renames,

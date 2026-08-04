@@ -1,6 +1,7 @@
 use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
 use crate::menu::{ContextMenu, MenuBar};
+use crate::terminal_panel::TerminalWindow;
 use crate::settings;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -558,6 +559,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
+    if app.show_terminal_rename {
+        draw_terminal_rename_modal(f, app, f.area());
+    }
     if app.show_goto {
         draw_goto_modal(f, app, f.area());
     }
@@ -868,6 +872,12 @@ fn draw_input_modal(f: &mut Frame, full: Rect, title: &str, prompt: &str, input:
 fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
     draw_input_modal(f, full, "Go to line", i18n::msg_goto_prompt(lang), &app.goto_input);
+}
+
+fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    let prompt = i18n::msg_terminal_rename_prompt(lang);
+    draw_input_modal(f, full, "Rename terminal", &prompt, &app.terminal_rename_input);
 }
 
 fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -1453,10 +1463,15 @@ pub struct TermTab {
     pub close: Option<u16>,
 }
 
-/// The display name of each tab in a window — the same "Terminal N" wording as a window's own
-/// title, so the tabs read clearly rather than as bare numbers.
-pub fn terminal_tab_labels(lang: Lang, count: usize) -> Vec<String> {
-    (0..count).map(|n| i18n::terminal_title(lang, n).trim().to_string()).collect()
+/// The display name of each tab in a window: its user-given name, or the default "Terminal N"
+/// wording (matching a window's own title) when it hasn't been renamed.
+pub fn terminal_tab_labels(window: &TerminalWindow, lang: Lang) -> Vec<String> {
+    window
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| t.name.clone().unwrap_or_else(|| i18n::terminal_title(lang, i).trim().to_string()))
+        .collect()
 }
 
 /// The tabs laid out along a terminal window's strip, left to right. Each chip is ` {name} ✕ `
@@ -1485,9 +1500,8 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
 /// never reads as an editor tab (those go cyan). Each tab carries a `✕` to close it.
-fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, lang: Lang, count: usize, active: usize) {
-    let labels = terminal_tab_labels(lang, count);
-    let tabs = terminal_tab_ranges(area, &labels);
+fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, labels: &[String], active: usize) {
+    let tabs = terminal_tab_ranges(area, labels);
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let budget = (tab.full.1 - tab.full.0) as usize;
@@ -1512,19 +1526,20 @@ fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
 }
 
 fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, focused: bool) {
-    let (tab_count, active_tab) = {
+    let (labels, active_tab) = {
         let Some(window) = app.terminals.get(index) else { return };
-        (window.tabs.len(), window.active)
+        (terminal_tab_labels(window, app.settings.lang), window.active)
     };
+    let tab_count = labels.len();
     let window_close = app.terminals.len() > 1;
 
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(focused, app.layout_resize_active()));
-    // With a single tab the top border just carries the terminal's name; with several, the tabs
-    // ride the border instead (drawn below) and stand in for the title.
+    // With a single tab the top border carries the (possibly renamed) terminal's name; with
+    // several, the tabs ride the border instead (drawn below) and stand in for the title.
     if tab_count <= 1 {
-        block = block.title(i18n::terminal_title(app.settings.lang, index));
+        block = block.title(format!(" {} ", labels.first().map(String::as_str).unwrap_or("")));
     }
     // A close button in the top-right corner, but only when there's another terminal to fall back
     // to — the last one can't be closed, so offering the button would only mislead. Its cell is
@@ -1541,7 +1556,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     f.render_widget(block, area);
     if tab_count > 1 {
         let strip = terminal_tab_strip_rect(area, window_close);
-        draw_terminal_tab_strip(f, strip, app.settings.lang, tab_count, active_tab);
+        draw_terminal_tab_strip(f, strip, &labels, active_tab);
     }
 
     let rows = content.height;
@@ -1709,7 +1724,7 @@ mod tests {
         let area = Rect { x: 5, y: 2, width: 40, height: 10 };
         // One tab: no strip. The tabs ride the top border, so the content is always the full
         // interior regardless of tab count.
-        assert!(terminal_tab_ranges(area, &terminal_tab_labels(Lang::En, 1)).is_empty());
+        assert!(terminal_tab_ranges(area, &["Terminal 1".to_string()]).is_empty());
         assert_eq!(terminal_content_rect(area), inner_rect(area));
 
         // The strip rides the top border row, starting just inside the left corner. With a window
@@ -1720,8 +1735,7 @@ mod tests {
 
         // Three tabs: ` Terminal N ✕ ` chips (name = 10 cells, chip = 14) laid left to right, each
         // with a close glyph after the name.
-        let labels = terminal_tab_labels(Lang::En, 3);
-        assert_eq!(labels[0], "Terminal 1");
+        let labels: Vec<String> = (1..=3).map(|n| format!("Terminal {n}")).collect();
         let tabs = terminal_tab_ranges(strip, &labels);
         assert_eq!(tabs.len(), 3);
         assert_eq!(tabs[0].full, (6, 20));
