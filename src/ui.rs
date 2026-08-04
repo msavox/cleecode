@@ -1446,23 +1446,29 @@ pub struct TermTab {
     pub close: Option<u16>,
 }
 
-/// The tabs laid out along a terminal window's strip, left to right. Each is labelled ` N ✕ `
-/// (1-based number plus a close glyph). Shared by the renderer and click handling, and clipped
-/// to the strip width. Empty when there's a single tab (no strip is shown).
-pub fn terminal_tab_ranges(area: Rect, count: usize) -> Vec<TermTab> {
-    if count <= 1 {
+/// The display name of each tab in a window — the same "Terminal N" wording as a window's own
+/// title, so the tabs read clearly rather than as bare numbers.
+pub fn terminal_tab_labels(lang: Lang, count: usize) -> Vec<String> {
+    (0..count).map(|n| i18n::terminal_title(lang, n).trim().to_string()).collect()
+}
+
+/// The tabs laid out along a terminal window's strip, left to right. Each chip is ` {name} ✕ `
+/// (a display name plus a close glyph). Shared by the renderer and click handling, and clipped to
+/// the strip width. Empty when there's a single tab (no strip is shown).
+pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
+    if labels.len() <= 1 {
         return Vec::new();
     }
     let mut tabs = Vec::new();
     let end = area.x + area.width;
     let mut x = area.x;
-    for n in 1..=count {
+    for label in labels {
         if x >= end {
             break;
         }
-        let digits = n.to_string().len() as u16;
-        let right = (x + digits + 4).min(end); // " N ✕ "
-        let close_x = x + digits + 2; // the ✕ sits after "␠N␠"
+        let lw = label.chars().count() as u16;
+        let right = (x + lw + 4).min(end); // " name ✕ "
+        let close_x = x + lw + 2; // the ✕ sits after "␠name␠"
         let close = (close_x < right).then_some(close_x);
         tabs.push(TermTab { full: (x, right), close });
         x = right;
@@ -1472,18 +1478,19 @@ pub fn terminal_tab_ranges(area: Rect, count: usize) -> Vec<TermTab> {
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
 /// never reads as an editor tab (those go cyan). Each tab carries a `✕` to close it.
-fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, count: usize, active: usize) {
-    let tabs = terminal_tab_ranges(area, count);
+fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, lang: Lang, count: usize, active: usize) {
+    let labels = terminal_tab_labels(lang, count);
+    let tabs = terminal_tab_ranges(area, &labels);
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let budget = (tab.full.1 - tab.full.0) as usize;
-        let label: String = format!(" {} ✕ ", i + 1).chars().take(budget).collect();
+        let chip: String = format!(" {} ✕ ", labels[i]).chars().take(budget).collect();
         let style = if i == active {
             Style::default().fg(Color::Black).bg(Color::Green)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
         };
-        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(chip, style));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -1527,7 +1534,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     f.render_widget(block, area);
     if tab_count > 1 {
         let strip = terminal_tab_strip_rect(area, window_close);
-        draw_terminal_tab_strip(f, strip, tab_count, active_tab);
+        draw_terminal_tab_strip(f, strip, app.settings.lang, tab_count, active_tab);
     }
 
     let rows = content.height;
@@ -1681,7 +1688,7 @@ mod tests {
         let area = Rect { x: 5, y: 2, width: 40, height: 10 };
         // One tab: no strip. The tabs ride the top border, so the content is always the full
         // interior regardless of tab count.
-        assert!(terminal_tab_ranges(area, 1).is_empty());
+        assert!(terminal_tab_ranges(area, &terminal_tab_labels(Lang::En, 1)).is_empty());
         assert_eq!(terminal_content_rect(area), inner_rect(area));
 
         // The strip rides the top border row, starting just inside the left corner. With a window
@@ -1690,13 +1697,16 @@ mod tests {
         assert_eq!((strip.x, strip.y), (6, 2));
         assert_eq!(strip.x + strip.width, area.x + area.width - 2);
 
-        // Three tabs: ` N ✕ ` (5 cells each) laid left to right, each with a close glyph.
-        let tabs = terminal_tab_ranges(strip, 3);
+        // Three tabs: ` Terminal N ✕ ` chips (name = 10 cells, chip = 14) laid left to right, each
+        // with a close glyph after the name.
+        let labels = terminal_tab_labels(Lang::En, 3);
+        assert_eq!(labels[0], "Terminal 1");
+        let tabs = terminal_tab_ranges(strip, &labels);
         assert_eq!(tabs.len(), 3);
-        assert_eq!(tabs[0].full, (6, 11));
-        assert_eq!(tabs[0].close, Some(9));
-        assert_eq!(tabs[1].full, (11, 16));
-        assert_eq!(tabs[1].close, Some(14));
+        assert_eq!(tabs[0].full, (6, 20));
+        assert_eq!(tabs[0].close, Some(18));
+        assert_eq!(tabs[1].full, (20, 34));
+        assert_eq!(tabs[1].close, Some(32));
     }
 
     #[test]

@@ -2381,6 +2381,46 @@ impl App {
         self.settings.clamp_layout();
     }
 
+    /// Handles a click on a terminal window's top border: its close ✕, or (with several tabs) a
+    /// tab's ✕ / tab switch. Returns whether the click was consumed, so the caller can stop before
+    /// the resize seam that shares this row claims it.
+    fn handle_terminal_titlebar_click(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
+        let Some(term_areas) = &areas.terminals else { return false };
+        let window_close = self.terminals.len() > 1;
+        let lang = self.settings.lang;
+        for (i, rect) in term_areas.iter().enumerate() {
+            if row != rect.y || col < rect.x || col >= rect.x + rect.width {
+                continue;
+            }
+            // The whole-window close button.
+            if window_close && ui::terminal_close_cell(*rect) == Some((col, row)) {
+                self.close_terminal(i);
+                return true;
+            }
+            // A tab, when the window has more than one: its ✕ closes it, elsewhere switches to it.
+            let tab_count = self.terminals[i].tabs.len();
+            if tab_count > 1 {
+                let strip = ui::terminal_tab_strip_rect(*rect, window_close);
+                let labels = ui::terminal_tab_labels(lang, tab_count);
+                if let Some((t, tab)) = ui::terminal_tab_ranges(strip, &labels)
+                    .into_iter()
+                    .enumerate()
+                    .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1)
+                {
+                    self.focus = Focus::Terminal;
+                    self.active_terminal = i;
+                    if tab.close == Some(col) {
+                        self.close_terminal_tab(i, t);
+                    } else {
+                        self.terminals[i].active = t;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn try_start_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
         if let Some(sidebar) = areas.sidebar {
             let border_x = sidebar.x + sidebar.width;
@@ -2412,7 +2452,10 @@ impl App {
             let panes = ui::editor_pane_rects(areas.editor, true, self.settings.split_pct);
             if let Some(right) = panes.get(1) {
                 let seam_x = right.x;
-                if row >= areas.editor.y
+                // Skip the tab-bar row (the panes' top row): a click there is a tab click, not a
+                // seam grab, or the split drag would swallow the editor tabs sitting on it.
+                let (tab_bar, _) = ui::split_editor_area(*right);
+                if row >= areas.editor.y + tab_bar.height
                     && row < areas.editor.y + areas.editor.height
                     && (col == seam_x || col + 1 == seam_x)
                 {
@@ -2869,6 +2912,12 @@ impl App {
                     self.mouse_menu_bar_click(col);
                     return;
                 }
+                // Terminal title-bar controls (window ✕, tab ✕, tab switch) live on the top
+                // border, which in the bottom layout doubles as the resize seam — so claim them
+                // before try_start_drag, or the drag would swallow every such click.
+                if self.handle_terminal_titlebar_click(col, row, areas) {
+                    return;
+                }
                 if self.try_start_drag(col, row, areas) {
                     return;
                 }
@@ -2921,44 +2970,14 @@ impl App {
                     return;
                 }
                 if let Some(term_areas) = &areas.terminals {
-                    // The close button lives on the border, outside the inner area, so test it
-                    // before the whole-panel hit — and only when there's more than one terminal,
-                    // matching when the button is actually drawn.
-                    if self.terminals.len() > 1 {
-                        if let Some(i) = term_areas
-                            .iter()
-                            .position(|rect| ui::terminal_close_cell(*rect) == Some((col, row)))
-                        {
-                            self.close_terminal(i);
-                            return;
-                        }
-                    }
+                    // Title-bar controls were already handled above; here a click inside a pane
+                    // focuses it and starts a text selection.
                     for (i, rect) in term_areas.iter().enumerate() {
                         if within(*rect, col, row) {
                             self.focus = Focus::Terminal;
                             self.active_terminal = i;
-                            // A click on the tabs riding the top border (when the window has more
-                            // than one tab): the tab's ✕ closes it, elsewhere on the tab switches
-                            // to it — rather than starting a text selection.
-                            let tab_count = self.terminals[i].tabs.len();
-                            let window_close = self.terminals.len() > 1;
-                            if tab_count > 1 && row == rect.y {
-                                let strip = ui::terminal_tab_strip_rect(*rect, window_close);
-                                if let Some((t, tab)) = ui::terminal_tab_ranges(strip, tab_count)
-                                    .into_iter()
-                                    .enumerate()
-                                    .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1)
-                                {
-                                    if tab.close == Some(col) {
-                                        self.close_terminal_tab(i, t);
-                                    } else {
-                                        self.terminals[i].active = t;
-                                    }
-                                    return;
-                                }
-                            }
-                            // Otherwise start a selection: cleecode captures the mouse, so the
-                            // host terminal's own selection can't be used while it runs.
+                            // cleecode captures the mouse, so the host terminal's own selection
+                            // can't be used while it runs.
                             let content = ui::terminal_content_rect(*rect);
                             if let Some(cell) = cell_at(content, col, row) {
                                 if let Some(term) = self.window_tab_mut(i) {
