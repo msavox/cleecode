@@ -52,3 +52,10 @@ sleep 4                            # held for the shot
 #      whole window and now shows the colouring — chords yellow, headings cyan, rules dimmed.
 palette "manual" 2.0
 sleep 5                            # held for the shot
+
+# ---- palette.png: the command palette, which is how anything is reached without a shortcut.
+k Escape; sleep 0.8
+k C-p; sleep 0.8
+t "term"; sleep 1.5
+sleep 3                            # held for the shot
+k Escape; sleep 0.8

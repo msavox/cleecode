@@ -1,3 +1,15 @@
+## What's new in 0.3.1
+
+- **`clee -w NAME`** opens a saved workspace straight from the shell, and `clee -w` on its own
+  lists the ones you have. The name is announced on the splash while the shells start.
+- **The workspace you are in is now visible**, in the corner of the menu bar. It was tracked all
+  along but never shown, so the only clue was a status message that had scrolled away.
+- **A built-in "Default layout" workspace**, always in the Workspace menu and impossible to
+  delete, for putting the frames back the way they ship without editing settings by hand. A
+  workspace of your own called `default` is untouched and keeps its place in the list.
+- **Loading a workspace restores which terminal had focus.** It was being written to the file and
+  then ignored on the way back in.
+
 ## What's new in 0.3.0
 
 ### It no longer closes on you

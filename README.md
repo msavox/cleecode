@@ -47,19 +47,30 @@ UI change instead of re-shot by hand.*
   terminals; three presets and a terminal-side toggle, persisted across restarts
 - **Settings panel** — line numbers, highlighting, word wrap, tab size, tabs vs spaces,
   whitespace, auto-indent, mouse, language, all live
-- **Named workspaces** — save a whole set-up under a name (`Ctrl+Shift+W`): project root, open files,
-  frame sizes, and the terminal windows with their tab names and startup commands, so reopening
-  one brings the shells back already running `claude`, `octave`, `npm run dev`… One TOML file per
-  workspace under `~/.config/cleecode/workspaces/`, hand-editable. A bare `clee` resumes the last
-  one, or just the last project and its open tabs if none was saved
-- **Built-in manual** — `Ctrl+Shift+M`, in English or Italian, so the key bindings are reachable from
-  inside the editor rather than only from this file
+- **Named workspaces** — save a whole set-up under a name (`Ctrl+Shift+W`): project root, open
+  files, frame sizes, and the terminal windows with their tab names and startup commands, so
+  reopening one brings the shells back already running `claude`, `octave`, `npm run dev`… Open one
+  from the Workspace menu or straight from the shell with `clee -w NAME`; the name it is running
+  under sits in the corner of the menu bar. One hand-editable TOML file per workspace under
+  `~/.config/cleecode/workspaces/`, plus a built-in **Default layout** that puts the frames back
+  the way they ship and cannot be deleted. A bare `clee` resumes the last one
+- **Built-in manual** — `Ctrl+Shift+M`, in English or Italian, so the key bindings are reachable
+  from inside the editor rather than only from this file
 - **Also** — `Ctrl+Shift+S` saves all, drag & drop into the tree (or `scp` onto an `ssh` session),
   auto-reload of externally changed files, English and Italian
 
 ![Layout and Run menus](docs/screenshots/menu.png)
 
 ![Split editor view](docs/screenshots/split.png)
+
+Nothing needs to be memorised: `Ctrl+P` fuzzy-searches every action in the app, with the key
+that would have done it shown alongside.
+
+![Command palette](docs/screenshots/palette.png)
+
+And the manual travels with the binary — `Ctrl+Shift+M`, English or Italian.
+
+![Built-in manual](docs/screenshots/manual.png)
 
 ## Installing
 
@@ -114,6 +125,8 @@ cargo build --release
 ./target/release/clee              # current directory (or resume the last workspace)
 ./target/release/clee src/main.rs  # current directory, with a file pre-opened
 ./target/release/clee ./some-dir   # that directory as the project root
+./target/release/clee -w work      # open the saved workspace called "work"
+./target/release/clee -w           # list the saved workspaces
 ./target/release/clee --help       # usage, --version, --install-font
 ```
 

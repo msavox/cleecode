@@ -41,6 +41,7 @@ pub enum Key {
     ItemToggleTerminal,
     ItemToggleMenuBar,
     ItemOpenMenuBar,
+    WorkspaceBadge,
     ItemOpenSettings,
     ItemNewTerminal,
     ItemNewTerminalTab,
@@ -173,6 +174,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemToggleMenuBar) => "Barra dei menu",
         (Lang::En, ItemOpenMenuBar) => "Open the menu bar",
         (Lang::It, ItemOpenMenuBar) => "Apri la barra dei menu",
+        // Short on purpose: it shares the menu bar row with the menu titles.
+        (Lang::En, WorkspaceBadge) => "workspace:",
+        (Lang::It, WorkspaceBadge) => "workspace:",
 
         (Lang::En, ItemOpenSettings) => "Settings...",
         (Lang::It, ItemOpenSettings) => "Impostazioni...",
@@ -711,6 +715,15 @@ pub fn msg_delete_cancelled(lang: Lang) -> String {
 /// Shown when something panicked and was contained rather than allowed to close the editor.
 /// It names the log deliberately: the status line is one transient line, and a bug worth
 /// reporting deserves somewhere to read the details back from.
+/// `clee -w` was given a name that is not on disk. Deliberately not a fallback to something
+/// else: opening a different workspace than the one asked for is worse than opening none.
+pub fn msg_workspace_unknown(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("No workspace called \"{name}\" — `clee -w` lists the saved ones"),
+        Lang::It => format!("Nessun workspace \"{name}\" — `clee -w` elenca quelli salvati"),
+    }
+}
+
 pub fn msg_internal_error(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("Internal error (session kept, see panic.log): {detail}"),

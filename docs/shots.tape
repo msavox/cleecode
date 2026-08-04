@@ -47,3 +47,7 @@ Wait+Screen@30s /CleeCode manual/
 Sleep 2s
 Screenshot docs/screenshots/manual.png
 Sleep 1s
+
+Wait+Screen@30s /Command palette/
+Sleep 1s
+Screenshot docs/screenshots/palette.png

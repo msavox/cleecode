@@ -1519,7 +1519,12 @@ impl App {
                 self.delete_workspace(&name);
             } else {
                 self.picker = None;
-                match crate::workspace::load(&name) {
+                let found = if crate::workspace::is_default(&name) {
+                    Some(crate::workspace::default_workspace(self.root.clone()))
+                } else {
+                    crate::workspace::load(&name)
+                };
+                match found {
                     Some(ws) => self.apply_workspace(ws),
                     None => self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string(),
                 }
@@ -2055,6 +2060,9 @@ impl App {
         }
 
         self.rebuild_terminals(&ws, same_root);
+        // Which shell you were looking at is part of the layout too, and it was being written to
+        // the file and then ignored on the way back in.
+        self.active_terminal = ws.active_terminal.min(self.terminals.len().saturating_sub(1));
         self.active_workspace = Some(name.clone());
         self.settings.last_workspace = Some(name.clone());
         self.status_message = i18n::msg_workspace_loaded(lang, &name);
@@ -2118,7 +2126,12 @@ impl App {
     /// The saved workspaces as picker rows, each with its project folder as the dimmed detail
     /// so two workspaces over different projects stay tellable apart.
     fn open_workspace_picker(&mut self, delete: bool) {
-        let saved = crate::workspace::list();
+        let mut saved = crate::workspace::list();
+        // Deleting offers only the files; the built-in has nothing on disk to remove, so it is
+        // simply not among the things you can pick there.
+        if !delete {
+            saved.insert(0, crate::workspace::default_workspace(self.root.clone()));
+        }
         if saved.is_empty() {
             self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string();
             return;

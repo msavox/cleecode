@@ -69,6 +69,45 @@ pub struct Workspace {
     pub terminals: Vec<WorkspaceTerminal>,
 }
 
+/// The built-in workspace. It is not a file and never becomes one: picking it puts the frames
+/// back the way CleeCode ships them, in whatever project you are already in. It exists because
+/// the layout is easy to wander away from — a hidden sidebar here, a dragged seam there — and
+/// there was no way back short of editing settings by hand. Being built in is also why it cannot
+/// be deleted: there is nothing on disk to delete.
+pub const DEFAULT_NAME: &str = "Default layout";
+
+/// Whether `name` is the built-in one. Compared by slug so case and spacing do not matter, but
+/// deliberately *not* a name anyone is likely to have used already — a workspace of your own
+/// called "default" keeps working and keeps its place in the list.
+pub fn is_default(name: &str) -> bool {
+    slug(name) == slug(DEFAULT_NAME)
+}
+
+/// The built-in workspace, pointed at `root`. No open files and no terminals of its own: the
+/// point is the shape of the window, not a set of shells, and `apply_workspace` keeps the ones
+/// already running when the project has not changed.
+pub fn default_workspace(root: PathBuf) -> Workspace {
+    Workspace {
+        name: DEFAULT_NAME.to_string(),
+        root,
+        open_files: Vec::new(),
+        active_file: None,
+        active_venv: None,
+        active_terminal: 0,
+        layout: WorkspaceLayout {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right: false,
+            split_view: false,
+            split_pct: 50,
+        },
+        terminals: Vec::new(),
+    }
+}
+
 /// Filename stem for a workspace: lowercase, with every run of non-alphanumerics collapsed to
 /// a single dash, so "My Project (2)" and "my-project-2" don't fight over the same file while
 /// still producing something readable in the directory listing.
@@ -96,6 +135,9 @@ fn file_in(dir: &Path, name: &str) -> PathBuf {
 }
 
 pub fn save_in(dir: &Path, ws: &Workspace) -> Result<PathBuf, String> {
+    if is_default(&ws.name) {
+        return Err(format!("\"{DEFAULT_NAME}\" is the built-in workspace and cannot be overwritten"));
+    }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = toml::to_string_pretty(ws).map_err(|e| e.to_string())?;
     let path = file_in(dir, &ws.name);
@@ -243,6 +285,37 @@ mod tests {
         let all = list_in(&dir);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].terminals.len(), 1);
+    }
+
+    /// The built-in workspace is always offered and can never be removed, which only holds if
+    /// it never becomes a file: saving over its name is refused, and a hand-made file claiming
+    /// it is ignored rather than listed alongside it.
+    #[test]
+    fn the_built_in_workspace_never_becomes_a_file() {
+        let dir = temp_dir("builtin");
+        assert!(is_default("Default layout") && is_default("default  LAYOUT"), "matched by slug");
+        // A workspace of your own called "default" is not the built-in and must survive.
+        assert!(!is_default("default") && !is_default("Defaults"));
+
+        let mut ws = sample(DEFAULT_NAME);
+        assert!(save_in(&dir, &ws).is_err(), "saving over the built-in name is refused");
+        assert!(list_in(&dir).is_empty());
+
+        // Someone's own "default" is a different thing and stays listed.
+        let mine = sample("default");
+        save_in(&dir, &mine).expect("a workspace called default is ordinary");
+        assert_eq!(list_in(&dir).len(), 1);
+
+        // Any other name still saves normally.
+        ws.name = "real".to_string();
+        assert!(save_in(&dir, &ws).is_ok());
+        assert_eq!(list_in(&dir).len(), 2);
+
+        // And the built-in itself is a plain default layout in whatever root it is given.
+        let built = default_workspace(PathBuf::from("/somewhere"));
+        assert_eq!(built.root, PathBuf::from("/somewhere"));
+        assert!(built.layout.show_sidebar && built.layout.show_terminal && !built.layout.split_view);
+        assert!(built.terminals.is_empty() && built.open_files.is_empty());
     }
 
     #[test]

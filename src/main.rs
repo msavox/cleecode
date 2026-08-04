@@ -98,11 +98,16 @@ clee — CleeCode, a terminal IDE
 
 USAGE:
     clee [FILE|DIRECTORY]
+    clee -w NAME
 
     A directory becomes the project root; a file is opened in the current directory.
     With no argument, the last project folder and its open files are restored.
 
 OPTIONS:
+    -w, --workspace NAME
+                      Open a saved workspace: its project root, files, frame sizes and
+                      terminals, shells and startup commands included. `clee -w` with no
+                      name lists the ones you have.
     --install-font    Install the bundled CleeCodeMono Nerd Font for the current user
     -h, --help        Print this help
     -V, --version     Print the version
@@ -122,6 +127,28 @@ fn main() -> Result<()> {
     if args.iter().any(|a| a == "--install-font") {
         font_install::install();
         return Ok(());
+    }
+    let mut open_workspace: Option<String> = None;
+    // `clee -w` with no name is a question, not a mistake: list what there is and stop, while
+    // the output can still be seen.
+    if let Some(i) = args.iter().position(|a| a == "-w" || a == "--workspace") {
+        match args.get(i + 1) {
+            Some(name) => open_workspace = Some(name.clone()),
+            None => {
+                let saved = workspace::list();
+                if saved.is_empty() {
+                    println!("No saved workspaces of your own yet — save one from the Workspace menu.");
+                    println!("    {:<24} (built in)", workspace::DEFAULT_NAME);
+                } else {
+                    println!("Saved workspaces:");
+                    for ws in saved {
+                        println!("    {:<24} {}", ws.name, ws.root.display());
+                    }
+                    println!("    {:<24} (built in)", workspace::DEFAULT_NAME);
+                }
+                return Ok(());
+            }
+        }
     }
     install_panic_hook();
     let mut terminal = ratatui::init();
@@ -146,7 +173,7 @@ fn main() -> Result<()> {
     let _ = stdout().flush();
     // Even a panic the loop couldn't shield must not skip the teardown below: leaving the
     // terminal in raw mode on the alternate screen hands the user an unusable shell.
-    let result = shielded(|| run(&mut terminal));
+    let result = shielded(|| run(&mut terminal, open_workspace));
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.
@@ -164,7 +191,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) -> Result<()> {
     let size = terminal.size()?;
     let cwd = std::env::current_dir()?;
     let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
@@ -177,11 +204,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     // A saved workspace remembers more than the plain resume does — terminal names, startup
     // commands, frame sizes — so it wins when there is one. Its root is picked up here, before
     // the first shells are spawned, so they start in the right directory.
-    let resumed = arg
-        .is_none()
-        .then(|| saved.last_workspace.as_deref().and_then(workspace::load))
-        .flatten();
+    // `-w name` is an explicit request, so it beats both the resume and a path argument. Falling
+    // back to the resume when the name is unknown would silently open the wrong thing, so a bad
+    // name simply opens nothing and says so once the UI is up.
+    let named = open_workspace.as_deref().map(|n| {
+        // The built-in one is not a file, so it is answered here rather than looked up. Its root
+        // is settled below like any other startup: the argument, or the current directory.
+        let found = if workspace::is_default(n) { None } else { workspace::load(n) };
+        (n.to_string(), found)
+    });
+    let resumed = match &named {
+        Some((_, found)) => found.clone(),
+        None => arg.is_none().then(|| saved.last_workspace.as_deref().and_then(workspace::load)).flatten(),
+    };
     let root = match &arg {
+        _ if resumed.is_some() && named.is_some() => {
+            resumed.as_ref().map(|w| w.root.clone()).filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
+        }
         Some(p) if p.is_dir() => p.clone(),
         Some(_) => cwd.clone(),
         None => resumed
@@ -194,12 +233,31 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 
     let mut app = App::new(root, size.height, size.width)?;
 
-    // Launched with an explicit file/folder: skip the splash and go straight to work.
-    if arg.is_some() {
+    // Launched with an explicit file/folder: skip the splash and go straight to work. A named
+    // workspace keeps it, since the splash is where its name is announced.
+    if arg.is_some() && named.is_none() {
         app.show_splash = false;
     }
 
-    match arg {
+    // A name given on the command line settles what to open, so the argument and resume paths
+    // below are skipped entirely — `clee -w work` should not also try to open "-w" as a file.
+    let opened_by_name = match named {
+        Some((name, found)) => {
+            match found {
+                Some(ws) => app.apply_workspace(ws),
+                None if workspace::is_default(&name) => {
+                    let root = app.root.clone();
+                    app.apply_workspace(workspace::default_workspace(root));
+                }
+                None => app.status_message = i18n::msg_workspace_unknown(app.settings.lang, &name),
+            }
+            true
+        }
+        None => false,
+    };
+
+    if !opened_by_name {
+        match arg {
         Some(path) if !arg_is_dir => app.open_file_in_tab(path),
         Some(_) => {} // directory: already the root, nothing to open
         None => match resumed {
@@ -219,6 +277,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 }
             }
         },
+        }
     }
     let mut last_external_check = Instant::now();
     // Consecutive frames that failed to draw. One is a hiccup worth reporting and carrying on

@@ -503,6 +503,18 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
         Line::from(Span::styled("msavox 2026", Style::default().fg(Color::DarkGray)))
             .alignment(ratatui::layout::Alignment::Center),
     );
+    // Started with a workspace — `clee -w name`, or a resumed one — so say which, while the
+    // splash is the only thing on screen and the shells behind it are still starting.
+    if let Some(name) = app.active_workspace.as_deref() {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(vec![
+                Span::styled(format!("{} ", i18n::t(lang, Key::WorkspaceBadge)), Style::default().fg(Color::DarkGray)),
+                Span::styled(name.to_string(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ])
+            .alignment(ratatui::layout::Alignment::Center),
+        );
+    }
     lines.push(Line::from(""));
     lines.push(
         Line::from(Span::styled(i18n::t(lang, Key::SplashHint), Style::default().fg(Color::DarkGray)))
@@ -645,9 +657,21 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(mnemonic, mnemonic_style));
         spans.push(Span::styled(format!("{} ", rest), style));
     }
-    let pad = area.width.saturating_sub(used);
+    // The open workspace, right-aligned on the same row. Nothing on screen used to say which one
+    // you were in — the name only appeared in the status line for a moment when it loaded, and
+    // was gone by the time you wondered. Titles are drawn from the left and this from the right,
+    // with the padding between them, so a long name eats blank space and never the menus.
+    let workspace = app
+        .active_workspace
+        .as_deref()
+        .map(|name| format!(" {} {} ", i18n::t(lang, Key::WorkspaceBadge), name))
+        .unwrap_or_default();
+    let pad = area.width.saturating_sub(used).saturating_sub(workspace.chars().count() as u16);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad as usize), Style::default().bg(Color::Black)));
+    }
+    if !workspace.is_empty() {
+        spans.push(Span::styled(workspace, Style::default().fg(Color::Black).bg(Color::Green)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
