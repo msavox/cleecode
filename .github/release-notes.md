@@ -1,3 +1,33 @@
+## What's new in 0.3.2
+
+**Column selection.** `Alt`+drag makes a rectangular selection, or turn it on from the Edit menu
+and draw it with `Shift`+arrows. Over ragged text the columns are clipped, not padded: a
+rectangle selects the text that is actually there.
+
+**The startup command no longer collides with the `clear`.** A shell opened with a command to run
+gets that command *instead of* the startup `clear`, so only ever one line is queued in the pty —
+which is what makes `clearclaude` on one line impossible rather than unlikely.
+
+**Workspaces.** `clee -w NAME` opens one from the shell and `clee -w` lists them; the name it is
+running under sits in the corner of the menu bar. A built-in **Default layout** is always offered
+and cannot be deleted or overwritten. A bare `clee` no longer reopens a named workspace — that
+stays a deliberate act — while the project, its files and your layout still come back. Loading one
+restores which terminal had focus, which was being written to the file and then ignored.
+
+**Reachable with the mouse.** The command palette, quick open, the venv browser and the workspace
+lists were keyboard-only: no click reached them. Clicking a result now takes it, the wheel moves
+the selection, and a click outside dismisses. In the *delete* list a click only selects, because a
+list that refolds under the pointer should not delete on a single click.
+
+**`clee -e FILE`** opens just that file — the editor and nothing else — and leaves your saved
+layout and session alone, so a quick edit does not become the state you come back to.
+
+**A man page**, `man clee`, installed by Homebrew and shipped in the archives. The manual now
+navigates with `↑↓` between sections and `Space` to page, since the contents list is a column and
+`PageUp`/`PageDown` want the `Fn` key.
+
+And a turtle. You will find it.
+
 ## What's new in 0.3.1
 
 - **`clee -w NAME`** opens a saved workspace straight from the shell, and `clee -w` on its own

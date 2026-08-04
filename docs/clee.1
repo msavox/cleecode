@@ -1,0 +1,201 @@
+.\" Man page for CleeCode. Rendered with: man docs/clee.1
+.\" Kept in roff by hand rather than generated: it is short, and a generator would be one more
+.\" thing to keep in step with the key bindings.
+.TH CLEE 1 "August 2026" "CleeCode 0.3.2" "User Commands"
+.SH NAME
+clee \- terminal IDE with a file tree, embedded terminals and syntax highlighting
+.SH SYNOPSIS
+.B clee
+.RI [ FILE | DIRECTORY ]
+.br
+.B clee
+.BR \-w " " \fINAME\fR
+.br
+.B clee
+.BR \-e " " \fIFILE\fR
+.br
+.B clee
+.RB [ \-\-install\-font ]
+.RB [ \-h ]
+.RB [ \-V ]
+.SH DESCRIPTION
+.B CleeCode
+puts an editor, a file tree and real terminals in one window. The terminals are proper ptys, so
+.BR ssh (1),
+.BR vim (1)
+and anything else interactive works inside them.
+.PP
+Everything is reachable from the keyboard; the mouse is an alternative, never the only way. With
+no argument the last project folder and its open files are restored. A directory argument becomes
+the project root; a file argument is opened in the current directory. A bare
+.B clee
+never reopens a saved workspace \(em that is always a deliberate act, with
+.B \-w
+or the Workspace menu.
+.SH OPTIONS
+.TP
+.BR \-e " " \fIFILE\fR ", " \-\-edit " " \fIFILE\fR
+Open just that file: the editor and nothing else, with no sidebar, terminals or menu bar. Leaves
+your saved layout and session untouched, so a quick edit does not become the state you come back
+to.
+.TP
+.BR \-w " " \fINAME\fR ", " \-\-workspace " " \fINAME\fR
+Open a saved workspace: its project root, open files, frame sizes and terminals, with each
+shell's startup command run for it. With no
+.I NAME
+it lists the workspaces you have and exits.
+.TP
+.B \-\-install\-font
+Install the bundled CleeCodeMono Nerd Font for the current user, so the file tree's icons render.
+Restart the terminal afterwards.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH KEYS
+There are no function keys and no PageUp/PageDown: on a laptop both need
+.BR Fn .
+There are no Alt+letter chords either, because macOS only sends Option as Meta on US keyboard
+layouts, so on any other one they never arrived at all.
+.PP
+.B Ctrl+Shift
+is the application's own layer. It is safe inside a terminal for a structural reason: no terminal
+can encode Ctrl+Shift for the program running in a pane, so nothing there is listening for it.
+Every other Ctrl chord belongs to a focused shell \(em Ctrl+J is Enter there, Ctrl+E is
+end\-of\-line.
+.SS Moving around
+.TP
+.B Ctrl+Alt+\(<-\(ua\(da\(->
+Go to the frame in that direction: the sidebar, either half of a split editor, or a tiled
+terminal, whichever is actually there. Ctrl with an arrow alone is taken by macOS for Mission
+Control and Spaces, which is why Alt joins in.
+.TP
+.BR Ctrl+Tab ", " Ctrl+Shift+Tab
+Cycle the frames, the way Cmd+Tab cycles windows.
+.TP
+.B Ctrl+Shift+\(<-/\(->
+Previous or next tab of whichever frame has focus.
+.TP
+.B Ctrl+Shift+\(ua/\(da
+Previous or next terminal window.
+.SS Application
+.TP
+.B Ctrl+Shift+M
+The built\-in manual, in English or Italian.
+.TP
+.B Ctrl+Shift+B
+Open the menu bar; then arrows, Enter, and the underlined letter to jump to a menu.
+.TP
+.B Ctrl+Shift+O
+Settings.
+.TP
+.B Ctrl+Shift+G
+Context menu for the focused frame. Right\-click does the same.
+.TP
+.B Ctrl+Shift+R
+Run the current file, using the venv the toolbar selector names.
+.TP
+.B Ctrl+Shift+U
+Resize mode: arrows grow the focused frame, Shift+arrow shrinks it, Esc or Enter leaves.
+.TP
+.BR Ctrl+P ", " Ctrl+O
+Command palette and quick open, both fuzzy. Nothing needs to be memorised.
+.SS Files and editing
+.TP
+.BR Ctrl+S ", " Ctrl+Shift+S
+Save, save all. An unnamed buffer asks for a name.
+.TP
+.BR Ctrl+W ", " Ctrl+D
+Close the current tab, prompting if it is unsaved.
+.TP
+.BR Ctrl+Z ", " Ctrl+Y
+Undo, redo.
+.TP
+.BR Ctrl+F ", " Ctrl+G
+Find and replace, go to line.
+.TP
+.B Ctrl+K
+Toggle a line comment.
+.TP
+.B Alt+\(<-/\(->
+Move by word; Shift extends the selection. Alt rather than Ctrl because an Option arrow makes no
+printable character, so it survives every keyboard layout.
+.TP
+.BR "Alt+\(ua/\(da" ", " Alt+Shift+\(da
+Move the current line up or down; duplicate it.
+.TP
+.B Alt+drag
+Column selection. It is also in the Edit menu, and from there Shift+arrows draw the rectangle.
+Columns past the end of a short line are clipped, not padded.
+.SS Terminals
+.TP
+.BR Ctrl+Shift+T ", " Ctrl+Shift+K
+New tab; close this shell, taking its window with it when it was the last tab.
+.TP
+.B Ctrl+Shift+N
+New terminal window.
+.TP
+.B Ctrl+Shift+E
+Name the focused terminal and give it a startup command.
+.TP
+.B Shift+arrows
+Select text inside a pane. The selection goes straight to the clipboard.
+.SS File tree
+.RB \(bu " n" " / " N
+new file or folder \(bu
+.B e
+rename \(bu
+.B Delete
+remove \(bu
+.B H
+show hidden files \(bu
+.B Enter
+open a file, or make a folder the project root.
+.SH WORKSPACES
+A workspace is a whole set\-up saved under a name: project root, open files, frame sizes, and the
+terminal windows with their tab names and startup commands. Reopening one brings the shells back
+already running whatever they were for.
+.PP
+Each is one hand\-editable TOML file, so they can be copied between machines or kept in version
+control. A built\-in
+.B "Default layout"
+is always offered and cannot be deleted or overwritten: it is the layout to go back to when the
+frames have wandered.
+.SH FILES
+.TP
+.I ~/.config/cleecode/settings.toml
+Preferences, layout, run commands per file extension, and interpreter paths. On Windows,
+.IR %APPDATA%\ecleecode\e .
+.TP
+.I ~/.config/cleecode/workspaces/
+One TOML file per saved workspace.
+.TP
+.I ~/.config/cleecode/panic.log
+Written if something goes wrong internally. CleeCode contains such a failure rather than closing,
+so a shell running in a pane is never taken down with it; this is where the detail goes.
+.SH ENVIRONMENT
+.TP
+.B CLEECODE
+Set to
+.B 1
+in every shell CleeCode starts, so a shell rc can skip heavy startup work when it is not wanted
+here \(em for example
+.RB ` "if not set -q CLEECODE; fastfetch; end" '
+in fish.
+.TP
+.B SHELL
+The shell each terminal runs.
+.SH EXIT STATUS
+.B clee
+exits 0 on a normal quit, including after an internal error it had to give up on.
+.SH SEE ALSO
+.BR micro (1),
+.BR tmux (1),
+.BR ssh (1)
+.PP
+The built\-in manual, Ctrl+Shift+M, covers the same ground with diagrams and stays in step with
+the binary.
+.SH AUTHOR
+Matteo Savoia \(la https://github.com/msavox/cleecode \(ra

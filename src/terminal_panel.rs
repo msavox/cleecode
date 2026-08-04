@@ -52,6 +52,8 @@ pub struct TerminalPanel {
     /// A command to run in this shell when the workspace holding it is opened (`claude`,
     /// `octave`, `npm run dev`…). Remembered with the workspace; not re-run on its own.
     pub startup_command: Option<String>,
+    /// The startup command, held back until the shell is actually reading. See `run_command`.
+    pending_command: Option<String>,
 }
 
 /// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
@@ -218,6 +220,19 @@ fn buildable_size(rows: u16, cols: u16) -> (u16, u16) {
 
 impl TerminalPanel {
     pub fn new(rows: u16, cols: u16, cwd: &Path) -> Result<Self> {
+        Self::with_startup(rows, cols, cwd, None)
+    }
+
+    /// Spawns a shell, optionally with the command this pane exists to run.
+    ///
+    /// The command takes the place of the startup `clear` rather than following it. Queueing
+    /// both put two lines in the pty's input buffer before the shell had read a byte, and a
+    /// shell with its own line editor takes over the tty part-way through that: it reads what is
+    /// already waiting as raw typing, the carriage return between them goes missing, and you get
+    /// `clearclaude` on one line. Only ever queueing one line makes that impossible. Nothing is
+    /// lost by dropping the clear here — the command's own output covers the banner it existed
+    /// to scrub.
+    pub fn with_startup(rows: u16, cols: u16, cwd: &Path, startup: Option<&str>) -> Result<Self> {
         let (rows, cols) = buildable_size(rows, cols);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -237,11 +252,16 @@ impl TerminalPanel {
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
-        // Queued in the pty's input buffer; the shell consumes it as soon as it starts
-        // reading interactively, clearing any startup banner (e.g. fastfetch/neofetch).
-        let clear = if cfg!(windows) { b"cls\r".as_slice() } else { b"clear\r".as_slice() };
+        // One line, queued in the pty's input buffer for the shell to consume as soon as it
+        // starts reading interactively: either the command this pane is for, or `clear` to scrub
+        // a startup banner (fastfetch/neofetch and friends) when there is no command.
+        let opening = match startup {
+            Some(command) => format!("{command}\r"),
+            None if cfg!(windows) => "cls\r".to_string(),
+            None => "clear\r".to_string(),
+        };
         if let Ok(mut w) = writer.lock() {
-            let _ = w.write_all(clear);
+            let _ = w.write_all(opening.as_bytes());
             let _ = w.flush();
         }
 
@@ -310,16 +330,33 @@ impl TerminalPanel {
             revealed: false,
             selection: None,
             name: None,
-            startup_command: None,
+            startup_command: startup.map(str::to_string),
+            pending_command: None,
         })
     }
 
-    /// Queues a command for the shell as if it had been typed. Called right after spawning a
-    /// workspace's tabs: the bytes sit in the pty's input buffer until the shell starts reading,
-    /// so this works before the prompt exists (the same trick as the startup `clear`).
+    /// Holds a command to be typed into the shell once it is genuinely reading.
+    ///
+    /// It used to be written straight into the pty, on the theory that the input buffer would
+    /// keep it until the shell got there — the same trick as the startup `clear`. It does not
+    /// hold for two lines in a row: a shell with its own line editor (zsh, fish) takes over the
+    /// tty part-way through and reads what is already queued as raw typing, so the carriage
+    /// return between them is swallowed and you get `clearclaude` on one line. Waiting for the
+    /// prompt is the only reliable answer, so the command sits here until `flush_pending`.
     pub fn run_command(&mut self, command: &str) {
-        self.write_input(command.as_bytes());
-        self.write_input(b"\r");
+        self.pending_command = Some(command.to_string());
+    }
+
+    /// Types the held command once the shell has settled — the same moment the pane is revealed,
+    /// by which point the `clear` has been consumed and there is a prompt to type at. Does
+    /// nothing until then, and only ever fires once.
+    pub fn flush_pending(&mut self) {
+        if self.pending_command.is_some() && self.is_ready() {
+            if let Some(command) = self.pending_command.take() {
+                self.write_input(command.as_bytes());
+                self.write_input(b"\r");
+            }
+        }
     }
 
     /// Whether the pane should be shown yet. Stays hidden during the shell's startup

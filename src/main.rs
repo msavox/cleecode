@@ -94,23 +94,35 @@ fn install_panic_hook() {
 /// hand-rolled (rather than pulling in an argument parser) because the whole surface is one
 /// optional path plus two flags.
 const USAGE: &str = "\
-clee — CleeCode, a terminal IDE
+clee — CleeCode, a terminal IDE: an editor, a file tree and real terminals in one window.
 
 USAGE:
-    clee [FILE|DIRECTORY]
-    clee -w NAME
-
-    A directory becomes the project root; a file is opened in the current directory.
-    With no argument, the last project folder and its open files are restored.
+    clee [FILE|DIRECTORY]   a directory becomes the project root; a file opens in the
+                            current one. With no argument, the last project and its open
+                            files come back.
+    clee -w NAME            open a saved workspace
+    clee -e FILE            open just that file, with everything else hidden
 
 OPTIONS:
-    -w, --workspace NAME
-                      Open a saved workspace: its project root, files, frame sizes and
-                      terminals, shells and startup commands included. `clee -w` with no
-                      name lists the ones you have.
-    --install-font    Install the bundled CleeCodeMono Nerd Font for the current user
-    -h, --help        Print this help
-    -V, --version     Print the version
+    -e, --edit FILE       Editor only: no sidebar, no terminals, no menu bar. Your saved
+                          layout and session are left alone, so a quick edit does not
+                          become the state you come back to.
+    -w, --workspace NAME  Open a workspace: its root, files, frame sizes and terminals,
+                          each shell running the command it was given. With no NAME,
+                          lists the ones you have.
+    --install-font        Install the bundled Nerd Font, so the file tree icons render.
+    -h, --help            Print this help.
+    -V, --version         Print the version.
+
+KEYS TO START WITH:
+    Ctrl+P                every action in the app, fuzzy-searched — nothing to memorise
+    Ctrl+Shift+M          the built-in manual, in English or Italian
+    Ctrl+Alt+arrows       go to the frame in that direction
+    Ctrl+Shift+B          open the menu bar
+
+    A focused terminal keeps every other Ctrl chord for the shell running in it.
+
+More in the manual (Ctrl+Shift+M) and in man clee.
 ";
 
 fn main() -> Result<()> {
@@ -129,6 +141,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let mut open_workspace: Option<String> = None;
+    // `-edit` is accepted alongside the usual spellings: it is what the request asked for, and
+    // refusing a flag over a missing dash helps nobody.
+    let mut edit_file: Option<std::path::PathBuf> = None;
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "-e" || a == "--edit" || a == "-edit")
+    {
+        match args.get(i + 1) {
+            Some(path) => edit_file = Some(std::path::PathBuf::from(path)),
+            None => {
+                eprintln!("clee -e needs a file to edit");
+                return Ok(());
+            }
+        }
+    }
     // `clee -w` with no name is a question, not a mistake: list what there is and stop, while
     // the output can still be seen.
     if let Some(i) = args.iter().position(|a| a == "-w" || a == "--workspace") {
@@ -173,7 +200,7 @@ fn main() -> Result<()> {
     let _ = stdout().flush();
     // Even a panic the loop couldn't shield must not skip the teardown below: leaving the
     // terminal in raw mode on the alternate screen hands the user an unusable shell.
-    let result = shielded(|| run(&mut terminal, open_workspace));
+    let result = shielded(|| run(&mut terminal, open_workspace, edit_file));
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.
@@ -191,7 +218,11 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) -> Result<()> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    open_workspace: Option<String>,
+    edit_file: Option<std::path::PathBuf>,
+) -> Result<()> {
     let size = terminal.size()?;
     let cwd = std::env::current_dir()?;
     let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
@@ -201,9 +232,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
     // explicit argument; an argument always takes precedence and starts fresh. A directory
     // argument becomes the project root; a file argument is opened within the current dir.
     let saved = Settings::load();
-    // A saved workspace remembers more than the plain resume does — terminal names, startup
-    // commands, frame sizes — so it wins when there is one. Its root is picked up here, before
-    // the first shells are spawned, so they start in the right directory.
     // `-w name` is an explicit request, so it beats both the resume and a path argument. Falling
     // back to the resume when the name is unknown would silently open the wrong thing, so a bad
     // name simply opens nothing and says so once the UI is up.
@@ -215,19 +243,28 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
     });
     let resumed = match &named {
         Some((_, found)) => found.clone(),
-        None => arg.is_none().then(|| saved.last_workspace.as_deref().and_then(workspace::load)).flatten(),
+        // A bare `clee` never reopens a named workspace. Opening one is a decision — `-w`, or
+        // picking it from the menu — and having yesterday's `claude` shell start itself because
+        // it happened to be the last one used is a surprise, not a convenience. What does carry
+        // over is the layout, which lives in the settings and is restored either way, so you get
+        // the default workspace with at most the shape you left the window in.
+        None => None,
     };
     let root = match &arg {
+        _ if edit_file.is_some() => edit_file
+            .as_ref()
+            .and_then(|f| f.parent().map(|p| p.to_path_buf()))
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| cwd.clone()),
         _ if resumed.is_some() && named.is_some() => {
             resumed.as_ref().map(|w| w.root.clone()).filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
         }
         Some(p) if p.is_dir() => p.clone(),
         Some(_) => cwd.clone(),
-        None => resumed
-            .as_ref()
-            .map(|w| w.root.clone())
+        None => saved
+            .last_root
+            .clone()
             .filter(|p| p.is_dir())
-            .or_else(|| saved.last_root.clone().filter(|p| p.is_dir()))
             .unwrap_or_else(|| cwd.clone()),
     };
 
@@ -239,9 +276,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
         app.show_splash = false;
     }
 
+    // Minimal mode: the editor on one file and nothing else. Frames are hidden rather than
+    // removed — the rest of the app assumes a terminal exists, and one that is never drawn costs
+    // nothing to keep. The splash goes too: this is meant to feel like `micro`, and a title card
+    // is not what you want when you opened a file to change one line.
+    if let Some(path) = &edit_file {
+        app.settings.show_sidebar = false;
+        app.settings.show_terminal = false;
+        app.settings.show_menubar = false;
+        app.show_splash = false;
+        app.focus = app::Focus::Editor;
+        app.open_file_in_tab(path.clone());
+    }
+
     // A name given on the command line settles what to open, so the argument and resume paths
     // below are skipped entirely — `clee -w work` should not also try to open "-w" as a file.
-    let opened_by_name = match named {
+    let opened_by_name = edit_file.is_some()
+        || match named {
         Some((name, found)) => {
             match found {
                 Some(ws) => app.apply_workspace(ws),
@@ -349,6 +400,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
                 last_external_check = Instant::now();
             }
             app.poll_splash();
+            app.poll_turtle();
             app.poll_background_messages();
             app.poll_terminal_exits();
             app.poll_git_status();
@@ -362,6 +414,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
         }
     }
 
+    // Minimal mode leaves no trace: not the hidden frames, not the file, not the project. It is
+    // a one-off edit, and coming back to a CleeCode with everything switched off — because of a
+    // `clee -e` last Tuesday — would be the opposite of what it is for.
+    if edit_file.is_some() {
+        return Ok(());
+    }
+
     // Canonicalize before saving: a path opened via a relative CLI argument would
     // otherwise be stored as typed, and re-resolve against whatever the *next* launch's
     // cwd happens to be rather than the file it actually pointed to.
@@ -370,9 +429,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, open_workspace: Option<String>) 
     app.settings.last_open_files = app.editors.iter().filter_map(|e| e.path.clone()).map(canonical).collect();
     app.settings.last_active_file = app.editors.get(app.active_editor).and_then(|e| e.path.clone()).map(canonical);
     // The workspace in use is written back as it stands, so a terminal renamed or a seam
-    // nudged during the session is still there next time it is opened.
+    // nudged during the session is still there next time it is opened. The built-in is the
+    // exception and is never written: it is the layout you go back to, so it has to stay put.
     if let Some(name) = app.active_workspace.clone() {
-        let _ = workspace::save(&app.capture_workspace(name));
+        if !workspace::is_default(&name) {
+            let _ = workspace::save(&app.capture_workspace(name));
+        }
     }
     app.settings.last_workspace = app.active_workspace.clone();
     app.settings.save();

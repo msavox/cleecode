@@ -41,6 +41,7 @@ pub enum Key {
     ItemToggleTerminal,
     ItemToggleMenuBar,
     ItemOpenMenuBar,
+    ItemColumnSelection,
     WorkspaceBadge,
     ItemOpenSettings,
     ItemNewTerminal,
@@ -174,6 +175,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemToggleMenuBar) => "Barra dei menu",
         (Lang::En, ItemOpenMenuBar) => "Open the menu bar",
         (Lang::It, ItemOpenMenuBar) => "Apri la barra dei menu",
+        (Lang::En, ItemColumnSelection) => "Column selection",
+        (Lang::It, ItemColumnSelection) => "Selezione verticale",
         // Short on purpose: it shares the menu bar row with the menu titles.
         (Lang::En, WorkspaceBadge) => "workspace:",
         (Lang::It, WorkspaceBadge) => "workspace:",
@@ -441,8 +444,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ManualTitle) => "CleeCode manual",
         (Lang::It, ManualTitle) => "Manuale CleeCode",
 
-        (Lang::En, ManualHint) => "↑↓ scroll · Tab/←→ section · PgUp/PgDn page · Home/End · Esc closes",
-        (Lang::It, ManualHint) => "↑↓ scorri · Tab/←→ sezione · PgSu/PgGiù pagina · Home/Fine · Esc chiude",
+        (Lang::En, ManualHint) => "↑↓ section · Space/⇧Space page · digit jumps · Home/End · Esc closes",
+        (Lang::It, ManualHint) => "↑↓ sezione · Spazio/⇧Spazio pagina · cifra salta · Home/Fine · Esc chiude",
 
         (Lang::En, MsgNoWorkspaces) => "No saved workspaces yet — use Workspace ▸ Save workspace",
         (Lang::It, MsgNoWorkspaces) => "Nessun workspace salvato — usa Workspace ▸ Salva workspace",
@@ -717,6 +720,30 @@ pub fn msg_delete_cancelled(lang: Lang) -> String {
 /// reporting deserves somewhere to read the details back from.
 /// `clee -w` was given a name that is not on disk. Deliberately not a fallback to something
 /// else: opening a different workspace than the one asked for is worse than opening none.
+/// Someone tried to save over the built-in workspace. It is not a file, and the point of it is
+/// to be the one layout that is always there to go back to — so it says no, with the reason.
+/// Column selection has no visible switch of its own, so the status line is where it says
+/// whether it is on — otherwise the only clue is the shape the next drag happens to make.
+pub fn msg_column_selection(lang: Lang, on: bool) -> String {
+    match (lang, on) {
+        (Lang::En, true) => "Column selection on — Shift+arrows draw the rectangle".to_string(),
+        (Lang::En, false) => "Column selection off".to_string(),
+        (Lang::It, true) => "Selezione verticale attiva — Shift+frecce disegnano il rettangolo".to_string(),
+        (Lang::It, false) => "Selezione verticale disattivata".to_string(),
+    }
+}
+
+pub fn msg_workspace_readonly(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => {
+            format!("\"{name}\" is built in and cannot be changed — save under another name")
+        }
+        Lang::It => {
+            format!("\"{name}\" è predefinito e non si può modificare — salvalo con un altro nome")
+        }
+    }
+}
+
 pub fn msg_workspace_unknown(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("No workspace called \"{name}\" — `clee -w` lists the saved ones"),

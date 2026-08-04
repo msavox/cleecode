@@ -14,63 +14,78 @@ UI change instead of re-shot by hand.*
 
 ![CleeCode main view](docs/screenshots/main.png)
 
-## Features
+## What it does
 
-- **Editor** — [syntect](https://github.com/trishume/syntect) highlighting, line numbers,
-  multi-file tabs, mouse and keyboard selection, system-clipboard copy/cut/paste, auto-indent,
-  word wrap, whitespace display, code folding (`Ctrl+Shift+F`)
-- **Split editor** — `Ctrl+L` splits the editor column into two panes, each with its own tab
-  strip; drag the divider (or use `Ctrl+Shift+U`) to rebalance them
-- **File tree sidebar** — per-type Nerd Font icons, git status dots (rolled up to folders), live
-  refresh on external changes, create/rename/delete, hidden-file toggle (`H`), reroot on a folder
-- **Run button** — `▶ Run` / `Ctrl+Shift+R` pastes a run command for the current file into an idle
-  terminal; configurable per extension in `settings.toml` (Python, Bash, Ruby, Node, Go, PHP,
-  Perl, Octave…). Interpreters off `PATH` go under `[interpreter_paths]`
-- **Quick open** — `Ctrl+O` fuzzy-searches the project; start the query with `/`, `~`, `./` or
-  `../` and it becomes a filesystem browser, so files outside the root are reachable too
-- **Venv selector** — drop-down of the Python virtualenvs at the project root, plus registered
-  venvs from elsewhere on disk — typed in by path or picked with a folder browser (saved to
-  `settings.toml`, available in every project)
-- **Tabbed terminals** — real ptys, so `ssh`, `vim`, `claude` all work; each terminal window (a
-  tiled pane) holds one or more tabs. New window (`Ctrl+Shift+N`) vs new tab (`Ctrl+Shift+T`); close a tab or a
-  whole window from its `✕`; rename a tab or window; drag the seam between windows to rebalance
-  them; auto-collapse on shell exit
-- **Terminal selection** — drag with the mouse or `Shift`+arrows; the selection goes straight to
-  the system clipboard, `Esc` clears it
-- **Menu bar** — macOS-style app menu plus File / Edit / View / Layout / Run / Terminal, their
-  entries grouped into sections; `Ctrl+Shift+B` opens it, then the underlined letter jumps to a menu. `Ctrl+B` hides it without making
-  anything unreachable
-- **Context menus** — right-click or `Ctrl+Shift+G` on the file tree, editor, or a terminal for its
-  common actions
-- **Resizable layout** — `Ctrl+Shift+U` resize mode (arrows grow the focused frame, `Shift`+arrow shrinks)
-  or drag any inner border with the mouse — sidebar, editor/terminal, the split divider, between
-  terminals; three presets and a terminal-side toggle, persisted across restarts
-- **Settings panel** — line numbers, highlighting, word wrap, tab size, tabs vs spaces,
-  whitespace, auto-indent, mouse, language, all live
-- **Named workspaces** — save a whole set-up under a name (`Ctrl+Shift+W`): project root, open
-  files, frame sizes, and the terminal windows with their tab names and startup commands, so
-  reopening one brings the shells back already running `claude`, `octave`, `npm run dev`… Open one
-  from the Workspace menu or straight from the shell with `clee -w NAME`; the name it is running
-  under sits in the corner of the menu bar. One hand-editable TOML file per workspace under
-  `~/.config/cleecode/workspaces/`, plus a built-in **Default layout** that puts the frames back
-  the way they ship and cannot be deleted. A bare `clee` resumes the last one
-- **Built-in manual** — `Ctrl+Shift+M`, in English or Italian, so the key bindings are reachable
-  from inside the editor rather than only from this file
-- **Also** — `Ctrl+Shift+S` saves all, drag & drop into the tree (or `scp` onto an `ssh` session),
-  auto-reload of externally changed files, English and Italian
+### Editing
 
-![Layout and Run menus](docs/screenshots/menu.png)
+[syntect](https://github.com/trishume/syntect) highlighting, line numbers, multi-file tabs,
+undo with coalescing, find and replace, go-to-line, code folding, auto-indent and auto-closing
+brackets. Selection works with the mouse or the keyboard, goes to the system clipboard, and can
+be **rectangular** — `Alt`+drag for a column selection over ragged text.
+
+`Ctrl+L` splits the editor into two panes, each with its own tab strip and Run button. Files
+changed underneath you are reloaded when they are not dirty, and a binary or non-UTF-8 file opens
+read-only rather than being corrupted on save.
+
+For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
+layout and session untouched.
 
 ![Split editor view](docs/screenshots/split.png)
 
-Nothing needs to be memorised: `Ctrl+P` fuzzy-searches every action in the app, with the key
-that would have done it shown alongside.
+### Terminals that are real
+
+Each terminal window is a tiled pane holding one or more tabbed shells, on proper ptys — `ssh`,
+`vim`, `claude` all work. Panes can be renamed, given a startup command, resized by dragging the
+seam, and they collapse when their shell exits.
+
+The keys respect that: a focused terminal keeps every `Ctrl` chord for the program running in it.
+`Ctrl+J` is Enter to a shell, `Ctrl+E` is end-of-line, and the editor does not steal either.
+
+`▶ Run` runs the current file with the interpreter the venv selector names — configurable per
+extension in `settings.toml`, with interpreters off `PATH` under `[interpreter_paths]`.
+
+### Workspaces
+
+Save a whole set-up under a name: project root, open files, frame sizes, and the terminal windows
+with their tab names and startup commands. Reopening one brings the shells back already running
+`claude`, `octave`, `npm run dev`. Open it from the Workspace menu or straight from the shell
+with `clee -w NAME`; the name it is running under sits in the corner of the menu bar.
+
+Each is one hand-editable TOML file under `~/.config/cleecode/workspaces/`, so they travel
+between machines. A built-in **Default layout** is always there and cannot be deleted or
+overwritten. A bare `clee` never reopens a named workspace — that stays a deliberate act — but it
+does restore the project, its open files and the layout you left.
+
+### Finding your way
+
+Nothing needs to be memorised. `Ctrl+P` fuzzy-searches every action in the app and shows the key
+that would have done it; `Ctrl+O` does the same for files, and a query starting `/`, `~`, `./` or
+`../` turns it into a filesystem browser.
 
 ![Command palette](docs/screenshots/palette.png)
 
-And the manual travels with the binary — `Ctrl+Shift+M`, English or Italian.
+There is a full menu bar behind `Ctrl+Shift+B`, context menus on right-click, and a manual that
+travels with the binary — `Ctrl+Shift+M`, English or Italian, with diagrams.
 
 ![Built-in manual](docs/screenshots/manual.png)
+
+There is also a `man clee`.
+
+### The frame around it
+
+A file tree with per-type Nerd Font icons and git status dots, live refresh, create/rename/delete
+and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
+Three layout presets, a resizable everything, and a settings panel that applies changes live.
+English and Italian throughout, including the manual.
+
+![Layout and Run menus](docs/screenshots/menu.png)
+
+### It does not close on you
+
+CleeCode hosts long-running shells, so a crash costing you an `ssh` session or a build would be
+the worst thing it could do. An internal failure is contained and reported in the status line
+rather than ending the process: a broken terminal costs you that terminal, at most. Details go to
+`~/.config/cleecode/panic.log`.
 
 ## Installing
 
@@ -122,15 +137,17 @@ That puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so make sure it
 
 ```bash
 cargo build --release
-./target/release/clee              # current directory (or resume the last workspace)
+./target/release/clee              # the last project, its open files and your layout
 ./target/release/clee src/main.rs  # current directory, with a file pre-opened
 ./target/release/clee ./some-dir   # that directory as the project root
 ./target/release/clee -w work      # open the saved workspace called "work"
 ./target/release/clee -w           # list the saved workspaces
+./target/release/clee -e notes.md  # just that file, everything else hidden
 ./target/release/clee --help       # usage, --version, --install-font
 ```
 
-An argument skips the startup splash; the splash only shows on a bare `clee`.
+An argument skips the startup splash; the splash only shows on a bare `clee` or with `-w`,
+where it names the workspace being opened.
 
 ### Nerd Font icons
 
@@ -181,11 +198,20 @@ just point your terminal at a Nerd Font you already have.
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
+| `Alt`+drag | Column selection (also in the Edit menu, then `Shift`+arrows) |
 
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
-opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `E` renames,
+opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `e` renames,
 `Delete` removes with confirmation, `H` toggles hidden files.
+
+There are deliberately **no function keys and no `PageUp`/`PageDown`** — on a laptop both need
+`Fn` — and **no `Alt`+letter chords**, because macOS only sends Option as Meta on US keyboard
+layouts, so on any other one they never arrived at all. `Ctrl+Shift` is the application's layer,
+and it is safe inside a terminal for a structural reason: no terminal can encode `Ctrl+Shift` for
+the program running in a pane, so nothing there is listening for it.
+
+The same list, with more detail, is in the built-in manual (`Ctrl+Shift+M`) and in `man clee`.
 
 ## Requirements
 

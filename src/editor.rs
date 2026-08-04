@@ -45,6 +45,9 @@ pub struct Editor {
     pub highlighted: Vec<Vec<(Style, String)>>,
     pub syntax_dirty: bool,
     pub selection_anchor: Option<(usize, usize)>,
+    /// Whether the selection is a rectangle rather than a run of text. A column selection has
+    /// the same two endpoints; what changes is which cells between them count as inside.
+    pub selection_block: bool,
     /// Active (collapsed) fold regions as (start_line, end_line), inclusive, sorted by start.
     pub folds: Vec<(usize, usize)>,
     /// Line-ending style detected on open, reapplied on save.
@@ -76,6 +79,7 @@ impl Editor {
             highlighted: Vec::new(),
             syntax_dirty: true,
             selection_anchor: None,
+            selection_block: false,
             folds: Vec::new(),
             line_ending: LineEnding::Lf,
             final_newline: false,
@@ -228,7 +232,57 @@ impl Editor {
         Some(if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) })
     }
 
+    /// The rectangle a column selection covers: `(first line, last line, first column, last
+    /// column)`, the columns exclusive at the end. `None` unless a column selection with actual
+    /// width is in force.
+    pub fn block_range(&self) -> Option<(usize, usize, usize, usize)> {
+        if !self.selection_block {
+            return None;
+        }
+        let (anchor_line, anchor_col) = self.selection_anchor?;
+        let (line, col) = (self.cursor_line, self.cursor_col);
+        let (c0, c1) = (anchor_col.min(col), anchor_col.max(col));
+        (c0 != c1).then_some((anchor_line.min(line), anchor_line.max(line), c0, c1))
+    }
+
+    /// Which columns of `line` are selected, or `None` for none of them.
+    ///
+    /// The one place that decides what "selected" means, so the renderer, the copier and the
+    /// deleter cannot drift apart — which is exactly how a rectangular selection would otherwise
+    /// end up looking right and copying wrong. Columns past the end of a short line are clipped
+    /// rather than padded: a rectangle drawn over ragged text selects only the text that is
+    /// there.
+    pub fn selected_columns(&self, line: usize) -> Option<(usize, usize)> {
+        let len = self.line_char_len(line);
+        if let Some((first, last, c0, c1)) = self.block_range() {
+            if line < first || line > last {
+                return None;
+            }
+            let (from, to) = (c0.min(len), c1.min(len));
+            return (from < to).then_some((from, to));
+        }
+        let ((sl, sc), (el, ec)) = self.selection_range()?;
+        if line < sl || line > el {
+            return None;
+        }
+        Some((if line == sl { sc } else { 0 }, if line == el { ec } else { len }))
+    }
+
     pub fn selected_text(&self) -> Option<String> {
+        if let Some((first, last, _, _)) = self.block_range() {
+            // Each row of the rectangle becomes a line, so pasting it elsewhere reproduces the
+            // shape — a short line contributes an empty one rather than being skipped.
+            let rows: Vec<String> = (first..=last)
+                .map(|line| match self.selected_columns(line) {
+                    Some((from, to)) => {
+                        let start = self.rope.line_to_char(line);
+                        self.rope.slice(start + from..start + to).to_string()
+                    }
+                    None => String::new(),
+                })
+                .collect();
+            return Some(rows.join("\n"));
+        }
         let ((sl, sc), (el, ec)) = self.selection_range()?;
         let start_idx = self.rope.line_to_char(sl) + sc;
         let end_idx = self.rope.line_to_char(el) + ec;
@@ -237,6 +291,7 @@ impl Editor {
 
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
+        self.selection_block = false;
     }
 
     pub fn start_or_extend_selection(&mut self) {
@@ -311,7 +366,7 @@ impl Editor {
     /// Deletes the active selection, if any, moving the cursor to its start. Returns
     /// whether a selection was actually deleted (callers use this to short-circuit).
     pub fn delete_selection(&mut self) -> bool {
-        if self.selection_range().is_none() {
+        if self.selection_range().is_none() && self.block_range().is_none() {
             return false;
         }
         self.checkpoint(EditKind::Other);
@@ -321,6 +376,23 @@ impl Editor {
     /// Selection delete without its own undo checkpoint, for callers that already
     /// checkpointed (insert-over-selection, backspace-with-selection, …).
     fn delete_selection_raw(&mut self) -> bool {
+        // A rectangle is cut out line by line, from the bottom up so the earlier lines keep the
+        // indices they were measured at.
+        if let Some((first, last, c0, _)) = self.block_range() {
+            for line in (first..=last).rev() {
+                if let Some((from, to)) = self.selected_columns(line) {
+                    let start = self.rope.line_to_char(line);
+                    self.rope.remove(start + from..start + to);
+                }
+            }
+            self.cursor_line = first;
+            self.cursor_col = c0;
+            self.selection_anchor = None;
+            self.selection_block = false;
+            self.dirty = true;
+            self.syntax_dirty = true;
+            return true;
+        }
         let Some(((sl, sc), (el, ec))) = self.selection_range() else { return false };
         let start_idx = self.rope.line_to_char(sl) + sc;
         let end_idx = self.rope.line_to_char(el) + ec;
@@ -1132,6 +1204,64 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
         assert!(!ed.dirty);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A rectangle over ragged text: the short line has nothing under the columns, and must
+    /// contribute an empty row rather than borrowing characters that are not there.
+    #[test]
+    fn a_column_selection_takes_a_rectangle_not_a_run() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nGH\nijklmn");
+        ed.selection_block = true;
+        ed.selection_anchor = Some((0, 2));
+        ed.cursor_line = 2;
+        ed.cursor_col = 4;
+
+        assert_eq!(ed.block_range(), Some((0, 2, 2, 4)));
+        assert_eq!(ed.selected_columns(0), Some((2, 4)), "cd");
+        assert_eq!(ed.selected_columns(1), None, "GH is too short to reach column 2");
+        assert_eq!(ed.selected_columns(2), Some((2, 4)), "kl");
+        assert_eq!(ed.selected_text().as_deref(), Some("cd\n\nkl"));
+
+        // Cutting it removes only those cells, leaving the rest of every line in place.
+        assert!(ed.delete_selection());
+        assert_eq!(ed.rope.to_string(), "abef\nGH\nijmn");
+        assert_eq!((ed.cursor_line, ed.cursor_col), (0, 2));
+        assert!(!ed.selection_block, "the mode ends with the selection it applied to");
+    }
+
+    /// Dragged the other way it is the same rectangle: the corners are normalised, not the
+    /// order they were given in.
+    #[test]
+    fn a_column_selection_does_not_care_which_corner_you_started_from() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nghijkl");
+        ed.selection_block = true;
+        ed.selection_anchor = Some((1, 4));
+        ed.cursor_line = 0;
+        ed.cursor_col = 1;
+        assert_eq!(ed.block_range(), Some((0, 1, 1, 4)));
+        assert_eq!(ed.selected_text().as_deref(), Some("bcd\nhij"));
+
+        // Zero width is not a selection, however tall it is.
+        ed.cursor_col = 4;
+        ed.selection_anchor = Some((0, 4));
+        assert_eq!(ed.block_range(), None);
+        assert_eq!(ed.selected_text(), None);
+    }
+
+    /// The ordinary selection has to keep behaving exactly as before, since both now go through
+    /// `selected_columns`.
+    #[test]
+    fn an_ordinary_selection_still_flows_like_text() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nghijkl");
+        ed.selection_anchor = Some((0, 4));
+        ed.cursor_line = 1;
+        ed.cursor_col = 2;
+        assert_eq!(ed.selected_columns(0), Some((4, 6)), "to the end of the first line");
+        assert_eq!(ed.selected_columns(1), Some((0, 2)), "from the start of the last");
+        assert_eq!(ed.selected_text().as_deref(), Some("ef\ngh"));
     }
 
     #[test]

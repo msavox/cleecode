@@ -9,6 +9,7 @@ pub enum MenuAction {
     RenameTerminal,
     ToggleMenuBar,
     OpenMenuBar,
+    ColumnSelection,
     OpenSettings,
     SaveAll,
     NewTerminal,
@@ -77,6 +78,7 @@ impl MenuAction {
         MenuAction::RenameTerminal,
         MenuAction::ToggleMenuBar,
         MenuAction::OpenMenuBar,
+        MenuAction::ColumnSelection,
         MenuAction::OpenSettings,
         MenuAction::SaveAll,
         MenuAction::NewTerminal,
@@ -203,6 +205,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 group(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
                 item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
                 group(Key::ItemToggleFold, MenuAction::ToggleFold, Some("Ctrl+Shift+F")),
+                // No key of its own: the comfortable chords are spent, and Alt+drag is the
+                // gesture people already reach for. From here it is still keyboard-reachable,
+                // and Shift+arrows then build the rectangle.
+                item(Key::ItemColumnSelection, MenuAction::ColumnSelection, None),
             ],
         },
         MenuDef {
@@ -463,6 +469,22 @@ mod tests {
     /// with an arrow produces no printable character, so it arrives as Meta on every layout.
     ///
     /// Function keys are barred for a different reason: on a laptop they sit behind Fn.
+    /// Column selection has no key of its own, so the palette is the only way to it from the
+    /// keyboard. If it ever falls out of the menus it becomes mouse-only in silence.
+    #[test]
+    fn column_selection_is_reachable_without_the_mouse() {
+        let labels: Vec<String> = command_entries()
+            .into_iter()
+            .map(|(menu, it)| {
+                format!("{}: {}", crate::i18n::t(crate::i18n::Lang::En, menu), crate::i18n::t(crate::i18n::Lang::En, it.label_key))
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("Column selection")),
+            "the palette should list it; it lists: {labels:?}"
+        );
+    }
+
     #[test]
     fn no_shortcut_is_advertised_that_some_keyboards_cannot_send() {
         for (_, it) in command_entries() {

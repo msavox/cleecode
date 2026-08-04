@@ -311,7 +311,8 @@ mod tests {
         assert!(save_in(&dir, &ws).is_ok());
         assert_eq!(list_in(&dir).len(), 2);
 
-        // And the built-in itself is a plain default layout in whatever root it is given.
+        // Its own root is whatever it is given, and it carries no files or shells: picking it
+        // is about the shape of the window, not about replacing what you have open.
         let built = default_workspace(PathBuf::from("/somewhere"));
         assert_eq!(built.root, PathBuf::from("/somewhere"));
         assert!(built.layout.show_sidebar && built.layout.show_terminal && !built.layout.split_view);

@@ -135,6 +135,45 @@ pub enum UnsavedPrompt {
     CloseTab(usize),
 }
 
+/// The turtle from the splash tagline, out for a walk along the status line. Clicking the logo
+/// in the menu bar sets it off; clicking again while it walks hurries it, which is the joke —
+/// the tagline has been saying "chi va piano va lontano" since the first launch, and this is
+/// where it finally answers back.
+pub struct Turtle {
+    started: Instant,
+    /// Columns of extra ground granted by impatient clicking.
+    nudged: u16,
+    /// How often it has been hurried. It replies once, then lets it go.
+    hurried: u8,
+    /// Whatever the status line was saying before, put back when the walk is over. A joke that
+    /// leaves your status line occupied afterwards has outstayed its welcome.
+    displaced: Option<String>,
+}
+
+/// How long a crossing takes when nobody hurries it. Slow on purpose: it should be something
+/// you notice out of the corner of your eye while you carry on working, not a thing to watch.
+const TURTLE_CROSSING: Duration = Duration::from_secs(14);
+/// Ground one impatient click buys.
+const TURTLE_NUDGE: u16 = 4;
+/// Hurryings before the tagline answers back.
+const TURTLE_PATIENCE: u8 = 3;
+
+/// Which column the turtle has reached, or `None` once it has walked off the end and the walk
+/// is over. Pure so the pace can be checked without running a terminal.
+///
+/// It walks right to left because that is the way the glyph faces — a turtle strolling backwards
+/// across the screen is a worse joke than no turtle. Starting on the right also keeps it away
+/// from the status message, which is written from the left, for most of the crossing.
+pub fn turtle_column(elapsed: Duration, nudged: u16, width: u16) -> Option<u16> {
+    if width == 0 {
+        return None;
+    }
+    let progress = elapsed.as_secs_f32() / TURTLE_CROSSING.as_secs_f32();
+    let walked = (progress * width as f32) as u32 + nudged as u32;
+    // The glyph is two cells wide, so it leaves the screen when its left edge passes the start.
+    (walked + 2 <= width as u32).then(|| (width as u32 - 2 - walked) as u16)
+}
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
@@ -184,6 +223,8 @@ pub struct App {
     pub show_about: bool,
     pub clipboard: Clipboard,
     pub show_splash: bool,
+    /// The easter egg, while it is walking. See `Turtle`.
+    pub turtle: Option<Turtle>,
     pub splash_started: Instant,
     pub show_delete_confirm: bool,
     pub delete_target: Option<PathBuf>,
@@ -819,6 +860,7 @@ impl App {
             show_about: false,
             clipboard: Clipboard::new(),
             show_splash: true,
+            turtle: None,
             splash_started: Instant::now(),
             show_delete_confirm: false,
             delete_target: None,
@@ -854,6 +896,49 @@ impl App {
         })
     }
 
+    /// A click on the logo. The first sets the turtle off; the rest hurry it along, and once
+    /// it has been hurried enough the status line quotes the tagline back at you.
+    fn poke_turtle(&mut self) {
+        let mut scold = false;
+        if let Some(t) = self.turtle.as_mut() {
+            t.nudged = t.nudged.saturating_add(TURTLE_NUDGE);
+            t.hurried = t.hurried.saturating_add(1);
+            scold = t.hurried == TURTLE_PATIENCE;
+        } else {
+            self.turtle = Some(Turtle { started: Instant::now(), nudged: 0, hurried: 0, displaced: None });
+        }
+        if scold {
+            let was = std::mem::replace(
+                &mut self.status_message,
+                i18n::t(self.settings.lang, Key::SplashTagline).to_string(),
+            );
+            if let Some(t) = self.turtle.as_mut() {
+                t.displaced = Some(was);
+            }
+        }
+    }
+
+    /// Where the turtle is right now, for the status line to draw. `None` when it is not out.
+    pub fn turtle_at(&self, width: u16) -> Option<u16> {
+        let t = self.turtle.as_ref()?;
+        turtle_column(t.started.elapsed(), t.nudged, width)
+    }
+
+    pub fn poll_turtle(&mut self) {
+        let width = self.last_full.width;
+        if self.turtle.is_some() && self.turtle_at(width).is_none() {
+            // Hand the status line back exactly as it was found — but only if the reply is still
+            // the thing on it. Anything the user has done since has more right to be there.
+            let tagline = i18n::t(self.settings.lang, Key::SplashTagline);
+            if let Some(displaced) = self.turtle.as_mut().and_then(|t| t.displaced.take()) {
+                if self.status_message == tagline {
+                    self.status_message = displaced;
+                }
+            }
+            self.turtle = None;
+        }
+    }
+
     pub fn poll_splash(&mut self) {
         if self.show_splash && self.splash_started.elapsed() >= SPLASH_DURATION {
             self.show_splash = false;
@@ -885,6 +970,13 @@ impl App {
     }
 
     pub fn poll_terminal_exits(&mut self) {
+        // A workspace's startup commands are typed here rather than at spawn time, once each
+        // shell is actually at a prompt.
+        for window in &mut self.terminals {
+            for tab in &mut window.tabs {
+                tab.flush_pending();
+            }
+        }
         let before: usize = self.terminals.len();
         // Reap exited tabs within each window, then drop any window left with no tabs.
         for window in &mut self.terminals {
@@ -1500,6 +1592,40 @@ impl App {
         }
     }
 
+    /// A click inside the picker. On a result it takes it there and then, which is what makes a
+    /// double click unnecessary; anywhere else inside is ignored so a stray click on the query
+    /// line does not throw the list away; outside, it dismisses.
+    fn mouse_picker(&mut self, col: u16, row: u16, full: Rect) {
+        let Some(p) = self.picker.as_ref() else {
+            return;
+        };
+        // A click runs the thing it lands on — except where that thing destroys something. The
+        // delete list refolds under the pointer after each removal, so one click executing
+        // immediately means a second click in the same spot takes the *next* workspace with it.
+        // There it selects only, and Enter is the deliberate second step.
+        let destructive = p.kind == crate::picker::PickerKind::WorkspaceDelete;
+        match ui::picker_row_at(p, full, col, row) {
+            Some(index) => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.selected = index;
+                }
+                if !destructive {
+                    self.execute_picker_selection();
+                }
+            }
+            None => {
+                let rect = ui::picker_rect(full);
+                let inside = col >= rect.x
+                    && col < rect.x + rect.width
+                    && row >= rect.y
+                    && row < rect.y + rect.height;
+                if !inside {
+                    self.picker = None;
+                }
+            }
+        }
+    }
+
     fn execute_picker_selection(&mut self) {
         let mut cmd = None;
         let mut file = None;
@@ -1958,6 +2084,13 @@ impl App {
         if name.is_empty() {
             return;
         }
+        // Refused here rather than deep in the writer, so the message is the user's language and
+        // names what to do instead.
+        if crate::workspace::is_default(&name) {
+            self.cancel_save_workspace();
+            self.status_message = i18n::msg_workspace_readonly(lang, &name);
+            return;
+        }
         self.cancel_save_workspace();
         let ws = self.capture_workspace(name.clone());
         let terminals = ws.terminals.len();
@@ -2082,14 +2215,21 @@ impl App {
         for wt in &ws.terminals {
             let mut tabs = Vec::new();
             for tab in &wt.tabs {
-                let panel = match spare.pop_front() {
-                    Some(p) => Some(p),
-                    None => TerminalPanel::new(24, 80, &root).ok(),
+                // A shell spawned for this tab gets the command instead of the startup `clear`,
+                // so only one line is ever queued. A reused one is already past that, and takes
+                // the command the patient way — held until it is back at a prompt.
+                let startup = tab.startup_command.as_deref();
+                let (panel, reused) = match spare.pop_front() {
+                    Some(p) => (Some(p), true),
+                    None => (
+                        TerminalPanel::with_startup(24, 80, &root, startup).ok(),
+                        false,
+                    ),
                 };
                 let Some(mut panel) = panel else { continue };
                 panel.name = tab.name.clone();
                 panel.startup_command = tab.startup_command.clone();
-                if let Some(command) = &tab.startup_command {
+                if let (true, Some(command)) = (reused, &tab.startup_command) {
                     panel.run_command(command);
                 }
                 tabs.push(panel);
@@ -2809,6 +2949,18 @@ impl App {
                 }
             }
             MenuAction::OpenMenuBar => self.menu.open(),
+            MenuAction::ColumnSelection => {
+                let lang = self.settings.lang;
+                let ed = self.editor_mut();
+                ed.selection_block = !ed.selection_block;
+                // Turning it on with nothing selected drops an anchor where the cursor is, so
+                // Shift+arrows have a corner to grow the rectangle from.
+                if ed.selection_block && ed.selection_anchor.is_none() {
+                    ed.selection_anchor = Some((ed.cursor_line, ed.cursor_col));
+                }
+                let on = self.editor().selection_block;
+                self.status_message = i18n::msg_column_selection(lang, on);
+            }
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
@@ -2905,7 +3057,7 @@ impl App {
     // ---- Manual -----------------------------------------------------------------------
 
     /// Rows of manual text on screen, kept in step with what `ui::draw_manual` lays out so
-    /// PgUp/PgDn move by exactly one screenful.
+    /// Space and Shift+Space move by exactly one screenful.
     fn manual_page(&self) -> usize {
         crate::ui::manual_body_height(self.last_full) as usize
     }
@@ -2919,9 +3071,17 @@ impl App {
         let page = self.manual_page();
         let Some(state) = self.manual.as_mut() else { return };
         let len = sections.get(state.section).map(|s| s.body.len()).unwrap_or(0);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Up => state.scroll_by(-1, len, page),
-            KeyCode::Down => state.scroll_by(1, len, page),
+            // Up and down walk the contents list, because that list is drawn as a column and
+            // that is what an arrow pointing down at it should do. Reading position moves a
+            // screenful at a time on Space, the way every pager since `more` has done it —
+            // and unlike PageUp/PageDown it does not want the Fn key on a laptop.
+            KeyCode::Up => state.cycle(-1, sections.len()),
+            KeyCode::Down => state.cycle(1, sections.len()),
+            KeyCode::Char(' ') if shift => state.scroll_by(-(page as isize), len, page),
+            KeyCode::Char(' ') => state.scroll_by(page as isize, len, page),
+            KeyCode::Backspace => state.scroll_by(-(page as isize), len, page),
             KeyCode::PageUp => state.scroll_by(-(page as isize), len, page),
             KeyCode::PageDown => state.scroll_by(page as isize, len, page),
             KeyCode::Home => state.scroll = 0,
@@ -3608,6 +3768,27 @@ impl App {
             return;
         }
 
+        // A picker is a modal list: while one is up the mouse belongs to it. Clicking a result
+        // takes it, the wheel moves the selection, and a click outside puts it away — the same
+        // three things the keyboard could already do, which until now it could do alone.
+        if self.picker.is_some() {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.mouse_picker(col, row, full),
+                MouseEventKind::ScrollUp => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.move_selection(-1);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.move_selection(1);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.show_splash {
@@ -3724,10 +3905,16 @@ impl App {
                     if within(tab_bar, col, row) {
                         self.mouse_tab_click(col, tab_bar, self.editor_pane_focus);
                     } else {
+                        // Alt while dragging makes it a column selection, which is the gesture
+                        // every editor and terminal uses for one — worth honouring precisely
+                        // because there is no comfortable key combination left to spend on it.
+                        let block = mouse.modifiers.contains(KeyModifiers::ALT);
                         self.editor_mut().clear_selection();
                         self.position_cursor_from_click(content, col, row);
                         let anchor = (self.editor().cursor_line, self.editor().cursor_col);
-                        self.editor_mut().selection_anchor = Some(anchor);
+                        let ed = self.editor_mut();
+                        ed.selection_anchor = Some(anchor);
+                        ed.selection_block = block;
                         self.dragging = Some(DragTarget::TextSelection);
                     }
                     return;
@@ -4095,6 +4282,11 @@ impl App {
 
     fn mouse_menu_bar_click(&mut self, col: u16) {
         let ranges = ui::menu_title_ranges(&self.menu, self.settings.lang);
+        // Anything left of the first menu title is the logo.
+        if ranges.first().is_some_and(|(first, _)| col < *first) {
+            self.poke_turtle();
+            return;
+        }
         for (i, (start, end)) in ranges.iter().enumerate() {
             if col >= *start && col < *end {
                 self.menu.menu_index = i;
@@ -4310,6 +4502,29 @@ mod tests {
     /// Ctrl+<direction> is meant to read as "go to the thing over there", so what matters is that
     /// each arrow lands on whatever is actually in that direction and stops at the window edge
     /// instead of wrapping.
+    /// The walk has to actually end, or the turtle would sit on the last column for the rest of
+    /// the session; and hurrying it has to move it without letting it skip the finish.
+    #[test]
+    fn the_turtle_crosses_and_then_is_gone() {
+        const W: u16 = 80;
+        assert_eq!(turtle_column(Duration::ZERO, 0, W), Some(W - 2), "starts against the right edge");
+
+        let half = turtle_column(TURTLE_CROSSING / 2, 0, W).expect("still walking half way");
+        assert!((38..=42).contains(&half), "half the time is about half the way, got {half}");
+
+        // Past the end it is over, and stays over.
+        assert_eq!(turtle_column(TURTLE_CROSSING, 0, W), None);
+        assert_eq!(turtle_column(TURTLE_CROSSING * 3, 0, W), None);
+
+        // A nudge buys ground — leftward — and enough of them end the walk early.
+        let nudged = turtle_column(TURTLE_CROSSING / 2, TURTLE_NUDGE, W).expect("still walking");
+        assert_eq!(nudged, half - TURTLE_NUDGE, "hurrying moves it towards the left edge");
+        assert_eq!(turtle_column(TURTLE_CROSSING / 2, W, W), None, "hurried right off the end");
+
+        // A window with no room is not a walk.
+        assert_eq!(turtle_column(Duration::ZERO, 0, 0), None);
+    }
+
     #[test]
     fn a_direction_lands_on_whatever_frame_lies_that_way() {
         use FocusTarget::*;

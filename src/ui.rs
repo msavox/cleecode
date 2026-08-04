@@ -1194,11 +1194,41 @@ fn draw_save_as_modal(f: &mut Frame, app: &App, full: Rect) {
     draw_input_modal(f, full, "Save as", &prompt, &app.save_as_input);
 }
 
+/// Where the picker modal sits. Pulled out of the drawing so the mouse can land on exactly the
+/// rows that were painted — a second copy of this arithmetic would drift the first time either
+/// side changed.
+pub fn picker_rect(full: Rect) -> Rect {
+    let width = full.width.saturating_sub(8).clamp(20, 90);
+    let height = full.height.saturating_sub(4).clamp(4, 20);
+    centered_rect(width, height, full)
+}
+
+/// Which result a click landed on, as an index into `filtered` — the same thing `selected`
+/// counts. `None` for the query line, the borders, or anywhere outside the modal.
+pub fn picker_row_at(p: &crate::picker::Picker, full: Rect, col: u16, row: u16) -> Option<usize> {
+    let inner = inner_rect(picker_rect(full));
+    let inside = col >= inner.x
+        && col < inner.x + inner.width
+        && row >= inner.y
+        && row < inner.y + inner.height;
+    if !inside || row == inner.y {
+        return None;
+    }
+    let list_rows = inner.height.saturating_sub(1) as usize;
+    // The list scrolls to keep the selection visible, so the first row on screen is not
+    // necessarily the first result — the same offset the drawing uses.
+    let start = if p.selected >= list_rows {
+        p.selected + 1 - list_rows
+    } else {
+        0
+    };
+    let index = start + (row - inner.y - 1) as usize;
+    (index < p.filtered.len()).then_some(index)
+}
+
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let Some(p) = app.picker.as_ref() else { return };
-    let width = full.width.saturating_sub(8).min(90).max(20);
-    let height = full.height.saturating_sub(4).min(20).max(4);
-    let rect = centered_rect(width, height, full);
+    let rect = picker_rect(full);
     f.render_widget(Clear, rect);
     let title = format!(" {}  ({} matches) ", p.title, p.filtered.len());
     let block = Block::default()
@@ -1606,7 +1636,6 @@ fn draw_editor_pane(
     let top_line = app.editors[idx].top_line;
     let left_col = app.editors[idx].left_col;
     let cursor_line = app.editors[idx].cursor_line;
-    let sel_range = app.editors[idx].selection_range();
     let visible_rows = app.editors[idx].visible_rows_from(top_line, viewport_height);
     let cursor_row = visible_rows.iter().position(|&l| l == cursor_line).unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
@@ -1640,17 +1669,11 @@ fn draw_editor_pane(
         } else {
             raw_spans
         };
-        let raw_spans = if let Some(((sl, sc), (el, ec))) = sel_range {
-            if line_idx >= sl && line_idx <= el {
-                let line_len = app.editors[idx].line_char_len(line_idx);
-                let from = if line_idx == sl { sc } else { 0 };
-                let to = if line_idx == el { ec } else { line_len };
-                highlight_selection(raw_spans, from, to)
-            } else {
-                raw_spans
-            }
-        } else {
-            raw_spans
+        // The editor decides the shape — a run of text or a rectangle — so the highlight always
+        // matches what a copy would take.
+        let raw_spans = match app.editors[idx].selected_columns(line_idx) {
+            Some((from, to)) => highlight_selection(raw_spans, from, to),
+            None => raw_spans,
         };
 
         if app.settings.word_wrap {
@@ -1946,6 +1969,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let paragraph = Paragraph::new(Line::from(Span::raw(msg))).style(style);
     f.render_widget(paragraph, area);
+
+    // The easter egg walks along the status line, over whatever message is there. It is the one
+    // place on screen already given over to things that come and go, so nothing is lost behind
+    // it, and you can carry on working while it crosses.
+    if let Some(col) = app.turtle_at(area.width) {
+        let spot = Rect { x: area.x + col, y: area.y, width: 2.min(area.width - col), height: 1 };
+        f.render_widget(Paragraph::new(Line::from(Span::raw("🐢"))), spot);
+    }
 }
 
 #[cfg(test)]
@@ -1992,6 +2023,58 @@ mod tests {
     }
 
     /// Hiding the menu bar is a preference about the idle screen, not a promise never to show a
+    /// Workspaces, the palette and quick open were all keyboard-only: the list was drawn but no
+    /// click reached it. The mapping has to agree with the drawing exactly, including the offset
+    /// the list scrolls by once the selection is past the bottom.
+    #[test]
+    fn a_click_lands_on_the_picker_row_it_looks_like() {
+        use crate::picker::{PickAction, PickItem, Picker, PickerKind};
+        let items: Vec<PickItem> = (0..40)
+            .map(|i| PickItem {
+                label: format!("item {i}"),
+                shortcut: None,
+                action: PickAction::OpenFile("x".into()),
+            })
+            .collect();
+        let mut p = Picker::new("Test", PickerKind::Workspaces, items);
+        let full = Rect::new(0, 0, 120, 40);
+        let inner = inner_rect(picker_rect(full));
+
+        // The first row under the query line is the first result.
+        assert_eq!(picker_row_at(&p, full, inner.x + 2, inner.y + 1), Some(0));
+        assert_eq!(picker_row_at(&p, full, inner.x + 2, inner.y + 3), Some(2));
+        // The query line itself is not a result, and neither is anything off the modal.
+        assert_eq!(picker_row_at(&p, full, inner.x + 2, inner.y), None);
+        assert_eq!(picker_row_at(&p, full, 0, 0), None);
+
+        // Once the selection has pushed the list down, the top row is no longer result 0 — the
+        // mouse has to follow the same scroll the drawing applies.
+        let list_rows = inner.height.saturating_sub(1) as usize;
+        p.selected = list_rows + 4;
+        let start = p.selected + 1 - list_rows;
+        assert_eq!(
+            picker_row_at(&p, full, inner.x + 2, inner.y + 1),
+            Some(start)
+        );
+        assert_eq!(
+            picker_row_at(&p, full, inner.x + 2, inner.y + list_rows as u16),
+            Some(p.selected)
+        );
+
+        // A short list has no rows past its end to click on.
+        let few = Picker::new(
+            "Test",
+            PickerKind::Workspaces,
+            vec![PickItem {
+                label: "only".into(),
+                shortcut: None,
+                action: PickAction::OpenFile("x".into()),
+            }],
+        );
+        assert_eq!(picker_row_at(&few, full, inner.x + 2, inner.y + 1), Some(0));
+        assert_eq!(picker_row_at(&few, full, inner.x + 2, inner.y + 2), None);
+    }
+
     /// menu again — and `Ctrl+Shift+B` is documented as reaching the menus while it is hidden.
     /// Without a row to draw in, opening one produced nothing at all.
     #[test]

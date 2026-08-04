@@ -97,6 +97,9 @@ jobs:
           mkdir -p "dist/${name}/fonts"
           cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
+          # The man page travels with the archive too, for anyone installing by hand rather
+          # than through Homebrew.
+          cp docs/clee.1 "dist/${name}/"
           # Ship the font alongside, so --install-font isn't the only way to get it.
           cp assets/fonts/CleeCodeMonoNerdFont-Regular.ttf assets/fonts/OFL.txt "dist/${name}/fonts/"
 

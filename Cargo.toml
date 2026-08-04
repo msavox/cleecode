@@ -1,6 +1,6 @@
 [package]
 name = "cleecode"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "A terminal IDE: editor with a file-tree sidebar, embedded terminals, syntax highlighting and a run button"
 authors = ["Matteo Savoia"]
@@ -10,9 +10,10 @@ repository = "https://github.com/msavox/cleecode"
 homepage = "https://github.com/msavox/cleecode"
 keywords = ["editor", "terminal", "tui", "ide", "ratatui"]
 categories = ["text-editors", "command-line-utilities"]
-# Screenshots and CI config aren't needed to build. assets/ must stay: the font is
+# Screenshots, the demo GIF and CI config aren't needed to build; docs/clee.1 is, because the
+# Homebrew formula installs the man page from the source tree. assets/ must stay too: the font is
 # include_bytes!-ed into the binary for --install-font, so excluding it breaks the build.
-exclude = ["docs/", ".github/"]
+exclude = ["docs/screenshots/", "docs/demo.gif", "docs/social-preview.png", ".github/"]
 
 # The crate stays "cleecode" but the built command is the shorter "clee".
 [[bin]]
