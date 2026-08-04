@@ -14,6 +14,15 @@ const STARTUP_IDLE: Duration = Duration::from_millis(250);
 /// (e.g. an rc that launches a long-running program) can't stay blank forever.
 const STARTUP_MAX: Duration = Duration::from_secs(12);
 
+/// Locks a mutex a terminal shares with its reader thread, stepping over poison. If that
+/// thread ever panics — on a malformed escape sequence, say — `unwrap()` here would turn one
+/// broken terminal into a panic on the main thread, closing the editor and every other shell
+/// in it. The data behind the lock is still perfectly readable, so the poison is ignored on
+/// purpose: the damage stays inside the terminal it happened in.
+pub fn lock_poisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub struct TerminalPanel {
     master: Box<dyn MasterPty + Send>,
     /// Shared with the reader thread so it can answer terminal queries (DSR/DA) inline,
@@ -40,6 +49,9 @@ pub struct TerminalPanel {
     /// A user-given name for this tab, shown in the tab strip (or the window title when it is the
     /// only tab) in place of the default "Terminal N".
     pub name: Option<String>,
+    /// A command to run in this shell when the workspace holding it is opened (`claude`,
+    /// `octave`, `npm run dev`…). Remembered with the workspace; not re-run on its own.
+    pub startup_command: Option<String>,
 }
 
 /// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
@@ -187,8 +199,26 @@ impl CsiScanner {
     }
 }
 
+/// A size a terminal grid can actually be driven at. Both floors are there to stop vt100 doing
+/// unsigned arithmetic that goes below zero — which panics in debug, wraps to 65535 in release,
+/// and either way used to take the whole editor and every shell in it down:
+///
+/// * **rows ≥ 2** — `Parser::new` sets its scroll region to `rows - 1`; and with a single row
+///   every line wrap scrolls, so `col_wrap` runs `prev_pos.row -= scrolled` on row 0.
+/// * **cols ≥ 2** — `col_wrap` computes `cols - width`, and `width` is 2 for a double-width
+///   character, so one CJK glyph or emoji arriving in a one-column pane is enough.
+///
+/// The size offered when a terminal is opened or resized comes from the window, which goes
+/// degenerate while a frame is collapsed or dragged small, so the floors are applied here rather
+/// than trusted from the caller. A 2x2 pane is unusable, but it is *inert* — the point is only
+/// that nothing can reach vt100 that makes it subtract past zero.
+fn buildable_size(rows: u16, cols: u16) -> (u16, u16) {
+    (rows.max(2), cols.max(2))
+}
+
 impl TerminalPanel {
     pub fn new(rows: u16, cols: u16, cwd: &Path) -> Result<Self> {
+        let (rows, cols) = buildable_size(rows, cols);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -236,7 +266,7 @@ impl TerminalPanel {
                     Ok(n) => {
                         let data = &buf[..n];
                         {
-                            let mut p = parser_clone.lock().unwrap();
+                            let mut p = lock_poisoned(&parser_clone);
                             p.process(data);
                         }
                         last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -248,7 +278,7 @@ impl TerminalPanel {
                         scanner.feed(data, &mut queries);
                         if !queries.is_empty() {
                             let (crow, ccol) = {
-                                let p = parser_clone.lock().unwrap();
+                                let p = lock_poisoned(&parser_clone);
                                 p.screen().cursor_position()
                             };
                             if let Ok(mut w) = writer_clone.lock() {
@@ -280,7 +310,16 @@ impl TerminalPanel {
             revealed: false,
             selection: None,
             name: None,
+            startup_command: None,
         })
+    }
+
+    /// Queues a command for the shell as if it had been typed. Called right after spawning a
+    /// workspace's tabs: the bytes sit in the pty's input buffer until the shell starts reading,
+    /// so this works before the prompt exists (the same trick as the startup `clear`).
+    pub fn run_command(&mut self, command: &str) {
+        self.write_input(command.as_bytes());
+        self.write_input(b"\r");
     }
 
     /// Whether the pane should be shown yet. Stays hidden during the shell's startup
@@ -354,7 +393,14 @@ impl TerminalPanel {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        if rows == 0 || cols == 0 || (rows == self.rows && cols == self.cols) {
+        // A collapsed or mid-drag pane offers no size worth adopting: reflowing the shell down to
+        // the minimum would mangle its output for a frame and gain nothing, so it is left alone.
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        // Anything that does get through still has to be a size vt100 can survive.
+        let (rows, cols) = buildable_size(rows, cols);
+        if rows == self.rows && cols == self.cols {
             return;
         }
         self.rows = rows;
@@ -365,7 +411,7 @@ impl TerminalPanel {
             pixel_width: 0,
             pixel_height: 0,
         });
-        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+        lock_poisoned(&self.parser).screen_mut().set_size(rows, cols);
     }
 }
 
@@ -374,6 +420,16 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Meta is sent the way terminals have always sent it: ESC, then the key. Without this an
+    // Alt chord that CleeCode does not claim reached the shell as a bare letter, so Alt+D in
+    // readline (delete-word) typed a "d" instead.
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let meta = |mut bytes: Vec<u8>| {
+        if alt {
+            bytes.insert(0, 0x1b);
+        }
+        bytes
+    };
 
     match key.code {
         KeyCode::Char(c) => {
@@ -381,12 +437,12 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
                 let upper = c.to_ascii_uppercase();
                 if upper.is_ascii_alphabetic() {
                     let byte = (upper as u8) - b'A' + 1;
-                    return vec![byte];
+                    return meta(vec![byte]);
                 }
-                vec![c as u8]
+                meta(vec![c as u8])
             } else {
                 let mut buf = [0u8; 4];
-                c.encode_utf8(&mut buf).as_bytes().to_vec()
+                meta(c.encode_utf8(&mut buf).as_bytes().to_vec())
             }
         }
         KeyCode::Enter => vec![b'\r'],
@@ -431,12 +487,18 @@ impl TerminalWindow {
         })
     }
 
+    /// Clamped rather than indexed raw: `active` can arrive from a hand-edited workspace file
+    /// or lag behind a tab that has just closed, and this is read on every frame. Falling back
+    /// to the last tab shows the wrong shell for one frame; indexing past the end would take the
+    /// whole editor down, along with every shell in it.
     pub fn active_tab(&self) -> &TerminalPanel {
-        &self.tabs[self.active]
+        let idx = self.active.min(self.tabs.len().saturating_sub(1));
+        &self.tabs[idx]
     }
 
     pub fn active_tab_mut(&mut self) -> &mut TerminalPanel {
-        &mut self.tabs[self.active]
+        let idx = self.active.min(self.tabs.len().saturating_sub(1));
+        &mut self.tabs[idx]
     }
 
     /// Adds a tab and focuses it — opening a tab is always to switch to it.
@@ -472,6 +534,53 @@ mod tests {
     /// trailing-space trimming is exercised.
     fn grid(row: u16, col: u16) -> String {
         if col == 4 { String::new() } else { format!("{row}{col}") }
+    }
+
+    /// The regression behind "CleeCode just closed on me, with a session running in a pane":
+    /// a terminal opened at zero height panicked inside vt100 and killed the process, shells
+    /// and all. The floor is asserted against the real parser, not just the arithmetic, so the
+    /// test still fails if vt100 ever gets stricter about what it will accept.
+    #[test]
+    fn a_terminal_is_never_built_at_a_size_vt100_cannot_take() {
+        for (rows, cols) in [(0, 0), (0, 80), (24, 0), (1, 1), (1, 0), (2, 2), (1, 200)] {
+            let (r, c) = buildable_size(rows, cols);
+            assert!(r >= 2 && c >= 2, "{rows}x{cols} must be floored, got {r}x{c}");
+
+            // Built, then driven: creation trips `rows - 1`, and feeding a double-width glyph
+            // trips `cols - width` in `col_wrap`. Both are exercised against the real parser, so
+            // the test still fails if vt100 changes what it will tolerate.
+            let mut parser = vt100::Parser::new(r, c, 0);
+            assert_eq!(parser.screen().size(), (r, c));
+            parser.process("日本語テキスト🙂".as_bytes());
+            parser.screen_mut().set_size(r, c);
+            parser.process("more text that has to wrap somewhere".as_bytes());
+        }
+        // Anything already usable is passed through untouched.
+        assert_eq!(buildable_size(40, 120), (40, 120));
+    }
+
+    /// What a shell actually needs to receive. Ctrl+letter is the control byte, and an Alt chord
+    /// carries the ESC prefix — without it Alt+D reached readline as a literal "d".
+    #[test]
+    fn keys_reach_the_shell_the_way_a_terminal_sends_them() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |code, mods| key_to_bytes(KeyEvent::new(code, mods));
+
+        // Ctrl+J is LF and Ctrl+I is Tab — the two the editor used to swallow.
+        assert_eq!(press(KeyCode::Char('j'), KeyModifiers::CONTROL), vec![0x0a]);
+        assert_eq!(press(KeyCode::Char('i'), KeyModifiers::CONTROL), vec![0x09]);
+        assert_eq!(press(KeyCode::Char('c'), KeyModifiers::CONTROL), vec![0x03]);
+
+        assert_eq!(press(KeyCode::Char('d'), KeyModifiers::ALT), vec![0x1b, b'd']);
+        assert_eq!(press(KeyCode::Char('b'), KeyModifiers::ALT), vec![0x1b, b'b']);
+        // Both modifiers at once: ESC then the control byte.
+        assert_eq!(
+            press(KeyCode::Char('x'), KeyModifiers::ALT | KeyModifiers::CONTROL),
+            vec![0x1b, 0x18]
+        );
+        // Plain text is untouched.
+        assert_eq!(press(KeyCode::Char('d'), KeyModifiers::NONE), vec![b'd']);
+        assert_eq!(press(KeyCode::Char('è'), KeyModifiers::NONE), "è".as_bytes().to_vec());
     }
 
     #[test]

@@ -21,6 +21,10 @@ pub struct LayoutParams {
     pub show_sidebar: bool,
     pub show_terminal: bool,
     pub show_menubar: bool,
+    /// Whether a menu is open right now. The bar needs its row either way: hiding the bar is a
+    /// preference about the idle screen, not a refusal to ever show a menu, and `Ctrl+Shift+B`
+    /// is documented as reaching the menus while it is hidden.
+    pub menu_active: bool,
     /// One relative weight per terminal window; adjacent weights shift when their seam is
     /// dragged. Its length is the window count.
     pub terminal_weights: Vec<u16>,
@@ -35,6 +39,7 @@ impl LayoutParams {
             show_sidebar: app.settings.show_sidebar,
             show_terminal: app.settings.show_terminal,
             show_menubar: app.settings.show_menubar,
+            menu_active: app.menu.active,
             terminal_weights: app.terminals.iter().map(|w| w.weight).collect(),
             sidebar_width: app.settings.sidebar_width,
             terminal_pct: app.settings.terminal_pct,
@@ -55,7 +60,7 @@ fn terminal_panes(area: Rect, weights: &[u16], direction: Direction) -> Vec<Rect
 }
 
 pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
-    let menu_h = if p.show_menubar { 1 } else { 0 };
+    let menu_h = if p.show_menubar || p.menu_active { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(menu_h), Constraint::Min(1), Constraint::Length(1)])
@@ -120,10 +125,17 @@ pub fn editor_pane_rects(area: Rect, split: bool, left_pct: u16) -> Vec<Rect> {
     if !split {
         return vec![area];
     }
+    // Under two columns there is no split to make — one side would have to be zero-wide — and
+    // asking for it is not merely pointless but fatal: the clamp below would be handed a minimum
+    // of 1 above a maximum of 0, and `clamp` panics on an inverted range. A window dragged narrow
+    // with the split on reached exactly that, and it closed the editor. One pane is the answer.
+    if area.width < 2 {
+        return vec![area];
+    }
     // The left pane gets `left_pct` of the width; the right takes the remainder, so no column is
     // lost to rounding. Both keep at least one column even at the clamp extremes.
     let mid = ((area.width as u32 * left_pct as u32) / 100) as u16;
-    let mid = mid.clamp(1, area.width.saturating_sub(1));
+    let mid = mid.clamp(1, area.width - 1);
     let left = Rect { width: mid, ..area };
     let right = Rect { x: area.x + mid, width: area.width - mid, ..area };
     vec![left, right]
@@ -154,7 +166,7 @@ const ARROW_W: u16 = 1;
 
 /// Columns kept for the tab strip before the toolbar buttons give up their space. On a
 /// narrow pane (a split view on a small terminal) seeing which files are open matters more
-/// than the buttons, which stay reachable via `F10` and the Run menu.
+/// than the buttons, which stay reachable via `Ctrl+Shift+R` and the Run menu.
 const MIN_TAB_STRIP: u16 = 12;
 
 /// The visible slice of a pane's tab strip. Ranges are relative to the tab bar's left edge.
@@ -452,7 +464,7 @@ pub fn settings_modal_rect(full: Rect) -> Rect {
     centered_rect(width, height, full)
 }
 
-/// The colour a frame's border takes while a resize is under way (F8 mode, or a border drag).
+/// The colour a frame's border takes while a resize is under way (Ctrl+Shift+U, or a border drag).
 /// Orange, to stand clearly apart from the cyan of ordinary focus.
 const RESIZE_BORDER_COLOR: Color = Color::Rgb(255, 140, 0);
 
@@ -537,7 +549,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_settings_modal(f, app, f.area());
     }
     if app.menu.active {
-        // While a menu is open, show the title bar even if it's normally hidden, so F9
+        // While a menu is open, show the title bar even if it's normally hidden, so Ctrl+Shift+B
         // navigation (←/→ between menus) stays visible; drawn as a top-row overlay.
         if areas.menu_bar.height == 0 {
             let full = f.area();
@@ -562,6 +574,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_terminal_rename {
         draw_terminal_rename_modal(f, app, f.area());
     }
+    if app.show_workspace_save {
+        draw_workspace_save_modal(f, app, f.area());
+    }
     if app.show_goto {
         draw_goto_modal(f, app, f.area());
     }
@@ -584,6 +599,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.picker.is_some() {
         draw_picker_modal(f, app, f.area());
     }
+    // The manual covers the whole working area; nothing else is up while it reads.
+    if app.manual.is_some() {
+        draw_manual(f, app, f.area());
+    }
     // Topmost: the context menu overlays whatever it was raised over.
     if app.context_menu.is_some() {
         draw_context_menu(f, app, f.area());
@@ -592,7 +611,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     // Hidden bar collapses to a zero-height row; nothing to paint (menus still reachable
-    // via F9 / Alt+<letter>, whose dropdown anchors to the top independently of this row).
+    // via Ctrl+Shift+B, whose dropdown anchors to the top independently of this row).
     if area.height == 0 {
         return;
     }
@@ -612,11 +631,18 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         if i == 0 {
             style = style.add_modifier(Modifier::BOLD);
         }
+        // The initial is underlined only while the bar is open, because that is the only time
+        // pressing it does anything. Everywhere else an underlined initial means "Alt and this
+        // letter", and CleeCode has no Alt+<letter> keys — macOS does not deliver them on
+        // non-US layouts, so they were dropped. Advertising a key that does nothing is worse
+        // than advertising none; showing it exactly when it works costs nothing, and the width
+        // does not change either way, so the bar does not jump when a menu opens.
         let mut chars = title.chars();
         let mnemonic = chars.next().map(|c| c.to_string()).unwrap_or_default();
         let rest: String = chars.collect();
+        let mnemonic_style = if app.menu.active { style.add_modifier(Modifier::UNDERLINED) } else { style };
         spans.push(Span::styled(" ", style));
-        spans.push(Span::styled(mnemonic, style.add_modifier(Modifier::UNDERLINED)));
+        spans.push(Span::styled(mnemonic, mnemonic_style));
         spans.push(Span::styled(format!("{} ", rest), style));
     }
     let pad = area.width.saturating_sub(used);
@@ -874,10 +900,220 @@ fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
     draw_input_modal(f, full, "Go to line", i18n::msg_goto_prompt(lang), &app.goto_input);
 }
 
+/// The terminal's name and its startup command, in one box: two prompts, two values, and a
+/// caret on whichever field is being typed into.
 fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    use crate::app::TerminalField;
     let lang = app.settings.lang;
-    let prompt = i18n::msg_terminal_rename_prompt(lang);
-    draw_input_modal(f, full, "Rename terminal", &prompt, &app.terminal_rename_input);
+    let rect = centered_rect(74, 7, full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(" Terminal name & startup command ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let on_name = app.terminal_rename_field == TerminalField::Name;
+    let marker = |active: bool| if active { "▶ " } else { "  " };
+    let value = Style::default().fg(Color::Yellow);
+    let label = Style::default().fg(Color::Gray);
+    let lines = vec![
+        Line::from(Span::styled(format!("{}{}", marker(on_name), i18n::msg_terminal_rename_prompt(lang)), label)),
+        Line::from(Span::styled(format!("  {}", app.terminal_rename_input), value)),
+        Line::from(Span::styled(format!("{}{}", marker(!on_name), i18n::msg_terminal_startup_prompt(lang)), label)),
+        Line::from(Span::styled(format!("  {}", app.terminal_startup_input), value)),
+        Line::from(Span::styled(i18n::msg_terminal_form_hint(lang), Style::default().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+
+    let (row, len) = if on_name {
+        (1u16, app.terminal_rename_input.chars().count())
+    } else {
+        (3u16, app.terminal_startup_input.chars().count())
+    };
+    f.set_cursor_position((inner.x + 2 + len as u16, inner.y + row));
+}
+
+fn draw_workspace_save_modal(f: &mut Frame, app: &App, full: Rect) {
+    let prompt = i18n::msg_workspace_save_prompt(app.settings.lang);
+    draw_input_modal(f, full, "Save workspace", &prompt, &app.workspace_save_input);
+}
+
+/// The manual's frame: bigger than the palette, but still a modal with the screen showing
+/// around it. Shared by the renderer and by click handling.
+pub fn manual_rect(full: Rect) -> Rect {
+    let width = full.width.saturating_sub(4).min(100).max(24);
+    let height = full.height.saturating_sub(2).min(40).max(8);
+    centered_rect(width, height, full)
+}
+
+/// Columns given to the table of contents down the left side.
+const MANUAL_LIST_WIDTH: u16 = 16;
+
+pub fn manual_list_rect(rect: Rect) -> Rect {
+    let inner = inner_rect(rect);
+    Rect { width: MANUAL_LIST_WIDTH.min(inner.width), ..inner }
+}
+
+/// The reading pane: everything right of the section list, minus the hint line at the bottom.
+fn manual_body_rect(rect: Rect) -> Rect {
+    let inner = inner_rect(rect);
+    let list = manual_list_rect(rect);
+    // One column for the rule between the two, one for breathing room.
+    let x = inner.x + list.width + 2;
+    Rect {
+        x,
+        y: inner.y,
+        width: inner.width.saturating_sub(list.width + 2),
+        height: inner.height.saturating_sub(2),
+    }
+}
+
+/// Rows of manual text on screen, so paging keys move by exactly one screenful.
+pub fn manual_body_height(full: Rect) -> u16 {
+    manual_body_rect(manual_rect(full)).height
+}
+
+/// Box-drawing characters, which in the manual only ever belong to a diagram.
+fn is_box_rule(c: char) -> bool {
+    matches!(
+        c,
+        '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
+            | '║' | '╨' | '╧' | '╪' | '╫' | '═' | '╔' | '╗' | '╚' | '╝' | '╠' | '╣' | '╦' | '╩' | '╬'
+    )
+}
+
+/// Whether a word is a key or a chord, and so worth picking out of the surrounding prose.
+fn looks_like_key(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| matches!(c, ',' | '.' | ')' | '(' | ':' | ';' | '—'));
+    if w.starts_with("Ctrl+") || w.starts_with("Alt+") || w.starts_with("Shift+") {
+        return true;
+    }
+    if matches!(w, "Esc" | "Enter" | "Tab" | "Del" | "Backspace" | "Home" | "End" | "Space" | "PgUp" | "PgDn") {
+        return true;
+    }
+    // F1..F12, but not a word that merely starts with F.
+    w.len() >= 2 && w.starts_with('F') && w[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Colours one line of the manual. It is reference material people scan rather than read, so
+/// the colour goes to the three things they scan *for* — the key names, the section headings and
+/// the outline of the diagrams — and prose stays plain, which is what keeps the colour meaning
+/// something. Styling happens here rather than in `manual.rs` so the text there stays plain
+/// strings that are easy to edit and to check the width of.
+fn manual_line(line: &'static str) -> Line<'static> {
+    let rule = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Yellow);
+    let heading = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let plain = Style::default();
+
+    // A diagram: the rules recede so the labels drawn inside them come forward.
+    if line.chars().any(is_box_rule) {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut buf = String::new();
+        let mut in_rule = false;
+        for c in line.chars() {
+            if is_box_rule(c) != in_rule && !buf.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut buf), if in_rule { rule } else { plain }));
+            }
+            in_rule = is_box_rule(c);
+            buf.push(c);
+        }
+        if !buf.is_empty() {
+            spans.push(Span::styled(buf, if in_rule { rule } else { plain }));
+        }
+        return Line::from(spans);
+    }
+
+    // A heading: flush left and introducing what follows.
+    let trimmed = line.trim_end();
+    if !line.starts_with(' ') && trimmed.ends_with(':') {
+        return Line::from(Span::styled(line, heading));
+    }
+
+    // Everything else word by word, so a chord is picked out whether it sits in the indented
+    // key column or in the middle of a sentence.
+    let mut spans: Vec<Span> = Vec::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        let gap: String = rest.chars().take_while(|c| *c == ' ').collect();
+        if !gap.is_empty() {
+            spans.push(Span::raw(&rest[..gap.len()]));
+            rest = &rest[gap.len()..];
+            continue;
+        }
+        let word_len = rest.find(' ').unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(word_len);
+        spans.push(Span::styled(word, if looks_like_key(word) { key } else { plain }));
+        rest = tail;
+    }
+    Line::from(spans)
+}
+
+fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
+    let Some(state) = app.manual.as_ref() else { return };
+    let lang = app.settings.lang;
+    let sections = crate::manual::sections(lang);
+    let rect = manual_rect(full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} · v{} ", i18n::t(lang, Key::ManualTitle), env!("CARGO_PKG_VERSION")))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // Table of contents, numbered so the digit keys have something to point at.
+    let list = manual_list_rect(rect);
+    let toc: Vec<Line> = sections
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let style = if i == state.section {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let width = list.width as usize;
+            let label = format!(" {} {}", i + 1, s.title);
+            let label: String = label.chars().take(width).collect();
+            let pad = width.saturating_sub(label.chars().count());
+            Line::from(Span::styled(format!("{label}{}", " ".repeat(pad)), style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(toc), list);
+
+    // The rule between the contents and the text.
+    let rule = Rect { x: inner.x + list.width + 1, y: inner.y, width: 1, height: inner.height };
+    let rule_lines: Vec<Line> = (0..rule.height)
+        .map(|_| Line::from(Span::styled("│", Style::default().fg(Color::DarkGray))))
+        .collect();
+    f.render_widget(Paragraph::new(rule_lines), rule);
+
+    let body_area = manual_body_rect(rect);
+    let Some(section) = sections.get(state.section) else { return };
+    let visible: Vec<Line> = section
+        .body
+        .iter()
+        .skip(state.scroll)
+        .take(body_area.height as usize)
+        .map(|line| manual_line(line))
+        .collect();
+    f.render_widget(Paragraph::new(visible), body_area);
+
+    // Position within the section, then the key hints, on the two rows kept back above.
+    let footer = Rect { x: body_area.x, y: body_area.y + body_area.height, width: body_area.width, height: 2 };
+    let shown = (state.scroll + body_area.height as usize).min(section.body.len());
+    let position = format!("{}/{}  ", shown, section.body.len().max(1));
+    let footer_lines = vec![
+        Line::from(Span::styled(
+            format!("{} · {}", section.title, position),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(i18n::t(lang, Key::ManualHint), Style::default().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Paragraph::new(footer_lines), footer);
 }
 
 fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -1463,14 +1699,21 @@ pub struct TermTab {
     pub close: Option<u16>,
 }
 
-/// The display name of each tab in a window: its user-given name, or the default "Terminal N"
-/// wording (matching a window's own title) when it hasn't been renamed.
-pub fn terminal_tab_labels(window: &TerminalWindow, lang: Lang) -> Vec<String> {
+/// The display name of each tab in a window: its user-given name, or a default when it hasn't
+/// been renamed. A single-tab window is named after its own position in the layout — every
+/// window used to call its lone tab "Terminal 1", so two windows carried the same title —
+/// while the tabs of a multi-tab window are numbered within it.
+pub fn terminal_tab_labels(window: &TerminalWindow, window_index: usize, lang: Lang) -> Vec<String> {
     window
         .tabs
         .iter()
         .enumerate()
-        .map(|(i, t)| t.name.clone().unwrap_or_else(|| i18n::terminal_title(lang, i).trim().to_string()))
+        .map(|(i, t)| {
+            t.name.clone().unwrap_or_else(|| {
+                let n = if window.tabs.len() == 1 { window_index } else { i };
+                i18n::terminal_title(lang, n).trim().to_string()
+            })
+        })
         .collect()
 }
 
@@ -1528,7 +1771,7 @@ fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
 fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, focused: bool) {
     let (labels, active_tab) = {
         let Some(window) = app.terminals.get(index) else { return };
-        (terminal_tab_labels(window, app.settings.lang), window.active)
+        (terminal_tab_labels(window, index, app.settings.lang), window.active)
     };
     let tab_count = labels.len();
     let window_close = app.terminals.len() > 1;
@@ -1586,7 +1829,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     }
 
     let selection = terminal.selection;
-    let parser = terminal.parser.lock().unwrap();
+    let parser = crate::terminal_panel::lock_poisoned(&terminal.parser);
     let screen = parser.screen();
     let (screen_rows, screen_cols) = screen.size();
 
@@ -1688,6 +1931,28 @@ mod tests {
     /// Five tabs of 10 columns each.
     const W: [u16; 5] = [10, 10, 10, 10, 10];
 
+    /// A split editor in a window dragged very narrow used to panic — `clamp(1, 0)` — and close
+    /// CleeCode. Too narrow to split now yields the single pane the callers already handle.
+    #[test]
+    fn a_split_too_narrow_to_make_falls_back_to_one_pane() {
+        for width in [0, 1] {
+            let area = Rect::new(0, 0, width, 20);
+            let panes = editor_pane_rects(area, true, 50);
+            assert_eq!(panes.len(), 1, "width {width} cannot hold two panes");
+            assert_eq!(panes[0], area);
+        }
+        // From two columns up the split is real, and neither side is ever zero-wide — including
+        // at the percentage extremes, where the rounding lands hardest.
+        for width in [2, 3, 80] {
+            for pct in [0, 1, 50, 99, 100] {
+                let panes = editor_pane_rects(Rect::new(0, 0, width, 20), true, pct);
+                assert_eq!(panes.len(), 2, "width {width} pct {pct}");
+                assert!(panes[0].width >= 1 && panes[1].width >= 1, "width {width} pct {pct}");
+                assert_eq!(panes[0].width + panes[1].width, width, "no column lost to rounding");
+            }
+        }
+    }
+
     #[test]
     fn terminal_panes_split_by_weight() {
         let area = Rect { x: 0, y: 0, width: 100, height: 10 };
@@ -1700,6 +1965,34 @@ mod tests {
         assert_eq!(uneven[0].width, 75);
         assert_eq!(uneven[1].width, 25);
         assert_eq!(uneven[1].x, uneven[0].x + uneven[0].width);
+    }
+
+    /// Hiding the menu bar is a preference about the idle screen, not a promise never to show a
+    /// menu again — and `Ctrl+Shift+B` is documented as reaching the menus while it is hidden.
+    /// Without a row to draw in, opening one produced nothing at all.
+    #[test]
+    fn an_open_menu_gets_its_row_even_when_the_bar_is_hidden() {
+        let full = Rect::new(0, 0, 120, 40);
+        let params = |show_menubar, menu_active| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar,
+            menu_active,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right: false,
+        };
+
+        assert_eq!(compute_layout(full, &params(false, false)).menu_bar.height, 0, "hidden and idle");
+        assert_eq!(compute_layout(full, &params(true, false)).menu_bar.height, 1, "shown");
+        assert_eq!(compute_layout(full, &params(false, true)).menu_bar.height, 1, "hidden but open");
+
+        // The row has to come out of the frames below, not off the bottom of the window.
+        let opened = compute_layout(full, &params(false, true));
+        let closed = compute_layout(full, &params(false, false));
+        assert_eq!(opened.status.y, closed.status.y, "the status line does not move");
+        assert_eq!(opened.editor.y, closed.editor.y + 1, "the frames below start one row lower");
     }
 
     #[test]

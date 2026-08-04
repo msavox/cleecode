@@ -1,3 +1,46 @@
+## What's new in 0.3.0
+
+### It no longer closes on you
+
+A panic used to take the whole editor down, and with it every shell running inside — an ssh
+session, a long-running build, a `claude` in a pane, gone with no way back. Three real crashes
+are fixed at the source (a terminal opened at zero height, a split editor in a very narrow
+window, a stale tab index), and a safety net now contains anything left: a panic is reported in
+the status line and written to `panic.log` instead of ending the session. A broken terminal
+costs you that terminal, at most.
+
+### Keys you can actually press
+
+The bindings were rebuilt around two facts. Function keys and PageUp/PageDown need Fn on a
+laptop, so they are gone — every one of them. And macOS only sends Option as Meta on US keyboard
+layouts, so `Alt`+letter never arrived at all on an Italian, German or French keyboard; those are
+gone too. What replaces them:
+
+- **`Ctrl+Alt`+arrow** moves to the frame in that direction — sidebar, either half of a split
+  editor, or a tiled terminal, whichever is actually there. (`Ctrl`+arrow alone belongs to
+  macOS, which uses it for Mission Control and Spaces.)
+- **`Ctrl+Shift`+letter** is the application's layer: `M` manual, `B` menu bar, `O` settings,
+  `R` run, `T`/`K` terminal tab open/close, `N` new terminal window, `W` save workspace.
+  It is safe inside a terminal because no terminal can encode `Ctrl+Shift` for the program
+  running in a pane — so nothing there is listening for it.
+- **`Ctrl+Shift+←/→`** moves between the tabs of the focused frame; `Ctrl+Tab` cycles the frames.
+
+A focused terminal now gets every other `Ctrl` chord. `Ctrl+J` is Enter to a shell, `Ctrl+E` is
+end-of-line, `Ctrl+T` is transpose — the editor no longer eats any of them.
+
+### Named workspaces
+
+Save a whole set-up under a name (`Ctrl+Shift+W`): project root, open files, frame sizes, and the
+terminal windows with their tab names and startup commands. Reopening one brings the shells back
+already running `claude`, `octave`, `npm run dev`. One hand-editable TOML file per workspace under
+`~/.config/cleecode/workspaces/`.
+
+### Also
+
+A built-in manual on `Ctrl+Shift+M`, in English or Italian, syntax-coloured and reachable without
+leaving the editor. Save As for buffers that never had a name. And the demo and screenshots are
+now generated from scripts in `docs/`, so they cannot quietly go stale again.
+
 ## Install
 
 **macOS** (Homebrew):

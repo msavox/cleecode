@@ -40,6 +40,7 @@ pub enum Key {
     ItemToggleSidebar,
     ItemToggleTerminal,
     ItemToggleMenuBar,
+    ItemOpenMenuBar,
     ItemOpenSettings,
     ItemNewTerminal,
     ItemNewTerminalTab,
@@ -116,6 +117,20 @@ pub enum Key {
     MsgNothingToUndo,
     MsgNothingToRedo,
     MsgNoCommentSyntax,
+    ItemNextTerminalTab,
+    ItemPrevTerminalTab,
+    ItemFocusFileTree,
+    ItemFocusEditor,
+    ItemFocusTerminal,
+    MenuWorkspace,
+    ItemSaveWorkspace,
+    ItemOpenWorkspace,
+    ItemDeleteWorkspace,
+    MenuHelp,
+    ItemShowManual,
+    ManualTitle,
+    ManualHint,
+    MsgNoWorkspaces,
 }
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -156,6 +171,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleMenuBar) => "Menu bar",
         (Lang::It, ItemToggleMenuBar) => "Barra dei menu",
+        (Lang::En, ItemOpenMenuBar) => "Open the menu bar",
+        (Lang::It, ItemOpenMenuBar) => "Apri la barra dei menu",
 
         (Lang::En, ItemOpenSettings) => "Settings...",
         (Lang::It, ItemOpenSettings) => "Impostazioni...",
@@ -332,10 +349,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, UntitledFile) => "[senza nome]",
 
         (Lang::En, StatusHelp) => {
-            "F9 menu · F1/F2/F3 focus · F4 settings · F5/F6 terminals · Ctrl+S save · Ctrl+Q quit"
+            "^⇧M manual · ^⇧B menu · ^P commands · ^⇧O settings · ^Tab frames · ^S save · ^Q quit"
         }
         (Lang::It, StatusHelp) => {
-            "F9 menu · F1/F2/F3 focus · F4 impostazioni · F5/F6 terminali · Ctrl+S salva · Ctrl+Q esci"
+            "^⇧M manuale · ^⇧B menu · ^P comandi · ^⇧O impostazioni · ^Tab frame · ^S salva · ^Q esci"
         }
 
         (Lang::En, ItemUndo) => "Undo",
@@ -386,6 +403,45 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, MsgNoCommentSyntax) => "No line-comment syntax for this file type",
         (Lang::It, MsgNoCommentSyntax) => "Nessuna sintassi di commento per questo tipo di file",
+
+        (Lang::En, ItemNextTerminalTab) => "Next terminal tab",
+        (Lang::It, ItemNextTerminalTab) => "Tab terminale successivo",
+        (Lang::En, ItemPrevTerminalTab) => "Previous terminal tab",
+        (Lang::It, ItemPrevTerminalTab) => "Tab terminale precedente",
+
+        (Lang::En, ItemFocusFileTree) => "Focus file tree",
+        (Lang::It, ItemFocusFileTree) => "Focus albero file",
+        (Lang::En, ItemFocusEditor) => "Focus editor",
+        (Lang::It, ItemFocusEditor) => "Focus editor",
+        (Lang::En, ItemFocusTerminal) => "Focus terminal",
+        (Lang::It, ItemFocusTerminal) => "Focus terminale",
+
+        // Untranslated on purpose: "workspace" is what the concept is called in Italian too,
+        // and it keeps the Alt+W mnemonic identical in both languages.
+        (Lang::En, MenuWorkspace) => "Workspace",
+        (Lang::It, MenuWorkspace) => "Workspace",
+
+        (Lang::En, ItemSaveWorkspace) => "Save workspace...",
+        (Lang::It, ItemSaveWorkspace) => "Salva workspace...",
+        (Lang::En, ItemOpenWorkspace) => "Open workspace...",
+        (Lang::It, ItemOpenWorkspace) => "Apri workspace...",
+        (Lang::En, ItemDeleteWorkspace) => "Delete workspace...",
+        (Lang::It, ItemDeleteWorkspace) => "Elimina workspace...",
+
+        (Lang::En, MenuHelp) => "Help",
+        (Lang::It, MenuHelp) => "Aiuto",
+
+        (Lang::En, ItemShowManual) => "Manual...",
+        (Lang::It, ItemShowManual) => "Manuale...",
+
+        (Lang::En, ManualTitle) => "CleeCode manual",
+        (Lang::It, ManualTitle) => "Manuale CleeCode",
+
+        (Lang::En, ManualHint) => "↑↓ scroll · Tab/←→ section · PgUp/PgDn page · Home/End · Esc closes",
+        (Lang::It, ManualHint) => "↑↓ scorri · Tab/←→ sezione · PgSu/PgGiù pagina · Home/Fine · Esc chiude",
+
+        (Lang::En, MsgNoWorkspaces) => "No saved workspaces yet — use Workspace ▸ Save workspace",
+        (Lang::It, MsgNoWorkspaces) => "Nessun workspace salvato — usa Workspace ▸ Salva workspace",
     }
 }
 
@@ -652,6 +708,16 @@ pub fn msg_delete_cancelled(lang: Lang) -> String {
     }
 }
 
+/// Shown when something panicked and was contained rather than allowed to close the editor.
+/// It names the log deliberately: the status line is one transient line, and a bug worth
+/// reporting deserves somewhere to read the details back from.
+pub fn msg_internal_error(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("Internal error (session kept, see panic.log): {detail}"),
+        Lang::It => format!("Errore interno (sessione mantenuta, vedi panic.log): {detail}"),
+    }
+}
+
 pub fn msg_scp_result(lang: Lang, ok: usize, failed: usize, target: &str) -> String {
     match lang {
         Lang::En if failed == 0 => format!("scp: {ok} item(s) uploaded to {target}"),
@@ -719,8 +785,76 @@ pub fn msg_not_a_venv(lang: Lang, path: &str) -> String {
 
 pub fn msg_terminal_rename_prompt(lang: Lang) -> String {
     match lang {
-        Lang::En => "New name for this terminal (empty to reset):".to_string(),
-        Lang::It => "Nuovo nome per questo terminale (vuoto per azzerare):".to_string(),
+        Lang::En => "Name (empty to reset):".to_string(),
+        Lang::It => "Nome (vuoto per azzerare):".to_string(),
+    }
+}
+
+pub fn msg_terminal_startup_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Startup command, run when the workspace opens (e.g. claude, octave):".to_string(),
+        Lang::It => "Comando di avvio, eseguito all'apertura del workspace (es. claude, octave):".to_string(),
+    }
+}
+
+pub fn msg_terminal_form_hint(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Tab switches field · Enter confirms · Esc cancels",
+        Lang::It => "Tab cambia campo · Invio conferma · Esc annulla",
+    }
+}
+
+pub fn msg_terminal_renamed(lang: Lang, name: &str, startup: Option<&str>) -> String {
+    let label = if name.is_empty() {
+        match lang {
+            Lang::En => "default name".to_string(),
+            Lang::It => "nome predefinito".to_string(),
+        }
+    } else {
+        format!("\"{name}\"")
+    };
+    match (lang, startup) {
+        (Lang::En, Some(cmd)) => format!("Terminal: {label} · startup command: {cmd} (runs when the workspace opens)"),
+        (Lang::En, None) => format!("Terminal: {label}"),
+        (Lang::It, Some(cmd)) => {
+            format!("Terminale: {label} · comando di avvio: {cmd} (eseguito all'apertura del workspace)")
+        }
+        (Lang::It, None) => format!("Terminale: {label}"),
+    }
+}
+
+pub fn msg_workspace_save_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Workspace name (an existing one is overwritten):".to_string(),
+        Lang::It => "Nome del workspace (se esiste viene sovrascritto):".to_string(),
+    }
+}
+
+pub fn msg_workspace_saved(lang: Lang, name: &str, terminals: usize) -> String {
+    match lang {
+        Lang::En => format!("Workspace \"{name}\" saved ({terminals} terminal window(s))"),
+        Lang::It => format!("Workspace \"{name}\" salvato ({terminals} finestre terminale)"),
+    }
+}
+
+pub fn msg_workspace_loaded(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Workspace \"{name}\" opened"),
+        Lang::It => format!("Workspace \"{name}\" aperto"),
+    }
+}
+
+pub fn msg_workspace_deleted(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Workspace \"{name}\" deleted"),
+        Lang::It => format!("Workspace \"{name}\" eliminato"),
+    }
+}
+
+pub fn msg_workspace_error(lang: Lang, err: &str) -> String {
+    match lang {
+        Lang::En => format!("Could not save the workspace: {err}"),
+        Lang::It => format!("Impossibile salvare il workspace: {err}"),
     }
 }
 

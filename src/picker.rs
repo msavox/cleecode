@@ -7,6 +7,8 @@ pub enum PickAction {
     OpenFile(PathBuf),
     /// A directory in the venv browser: registered if it's a venv, otherwise descended into.
     VenvDir(PathBuf),
+    /// A saved workspace, by name: opened, or deleted, depending on the picker's kind.
+    Workspace(String),
 }
 
 pub struct PickItem {
@@ -24,6 +26,11 @@ pub enum PickerKind {
     Files,
     /// Browsing the disk for a directory to register as a venv.
     VenvBrowse,
+    /// Saved workspaces, to open one.
+    Workspaces,
+    /// The same list, but Enter deletes instead of opening. A separate kind rather than a flag
+    /// so nothing can confuse the two — one of them destroys a file.
+    WorkspaceDelete,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds

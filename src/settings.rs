@@ -31,7 +31,7 @@ pub struct Settings {
     #[serde(default = "default_split_pct")]
     pub split_pct: u16,
     // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
-    // power users can hide it (Alt+B / View menu) and still reach menus via F9 / Alt+<letter>.
+    // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
     pub show_menubar: bool,
     // Extension (no dot) -> shell command template; "{file}" is replaced with the
@@ -67,6 +67,11 @@ pub struct Settings {
     pub last_open_files: Vec<std::path::PathBuf>,
     #[serde(default)]
     pub last_active_file: Option<std::path::PathBuf>,
+    // The named workspace in use, if any. Reopened on a bare `clee` (taking precedence over
+    // the plain last_root/last_open_files resume) and kept up to date on exit, so a saved
+    // layout — terminal names and startup commands included — survives the session.
+    #[serde(default)]
+    pub last_workspace: Option<String>,
 }
 
 /// A venv registered by absolute path, offered in every project. Accepts either form in
@@ -169,11 +174,12 @@ impl Default for Settings {
             last_root: None,
             last_open_files: Vec::new(),
             last_active_file: None,
+            last_workspace: None,
         }
     }
 }
 
-fn config_dir() -> Option<std::path::PathBuf> {
+pub fn config_dir() -> Option<std::path::PathBuf> {
     // Keep the long-standing ~/.config/cleecode location on Unix (macOS included, where it
     // predates this cross-platform work) rather than moving to ~/Library/Application
     // Support, so existing settings are still found. On Windows fall back to %APPDATA%.

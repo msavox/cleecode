@@ -8,6 +8,7 @@ pub enum MenuAction {
     CloseTerminalTab,
     RenameTerminal,
     ToggleMenuBar,
+    OpenMenuBar,
     OpenSettings,
     SaveAll,
     NewTerminal,
@@ -51,6 +52,84 @@ pub enum MenuAction {
     OpenFilePicker,
     Rename,
     Delete,
+    NextTerminalTab,
+    PrevTerminalTab,
+    SaveWorkspace,
+    OpenWorkspace,
+    DeleteWorkspace,
+    ShowManual,
+    FocusFileTree,
+    FocusEditor,
+    FocusTerminal,
+}
+
+impl MenuAction {
+    /// Every action the app can perform. The palette is built from the menus, and
+    /// `every_action_is_reachable` checks this list against it — so an action that exists but
+    /// sits in no menu (as `RenameTerminal` once did, reachable only by right-click) fails the
+    /// test instead of quietly being mouse-only.
+    #[allow(dead_code, reason = "the checklist the reachability tests are written against")]
+    pub const ALL: &'static [MenuAction] = &[
+        MenuAction::ToggleSidebar,
+        MenuAction::ToggleTerminal,
+        MenuAction::NewTerminalTab,
+        MenuAction::CloseTerminalTab,
+        MenuAction::RenameTerminal,
+        MenuAction::ToggleMenuBar,
+        MenuAction::OpenMenuBar,
+        MenuAction::OpenSettings,
+        MenuAction::SaveAll,
+        MenuAction::NewTerminal,
+        MenuAction::CloseTerminal,
+        MenuAction::Save,
+        MenuAction::SaveAs,
+        MenuAction::SelectVenv,
+        MenuAction::Quit,
+        MenuAction::ShowAbout,
+        MenuAction::Copy,
+        MenuAction::Cut,
+        MenuAction::Paste,
+        MenuAction::SelectAll,
+        MenuAction::Indent,
+        MenuAction::Outdent,
+        MenuAction::ToggleFold,
+        MenuAction::CloseFile,
+        MenuAction::NextTab,
+        MenuAction::PrevTab,
+        MenuAction::NextTerminal,
+        MenuAction::PrevTerminal,
+        MenuAction::LayoutClassic,
+        MenuAction::LayoutWide,
+        MenuAction::LayoutTriple,
+        MenuAction::ToggleTerminalSide,
+        MenuAction::ToggleResizeMode,
+        MenuAction::RunFile,
+        MenuAction::ToggleSplitView,
+        MenuAction::ToggleHiddenFiles,
+        MenuAction::Undo,
+        MenuAction::Redo,
+        MenuAction::ToggleComment,
+        MenuAction::DuplicateLine,
+        MenuAction::MoveLineUp,
+        MenuAction::MoveLineDown,
+        MenuAction::Find,
+        MenuAction::GotoLine,
+        MenuAction::NewFile,
+        MenuAction::NewFolder,
+        MenuAction::CommandPalette,
+        MenuAction::OpenFilePicker,
+        MenuAction::Rename,
+        MenuAction::Delete,
+        MenuAction::NextTerminalTab,
+        MenuAction::PrevTerminalTab,
+        MenuAction::SaveWorkspace,
+        MenuAction::OpenWorkspace,
+        MenuAction::DeleteWorkspace,
+        MenuAction::ShowManual,
+        MenuAction::FocusFileTree,
+        MenuAction::FocusEditor,
+        MenuAction::FocusTerminal,
+    ];
 }
 
 pub struct MenuItemDef {
@@ -84,9 +163,8 @@ pub fn menu_defs() -> Vec<MenuDef> {
         MenuDef {
             title_key: Key::MenuCleeCode,
             items: vec![
-                item(Key::ItemAbout, MenuAction::ShowAbout, None),
-                group(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
-                item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("F4")),
+                item(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
+                item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("Ctrl+Shift+O")),
                 group(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
             ],
         },
@@ -96,12 +174,15 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemOpenFilePicker, MenuAction::OpenFilePicker, Some("Ctrl+O")),
                 item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
                 item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
+                // Act on the file tree's selection, hence the tree-scoped key hints.
+                item(Key::ItemRename, MenuAction::Rename, Some("e")),
+                item(Key::ItemDelete, MenuAction::Delete, Some("Del")),
                 group(Key::ItemSave, MenuAction::Save, Some("Ctrl+S")),
                 item(Key::ItemSaveAs, MenuAction::SaveAs, None),
-                item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Alt+S")),
+                item(Key::ItemSaveAll, MenuAction::SaveAll, Some("Ctrl+Shift+S")),
                 group(Key::ItemCloseFile, MenuAction::CloseFile, Some("Ctrl+W")),
-                group(Key::ItemNextTab, MenuAction::NextTab, Some("Alt+.")),
-                item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Alt+,")),
+                group(Key::ItemNextTab, MenuAction::NextTab, Some("Ctrl+Shift+→")),
+                item(Key::ItemPrevTab, MenuAction::PrevTab, Some("Ctrl+Shift+←")),
             ],
         },
         MenuDef {
@@ -115,13 +196,13 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
                 group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
                 item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
-                group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
+                group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+K")),
                 item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
                 item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),
                 item(Key::ItemMoveLineDown, MenuAction::MoveLineDown, Some("Alt+↓")),
                 group(Key::ItemIndent, MenuAction::Indent, Some("Tab")),
                 item(Key::ItemOutdent, MenuAction::Outdent, Some("Shift+Tab")),
-                group(Key::ItemToggleFold, MenuAction::ToggleFold, Some("F7")),
+                group(Key::ItemToggleFold, MenuAction::ToggleFold, Some("Ctrl+Shift+F")),
             ],
         },
         MenuDef {
@@ -130,7 +211,15 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
                 item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+J")),
                 item(Key::ItemToggleMenuBar, MenuAction::ToggleMenuBar, Some("Ctrl+B")),
+                // Reachable from the palette on purpose: Ctrl+Shift+B is the only key that
+                // opens the menus, and a terminal without disambiguated key reporting sends
+                // it as plain Ctrl+B — which hides the bar instead. Without this entry the
+                // menus would be mouse-only there.
+                item(Key::ItemOpenMenuBar, MenuAction::OpenMenuBar, Some("Ctrl+Shift+B")),
                 group(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
+                group(Key::ItemFocusFileTree, MenuAction::FocusFileTree, Some("Ctrl+Alt+←")),
+                item(Key::ItemFocusEditor, MenuAction::FocusEditor, Some("Ctrl+Tab")),
+                item(Key::ItemFocusTerminal, MenuAction::FocusTerminal, Some("Ctrl+Alt+↓")),
             ],
         },
         MenuDef {
@@ -140,28 +229,75 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemLayoutWide, MenuAction::LayoutWide, None),
                 item(Key::ItemLayoutTriple, MenuAction::LayoutTriple, None),
                 group(Key::ItemToggleTerminalSide, MenuAction::ToggleTerminalSide, None),
-                item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("F8")),
+                item(Key::ItemToggleResizeMode, MenuAction::ToggleResizeMode, Some("Ctrl+Shift+U")),
                 item(Key::ItemToggleSplitView, MenuAction::ToggleSplitView, Some("Ctrl+L")),
             ],
         },
         MenuDef {
             title_key: Key::MenuRun,
             items: vec![
-                item(Key::ItemRunFile, MenuAction::RunFile, Some("F10")),
+                item(Key::ItemRunFile, MenuAction::RunFile, Some("Ctrl+Shift+R")),
                 group(Key::ItemSelectVenv, MenuAction::SelectVenv, None),
             ],
         },
         MenuDef {
             title_key: Key::MenuTerminal,
             items: vec![
-                item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
-                item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+T")),
-                item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
-                group(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+PgDn")),
-                item(Key::ItemPrevTerminal, MenuAction::PrevTerminal, Some("Ctrl+PgUp")),
+                item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("Ctrl+Shift+N")),
+                item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+Shift+T")),
+                item(Key::ItemRenameTerminal, MenuAction::RenameTerminal, Some("Ctrl+Shift+E")),
+                group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
+                item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, None),
+                group(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+Shift+↓")),
+                item(Key::ItemPrevTerminal, MenuAction::PrevTerminal, Some("Ctrl+Shift+↑")),
+                item(Key::ItemNextTerminalTab, MenuAction::NextTerminalTab, Some("Ctrl+Shift+→")),
+                item(Key::ItemPrevTerminalTab, MenuAction::PrevTerminalTab, Some("Ctrl+Shift+←")),
+            ],
+        },
+        MenuDef {
+            title_key: Key::MenuWorkspace,
+            items: vec![
+                item(Key::ItemOpenWorkspace, MenuAction::OpenWorkspace, None),
+                item(Key::ItemSaveWorkspace, MenuAction::SaveWorkspace, Some("Ctrl+Shift+W")),
+                group(Key::ItemDeleteWorkspace, MenuAction::DeleteWorkspace, None),
+            ],
+        },
+        MenuDef {
+            title_key: Key::MenuHelp,
+            items: vec![
+                item(Key::ItemShowManual, MenuAction::ShowManual, Some("Ctrl+Shift+M")),
+                group(Key::ItemAbout, MenuAction::ShowAbout, None),
             ],
         },
     ]
+}
+
+/// Every action offered anywhere, as (owning menu title, item): the menu bar's entries first,
+/// then any context-menu entry the menu bar doesn't already carry. The command palette is built
+/// from this, so a context-only action stays reachable without a mouse.
+pub fn command_entries() -> Vec<(Key, MenuItemDef)> {
+    let mut seen: Vec<MenuAction> = Vec::new();
+    let mut out = Vec::new();
+    for def in menu_defs() {
+        for it in def.items {
+            seen.push(it.action);
+            out.push((def.title_key, it));
+        }
+    }
+    for target in [ContextTarget::Sidebar, ContextTarget::Editor, ContextTarget::Terminal] {
+        let group_key = match target {
+            ContextTarget::Sidebar => Key::PanelFile,
+            ContextTarget::Editor => Key::MenuEdit,
+            ContextTarget::Terminal => Key::MenuTerminal,
+        };
+        for it in context_items(target) {
+            if !seen.contains(&it.action) {
+                seen.push(it.action);
+                out.push((group_key, it));
+            }
+        }
+    }
+    out
 }
 
 /// Which frame a context menu was raised over, so the right item set is offered.
@@ -207,7 +343,9 @@ fn context_items(target: ContextTarget) -> Vec<MenuItemDef> {
         ContextTarget::Sidebar => vec![
             item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
             item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
-            group(Key::ItemRename, MenuAction::Rename, Some("F2")),
+            // "e" is what the tree actually binds; the hint used to claim F2, which focuses
+            // the editor instead.
+            group(Key::ItemRename, MenuAction::Rename, Some("e")),
             item(Key::ItemDelete, MenuAction::Delete, Some("Del")),
         ],
         ContextTarget::Editor => vec![
@@ -215,18 +353,18 @@ fn context_items(target: ContextTarget) -> Vec<MenuItemDef> {
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
             item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
             item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
-            group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+/")),
+            group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+K")),
             group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
             item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
         ],
         ContextTarget::Terminal => vec![
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
             item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
-            group(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("F5")),
-            item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+T")),
-            item(Key::ItemRenameTerminal, MenuAction::RenameTerminal, None),
-            group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, None),
-            item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, Some("F6")),
+            group(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("Ctrl+Shift+N")),
+            item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+Shift+T")),
+            item(Key::ItemRenameTerminal, MenuAction::RenameTerminal, Some("Ctrl+Shift+E")),
+            group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
+            item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, None),
         ],
     }
 }
@@ -250,12 +388,6 @@ impl MenuBar {
 
     pub fn open(&mut self) {
         self.active = true;
-        self.item_index = 0;
-    }
-
-    pub fn open_at(&mut self, menu_index: usize) {
-        self.active = true;
-        self.menu_index = menu_index;
         self.item_index = 0;
     }
 
@@ -286,5 +418,68 @@ impl MenuBar {
             .items
             .get(self.item_index)
             .map(|i| i.action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule this whole audit exists to enforce: nothing is mouse-only. Every action the app
+    /// knows must appear in the command palette, which is built from `command_entries`.
+    #[test]
+    fn every_action_is_reachable_from_the_palette() {
+        let entries = command_entries();
+        for action in MenuAction::ALL {
+            assert!(
+                entries.iter().any(|(_, it)| it.action == *action),
+                "an action is missing from every menu, so it can only be reached with a mouse"
+            );
+        }
+    }
+
+    /// And the other direction: an action offered somewhere but absent from `ALL` would slip
+    /// past the check above.
+    #[test]
+    fn the_palette_offers_each_action_once_and_only_known_ones() {
+        let entries = command_entries();
+        for (_, it) in &entries {
+            assert!(MenuAction::ALL.contains(&it.action), "menus offer an action missing from MenuAction::ALL");
+        }
+        let mut actions: Vec<usize> = entries
+            .iter()
+            .map(|(_, it)| MenuAction::ALL.iter().position(|a| *a == it.action).unwrap())
+            .collect();
+        let before = actions.len();
+        actions.sort_unstable();
+        actions.dedup();
+        assert_eq!(before, actions.len(), "the palette lists the same action twice");
+    }
+
+    /// No advertised shortcut may be Alt plus a letter or a digit. macOS sends Option as Meta
+    /// only on US keyboard layouts, so on an Italian or German one those chords never reach the
+    /// application — and a menu that promises a key which quietly does nothing is worse than a
+    /// menu that promises none. Alt with an *arrow* is fine and deliberately still used: Option
+    /// with an arrow produces no printable character, so it arrives as Meta on every layout.
+    ///
+    /// Function keys are barred for a different reason: on a laptop they sit behind Fn.
+    #[test]
+    fn no_shortcut_is_advertised_that_some_keyboards_cannot_send() {
+        for (_, it) in command_entries() {
+            let Some(sc) = it.shortcut else { continue };
+            // The key itself is the last part of the chord; everything before it is modifiers,
+            // so "Alt+Shift+↓" is an arrow and not, as a first-character test would have it, S.
+            let pressed = sc.rsplit('+').next().unwrap_or(sc);
+            let is_letter_or_digit = pressed.chars().count() == 1
+                && pressed.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+            assert!(
+                !(sc.contains("Alt+") && is_letter_or_digit),
+                "{sc} needs Option-as-Meta, which macOS does not give non-US layouts"
+            );
+            let f_key =
+                pressed.strip_prefix('F').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            assert!(!f_key, "{sc} is a function key, which needs Fn on a laptop");
+            assert!(!sc.contains("PgUp") && !sc.contains("PgDn"), "{sc} needs Fn on a laptop");
+        }
     }
 }

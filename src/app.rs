@@ -94,6 +94,22 @@ pub enum VenvRowAction {
     Register,
 }
 
+/// Which field the terminal name/startup-command box is typing into.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TerminalField {
+    Name,
+    Startup,
+}
+
+impl TerminalField {
+    fn other(self) -> Self {
+        match self {
+            TerminalField::Name => TerminalField::Startup,
+            TerminalField::Startup => TerminalField::Name,
+        }
+    }
+}
+
 /// Registering a venv asks for two things in turn: where it is, then what to call it.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum VenvRegisterStep {
@@ -147,11 +163,21 @@ pub struct App {
     pub settings_selected: usize,
     pub highlighter: Highlighter,
     pub menu: MenuBar,
-    /// Right-click / Shift+F10 pop-up, when open.
+    /// Right-click / Ctrl+Shift+G pop-up, when open.
     pub context_menu: Option<ContextMenu>,
-    /// Rename box for the focused terminal tab/window, when open.
+    /// Name + startup-command box for the focused terminal tab/window, when open.
     pub show_terminal_rename: bool,
     pub terminal_rename_input: String,
+    pub terminal_startup_input: String,
+    pub terminal_rename_field: TerminalField,
+    /// Name box for saving the current set-up as a workspace, when open.
+    pub show_workspace_save: bool,
+    pub workspace_save_input: String,
+    /// The named workspace in use, if any: what Save overwrites by default, and what gets
+    /// written back on exit so a session's layout changes aren't lost.
+    pub active_workspace: Option<String>,
+    /// The built-in manual (Help ▸ Manual / F1), when open.
+    pub manual: Option<crate::manual::ManualState>,
     /// The last full frame rect seen at draw time, so keyboard-opened pop-ups (which don't get
     /// passed the layout) can still anchor themselves against the current geometry.
     pub last_full: Rect,
@@ -427,6 +453,9 @@ pub enum ResizeCmd {
     Terminal(i16),
     /// Delta in percent for `split_pct` (the left pane's share).
     Split(i16),
+    /// The seam between terminal windows `seam` and `seam + 1`: `delta` is added to the first
+    /// window's weight and taken from the second, so only the pair resizes.
+    TerminalWeight { seam: usize, delta: i16 },
 }
 
 /// The layout facts a resize nudge depends on, gathered so the resolver stays a pure, testable
@@ -438,11 +467,83 @@ pub struct ResizeLayout {
     pub show_sidebar: bool,
     pub show_terminal: bool,
     pub terminal_on_right: bool,
+    /// Which terminal window has focus, and how many there are — the seams between them are
+    /// movable too, and until now only with the mouse.
+    pub terminal_index: usize,
+    pub terminal_count: usize,
+}
+
+/// Where a directional move lands. A "frame" for this purpose is finer-grained than `Focus`:
+/// the two halves of a split editor and each tiled terminal window are places you can be, and
+/// an arrow should reach them the same way it reaches the sidebar.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum FocusTarget {
+    Tree,
+    Editor(EditorPane),
+    Terminal(usize),
+}
+
+/// The frame that lies in the given direction, or `None` at the edge of the window.
+///
+/// Navigation is spatial rather than by category: you press the direction the thing you want is
+/// in, and it does not matter whether that thing is a file tree, an editor pane or a shell. The
+/// layout has only two arrangements, so the whole map is small:
+///
+/// ```text
+///   terminals below (classic)        terminals on the right
+///   ┌──────┬──────────────┐          ┌──────┬─────────┬──────┐
+///   │ tree │ editor       │          │ tree │ editor  │ term │
+///   ├──────┴──────────────┤          │      │         ├──────┤
+///   │ term │ term         │          │      │         │ term │
+///   └──────┴──────────────┘          └──────┴─────────┴──────┘
+///   windows side by side             windows stacked
+/// ```
+///
+/// The terminal strip spans the full width in the classic layout, which is why its windows are
+/// walked with left/right there and with up/down when the panel is a column instead.
+pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget> {
+    use ResizeSide::*;
+    let last_window = l.terminal_count.checked_sub(1)?;
+    match l.focus {
+        Focus::FileTree => match side {
+            Right => Some(FocusTarget::Editor(EditorPane::Left)),
+            Down if l.show_terminal && !l.terminal_on_right => Some(FocusTarget::Terminal(0)),
+            _ => None,
+        },
+        Focus::Editor => match side {
+            Left if l.split_view && l.editor_pane == EditorPane::Right => {
+                Some(FocusTarget::Editor(EditorPane::Left))
+            }
+            Left if l.show_sidebar => Some(FocusTarget::Tree),
+            Right if l.split_view && l.editor_pane == EditorPane::Left => {
+                Some(FocusTarget::Editor(EditorPane::Right))
+            }
+            Right if l.show_terminal && l.terminal_on_right => Some(FocusTarget::Terminal(0)),
+            Down if l.show_terminal && !l.terminal_on_right => Some(FocusTarget::Terminal(0)),
+            _ => None,
+        },
+        Focus::Terminal => {
+            // Along the axis the windows tile on, the arrows walk between them; across it, they
+            // leave the panel for whatever is next to it.
+            let (prev, next) = if l.terminal_on_right { (Up, Down) } else { (Left, Right) };
+            let leave = if l.terminal_on_right { Left } else { Up };
+            let back_to_editor =
+                Some(FocusTarget::Editor(if l.split_view { EditorPane::Right } else { EditorPane::Left }));
+            match side {
+                s if s == prev => l.terminal_index.checked_sub(1).map(FocusTarget::Terminal),
+                s if s == next => (l.terminal_index < last_window).then_some(FocusTarget::Terminal(l.terminal_index + 1)),
+                s if s == leave => back_to_editor,
+                _ => None,
+            }
+        }
+    }
 }
 
 const SIDEBAR_STEP: i16 = 2;
 const TERMINAL_STEP: i16 = 5;
 const SPLIT_STEP: i16 = 5;
+/// A tenth of the default weight: ten nudges take a window from its share to a neighbour's.
+const WEIGHT_STEP: i16 = 100;
 
 /// Resolves an arrow nudge on the focused frame to the seam it moves. `None` when the named
 /// border coincides with the window edge — there is nothing there to drag. `grow` pushes the
@@ -465,6 +566,26 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
         Focus::Terminal => {
             if !l.show_terminal {
                 return None;
+            }
+            // Windows tile across the panel: side by side when it is a strip below the editor,
+            // stacked when it is a column beside it. Along that axis the focused window's
+            // borders are seams with its neighbours; across it, with the editor.
+            let along_axis = if l.terminal_on_right {
+                matches!(side, Up | Down)
+            } else {
+                matches!(side, Left | Right)
+            };
+            if along_axis {
+                let toward_next = matches!(side, Right | Down);
+                // The seam is named by the window on its left/top, so which one that is
+                // depends on the direction — and which way its weight has to move for the
+                // *focused* window to grow.
+                let seam = if toward_next { l.terminal_index } else { l.terminal_index.checked_sub(1)? };
+                if seam + 1 >= l.terminal_count {
+                    return None;
+                }
+                let delta = if toward_next { s * WEIGHT_STEP } else { -s * WEIGHT_STEP };
+                return Some(ResizeCmd::TerminalWeight { seam, delta });
             }
             // The terminal touches the editor on exactly one side, set by its orientation.
             match (l.terminal_on_right, side) {
@@ -634,6 +755,15 @@ fn resolve_save_as_path(input: &str, root: &std::path::Path, home: Option<&std::
 /// Screen cell `(row, col)` under a mouse position, relative to a pane's inner area. Positions
 /// outside the area are clamped to its edges, so a drag that wanders off the pane keeps
 /// selecting up to the border instead of being dropped.
+/// Whether `key` is a particular Ctrl+Shift+<letter>. Each overlay closes on the chord that
+/// opened it, so the two have to agree; naming the letter here keeps that pairing readable at
+/// both ends instead of spelling out the modifier test four times.
+fn is_ctrl_shift(key: KeyEvent, letter: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&letter))
+}
+
 fn cell_at(inner: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
     if inner.width == 0 || inner.height == 0 {
         return None;
@@ -670,6 +800,12 @@ impl App {
             context_menu: None,
             show_terminal_rename: false,
             terminal_rename_input: String::new(),
+            terminal_startup_input: String::new(),
+            terminal_rename_field: TerminalField::Name,
+            show_workspace_save: false,
+            workspace_save_input: String::new(),
+            active_workspace: None,
+            manual: None,
             last_full: Rect::new(0, 0, 0, 0),
             focus: Focus::FileTree,
             should_quit: false,
@@ -851,11 +987,16 @@ impl App {
     /// Which editor the keyboard (and anything else routed through `editor()`/
     /// `editor_mut()`) currently acts on: the right pane's active tab when split and
     /// focused there, the left/only pane's otherwise.
+    /// Both panes are clamped, not just the right one. `editor()` is indexed on every frame and
+    /// every keystroke, so an index that has fallen behind the tab list is not a wrong buffer —
+    /// it is a panic in the hottest path in the program, which used to close CleeCode outright.
+    /// Showing the last tab is a far better answer than that.
     fn active_editor_index(&self) -> usize {
+        let last = self.editors.len().saturating_sub(1);
         if self.split_view && self.editor_pane_focus == EditorPane::Right {
-            self.active_editor_right.min(self.editors.len().saturating_sub(1))
+            self.active_editor_right.min(last)
         } else {
-            self.active_editor
+            self.active_editor.min(last)
         }
     }
 
@@ -1230,20 +1371,18 @@ impl App {
 
     // ---- Command palette / file quick-open ------------------------------------------
 
+    /// Every action in the app, menu bar and context menus alike — see `menu::command_entries`.
+    /// Built from that one list so an action can't be offered by a right-click and nowhere else.
     fn open_command_palette(&mut self) {
         let lang = self.settings.lang;
-        let mut items = Vec::new();
-        for def in crate::menu::menu_defs() {
-            let menu_title = i18n::t(lang, def.title_key);
-            for it in def.items {
-                let label = format!("{}: {}", menu_title, i18n::t(lang, it.label_key));
-                items.push(crate::picker::PickItem {
-                    label,
-                    shortcut: it.shortcut.map(|s| s.to_string()),
-                    action: crate::picker::PickAction::Command(it.action),
-                });
-            }
-        }
+        let items: Vec<crate::picker::PickItem> = crate::menu::command_entries()
+            .into_iter()
+            .map(|(group_key, it)| crate::picker::PickItem {
+                label: format!("{}: {}", i18n::t(lang, group_key), i18n::t(lang, it.label_key)),
+                shortcut: it.shortcut.map(|s| s.to_string()),
+                action: crate::picker::PickAction::Command(it.action),
+            })
+            .collect();
         self.picker = Some(crate::picker::Picker::new("Command palette", crate::picker::PickerKind::Commands, items));
     }
 
@@ -1365,14 +1504,27 @@ impl App {
         let mut cmd = None;
         let mut file = None;
         let mut venv_dir = None;
+        let mut workspace = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
                 crate::picker::PickAction::OpenFile(p) => file = Some(p.clone()),
                 crate::picker::PickAction::VenvDir(p) => venv_dir = Some(p.clone()),
+                crate::picker::PickAction::Workspace(name) => workspace = Some(name.clone()),
             }
         }
-        if let Some(a) = cmd {
+        if let Some(name) = workspace {
+            // Which of the two workspace pickers is open decides what Enter means.
+            if self.picker.as_ref().map(|p| p.kind) == Some(crate::picker::PickerKind::WorkspaceDelete) {
+                self.delete_workspace(&name);
+            } else {
+                self.picker = None;
+                match crate::workspace::load(&name) {
+                    Some(ws) => self.apply_workspace(ws),
+                    None => self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string(),
+                }
+            }
+        } else if let Some(a) = cmd {
             self.picker = None;
             self.run_menu_action(a);
         } else if let Some(p) = venv_dir {
@@ -1537,8 +1689,12 @@ impl App {
         if idx >= self.editors.len() {
             return;
         }
+        // Closing the only tab leaves an empty buffer rather than no buffer: the rest of the app
+        // assumes there is always one to show. Assigning into slot 0 would panic on an already
+        // empty list, so the list is rebuilt instead of indexed.
         if self.editors.len() <= 1 {
-            self.editors[0] = Editor::empty();
+            self.editors.clear();
+            self.editors.push(Editor::empty());
             self.active_editor = 0;
             self.active_editor_right = 0;
             return;
@@ -1560,6 +1716,17 @@ impl App {
         let last = self.editors.len() - 1;
         for offset in &mut self.tab_offsets {
             *offset = (*offset).min(last);
+        }
+    }
+
+    /// Sideways through the tabs of whichever frame has focus — one key for both strips instead
+    /// of one idiom per frame. The file tree has no tabs of its own, so from there it moves the
+    /// editor's: the strip is the only one on screen, and doing nothing would be the stranger
+    /// answer.
+    fn cycle_focused_tab(&mut self, forward: bool) {
+        match self.focus {
+            Focus::Terminal => self.cycle_terminal_tab(forward),
+            _ => self.cycle_editor(forward),
         }
     }
 
@@ -1625,7 +1792,7 @@ impl App {
         }
     }
 
-    /// Cycles the tabs of the focused window (Alt+PgUp/PgDn).
+    /// Cycles the tabs of the focused window (Ctrl+Shift+←/→).
     pub fn cycle_terminal_tab(&mut self, forward: bool) {
         if let Some(window) = self.terminals.get_mut(self.active_terminal) {
             window.cycle_tab(forward);
@@ -1654,38 +1821,67 @@ impl App {
         }
     }
 
-    /// Opens the rename box for the focused window's on-screen tab, prefilled with its current
-    /// name. For a single-tab window this renames what shows as the window title.
+    /// Opens the name/startup-command box for the focused window's on-screen tab, prefilled
+    /// with what it has now. For a single-tab window the name is what shows as the window title.
     pub fn start_terminal_rename(&mut self) {
-        let Some(panel) = self.focused_panel() else { return };
-        self.terminal_rename_input = panel.name.clone().unwrap_or_default();
+        let Some((name, startup)) = self
+            .focused_panel()
+            .map(|p| (p.name.clone().unwrap_or_default(), p.startup_command.clone().unwrap_or_default()))
+        else {
+            return;
+        };
+        self.terminal_rename_input = name;
+        self.terminal_startup_input = startup;
+        self.terminal_rename_field = TerminalField::Name;
         self.show_terminal_rename = true;
+    }
+
+    fn terminal_field_mut(&mut self) -> &mut String {
+        match self.terminal_rename_field {
+            TerminalField::Name => &mut self.terminal_rename_input,
+            TerminalField::Startup => &mut self.terminal_startup_input,
+        }
     }
 
     fn handle_terminal_rename_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => self.confirm_terminal_rename(),
             KeyCode::Esc => self.cancel_terminal_rename(),
-            KeyCode::Backspace => {
-                self.terminal_rename_input.pop();
+            // Both fields are one line, so the vertical keys move between them too — nobody
+            // should have to guess that only Tab works.
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                self.terminal_rename_field = self.terminal_rename_field.other();
             }
-            KeyCode::Char(c) => self.terminal_rename_input.push(c),
+            KeyCode::Backspace => {
+                self.terminal_field_mut().pop();
+            }
+            KeyCode::Char(c) => self.terminal_field_mut().push(c),
             _ => {}
         }
     }
 
     fn confirm_terminal_rename(&mut self) {
+        let lang = self.settings.lang;
         let name = self.terminal_rename_input.trim().to_string();
+        // The command keeps its inner spacing — it is a shell command line, not a label.
+        let startup = self.terminal_startup_input.trim().to_string();
         if let Some(panel) = self.focused_panel_mut() {
-            // An empty name clears it, falling back to the default "Terminal N".
-            panel.name = (!name.is_empty()).then_some(name);
+            // An empty name clears it, falling back to the default "Terminal N"; an empty
+            // command clears it, so a workspace stops running it.
+            panel.name = (!name.is_empty()).then(|| name.clone());
+            panel.startup_command = (!startup.is_empty()).then(|| startup.clone());
         }
+        // Deliberately not run here: it belongs to opening the workspace, and re-running
+        // `claude` (or a dev server) just for renaming its tab would be a nasty surprise.
+        self.status_message = i18n::msg_terminal_renamed(lang, &name, (!startup.is_empty()).then_some(&startup));
         self.cancel_terminal_rename();
     }
 
     pub fn cancel_terminal_rename(&mut self) {
         self.show_terminal_rename = false;
         self.terminal_rename_input.clear();
+        self.terminal_startup_input.clear();
+        self.terminal_rename_field = TerminalField::Name;
     }
 
     /// Closes the focused window's on-screen tab (context menu entry).
@@ -1718,6 +1914,249 @@ impl App {
             if self.active_terminal > window_idx || self.active_terminal >= self.terminals.len() {
                 self.active_terminal = self.active_terminal.saturating_sub(1);
             }
+        }
+    }
+
+    // ---- Workspaces -------------------------------------------------------------------
+
+    /// Asks for a name to save the current set-up under, defaulting to the workspace already in
+    /// use (so saving again just updates it) or the project folder's name.
+    fn begin_save_workspace(&mut self) {
+        self.workspace_save_input = self.active_workspace.clone().unwrap_or_else(|| {
+            self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        });
+        self.show_workspace_save = true;
+    }
+
+    fn handle_workspace_save_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_save_workspace(),
+            KeyCode::Esc => self.cancel_save_workspace(),
+            KeyCode::Backspace => {
+                self.workspace_save_input.pop();
+            }
+            KeyCode::Char(c) => self.workspace_save_input.push(c),
+            _ => {}
+        }
+    }
+
+    pub fn cancel_save_workspace(&mut self) {
+        self.show_workspace_save = false;
+        self.workspace_save_input.clear();
+    }
+
+    fn confirm_save_workspace(&mut self) {
+        let lang = self.settings.lang;
+        let name = self.workspace_save_input.trim().to_string();
+        // An empty name has nothing to save under, so the box stays open rather than
+        // silently doing nothing.
+        if name.is_empty() {
+            return;
+        }
+        self.cancel_save_workspace();
+        let ws = self.capture_workspace(name.clone());
+        let terminals = ws.terminals.len();
+        match crate::workspace::save(&ws) {
+            Ok(_) => {
+                self.active_workspace = Some(name.clone());
+                self.settings.last_workspace = Some(name.clone());
+                // Written now rather than at exit, so a crash can't lose the workspace.
+                self.settings.save();
+                self.status_message = i18n::msg_workspace_saved(lang, &name, terminals);
+            }
+            Err(e) => self.status_message = i18n::msg_workspace_error(lang, &e),
+        }
+    }
+
+    /// The current set-up as a workspace. Paths are canonicalized, as they are for the plain
+    /// session resume: a workspace is opened from wherever the next `clee` happens to start.
+    pub fn capture_workspace(&self, name: String) -> crate::workspace::Workspace {
+        let canonical = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        crate::workspace::Workspace {
+            name,
+            root: canonical(&self.root),
+            open_files: self.editors.iter().filter_map(|e| e.path.as_ref()).map(canonical).collect(),
+            active_file: self.editors.get(self.active_editor).and_then(|e| e.path.as_ref()).map(canonical),
+            active_venv: self.settings.active_venv.clone(),
+            active_terminal: self.active_terminal,
+            layout: crate::workspace::WorkspaceLayout {
+                show_sidebar: self.settings.show_sidebar,
+                show_terminal: self.settings.show_terminal,
+                show_menubar: self.settings.show_menubar,
+                sidebar_width: self.settings.sidebar_width,
+                terminal_pct: self.settings.terminal_pct,
+                terminal_on_right: self.settings.terminal_on_right,
+                split_view: self.split_view,
+                split_pct: self.settings.split_pct,
+            },
+            terminals: self
+                .terminals
+                .iter()
+                .map(|w| crate::workspace::WorkspaceTerminal {
+                    weight: w.weight,
+                    active: w.active,
+                    tabs: w
+                        .tabs
+                        .iter()
+                        .map(|t| crate::workspace::WorkspaceTab {
+                            name: t.name.clone(),
+                            startup_command: t.startup_command.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Restores a saved set-up: root, files, frame sizes, and the terminal windows/tabs with
+    /// their names — running each tab's startup command in its own shell.
+    pub fn apply_workspace(&mut self, ws: crate::workspace::Workspace) {
+        let lang = self.settings.lang;
+        let name = ws.name.clone();
+        // Shells already running in the right directory are reused rather than replaced, which
+        // is what makes opening the last workspace at startup cost nothing extra. A workspace
+        // for a *different* project gets fresh shells, since a reused one would still sit in
+        // the old project's directory.
+        let same_root = self.root == ws.root;
+        if ws.root.is_dir() && !same_root {
+            self.set_root(ws.root.clone());
+        }
+
+        self.settings.show_sidebar = ws.layout.show_sidebar;
+        self.settings.show_terminal = ws.layout.show_terminal;
+        self.settings.show_menubar = ws.layout.show_menubar;
+        self.settings.sidebar_width = ws.layout.sidebar_width;
+        self.settings.terminal_pct = ws.layout.terminal_pct;
+        self.settings.terminal_on_right = ws.layout.terminal_on_right;
+        self.settings.split_pct = ws.layout.split_pct;
+        self.settings.clamp_layout();
+        self.split_view = ws.layout.split_view;
+        self.settings.active_venv = ws.active_venv.clone();
+
+        // Unsaved work outlives a workspace switch: dirty buffers stay open alongside the
+        // workspace's own files. Everything else makes way.
+        self.editors.retain(|e| e.dirty);
+        if self.editors.is_empty() {
+            self.editors.push(Editor::empty());
+        }
+        self.active_editor = 0;
+        self.active_editor_right = 0;
+        self.tab_offsets = [0, 0];
+        self.tab_revealed = [None, None];
+        for path in &ws.open_files {
+            if path.is_file() {
+                self.open_file_in_tab(path.clone());
+            }
+        }
+        if let Some(active) = &ws.active_file {
+            if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(active.as_path())) {
+                self.active_editor = idx;
+            }
+        }
+
+        self.rebuild_terminals(&ws, same_root);
+        self.active_workspace = Some(name.clone());
+        self.settings.last_workspace = Some(name.clone());
+        self.status_message = i18n::msg_workspace_loaded(lang, &name);
+    }
+
+    /// Rebuilds the terminal windows a workspace describes. Existing shells are handed out in
+    /// order when `reuse` allows; the rest are spawned. A window whose shells all failed to
+    /// start is skipped rather than left empty, and the workspace never ends up with none.
+    fn rebuild_terminals(&mut self, ws: &crate::workspace::Workspace, reuse: bool) {
+        let mut spare: std::collections::VecDeque<TerminalPanel> = if reuse {
+            self.terminals.drain(..).flat_map(|w| w.tabs).collect()
+        } else {
+            std::collections::VecDeque::new()
+        };
+        let root = self.root.clone();
+        let mut windows = Vec::new();
+        for wt in &ws.terminals {
+            let mut tabs = Vec::new();
+            for tab in &wt.tabs {
+                let panel = match spare.pop_front() {
+                    Some(p) => Some(p),
+                    None => TerminalPanel::new(24, 80, &root).ok(),
+                };
+                let Some(mut panel) = panel else { continue };
+                panel.name = tab.name.clone();
+                panel.startup_command = tab.startup_command.clone();
+                if let Some(command) = &tab.startup_command {
+                    panel.run_command(command);
+                }
+                tabs.push(panel);
+            }
+            if tabs.is_empty() {
+                continue;
+            }
+            let active = wt.active.min(tabs.len() - 1);
+            windows.push(TerminalWindow { tabs, active, weight: wt.weight.max(1) });
+        }
+        if windows.is_empty() {
+            // A workspace saved with no terminals, or one whose shells all failed to spawn:
+            // fall back to the invariant the rest of the app relies on.
+            match spare.pop_front() {
+                Some(panel) => windows.push(TerminalWindow {
+                    tabs: vec![panel],
+                    active: 0,
+                    weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+                }),
+                None => {
+                    if let Ok(w) = TerminalWindow::new(24, 80, &root) {
+                        windows.push(w);
+                    }
+                }
+            }
+        }
+        self.terminals = windows;
+        self.active_terminal = ws.active_terminal.min(self.terminals.len().saturating_sub(1));
+    }
+
+    const WORKSPACE_OPEN_TITLE: &'static str = "Open workspace (Enter opens)";
+    const WORKSPACE_DELETE_TITLE: &'static str = "Delete workspace (Enter deletes)";
+
+    /// The saved workspaces as picker rows, each with its project folder as the dimmed detail
+    /// so two workspaces over different projects stay tellable apart.
+    fn open_workspace_picker(&mut self, delete: bool) {
+        let saved = crate::workspace::list();
+        if saved.is_empty() {
+            self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string();
+            return;
+        }
+        let items: Vec<crate::picker::PickItem> = saved
+            .into_iter()
+            .map(|ws| crate::picker::PickItem {
+                shortcut: ws
+                    .root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .or_else(|| Some(ws.root.to_string_lossy().into_owned())),
+                action: crate::picker::PickAction::Workspace(ws.name.clone()),
+                label: ws.name,
+            })
+            .collect();
+        let (title, kind) = if delete {
+            (Self::WORKSPACE_DELETE_TITLE, crate::picker::PickerKind::WorkspaceDelete)
+        } else {
+            (Self::WORKSPACE_OPEN_TITLE, crate::picker::PickerKind::Workspaces)
+        };
+        self.picker = Some(crate::picker::Picker::new(title, kind, items));
+    }
+
+    /// Deletes a saved workspace and refreshes the list in place, so several can go in one
+    /// visit. The picker closes once nothing is left to delete.
+    fn delete_workspace(&mut self, name: &str) {
+        let lang = self.settings.lang;
+        if crate::workspace::delete(name) {
+            self.status_message = i18n::msg_workspace_deleted(lang, name);
+        }
+        if self.active_workspace.as_deref() == Some(name) {
+            self.active_workspace = None;
+            self.settings.last_workspace = None;
+        }
+        self.picker = None;
+        if !crate::workspace::list().is_empty() {
+            self.open_workspace_picker(true);
         }
     }
 
@@ -2076,6 +2515,14 @@ impl App {
             self.handle_terminal_rename_key(key);
             return;
         }
+        if self.show_workspace_save {
+            self.handle_workspace_save_key(key);
+            return;
+        }
+        if self.manual.is_some() {
+            self.handle_manual_key(key);
+            return;
+        }
         if self.resize_mode {
             self.handle_resize_key(key);
             return;
@@ -2092,79 +2539,146 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        if alt {
-            if let KeyCode::Char(c) = key.code {
-                if let Some(idx) = self.menu_index_for_mnemonic(c) {
-                    self.menu.open_at(idx);
-                    return;
-                }
-            }
+        // A focused terminal has first claim on Ctrl. These panes run vim, tmux, ssh and
+        // readline, where Ctrl+E is end-of-line, Ctrl+T is transpose, Ctrl+P is the previous
+        // command and Ctrl+J *is* Enter — an editor that eats them is an editor you cannot work
+        // in. So every Ctrl chord goes straight to the child, and CleeCode keeps exactly one:
+        // Ctrl+Tab, its way back out of the pane. That is the bargain a terminal multiplexer
+        // strikes, and Ctrl+Tab is chosen because no common terminal program binds it.
+        //
+        // Alt chords and the frame's own keys are unaffected: they never had a conflict to lose.
+        //
+        // Two exceptions stay with CleeCode. Ctrl+Tab is its way back out of the pane. And every
+        // Ctrl+Shift chord is safe to keep, because no terminal can deliver one to a child in the
+        // first place: the encoding terminals have used since VT100 has no room for the Shift, so
+        // Ctrl+Shift+M and Ctrl+M are the same byte. Nothing running in the shell can be listening
+        // for these, which is exactly what makes them a good home for the application's own keys.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let reserved = matches!(
+            key.code,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+        ) || shift;
+        if self.focus == Focus::Terminal && ctrl && !reserved {
+            self.handle_terminal_key(key);
+            return;
         }
 
+        // No Alt+<letter> and no Alt+<digit> anywhere in CleeCode. macOS only sends Option as
+        // Meta on US keyboard layouts, so on any other one — Italian, German, French — those
+        // chords never arrived at all, and a shortcut that silently does nothing is worse than
+        // no shortcut. Alt with an *arrow* is a different matter and is still used: an Option
+        // arrow produces no printable character, so the terminal forwards it as Meta whatever
+        // the layout, which is also why editors have settled on Alt+↑/↓ for moving a line.
         match key.code {
-            KeyCode::F(9) => {
-                self.menu.open();
+            // ---- The application layer: Ctrl+Shift+<letter> -----------------------------------
+            //
+            // Function keys used to live here, and they are gone. On a laptop they are a second-
+            // class row — on a Mac they need Fn — and PageUp/PageDown need Fn too, which ruled out
+            // the tab and window keys as well. Alt was not an option either: it only reaches an
+            // application when the terminal sends Option as Meta, which it does not on non-US
+            // keyboard layouts, so half the old Alt bindings never arrived at all.
+            //
+            // Letters and arrows only, never a symbol: on an Italian layout `/`, `<`, `[` and
+            // friends already need Shift or Option to type, so a chord built on one of them would
+            // ask for the same modifier twice.
+            KeyCode::Char('m') | KeyCode::Char('M') if ctrl && shift => {
+                self.manual = Some(crate::manual::ManualState::new());
                 return;
             }
-            KeyCode::F(1) => {
-                self.focus = Focus::FileTree;
-                return;
-            }
-            KeyCode::F(2) => {
-                self.focus = Focus::Editor;
-                return;
-            }
-            KeyCode::F(3) => {
-                if self.settings.show_terminal {
-                    self.focus = Focus::Terminal;
-                }
-                return;
-            }
-            KeyCode::F(4) => {
+            KeyCode::Char('o') | KeyCode::Char('O') if ctrl && shift => {
                 self.show_settings = true;
                 return;
             }
-            KeyCode::F(5) => {
-                self.new_terminal();
-                return;
-            }
-            KeyCode::F(6) => {
-                self.close_active_terminal();
-                return;
-            }
-            KeyCode::F(7) => {
-                self.editor_mut().toggle_fold();
-                return;
-            }
-            KeyCode::F(8) => {
-                self.resize_mode = !self.resize_mode;
-                return;
-            }
-            // Shift+F10 is the conventional context-menu key (and, unlike Ctrl+Space, doesn't
-            // clash with macOS input-source switching); plain F10 runs the current file.
-            KeyCode::F(10) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.open_context_menu_for_focus();
-                return;
-            }
-            KeyCode::F(10) => {
+            KeyCode::Char('r') | KeyCode::Char('R') if ctrl && shift => {
                 self.run_active_file();
                 return;
             }
-            KeyCode::PageDown if ctrl => {
+            KeyCode::Char('n') | KeyCode::Char('N') if ctrl && shift => {
+                self.new_terminal();
+                return;
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') if ctrl && shift => {
+                self.new_terminal_tab();
+                return;
+            }
+            // One key closes the shell you are looking at. It takes the window with it when that
+            // was its last tab, so there is nothing to remember about which of the two you meant.
+            KeyCode::Char('k') | KeyCode::Char('K') if ctrl && shift => {
+                self.close_active_terminal_tab();
+                return;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') if ctrl && shift => {
+                self.editor_mut().toggle_fold();
+                return;
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') if ctrl && shift => {
+                self.resize_mode = !self.resize_mode;
+                return;
+            }
+            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && shift => {
+                self.menu.open();
+                return;
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') if ctrl && shift => {
+                self.open_context_menu_for_focus();
+                return;
+            }
+            // Navigation lives on the arrows: the same physical keys on every layout, and no Fn
+            // needed. Ctrl+<direction> moves to the frame that lies that way — sidebar, either
+            // half of a split editor, or a tiled terminal window, without caring which kind it
+            // is. Ctrl+Shift+←/→ is the one exception, moving between the tabs *inside* the
+            // frame you are already in.
+            KeyCode::Right if ctrl && shift => {
+                self.cycle_focused_tab(true);
+                return;
+            }
+            KeyCode::Left if ctrl && shift => {
+                self.cycle_focused_tab(false);
+                return;
+            }
+            // Walks the terminal windows without having to know how they happen to be tiled —
+            // the spatial arrows do it too, but which one depends on the layout.
+            KeyCode::Down if ctrl && shift => {
                 self.cycle_terminal(true);
                 return;
             }
-            KeyCode::PageUp if ctrl => {
+            KeyCode::Up if ctrl && shift => {
                 self.cycle_terminal(false);
                 return;
             }
-            // Alt+PgUp/PgDn cycle the tabs of the focused window, mirroring Ctrl+PgUp/Dn for windows.
-            KeyCode::PageDown if alt => {
-                self.cycle_terminal_tab(true);
+            // Ctrl+Alt, not plain Ctrl: macOS binds Ctrl with each arrow to Mission Control and
+            // to switching Spaces, and the system takes them before any terminal sees them, so
+            // a plain Ctrl+arrow here would never arrive on the platform CleeCode is developed
+            // on. Adding Alt steps out of the way of all four, and costs nothing elsewhere —
+            // nothing in a shell, an editor or a multiplexer binds Ctrl+Alt with an arrow.
+            KeyCode::Left if ctrl && alt => {
+                self.focus_in_direction(ResizeSide::Left);
                 return;
             }
-            KeyCode::PageUp if alt => {
-                self.cycle_terminal_tab(false);
+            KeyCode::Right if ctrl && alt => {
+                self.focus_in_direction(ResizeSide::Right);
+                return;
+            }
+            KeyCode::Up if ctrl && alt => {
+                self.focus_in_direction(ResizeSide::Up);
+                return;
+            }
+            KeyCode::Down if ctrl && alt => {
+                self.focus_in_direction(ResizeSide::Down);
+                return;
+            }
+            // Name the focused terminal and give it a startup command; save the workspace under
+            // a name; save every dirty buffer. All three used to be Alt chords.
+            KeyCode::Char('e') | KeyCode::Char('E') if ctrl && shift => {
+                self.start_terminal_rename();
+                return;
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') if ctrl && shift => {
+                self.begin_save_workspace();
+                return;
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') if ctrl && shift => {
+                self.save_all();
                 return;
             }
             KeyCode::Char('q') if ctrl => {
@@ -2199,32 +2713,25 @@ impl App {
                 }
                 return;
             }
+            // Cycle the three frames, the way Cmd+Tab cycles windows. Reaching this from a
+            // focused terminal is the whole point, so it is the one Ctrl chord the gate above
+            // holds back from the shell.
             KeyCode::Tab if ctrl => {
-                self.cycle_focus(true);
+                self.cycle_focus(!key.modifiers.contains(KeyModifiers::SHIFT));
                 return;
             }
-            // Ctrl+\ (0x1C, ASCII FS) isn't reliably delivered by every terminal, unlike
-            // Alt+letter which already works via the ESC-prefix mechanism (menu mnemonics).
-            KeyCode::Char('p') | KeyCode::Char('P') if alt => {
-                self.toggle_split_view();
+            KeyCode::BackTab if ctrl => {
+                self.cycle_focus(false);
                 return;
             }
-            // Show/hide the menu bar. Alt+B works where the terminal sends Option as Meta;
-            // 'B' is no menu's mnemonic in either language, so it never clashes with the
-            // Alt+<letter> menu-open shortcuts. Ctrl+B is a macOS-friendly alias, since
-            // Terminal.app/iTerm don't send Option as Meta by default — but it's only
-            // claimed outside the terminal pane, so a focused shell/tmux still gets Ctrl+B.
-            KeyCode::Char('b') | KeyCode::Char('B') if alt => {
+            // No `focus != Terminal` guard on these two: the gate above already handed every
+            // Ctrl chord to a focused shell before we got here.
+            KeyCode::Char('b') if ctrl => {
                 self.settings.show_menubar = !self.settings.show_menubar;
                 return;
             }
-            KeyCode::Char('b') if ctrl && self.focus != Focus::Terminal => {
-                self.settings.show_menubar = !self.settings.show_menubar;
-                return;
-            }
-            // Ctrl+L: macOS-friendly alias for Alt+P (toggle split editor), since Option
-            // isn't Meta by default there. Claimed only outside the terminal pane.
-            KeyCode::Char('l') if ctrl && self.focus != Focus::Terminal => {
+            // Split the editor into two panes.
+            KeyCode::Char('l') if ctrl => {
                 self.toggle_split_view();
                 return;
             }
@@ -2252,7 +2759,8 @@ impl App {
 
     fn handle_menu_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::F(9) => self.menu.close(),
+            KeyCode::Esc => self.menu.close(),
+            _ if is_ctrl_shift(key, 'b') => self.menu.close(),
             KeyCode::Left => self.menu.move_menu(-1),
             KeyCode::Right => self.menu.move_menu(1),
             KeyCode::Up => self.menu.move_item(-1),
@@ -2287,6 +2795,7 @@ impl App {
                     self.cycle_focus(true);
                 }
             }
+            MenuAction::OpenMenuBar => self.menu.open(),
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
@@ -2360,6 +2869,60 @@ impl App {
             MenuAction::Delete => self.start_delete(),
             MenuAction::CommandPalette => self.open_command_palette(),
             MenuAction::OpenFilePicker => self.open_file_picker(),
+            MenuAction::NextTerminalTab => self.cycle_terminal_tab(true),
+            MenuAction::PrevTerminalTab => self.cycle_terminal_tab(false),
+            MenuAction::SaveWorkspace => self.begin_save_workspace(),
+            MenuAction::OpenWorkspace => self.open_workspace_picker(false),
+            MenuAction::DeleteWorkspace => self.open_workspace_picker(true),
+            MenuAction::ShowManual => self.manual = Some(crate::manual::ManualState::new()),
+            MenuAction::FocusFileTree => {
+                // Focusing a hidden frame would leave the keyboard talking to something
+                // invisible, so show it first — the intent is clearly to work there.
+                self.settings.show_sidebar = true;
+                self.focus = Focus::FileTree;
+            }
+            MenuAction::FocusEditor => self.focus = Focus::Editor,
+            MenuAction::FocusTerminal => {
+                self.settings.show_terminal = true;
+                self.focus = Focus::Terminal;
+            }
+        }
+    }
+
+    // ---- Manual -----------------------------------------------------------------------
+
+    /// Rows of manual text on screen, kept in step with what `ui::draw_manual` lays out so
+    /// PgUp/PgDn move by exactly one screenful.
+    fn manual_page(&self) -> usize {
+        crate::ui::manual_body_height(self.last_full) as usize
+    }
+
+    fn handle_manual_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc || is_ctrl_shift(key, 'm') {
+            self.manual = None;
+            return;
+        }
+        let sections = crate::manual::sections(self.settings.lang);
+        let page = self.manual_page();
+        let Some(state) = self.manual.as_mut() else { return };
+        let len = sections.get(state.section).map(|s| s.body.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Up => state.scroll_by(-1, len, page),
+            KeyCode::Down => state.scroll_by(1, len, page),
+            KeyCode::PageUp => state.scroll_by(-(page as isize), len, page),
+            KeyCode::PageDown => state.scroll_by(page as isize, len, page),
+            KeyCode::Home => state.scroll = 0,
+            KeyCode::End => state.scroll_by(len as isize, len, page),
+            KeyCode::Left | KeyCode::BackTab => state.cycle(-1, sections.len()),
+            KeyCode::Right | KeyCode::Tab => state.cycle(1, sections.len()),
+            // A digit jumps straight to a section, the way a table of contents invites.
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if n > 0 {
+                    state.select(n - 1, sections.len());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2378,8 +2941,15 @@ impl App {
         // Shift inverts the gesture: a plain arrow grows the focused frame on that side, Shift
         // shrinks it. The window-edge sides simply do nothing.
         let grow = !key.modifiers.contains(KeyModifiers::SHIFT);
+        // Ctrl+Shift+U toggles back out, so the key that enters the mode also leaves it. Tested
+        // before the arrows, which inside the mode belong to resizing.
+        if is_ctrl_shift(key, 'u') {
+            self.resize_mode = false;
+            self.settings.save();
+            return;
+        }
         match key.code {
-            KeyCode::Esc | KeyCode::F(8) | KeyCode::Enter => {
+            KeyCode::Esc | KeyCode::Enter => {
                 self.resize_mode = false;
                 self.settings.save();
             }
@@ -2393,6 +2963,38 @@ impl App {
 
     /// Moves the seam on `side` of the focused frame. A no-op (with a brief note) when that
     /// border is the outer window edge, which can't move.
+    /// Moves the focus one frame in the given direction, doing nothing at the edge of the window
+    /// rather than wrapping — an arrow that quietly jumped to the far side would be worse than
+    /// one that stops.
+    fn focus_in_direction(&mut self, side: ResizeSide) {
+        let Some(target) = focus_neighbour(&self.resize_layout(), side) else { return };
+        match target {
+            FocusTarget::Tree => self.focus = Focus::FileTree,
+            FocusTarget::Editor(pane) => {
+                self.focus = Focus::Editor;
+                self.editor_pane_focus = pane;
+            }
+            FocusTarget::Terminal(index) => {
+                self.focus = Focus::Terminal;
+                self.active_terminal = index.min(self.terminals.len().saturating_sub(1));
+            }
+        }
+    }
+
+    /// The layout facts the pure resolvers work from.
+    fn resize_layout(&self) -> ResizeLayout {
+        ResizeLayout {
+            focus: self.focus,
+            editor_pane: self.editor_pane_focus,
+            split_view: self.split_view,
+            show_sidebar: self.settings.show_sidebar,
+            show_terminal: self.settings.show_terminal,
+            terminal_on_right: self.settings.terminal_on_right,
+            terminal_index: self.active_terminal,
+            terminal_count: self.terminals.len(),
+        }
+    }
+
     fn apply_resize(&mut self, side: ResizeSide, grow: bool) {
         let layout = ResizeLayout {
             focus: self.focus,
@@ -2401,6 +3003,8 @@ impl App {
             show_sidebar: self.settings.show_sidebar,
             show_terminal: self.settings.show_terminal,
             terminal_on_right: self.settings.terminal_on_right,
+            terminal_index: self.active_terminal,
+            terminal_count: self.terminals.len(),
         };
         match resize_command(&layout, side, grow) {
             Some(ResizeCmd::Sidebar(d)) => {
@@ -2412,6 +3016,10 @@ impl App {
             Some(ResizeCmd::Split(d)) => {
                 self.settings.split_pct = nudge_u16(self.settings.split_pct, d);
             }
+            Some(ResizeCmd::TerminalWeight { seam, delta }) => {
+                self.nudge_terminal_weight(seam, delta);
+                return;
+            }
             None => {
                 self.status_message = i18n::msg_resize_edge(self.settings.lang);
                 return;
@@ -2420,7 +3028,24 @@ impl App {
         self.settings.clamp_layout();
     }
 
-    /// True while a layout resize is in play — the F8 mode, or a border drag — so the focused
+    /// Moves weight across the seam between terminal windows `seam` and `seam + 1`, keeping
+    /// their combined share fixed — the keyboard twin of dragging that seam — with the same
+    /// floor of a tenth each, so neither collapses to nothing.
+    fn nudge_terminal_weight(&mut self, seam: usize, delta: i16) {
+        let (Some(a), Some(b)) = (
+            self.terminals.get(seam).map(|w| w.weight),
+            self.terminals.get(seam + 1).map(|w| w.weight),
+        ) else {
+            return;
+        };
+        let total = a as i32 + b as i32;
+        let floor = (total / 10).max(1);
+        let new_a = (a as i32 + delta as i32).clamp(floor, total - floor);
+        self.terminals[seam].weight = new_a as u16;
+        self.terminals[seam + 1].weight = (total - new_a) as u16;
+    }
+
+    /// True while a layout resize is in play — Ctrl+Shift+U, or a border drag — so the focused
     /// frame can switch its border to the resize colour.
     pub fn layout_resize_active(&self) -> bool {
         self.resize_mode || self.dragging.map(DragTarget::is_layout).unwrap_or(false)
@@ -2455,7 +3080,7 @@ impl App {
             let tab_count = self.terminals[i].tabs.len();
             if tab_count > 1 {
                 let strip = ui::terminal_tab_strip_rect(*rect, window_close);
-                let labels = ui::terminal_tab_labels(&self.terminals[i], lang);
+                let labels = ui::terminal_tab_labels(&self.terminals[i], i, lang);
                 if let Some((t, tab)) = ui::terminal_tab_ranges(strip, &labels)
                     .into_iter()
                     .enumerate()
@@ -2682,7 +3307,8 @@ impl App {
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::F(4) => self.show_settings = false,
+            KeyCode::Esc => self.show_settings = false,
+            _ if is_ctrl_shift(key, 'o') => self.show_settings = false,
             KeyCode::Up => {
                 self.settings_selected = if self.settings_selected == 0 {
                     settings::SETTINGS_COUNT - 1
@@ -2751,17 +3377,12 @@ impl App {
             // Ctrl+Shift+S is indistinguishable from plain Ctrl+S in standard terminal
             // input (no Kitty keyboard protocol), so Save All uses Alt+S instead — Alt
             // combos already work reliably via the ESC-prefix menu mnemonics.
-            KeyCode::Char('s') | KeyCode::Char('S') if alt => self.save_all(),
             // Split-pane focus (only meaningful when split); left unchanged on Alt+←/→.
-            KeyCode::Left if alt && self.split_view => self.editor_pane_focus = EditorPane::Left,
-            KeyCode::Right if alt && self.split_view => self.editor_pane_focus = EditorPane::Right,
             // Move the current line up/down; Alt+Shift+↓ duplicates it.
             KeyCode::Down if alt && shift => self.editor_mut().duplicate_line(),
             KeyCode::Up if alt => self.editor_mut().move_line_up(),
             KeyCode::Down if alt => self.editor_mut().move_line_down(),
             // Editor-tab cycling moved off Ctrl+←/→ (now word motion) to Alt+, / Alt+.
-            KeyCode::Char(',') if alt => self.cycle_editor(false),
-            KeyCode::Char('.') if alt => self.cycle_editor(true),
             KeyCode::Char('s') if ctrl => self.save_active_file(),
             KeyCode::Char('w') if ctrl => self.close_active_editor(),
             KeyCode::Char('d') if ctrl => self.close_active_editor(),
@@ -2772,12 +3393,19 @@ impl App {
             KeyCode::Char('z') | KeyCode::Char('Z') if ctrl && shift => self.editor_redo(),
             KeyCode::Char('z') if ctrl => self.editor_undo(),
             KeyCode::Char('y') if ctrl => self.editor_redo(),
+            // Ctrl+K is the one that is documented: on an Italian layout `/` is Shift+7, so the
+            // conventional Ctrl+/ asks for a modifier the chord already uses. It still works for
+            // the layouts where `/` is a key of its own, since keeping it costs nothing.
+            KeyCode::Char('k') if ctrl => self.toggle_comment(),
             KeyCode::Char('/') if ctrl => self.toggle_comment(),
             KeyCode::Char('f') if ctrl => self.open_find(false),
             KeyCode::Char('g') if ctrl => self.open_goto(),
             // Word-wise motion (Ctrl+←/→, Shift extends) and deletion (Ctrl+Backspace/Delete).
-            KeyCode::Left if ctrl => self.move_with_selection(shift, |e| e.move_word_left()),
-            KeyCode::Right if ctrl => self.move_with_selection(shift, |e| e.move_word_right()),
+            // Word motion on Alt, not Ctrl: Ctrl+<direction> now leaves the frame. Alt+arrow is
+            // what macOS uses for this anyway, and it survives every keyboard layout because an
+            // Option arrow produces no printable character.
+            KeyCode::Left if alt || ctrl => self.move_with_selection(shift, |e| e.move_word_left()),
+            KeyCode::Right if alt || ctrl => self.move_with_selection(shift, |e| e.move_word_right()),
             KeyCode::Backspace if ctrl => self.editor_mut().delete_word_left(),
             KeyCode::Delete if ctrl => self.editor_mut().delete_word_right(),
             KeyCode::Char(c) if !ctrl => {
@@ -2955,6 +3583,18 @@ impl App {
         let col = mouse.column;
         let row = mouse.row;
 
+        // The manual is a reader, not a frame: while it is up the mouse only picks sections,
+        // scrolls, or dismisses it.
+        if self.manual.is_some() {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.mouse_manual(col, row),
+                MouseEventKind::ScrollUp => self.scroll_manual(-3),
+                MouseEventKind::ScrollDown => self.scroll_manual(3),
+                _ => {}
+            }
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.show_splash {
@@ -2985,6 +3625,10 @@ impl App {
                 }
                 if self.show_terminal_rename {
                     self.cancel_terminal_rename();
+                    return;
+                }
+                if self.show_workspace_save {
+                    self.cancel_save_workspace();
                     return;
                 }
                 if self.show_save_as {
@@ -3405,6 +4049,37 @@ impl App {
         }
     }
 
+    fn scroll_manual(&mut self, delta: isize) {
+        let sections = crate::manual::sections(self.settings.lang);
+        let page = self.manual_page();
+        if let Some(state) = self.manual.as_mut() {
+            let len = sections.get(state.section).map(|s| s.body.len()).unwrap_or(0);
+            state.scroll_by(delta, len, page);
+        }
+    }
+
+    /// A click in the manual: a row of the section list jumps there, anywhere outside the
+    /// frame closes it, and the text itself simply absorbs the click.
+    fn mouse_manual(&mut self, col: u16, row: u16) {
+        let full = self.last_full;
+        let rect = ui::manual_rect(full);
+        if !within(rect, col, row) {
+            self.manual = None;
+            return;
+        }
+        let list = ui::manual_list_rect(rect);
+        if !within(list, col, row) || row < list.y {
+            return;
+        }
+        let count = crate::manual::sections(self.settings.lang).len();
+        let index = (row - list.y) as usize;
+        if index < count {
+            if let Some(state) = self.manual.as_mut() {
+                state.select(index, count);
+            }
+        }
+    }
+
     fn mouse_menu_bar_click(&mut self, col: u16) {
         let ranges = ui::menu_title_ranges(&self.menu, self.settings.lang);
         for (i, (start, end)) in ranges.iter().enumerate() {
@@ -3567,14 +4242,7 @@ mod tests {
     fn resize_command_maps_focused_borders_to_seams() {
         use ResizeSide::*;
         // Classic layout: sidebar left, terminal a full-width strip below, editor unsplit.
-        let classic = ResizeLayout {
-            focus: Focus::Editor,
-            editor_pane: EditorPane::Left,
-            split_view: false,
-            show_sidebar: true,
-            show_terminal: true,
-            terminal_on_right: false,
-        };
+        let classic = ResizeLayout { focus: Focus::Editor, ..classic_like() };
         // Editor grows left by eating the sidebar; shrinking left gives it back.
         assert_eq!(resize_command(&classic, Left, true), Some(ResizeCmd::Sidebar(-SIDEBAR_STEP)));
         assert_eq!(resize_command(&classic, Left, false), Some(ResizeCmd::Sidebar(SIDEBAR_STEP)));
@@ -3621,7 +4289,126 @@ mod tests {
             show_sidebar: true,
             show_terminal: true,
             terminal_on_right: false,
+            terminal_index: 0,
+            terminal_count: 1,
         }
+    }
+
+    /// Ctrl+<direction> is meant to read as "go to the thing over there", so what matters is that
+    /// each arrow lands on whatever is actually in that direction and stops at the window edge
+    /// instead of wrapping.
+    #[test]
+    fn a_direction_lands_on_whatever_frame_lies_that_way() {
+        use FocusTarget::*;
+        use ResizeSide::*;
+
+        // Classic: tree | editor, with the terminal strip spanning the width below both.
+        let tree = ResizeLayout { focus: Focus::FileTree, ..classic_like() };
+        assert_eq!(focus_neighbour(&tree, Right), Some(Editor(EditorPane::Left)));
+        assert_eq!(focus_neighbour(&tree, Down), Some(Terminal(0)));
+        assert_eq!(focus_neighbour(&tree, Left), None, "the tree is against the window edge");
+        assert_eq!(focus_neighbour(&tree, Up), None);
+
+        let editor = classic_like();
+        assert_eq!(focus_neighbour(&editor, Left), Some(Tree));
+        assert_eq!(focus_neighbour(&editor, Down), Some(Terminal(0)));
+        assert_eq!(focus_neighbour(&editor, Up), None);
+
+        // Terminals below tile side by side, so they are walked left/right, and up leaves them.
+        let term = ResizeLayout { focus: Focus::Terminal, terminal_count: 3, terminal_index: 1, ..classic_like() };
+        assert_eq!(focus_neighbour(&term, Left), Some(Terminal(0)));
+        assert_eq!(focus_neighbour(&term, Right), Some(Terminal(2)));
+        assert_eq!(focus_neighbour(&term, Up), Some(Editor(EditorPane::Left)));
+        let first = ResizeLayout { terminal_index: 0, ..term };
+        assert_eq!(focus_neighbour(&first, Left), None, "no window to the left of the first");
+        let last = ResizeLayout { terminal_index: 2, ..term };
+        assert_eq!(focus_neighbour(&last, Right), None, "and none past the last");
+
+        // With the panel on the right the windows stack, so the same walk is up/down instead.
+        let right = ResizeLayout {
+            focus: Focus::Terminal,
+            terminal_on_right: true,
+            terminal_count: 3,
+            terminal_index: 1,
+            ..classic_like()
+        };
+        assert_eq!(focus_neighbour(&right, Up), Some(Terminal(0)));
+        assert_eq!(focus_neighbour(&right, Down), Some(Terminal(2)));
+        assert_eq!(focus_neighbour(&right, Left), Some(Editor(EditorPane::Left)));
+        assert_eq!(focus_neighbour(&right, Right), None);
+    }
+
+    /// The two halves of a split editor are frames in their own right: the same arrow that leaves
+    /// the editor for the sidebar has to cross the split first.
+    #[test]
+    fn a_split_editor_is_two_frames_to_the_arrows() {
+        use FocusTarget::*;
+        use ResizeSide::*;
+        let split = ResizeLayout { split_view: true, ..classic_like() };
+
+        assert_eq!(focus_neighbour(&split, Right), Some(Editor(EditorPane::Right)));
+        assert_eq!(focus_neighbour(&split, Left), Some(Tree), "from the left half, out to the tree");
+
+        let on_right = ResizeLayout { editor_pane: EditorPane::Right, ..split };
+        assert_eq!(focus_neighbour(&on_right, Left), Some(Editor(EditorPane::Left)));
+
+        // Coming back from a terminal lands in the half nearest it.
+        let term = ResizeLayout { focus: Focus::Terminal, ..split };
+        assert_eq!(focus_neighbour(&term, Up), Some(Editor(EditorPane::Right)));
+    }
+
+    /// A hidden frame is not somewhere you can go.
+    #[test]
+    fn arrows_skip_frames_that_are_not_on_screen() {
+        use ResizeSide::*;
+        let no_sidebar = ResizeLayout { show_sidebar: false, ..classic_like() };
+        assert_eq!(focus_neighbour(&no_sidebar, Left), None);
+
+        let no_terminal = ResizeLayout { show_terminal: false, ..classic_like() };
+        assert_eq!(focus_neighbour(&no_terminal, Down), None);
+    }
+
+    /// The seams *between* terminal windows used to be mouse-only: resize mode plus arrows did nothing
+    /// along the tiling axis.
+    #[test]
+    fn resize_moves_the_seam_between_terminal_windows() {
+        use ResizeSide::*;
+        // Three windows side by side under the editor, the middle one focused.
+        let strip = ResizeLayout {
+            focus: Focus::Terminal,
+            terminal_index: 1,
+            terminal_count: 3,
+            ..classic_like()
+        };
+        // Growing rightwards takes from the window after it; growing leftwards, from the one
+        // before — in both cases the focused window ends up bigger.
+        assert_eq!(resize_command(&strip, Right, true), Some(ResizeCmd::TerminalWeight { seam: 1, delta: WEIGHT_STEP }));
+        assert_eq!(resize_command(&strip, Left, true), Some(ResizeCmd::TerminalWeight { seam: 0, delta: -WEIGHT_STEP }));
+        assert_eq!(resize_command(&strip, Left, false), Some(ResizeCmd::TerminalWeight { seam: 0, delta: WEIGHT_STEP }));
+        // Across the axis it is still the editor seam, and the outer edge is still nothing.
+        assert_eq!(resize_command(&strip, Up, true), Some(ResizeCmd::Terminal(TERMINAL_STEP)));
+        assert_eq!(resize_command(&strip, Down, true), None);
+
+        // The first window has no neighbour to its left, the last none to its right.
+        let first = ResizeLayout { terminal_index: 0, ..strip };
+        assert_eq!(resize_command(&first, Left, true), None);
+        let last = ResizeLayout { terminal_index: 2, ..strip };
+        assert_eq!(resize_command(&last, Right, true), None);
+
+        // Stacked on the right instead: the same seams, now vertical, and the editor seam
+        // moves to the left border.
+        let stacked = ResizeLayout { terminal_on_right: true, terminal_index: 0, terminal_count: 2, ..strip };
+        assert_eq!(
+            resize_command(&stacked, Down, true),
+            Some(ResizeCmd::TerminalWeight { seam: 0, delta: WEIGHT_STEP })
+        );
+        assert_eq!(resize_command(&stacked, Left, true), Some(ResizeCmd::Terminal(TERMINAL_STEP)));
+        assert_eq!(resize_command(&stacked, Up, true), None);
+
+        // A single window has no seam of its own at all.
+        let alone = ResizeLayout { terminal_count: 1, terminal_index: 0, ..strip };
+        assert_eq!(resize_command(&alone, Right, true), None);
+        assert_eq!(resize_command(&alone, Left, true), None);
     }
 
     #[test]

@@ -8,7 +8,9 @@ By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
 ![CleeCode in action](docs/demo.gif)
 
-*Recorded from [`docs/demo.tape`](docs/demo.tape).*
+*Recorded from [`docs/demo.tape`](docs/demo.tape); the stills come from
+[`docs/shots.tape`](docs/shots.tape). Both replay a fixed script, so they can be re-made after a
+UI change instead of re-shot by hand.*
 
 ![CleeCode main view](docs/screenshots/main.png)
 
@@ -16,12 +18,12 @@ By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
 - **Editor** — [syntect](https://github.com/trishume/syntect) highlighting, line numbers,
   multi-file tabs, mouse and keyboard selection, system-clipboard copy/cut/paste, auto-indent,
-  word wrap, whitespace display, code folding (`F7`)
-- **Split editor** — `Alt+P` splits the editor column into two panes, each with its own tab
-  strip; drag the divider (or use `F8`) to rebalance them
+  word wrap, whitespace display, code folding (`Ctrl+Shift+F`)
+- **Split editor** — `Ctrl+L` splits the editor column into two panes, each with its own tab
+  strip; drag the divider (or use `Ctrl+Shift+U`) to rebalance them
 - **File tree sidebar** — per-type Nerd Font icons, git status dots (rolled up to folders), live
   refresh on external changes, create/rename/delete, hidden-file toggle (`H`), reroot on a folder
-- **Run button** — `▶ Run` / `F10` pastes a run command for the current file into an idle
+- **Run button** — `▶ Run` / `Ctrl+Shift+R` pastes a run command for the current file into an idle
   terminal; configurable per extension in `settings.toml` (Python, Bash, Ruby, Node, Go, PHP,
   Perl, Octave…). Interpreters off `PATH` go under `[interpreter_paths]`
 - **Quick open** — `Ctrl+O` fuzzy-searches the project; start the query with `/`, `~`, `./` or
@@ -30,23 +32,29 @@ By **Matteo Savoia** ([msavox](https://github.com/msavox)).
   venvs from elsewhere on disk — typed in by path or picked with a folder browser (saved to
   `settings.toml`, available in every project)
 - **Tabbed terminals** — real ptys, so `ssh`, `vim`, `claude` all work; each terminal window (a
-  tiled pane) holds one or more tabs. New window (`F5`) vs new tab (`Ctrl+T`); close a tab or a
+  tiled pane) holds one or more tabs. New window (`Ctrl+Shift+N`) vs new tab (`Ctrl+Shift+T`); close a tab or a
   whole window from its `✕`; rename a tab or window; drag the seam between windows to rebalance
   them; auto-collapse on shell exit
 - **Terminal selection** — drag with the mouse or `Shift`+arrows; the selection goes straight to
   the system clipboard, `Esc` clears it
 - **Menu bar** — macOS-style app menu plus File / Edit / View / Layout / Run / Terminal, their
-  entries grouped into sections; `Alt+<letter>` or `F9`. `Ctrl+B` hides the bar without making
+  entries grouped into sections; `Ctrl+Shift+B` opens it, then the underlined letter jumps to a menu. `Ctrl+B` hides it without making
   anything unreachable
-- **Context menus** — right-click or `Shift+F10` on the file tree, editor, or a terminal for its
+- **Context menus** — right-click or `Ctrl+Shift+G` on the file tree, editor, or a terminal for its
   common actions
-- **Resizable layout** — `F8` resize mode (arrows grow the focused frame, `Shift`+arrow shrinks)
+- **Resizable layout** — `Ctrl+Shift+U` resize mode (arrows grow the focused frame, `Shift`+arrow shrinks)
   or drag any inner border with the mouse — sidebar, editor/terminal, the split divider, between
   terminals; three presets and a terminal-side toggle, persisted across restarts
 - **Settings panel** — line numbers, highlighting, word wrap, tab size, tabs vs spaces,
   whitespace, auto-indent, mouse, language, all live
-- **Workspace persistence** — a bare `clee` resumes the last project and its open tabs
-- **Also** — `Alt+S` saves all, drag & drop into the tree (or `scp` onto an `ssh` session),
+- **Named workspaces** — save a whole set-up under a name (`Ctrl+Shift+W`): project root, open files,
+  frame sizes, and the terminal windows with their tab names and startup commands, so reopening
+  one brings the shells back already running `claude`, `octave`, `npm run dev`… One TOML file per
+  workspace under `~/.config/cleecode/workspaces/`, hand-editable. A bare `clee` resumes the last
+  one, or just the last project and its open tabs if none was saved
+- **Built-in manual** — `Ctrl+Shift+M`, in English or Italian, so the key bindings are reachable from
+  inside the editor rather than only from this file
+- **Also** — `Ctrl+Shift+S` saves all, drag & drop into the tree (or `scp` onto an `ssh` session),
   auto-reload of externally changed files, English and Italian
 
 ![Layout and Run menus](docs/screenshots/menu.png)
@@ -129,36 +137,38 @@ just point your terminal at a Nerd Font you already have.
 
 | Key | Action |
 |---|---|
-| `F9` | Open/close the menu bar (then a letter to jump to a menu) |
-| `Alt+<letter>` | Jump straight to a menu (see the underlined letter) |
-| `F1` / `F2` / `F3` | Focus file tree / editor / terminal |
-| `F4` | Settings |
-| `F5` / `F6` | New terminal window / close the window |
-| `Ctrl+T` | New terminal tab (in the focused window) |
-| `F7` | Fold/unfold the block under the cursor |
-| `F8` | Resize mode (arrows grow the focused frame, `Shift`+arrow shrinks, `Esc`/`Enter` to exit) |
-| `F10` | Run the current file |
-| `Ctrl+L` / `Alt+P` | Toggle split editor (`Alt+P` needs Option-as-Meta on macOS) |
-| `Alt+Left` / `Alt+Right` | Switch focus between split panes |
-| `Ctrl+S` / `Alt+S` | Save / save all |
+| `Ctrl+Alt+←` `↑` `↓` `→` | Go to the frame that lies in that direction — sidebar, either half of a split editor, or a tiled terminal, whichever is there. `Ctrl+Alt` rather than plain `Ctrl` because macOS keeps `Ctrl`+arrow for Mission Control and Spaces |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Or cycle the frames, the way `Cmd+Tab` cycles windows |
+| `Ctrl+Shift+←` / `→` | Previous / next tab *inside* the focused frame |
+| `Ctrl+Shift+↑` / `↓` | Previous / next terminal window, whatever the layout |
+| `Ctrl+Shift+M` | The built-in manual |
+| `Ctrl+Shift+B` | Open the menu bar (then arrows and Enter) |
+| `Ctrl+Shift+O` | Settings |
+| `Ctrl+Shift+G` / right-click | Context menu for the focused frame |
+| `Ctrl+Shift+R` | Run the current file |
+| `Ctrl+Shift+T` / `Ctrl+Shift+K` | New terminal tab / close this shell |
+| `Ctrl+Shift+N` | New terminal window |
+| `Ctrl+Shift+U` | Resize mode (arrows grow the focused frame, `Shift`+arrow shrinks) |
+| `Ctrl+Shift+F` | Fold/unfold the block under the cursor |
+| `Ctrl+L` | Toggle split editor (`Ctrl+Alt+←`/`→` moves between the panes) |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save / save all (an unnamed buffer asks for a name; Save As is in the File menu) |
+| `Ctrl+Shift+W` | Save the current workspace (open and delete are in the View menu) |
+| `Ctrl+Shift+E` | Name the focused terminal and give it a startup command |
 | `Ctrl+E` / `Ctrl+J` | Toggle sidebar / terminal panel |
-| `Ctrl+B` / `Alt+B` | Show/hide the menu bar |
+| `Ctrl+B` | Show/hide the menu bar |
 | `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |
 | `Ctrl+Q` | Quit (prompts if any file is unsaved) |
 | `Ctrl+C/X/V/A` | Copy / cut / paste / select all (in the editor) |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
-| `Ctrl+Left/Right` | Move by word (`Shift` extends the selection) |
+| `Alt+Left` / `Alt+Right` | Move by word (`Ctrl`+arrow too, where the OS allows it) |
 | `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
 | `Ctrl+P` / `Ctrl+O` | Command palette / quick open (both fuzzy) |
 | `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
-| `Ctrl+/` | Toggle line comment |
+| `Ctrl+K` | Toggle line comment |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
-| `Alt+,` / `Alt+.` | Switch editor tab |
-| `Ctrl+PageUp/Down` | Switch terminal window |
-| `Alt+PageUp/Down` | Switch terminal tab |
-| `Shift+F10` / right-click | Context menu for the focused frame |
+
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
 opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `E` renames,
