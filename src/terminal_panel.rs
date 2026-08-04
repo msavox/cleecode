@@ -409,12 +409,22 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
 pub struct TerminalWindow {
     pub tabs: Vec<TerminalPanel>,
     pub active: usize,
+    /// Relative size among the tiled terminal windows; equal by default, shifted when the seam to
+    /// a neighbour is dragged. A large base value leaves room for fine adjustment.
+    pub weight: u16,
 }
+
+/// Default window weight: large enough that a drag can nudge the split in fine steps.
+pub const TERMINAL_WEIGHT_DEFAULT: u16 = 1000;
 
 impl TerminalWindow {
     /// A fresh window with a single shell.
     pub fn new(rows: u16, cols: u16, cwd: &Path) -> Result<Self> {
-        Ok(TerminalWindow { tabs: vec![TerminalPanel::new(rows, cols, cwd)?], active: 0 })
+        Ok(TerminalWindow {
+            tabs: vec![TerminalPanel::new(rows, cols, cwd)?],
+            active: 0,
+            weight: TERMINAL_WEIGHT_DEFAULT,
+        })
     }
 
     pub fn active_tab(&self) -> &TerminalPanel {

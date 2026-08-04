@@ -20,7 +20,9 @@ pub struct LayoutParams {
     pub show_sidebar: bool,
     pub show_terminal: bool,
     pub show_menubar: bool,
-    pub terminal_count: usize,
+    /// One relative weight per terminal window; adjacent weights shift when their seam is
+    /// dragged. Its length is the window count.
+    pub terminal_weights: Vec<u16>,
     pub sidebar_width: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
@@ -32,7 +34,7 @@ impl LayoutParams {
             show_sidebar: app.settings.show_sidebar,
             show_terminal: app.settings.show_terminal,
             show_menubar: app.settings.show_menubar,
-            terminal_count: app.terminals.len(),
+            terminal_weights: app.terminals.iter().map(|w| w.weight).collect(),
             sidebar_width: app.settings.sidebar_width,
             terminal_pct: app.settings.terminal_pct,
             terminal_on_right: app.settings.terminal_on_right,
@@ -40,9 +42,14 @@ impl LayoutParams {
     }
 }
 
-fn terminal_panes(area: Rect, count: usize, direction: Direction) -> Vec<Rect> {
-    let n = count.max(1);
-    let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage((100 / n) as u16)).collect();
+/// Tiles the terminal region into one pane per window, sized by relative weight so a dragged seam
+/// can give one window more room than its neighbours.
+fn terminal_panes(area: Rect, weights: &[u16], direction: Direction) -> Vec<Rect> {
+    let constraints: Vec<Constraint> = if weights.is_empty() {
+        vec![Constraint::Fill(1)]
+    } else {
+        weights.iter().map(|&w| Constraint::Fill(w.max(1))).collect()
+    };
     Layout::default().direction(direction).constraints(constraints).split(area).to_vec()
 }
 
@@ -71,7 +78,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
                 .split(rest);
-            (h[0], Some(terminal_panes(h[1], p.terminal_count, Direction::Vertical)))
+            (h[0], Some(terminal_panes(h[1], &p.terminal_weights, Direction::Vertical)))
         } else {
             (rest, None)
         };
@@ -82,7 +89,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
                 .split(main_area);
-            (v[0], Some(terminal_panes(v[1], p.terminal_count, Direction::Horizontal)))
+            (v[0], Some(terminal_panes(v[1], &p.terminal_weights, Direction::Horizontal)))
         } else {
             (main_area, None)
         };
@@ -1665,6 +1672,20 @@ mod tests {
 
     /// Five tabs of 10 columns each.
     const W: [u16; 5] = [10, 10, 10, 10, 10];
+
+    #[test]
+    fn terminal_panes_split_by_weight() {
+        let area = Rect { x: 0, y: 0, width: 100, height: 10 };
+        // Equal weights: an even split.
+        let even = terminal_panes(area, &[1000, 1000], Direction::Horizontal);
+        assert_eq!(even[0].width, 50);
+        assert_eq!(even[1].width, 50);
+        // 3:1 weights give the first pane three-quarters, contiguously.
+        let uneven = terminal_panes(area, &[1500, 500], Direction::Horizontal);
+        assert_eq!(uneven[0].width, 75);
+        assert_eq!(uneven[1].width, 25);
+        assert_eq!(uneven[1].x, uneven[0].x + uneven[0].width);
+    }
 
     #[test]
     fn context_menu_stays_on_screen() {

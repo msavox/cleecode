@@ -383,6 +383,9 @@ pub enum DragTarget {
     TerminalHeight,
     /// Dragging the vertical seam between the two editor panes in split view.
     EditorSplit,
+    /// Dragging the seam between terminal window `i` and window `i + 1` to redistribute their
+    /// space (horizontally when tiled side by side, vertically when stacked).
+    TerminalSplit(usize),
     TextSelection,
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
@@ -392,7 +395,13 @@ impl DragTarget {
     /// Whether this drag is resizing a layout seam (as opposed to selecting text), so the
     /// focused frame can show its resize highlight while the drag is under way.
     fn is_layout(self) -> bool {
-        matches!(self, DragTarget::Sidebar | DragTarget::TerminalHeight | DragTarget::EditorSplit)
+        matches!(
+            self,
+            DragTarget::Sidebar
+                | DragTarget::TerminalHeight
+                | DragTarget::EditorSplit
+                | DragTarget::TerminalSplit(_)
+        )
     }
 }
 
@@ -2445,6 +2454,22 @@ impl App {
                     }
                 }
             }
+            // The seams between adjacent terminal windows: vertical when tiled side by side,
+            // horizontal when stacked. Dragging one redistributes the two windows' space.
+            for i in 0..term_areas.len().saturating_sub(1) {
+                let next = term_areas[i + 1];
+                let hit = if self.settings.terminal_on_right {
+                    let seam_y = next.y; // stacked: horizontal seam at the next window's top edge
+                    col >= next.x && col < next.x + next.width && (row == seam_y || row + 1 == seam_y)
+                } else {
+                    let seam_x = next.x; // side by side: vertical seam at the next window's left edge
+                    row >= next.y && row < next.y + next.height && (col == seam_x || col + 1 == seam_x)
+                };
+                if hit {
+                    self.dragging = Some(DragTarget::TerminalSplit(i));
+                    return true;
+                }
+            }
         }
         // The seam between the two editor panes, when split. It's the right pane's left edge;
         // grabbing it (or the column just left of it) starts a split-ratio drag.
@@ -2499,9 +2524,41 @@ impl App {
                     self.settings.clamp_layout();
                 }
             }
+            Some(DragTarget::TerminalSplit(i)) => self.drag_terminal_split(i, col, row, full),
             // Both are handled where the drag happens, against the pane they started in.
             Some(DragTarget::TextSelection) | Some(DragTarget::TerminalSelection(_)) | None => {}
         }
+    }
+
+    /// Redistributes the space between terminal windows `i` and `i + 1` as their seam is dragged.
+    /// Their combined weight is preserved, so only these two resize, and a floor keeps either from
+    /// collapsing to nothing.
+    fn drag_terminal_split(&mut self, i: usize, col: u16, row: u16, full: Rect) {
+        let areas = ui::compute_layout(full, &ui::LayoutParams::from_app(self));
+        let Some(term_areas) = areas.terminals else { return };
+        let (Some(&a), Some(&b)) = (term_areas.get(i), term_areas.get(i + 1)) else { return };
+        // The pair's combined span along the tiling axis, and the cursor's position within it.
+        let (start, end, pos) = if self.settings.terminal_on_right {
+            (a.y, b.y + b.height, row) // stacked: drag vertically
+        } else {
+            (a.x, b.x + b.width, col) // side by side: drag horizontally
+        };
+        let span = end.saturating_sub(start) as u32;
+        let (Some(wi), Some(wj)) = (
+            self.terminals.get(i).map(|w| w.weight),
+            self.terminals.get(i + 1).map(|w| w.weight),
+        ) else {
+            return;
+        };
+        let total = wi as u32 + wj as u32;
+        if span < 2 || total == 0 {
+            return;
+        }
+        let frac = pos.clamp(start + 1, end - 1) as u32 - start as u32;
+        let floor = (total / 10).max(1); // at least a tenth of the pair each side
+        let new_i = (total * frac / span).clamp(floor, total - floor) as u16;
+        self.terminals[i].weight = new_i;
+        self.terminals[i + 1].weight = (total - new_i as u32) as u16;
     }
 
     fn confirm_delete(&mut self) {
@@ -3006,7 +3063,8 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => match self.dragging {
                 Some(DragTarget::Sidebar)
                 | Some(DragTarget::TerminalHeight)
-                | Some(DragTarget::EditorSplit) => {
+                | Some(DragTarget::EditorSplit)
+                | Some(DragTarget::TerminalSplit(_)) => {
                     self.continue_drag(col, row, full);
                 }
                 Some(DragTarget::TextSelection) => {
