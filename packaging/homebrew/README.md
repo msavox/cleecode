@@ -17,7 +17,7 @@ Then fill in `url` and `sha256` (see below), commit and push.
 
 ## Each release
 
-1. Tag and push: `git tag v0.1.2 && git push origin v0.1.2`. The Release workflow builds
+1. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`. The Release workflow builds
    the macOS binaries, attaches them to the GitHub release, and prints the formula's `url`
    and `sha256` in its run summary (job "Homebrew source checksum").
 2. Copy those two lines into `Formula/clee.rb` in the tap, then commit and push.
@@ -25,7 +25,7 @@ Then fill in `url` and `sha256` (see below), commit and push.
 To compute the checksum by hand instead:
 
 ```bash
-curl -fsSL https://github.com/msavox/cleecode/archive/refs/tags/v0.1.2.tar.gz | shasum -a 256
+curl -fsSL https://github.com/msavox/cleecode/archive/refs/tags/v0.2.0.tar.gz | shasum -a 256
 ```
 
 ## Verifying the formula before publishing
