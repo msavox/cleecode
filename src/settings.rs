@@ -56,6 +56,12 @@ pub struct Settings {
     // that bury the actual source files. `H` (or the View menu) brings them back.
     #[serde(default)]
     pub show_hidden_files: bool,
+    // Lines of scrolled-off output each shell keeps, for scrolling back through. Costs
+    // lines x columns x 32 bytes per shell, so it is worth setting deliberately rather than
+    // to a huge number. vt100 fixes the length when a shell starts, so a change here reaches
+    // the shells opened afterwards, not the ones already running.
+    #[serde(default = "default_terminal_scrollback")]
+    pub terminal_scrollback: usize,
     // Auto-close brackets/quotes and expand pairs on Enter. Hand-editable; on by default.
     #[serde(default = "default_true")]
     pub auto_pairs: bool,
@@ -117,6 +123,10 @@ fn default_split_pct() -> u16 {
     50
 }
 
+fn default_terminal_scrollback() -> usize {
+    crate::terminal_panel::DEFAULT_SCROLLBACK
+}
+
 /// Octave's plot windows only live as long as the interpreter does, so a plain
 /// `octave script.m` draws the figures and closes them the instant the script ends.
 /// `--persist` stays in the interactive prompt afterwards, leaving the plots on screen and
@@ -140,10 +150,35 @@ fn default_run_commands() -> std::collections::HashMap<String, String> {
         ("pl", "perl {file}"),
         ("go", "go run {file}"),
         ("php", "php {file}"),
+        // LaTeX writes its .aux/.log/.pdf next to wherever it is told to, so it needs the
+        // file's own folder rather than the shell's current directory, which is the project
+        // root. `-interaction=nonstopmode` keeps an error from parking the terminal at
+        // LaTeX's interactive `?` prompt.
+        ("tex", "pdflatex -interaction=nonstopmode -output-directory {dir} {file}"),
+        // Pictures, shown in a terminal pane as coloured text.
+        //
+        // `-f symbols` is not optional. Left to itself chafa asks the *host* terminal what it
+        // can do, and on a Ghostty or kitty it answers with the graphics protocol — which a
+        // pane never passes on: the pty is parsed into a grid of cells and repainted, and
+        // vt100 drops the graphics escapes on the floor. The result is a megabyte of output
+        // and a blank pane. Symbols are half-blocks and box glyphs with RGB colour, which are
+        // just cells, so they survive the trip intact.
+        ("png", "chafa -f symbols {file}"),
+        ("jpg", "chafa -f symbols {file}"),
+        ("jpeg", "chafa -f symbols {file}"),
+        ("gif", "chafa -f symbols {file}"),
+        ("webp", "chafa -f symbols {file}"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+/// The command an extension ships with, if any. Emptying the run-command box restores this
+/// rather than removing the entry, since `merge_run_command_defaults` would put it back at the
+/// next start anyway.
+pub fn default_run_command(ext: &str) -> Option<String> {
+    default_run_commands().get(ext).cloned()
 }
 
 impl Default for Settings {
@@ -170,6 +205,7 @@ impl Default for Settings {
             registered_venvs: Vec::new(),
             interpreter_paths: std::collections::HashMap::new(),
             show_hidden_files: false,
+            terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
             last_root: None,
             last_open_files: Vec::new(),
@@ -245,6 +281,58 @@ impl Settings {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
         self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
         self.split_pct = self.split_pct.clamp(SPLIT_PCT_RANGE.0, SPLIT_PCT_RANGE.1);
+    }
+}
+
+/// The file a project keeps its own settings in, in its root.
+pub const PROJECT_FILE: &str = ".cleecode.toml";
+
+/// What a project says about itself, overriding the global settings for as long as it is open.
+///
+/// Only run commands so far, because that is where a global answer is actually wrong rather
+/// than merely coarse: one `[run_commands]` entry for `.tex` cannot compile this project's
+/// master file and the next project's too. Preferences — theme, layout, keys — are about the
+/// person, not the project, and stay in settings.toml where changing them once is the point.
+///
+/// It lives in the project, so it is meant to be committed and shared: hand-written entries and
+/// comments survive untouched unless the same extension is edited from inside CleeCode.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ProjectSettings {
+    #[serde(default)]
+    pub run_commands: std::collections::HashMap<String, String>,
+}
+
+impl ProjectSettings {
+    pub fn path(root: &std::path::Path) -> std::path::PathBuf {
+        root.join(PROJECT_FILE)
+    }
+
+    /// Reads a project's file, or an empty set when it has none. A malformed file is also read
+    /// as empty: a typo in it should cost the overrides, not the ability to run anything.
+    pub fn load(root: &std::path::Path) -> Self {
+        std::fs::read_to_string(Self::path(root))
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Whether anything is actually overridden. An empty set is written out as an empty file,
+    /// so this is what decides between keeping the file and removing it.
+    pub fn is_empty(&self) -> bool {
+        self.run_commands.is_empty()
+    }
+
+    /// Best-effort save into the project root. Emptied of every override, the file is deleted
+    /// rather than left behind as an empty stub in someone's repository.
+    pub fn save(&self, root: &std::path::Path) {
+        let path = Self::path(root);
+        if self.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        if let Ok(text) = toml::to_string_pretty(self) {
+            let _ = std::fs::write(path, text);
+        }
     }
 }
 
@@ -325,6 +413,37 @@ mod tests {
         // Defaults fill in for what the old file never knew about.
         assert!(s.auto_pairs);
         assert!(s.run_commands.contains_key("m"));
+    }
+
+    /// A project's file is meant to be committed and shared, so what it does to somebody's
+    /// repository matters: it appears when there is something to say and goes away again when
+    /// there is not, rather than leaving an empty stub behind.
+    #[test]
+    fn a_project_file_round_trips_and_removes_itself_when_emptied() {
+        let dir = std::env::temp_dir().join(format!("clee_proj_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = ProjectSettings::path(&dir);
+
+        // A project with no file of its own overrides nothing.
+        let loaded = ProjectSettings::load(&dir);
+        assert!(loaded.is_empty());
+        assert!(!path.exists());
+
+        let mut project = ProjectSettings::default();
+        project.run_commands.insert("tex".to_string(), "latexmk -pdf main.tex".to_string());
+        project.save(&dir);
+        assert!(path.exists());
+        assert_eq!(ProjectSettings::load(&dir), project);
+
+        // A file nobody can parse costs the overrides, not the ability to run anything.
+        std::fs::write(&path, "this is not toml {{{").unwrap();
+        assert!(ProjectSettings::load(&dir).is_empty());
+
+        // Emptied of its last override, the file is removed rather than left as a stub.
+        ProjectSettings::default().save(&dir);
+        assert!(!path.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

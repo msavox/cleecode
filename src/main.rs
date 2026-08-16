@@ -11,6 +11,7 @@ mod i18n;
 mod manual;
 mod menu;
 mod picker;
+mod preview;
 mod settings;
 mod terminal_panel;
 mod ui;
@@ -185,6 +186,11 @@ fn main() -> Result<()> {
     // used since VT100 — so cycling frames from the keyboard would be impossible to tell from
     // indenting. Ghostty, kitty, WezTerm and foot support this; Terminal.app does not, which is
     // why Alt+1/2/3 reach the frames directly and work everywhere.
+    // Asked here, alongside the other capability query and for the same reason: it writes to
+    // stdout and waits for the terminal's answer, which cannot happen once frames are being
+    // drawn. It has its own timeout and falls back to half-blocks, so a silent terminal costs a
+    // coarser picture rather than a stall.
+    preview::detect_terminal();
     let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
     if enhanced {
         let _ = crossterm::execute!(
@@ -402,6 +408,8 @@ fn run(
             app.poll_splash();
             app.poll_turtle();
             app.poll_background_messages();
+            app.poll_previews();
+            app.refresh_rendered_previews();
             app.poll_terminal_exits();
             app.poll_git_status();
         }));

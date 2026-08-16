@@ -3,7 +3,7 @@ use anyhow::Result;
 use ratatui::style::Style;
 use ropey::Rope;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// How lines are terminated on disk, detected on open and reapplied on save so we never
 /// silently rewrite a file's line endings (a spurious full-file diff on the first save).
@@ -40,6 +40,18 @@ pub struct Editor {
     pub cursor_col: usize,
     pub top_line: usize,
     pub left_col: usize,
+    /// Where the view was as of the last frame, and when it last moved, so the scrollbars can
+    /// show while it is moving and fade out once it settles.
+    ///
+    /// Compared once per frame rather than stamped at every call site that scrolls: the wheel,
+    /// the arrows, Go to line, folding and a resize all move the view, and one comparison
+    /// catches every one of them — including the ones added later.
+    scroll_seen: (usize, usize),
+    scroll_moved: Option<Instant>,
+    /// Bumped by every change to the text. A live preview watches it to know whether what it
+    /// drew is still what the buffer says — the cheapest honest answer to "has this moved since
+    /// I last rendered it", and far cheaper than comparing the text itself every frame.
+    revision: u64,
     pub dirty: bool,
     pub disk_mtime: Option<SystemTime>,
     pub highlighted: Vec<Vec<(Style, String)>>,
@@ -57,6 +69,10 @@ pub struct Editor {
     /// Set when the file couldn't be loaded as text (binary/undecodable, or a read error).
     /// Such a buffer is display-only and refuses to save, so we never truncate the original.
     pub read_only: bool,
+    /// Set instead of a text buffer when the file is a picture: the tab draws it rather than
+    /// pretending to hold lines. Every text operation already refuses on `read_only`, which
+    /// such a tab always is, so this only has to change what gets drawn.
+    pub preview: Option<crate::preview::Preview>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     last_edit: EditKind,
@@ -74,6 +90,9 @@ impl Editor {
             cursor_col: 0,
             top_line: 0,
             left_col: 0,
+            scroll_seen: (0, 0),
+            scroll_moved: None,
+            revision: 0,
             dirty: false,
             disk_mtime: None,
             highlighted: Vec::new(),
@@ -84,11 +103,48 @@ impl Editor {
             line_ending: LineEnding::Lf,
             final_newline: false,
             read_only: false,
+            preview: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::None,
             in_compound: false,
         }
+    }
+
+    /// Whether a file is binary, judged the way `file(1)` does: a NUL byte near the front.
+    ///
+    /// Only the head is read, on purpose. This is asked *before* deciding to open something as
+    /// text, and the files it exists to catch — pictures, PDFs — are exactly the ones it would
+    /// be wasteful to slurp whole only to throw away. A file too short to hold a NUL, or one
+    /// that cannot be read at all, is left to `open` to deal with properly.
+    pub fn looks_binary(path: &std::path::Path) -> bool {
+        use std::io::Read;
+        let Ok(mut file) = std::fs::File::open(path) else { return false };
+        let mut head = [0u8; 8192];
+        match file.read(&mut head) {
+            Ok(n) => head[..n].contains(&0),
+            Err(_) => false,
+        }
+    }
+
+    /// A tab that shows a file instead of holding it: read-only, no buffer, and a picture on
+    /// its way. There is deliberately no rope behind it — an empty one that pretended to be the
+    /// file's contents is exactly what this replaces.
+    /// Whether this tab is a rendered view of another buffer rather than a file of its own.
+    pub fn is_rendered_view(&self) -> bool {
+        self.preview.as_ref().is_some_and(|p| p.source.is_some())
+    }
+
+    pub fn preview(path: PathBuf, preview: crate::preview::Preview) -> Self {
+        let mut editor = Editor::empty();
+        // Recorded up front like any other opened file, so the watcher that re-renders a
+        // changed preview has a baseline. Left unset, every tab would look stale the instant it
+        // opened and render itself twice.
+        editor.disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        editor.path = Some(path);
+        editor.read_only = true;
+        editor.preview = Some(preview);
+        editor
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -184,6 +240,7 @@ impl Editor {
         self.rope = Rope::from_str(&content.replace("\r\n", "\n"));
         self.disk_mtime = Some(mtime);
         self.syntax_dirty = true;
+        self.revision = self.revision.wrapping_add(1);
         self.folds.clear();
         // A silent reload starts a fresh edit timeline; the old history refers to gone text.
         self.undo_stack.clear();
@@ -196,10 +253,13 @@ impl Editor {
     }
 
     pub fn title(&self, lang: Lang) -> String {
-        match &self.path {
+        let name = match &self.path {
             Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             None => i18n::t(lang, Key::UntitledFile).to_string(),
-        }
+        };
+        // A rendered view sits in the strip beside the very file it renders, under the same
+        // name. The glyph is what tells the two apart at a glance, without reading.
+        if self.is_rendered_view() { format!("\u{25a4} {name}") } else { name }
     }
 
     pub fn line_char_len(&self, line: usize) -> usize {
@@ -332,8 +392,7 @@ impl Editor {
         self.cursor_line = snap.cursor_line.min(max_line);
         self.cursor_col = snap.cursor_col.min(self.line_char_len(self.cursor_line));
         self.selection_anchor = None;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
         self.folds.clear();
     }
 
@@ -389,8 +448,7 @@ impl Editor {
             self.cursor_col = c0;
             self.selection_anchor = None;
             self.selection_block = false;
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
             return true;
         }
         let Some(((sl, sc), (el, ec))) = self.selection_range() else { return false };
@@ -400,8 +458,7 @@ impl Editor {
         self.cursor_line = sl;
         self.cursor_col = sc;
         self.selection_anchor = None;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
         true
     }
 
@@ -430,8 +487,7 @@ impl Editor {
                 *ac += tab_size;
             }
         }
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     pub fn outdent_selection(&mut self, tab_size: usize) {
@@ -461,8 +517,7 @@ impl Editor {
         if let (Some((_, ac)), Some(len)) = (self.selection_anchor.as_mut(), anchor_len) {
             *ac = (*ac).min(len);
         }
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -471,8 +526,7 @@ impl Editor {
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
         self.rope.insert_char(idx, ch);
         self.cursor_col += 1;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     fn char_before_cursor(&self) -> Option<char> {
@@ -515,8 +569,7 @@ impl Editor {
             let pair: String = [ch, close].iter().collect();
             self.rope.insert(idx, &pair);
             self.cursor_col += 1; // land between the pair
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
             return;
         }
         self.insert_char(ch);
@@ -541,8 +594,7 @@ impl Editor {
                     let idx = self.cursor_char_idx();
                     self.rope.insert(idx, &insertion);
                     self.set_cursor_char_idx(idx + 1 + mid.chars().count());
-                    self.dirty = true;
-                    self.syntax_dirty = true;
+                    self.mark_edited();
                     return;
                 }
             }
@@ -557,8 +609,7 @@ impl Editor {
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
         self.rope.insert(idx, s);
         self.cursor_col += s.chars().count();
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     /// Inserts possibly multi-line text (e.g. a clipboard paste), splitting on '\n'. The
@@ -597,8 +648,7 @@ impl Editor {
             self.rope.insert(insert_idx, &indent);
             self.cursor_col = indent.chars().count();
         }
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     pub fn backspace(&mut self) {
@@ -613,8 +663,7 @@ impl Editor {
                 let idx = self.cursor_char_idx();
                 self.rope.remove(idx - 1..idx + 1);
                 self.cursor_col -= 1;
-                self.dirty = true;
-                self.syntax_dirty = true;
+                self.mark_edited();
                 return;
             }
         }
@@ -623,16 +672,14 @@ impl Editor {
             let idx = self.char_idx(self.cursor_line, self.cursor_col);
             self.rope.remove(idx - 1..idx);
             self.cursor_col -= 1;
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
         } else if self.cursor_line > 0 {
             let prev_len = self.line_char_len(self.cursor_line - 1);
             let idx = self.char_idx(self.cursor_line, 0);
             self.rope.remove(idx - 1..idx);
             self.cursor_line -= 1;
             self.cursor_col = prev_len;
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
         }
     }
 
@@ -644,8 +691,7 @@ impl Editor {
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
         if idx < self.rope.len_chars() {
             self.rope.remove(idx..idx + 1);
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
         }
     }
 
@@ -898,8 +944,7 @@ impl Editor {
             self.checkpoint(EditKind::Delete);
             self.rope.remove(start..end);
             self.set_cursor_char_idx(start);
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
         }
     }
 
@@ -912,8 +957,7 @@ impl Editor {
         if start < end {
             self.checkpoint(EditKind::Delete);
             self.rope.remove(start..end);
-            self.dirty = true;
-            self.syntax_dirty = true;
+            self.mark_edited();
         }
     }
 
@@ -937,8 +981,7 @@ impl Editor {
             self.rope.insert(line_end, &format!("\n{content}"));
         }
         self.cursor_line += 1;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     /// Swaps lines `a` and `a+1` (`b`), preserving whether the block ends with a newline.
@@ -974,8 +1017,7 @@ impl Editor {
         let line = self.cursor_line;
         self.swap_adjacent_lines(line - 1, line);
         self.cursor_line -= 1;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     pub fn move_line_down(&mut self) {
@@ -986,8 +1028,7 @@ impl Editor {
         self.checkpoint(EditKind::Other);
         self.swap_adjacent_lines(line, line + 1);
         self.cursor_line += 1;
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     /// Toggles a line comment (`token`) on the current line or every line in the selection:
@@ -1028,8 +1069,7 @@ impl Editor {
             }
         }
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
-        self.dirty = true;
-        self.syntax_dirty = true;
+        self.mark_edited();
     }
 
     /// Moves the cursor to the start of `line_1based` (clamped to the document), clearing
@@ -1072,8 +1112,39 @@ impl Editor {
         self.rope.insert(start, text);
         self.selection_anchor = None;
         self.set_cursor_char_idx(start + text.chars().count());
+        self.mark_edited();
+    }
+
+    /// Marks the buffer changed: unsaved, needing re-highlighting, and one revision newer.
+    ///
+    /// One call rather than the three assignments it replaces, so an edit added later cannot
+    /// quietly forget one of them — which is how a live preview would end up showing text that
+    /// is no longer there.
+    fn mark_edited(&mut self) {
         self.dirty = true;
         self.syntax_dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// How many times the text has changed. Compared, never interpreted.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Notes whether the view moved since the last frame. Called once per frame by the renderer,
+    /// which is the only place that sees every kind of scroll, whatever caused it.
+    pub fn observe_scroll(&mut self) {
+        let now = (self.top_line, self.left_col);
+        if now != self.scroll_seen {
+            self.scroll_seen = now;
+            self.scroll_moved = Some(Instant::now());
+        }
+    }
+
+    /// Whether the view moved within `window`, for deciding if a scrollbar still has a reason
+    /// to be on screen.
+    pub fn scrolled_within(&self, window: Duration) -> bool {
+        self.scroll_moved.is_some_and(|at| at.elapsed() < window)
     }
 
     pub fn adjust_scroll(&mut self, viewport_height: usize, viewport_width: usize) {
@@ -1507,5 +1578,74 @@ mod tests {
         assert!(msg.is_some());
         assert_eq!(ed.rope.to_string(), "changed on disk");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What decides whether opening a file makes a buffer or shows the file instead, so it has
+    /// to be right about ordinary source files above all: calling one of those binary would
+    /// send it to a terminal instead of opening it.
+    #[test]
+    fn binary_is_judged_from_the_head_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("clee_bin_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p
+        };
+
+        assert!(!Editor::looks_binary(&write("a.rs", b"fn main() {}\n")));
+        assert!(!Editor::looks_binary(&write("empty.txt", b"")));
+        // Accented text is multi-byte UTF-8, never NUL — the case a naive byte check gets wrong.
+        assert!(!Editor::looks_binary(&write("it.md", "però è così — ok\n".as_bytes())));
+
+        // A PNG's signature carries NULs in its first bytes.
+        assert!(Editor::looks_binary(&write("i.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")));
+        assert!(Editor::looks_binary(&write("mid.bin", b"text then\x00a nul")));
+
+        // Only the head is read, so a NUL past it is not found — deliberate, and the reason a
+        // 20 MB picture is not slurped whole just to be classified.
+        let mut late = vec![b'x'; 9000];
+        late.push(0);
+        assert!(!Editor::looks_binary(&write("late.bin", &late)));
+
+        // A file that isn't there is not binary; opening it reports its own error.
+        assert!(!Editor::looks_binary(&dir.join("nope.txt")));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The scrollbars appear off one comparison made once a frame, so what counts as "the view
+    /// moved" has to be exactly that and nothing else — editing or moving the cursor within the
+    /// visible text must not flash them up.
+    #[test]
+    fn only_a_moved_view_counts_as_scrolling() {
+        let window = Duration::from_millis(500);
+        let mut ed = Editor::empty();
+
+        // A first look at a view that has never moved is not a scroll.
+        ed.observe_scroll();
+        assert!(!ed.scrolled_within(window));
+
+        ed.top_line = 12;
+        ed.observe_scroll();
+        assert!(ed.scrolled_within(window));
+
+        // Frames where nothing moves leave the timestamp where it was rather than refreshing
+        // it, which is what lets the bars ever fade out.
+        ed.observe_scroll();
+        assert!(!ed.scrolled_within(Duration::ZERO));
+
+        // Sideways counts too, and is what the horizontal bar rides on.
+        ed.left_col = 40;
+        ed.observe_scroll();
+        assert!(ed.scrolled_within(window));
+
+        // Typing moves the cursor, not the view: no bar.
+        let mut quiet = Editor::empty();
+        quiet.observe_scroll();
+        quiet.cursor_col = 7;
+        quiet.dirty = true;
+        quiet.observe_scroll();
+        assert!(!quiet.scrolled_within(window));
     }
 }

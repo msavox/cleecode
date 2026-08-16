@@ -25,7 +25,20 @@ be **rectangular** — `Alt`+drag for a column selection over ragged text.
 
 `Ctrl+L` splits the editor into two panes, each with its own tab strip and Run button. Files
 changed underneath you are reloaded when they are not dirty, and a binary or non-UTF-8 file opens
-read-only rather than being corrupted on save.
+read-only rather than being corrupted on save. Scrollbars appear inside the frame while the view
+moves or the pointer rests on them, and they are working controls: drag the thumb, click the
+groove to jump, click the end arrows to step a line.
+
+Pictures, PDFs and Markdown open as themselves. A `.png` gets a tab that draws it — real pixels
+on a terminal with a graphics protocol (kitty, iTerm2, sixel), coloured half-blocks elsewhere —
+instead of the blank read-only buffer a binary file used to give. A PDF opens as pages, turned
+with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
+Run, and the page beside it is the one you just typeset.
+
+Markdown gets a live preview beside the source — one file, two tabs, one copy of the text.
+Where `pandoc` is installed it is a real document, so pictures the text refers to appear in the
+flow of it; elsewhere it falls back to styled terminal text. CleeCode draws all of it itself, so
+it works over `ssh` too.
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.
@@ -41,8 +54,17 @@ seam, and they collapse when their shell exits.
 The keys respect that: a focused terminal keeps every `Ctrl` chord for the program running in it.
 `Ctrl+J` is Enter to a shell, `Ctrl+E` is end-of-line, and the editor does not steal either.
 
-`▶ Run` runs the current file with the interpreter the venv selector names — configurable per
-extension in `settings.toml`, with interpreters off `PATH` under `[interpreter_paths]`.
+Each shell keeps its scrolled-off output. The wheel walks back through it, typing returns to the
+live end, and output arriving while you read back does not drag the page away. The same
+scrollbar the editor has shows where in the history you are.
+
+`▶ Run` runs the current file in an idle terminal. The button beside it says what Run will use
+on *this* file and changes it: the venv selector on a `.py` file, and on any file type the run
+command for its extension — `{file}`, `{dir}`, `{name}` and `{stem}` to build it, so a `.tex`
+file can typeset and open its own PDF, and `chafa` will put a `.png` in a terminal pane beside
+its output. A command can be shared by every project or kept in the project's own `.cleecode.toml`,
+which wins and is meant to be committed with it. Interpreters off `PATH` go under
+`[interpreter_paths]`.
 
 ### Workspaces
 

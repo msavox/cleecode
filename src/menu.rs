@@ -16,7 +16,7 @@ pub enum MenuAction {
     CloseTerminal,
     Save,
     SaveAs,
-    SelectVenv,
+    RunTarget,
     Quit,
     ShowAbout,
     Copy,
@@ -85,7 +85,7 @@ impl MenuAction {
         MenuAction::CloseTerminal,
         MenuAction::Save,
         MenuAction::SaveAs,
-        MenuAction::SelectVenv,
+        MenuAction::RunTarget,
         MenuAction::Quit,
         MenuAction::ShowAbout,
         MenuAction::Copy,
@@ -243,7 +243,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuRun,
             items: vec![
                 item(Key::ItemRunFile, MenuAction::RunFile, Some("Ctrl+Shift+R")),
-                group(Key::ItemSelectVenv, MenuAction::SelectVenv, None),
+                group(Key::ItemRunTarget, MenuAction::RunTarget, None),
             ],
         },
         MenuDef {

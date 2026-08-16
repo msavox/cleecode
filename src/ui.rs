@@ -6,8 +6,13 @@ use crate::settings;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::Frame;
+use ratatui_image::StatefulImage;
+use std::time::Duration;
 
 pub struct Areas {
     pub menu_bar: Rect,
@@ -193,10 +198,13 @@ impl TabStrip {
 }
 
 /// Width each tab occupies: `" title* "` plus the `×` glyph and a trailing space.
-pub fn tab_widths(app: &App) -> Vec<u16> {
+/// The width of each tab in one pane's strip. Per pane, not per buffer: the two halves of a
+/// split hold different files, so they have different strips.
+pub fn tab_widths(app: &App, pane: EditorPane) -> Vec<u16> {
     let lang = app.settings.lang;
-    app.editors
+    app.pane_tabs(pane)
         .iter()
+        .filter_map(|&i| app.editors.get(i))
         .map(|editor| {
             let dirty = if editor.dirty { "*" } else { "" };
             let prefix = format!(" {}{} ", editor.title(lang), dirty);
@@ -283,8 +291,23 @@ pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize) -> TabStrip {
     }
 }
 
-fn run_button_label(lang: Lang) -> String {
-    format!(" \u{25b6} {} ", i18n::t(lang, Key::ToolbarRun))
+/// The action button. On a preview tab it is a refresh — the file is already being shown, so
+/// "run" would mean nothing there, and a button that means nothing is worse than one that means
+/// something small.
+fn run_button_label(app: &App, idx: usize) -> String {
+    let key = if app.editors.get(idx).is_some_and(|e| e.preview.is_some()) {
+        Key::ToolbarRefresh
+    } else {
+        Key::ToolbarRun
+    };
+    let label = i18n::t(app.settings.lang, key);
+    // Padded to whichever of the two words is longer, so switching to a preview tab cannot
+    // shift the toolbar sideways under the pointer.
+    let width = i18n::t(app.settings.lang, Key::ToolbarRun)
+        .chars()
+        .count()
+        .max(i18n::t(app.settings.lang, Key::ToolbarRefresh).chars().count());
+    format!(" \u{25b6} {label:<width$} ")
 }
 
 /// Short label for a venv in the toolbar. A nickname from `registered_venvs` wins, since it
@@ -311,33 +334,83 @@ pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) ->
     name
 }
 
-fn venv_button_label(app: &App) -> String {
-    // The selected venv is remembered globally, so opening a project that doesn't have it left
-    // the button naming a venv that isn't there while runs quietly fell back to system python.
-    // The label follows what would actually be used.
-    match crate::app::effective_venv(app.settings.active_venv.as_deref(), &app.available_venvs) {
-        Some(name) => format!(" venv: {} \u{25be} ", venv_display_name(name, &app.settings.registered_venvs)),
-        None => format!(" {} \u{25be} ", i18n::t(app.settings.lang, Key::ToolbarVenvNone)),
+/// The program a run command starts with, as the toolbar should name it: the first word,
+/// reduced to its file name when the template spells out a whole path.
+///
+/// Split the way a shell would, so a program path quoted because it has spaces in it — the
+/// usual shape on Windows — is one token rather than two. Both separators are cut on either
+/// platform: a settings.toml is copied between machines.
+pub fn run_program_name(template: &str) -> String {
+    let program = shell_words::split(template)
+        .ok()
+        .and_then(|words| words.into_iter().next())
+        .unwrap_or_else(|| template.split_whitespace().next().unwrap_or("").to_string());
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(&program);
+    name.strip_suffix(".exe").unwrap_or(name).to_string()
+}
+
+/// What the run-target button says about the buffer at `idx`: the answer to "what will Run use
+/// on this file". For a python file that is which interpreter — the venv, the one choice that
+/// isn't already written in the run command. For everything else it is the command's program,
+/// or that there is no command yet.
+pub fn run_target_text(app: &App, idx: usize) -> String {
+    let lang = app.settings.lang;
+    let ext = app.editor_ext(idx);
+    if crate::app::is_python_ext(&ext) {
+        // The selected venv is remembered globally, so opening a project that doesn't have it
+        // left the button naming a venv that isn't there while runs quietly fell back to system
+        // python. The label follows what would actually be used.
+        return match crate::app::effective_venv(app.settings.active_venv.as_deref(), &app.available_venvs) {
+            Some(name) => format!("venv: {}", venv_display_name(name, &app.settings.registered_venvs)),
+            None => i18n::t(lang, Key::ToolbarVenvNone).to_string(),
+        };
+    }
+    match app.run_command_for(&ext) {
+        Some(template) => run_program_name(template),
+        None => i18n::t(lang, Key::ToolbarRunNone).to_string(),
     }
 }
 
+/// Truncates to `width` columns, marking that it was cut.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars().take(width.saturating_sub(1)).chain(std::iter::once('\u{2026}')).collect()
+}
+
+/// Columns the run-target button takes, padding and drop-down arrow included.
+///
+/// Sized for the widest label any *open* file would put there, not for the file on screen: the
+/// label now changes with the active tab, and letting the button's width follow it would resize
+/// the tab strip — shuffling the tabs sideways — every time you switched tab.
+pub fn run_target_button_width(app: &App) -> u16 {
+    let widest =
+        (0..app.editors.len()).map(|i| run_target_text(app, i).chars().count() as u16).max().unwrap_or(0);
+    // A leading space, then " \u{25be} " after the text.
+    (widest + 4).clamp(14, 26)
+}
+
+fn run_target_button_label(app: &App, idx: usize) -> String {
+    let width = run_target_button_width(app) as usize - 4;
+    format!(" {:<width$} \u{25be} ", fit(&run_target_text(app, idx), width))
+}
+
 /// Relative (start, end) ranges for the right-aligned toolbar buttons that fit within
-/// `area_width`: the venv selector (dropped first if there isn't room for both) and the Run
-/// button. Their space is reserved up front, independent of how many tabs are open — the tab
+/// `area_width`: the run-target selector (dropped first if there isn't room for both) and the
+/// Run button. Their space is reserved up front, independent of how many tabs are open — the tab
 /// strip scrolls instead of pushing the buttons off the bar — but they yield once fewer than
 /// `MIN_TAB_STRIP` columns would be left for the tabs themselves.
-pub fn toolbar_button_ranges(
-    app: &App,
-    area_width: u16,
-    with_venv: bool,
-) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
-    let run_w = run_button_label(app.settings.lang).chars().count() as u16;
-    let venv_w = venv_button_label(app).chars().count() as u16;
+///
+/// Pane-independent, because the target button's width is too: only its text differs per pane.
+pub fn toolbar_button_ranges(app: &App, area_width: u16) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
+    let run_w = run_button_label(app, 0).chars().count() as u16;
+    let target_w = run_target_button_width(app);
 
-    if with_venv && venv_w + run_w + MIN_TAB_STRIP <= area_width {
+    if target_w + run_w + MIN_TAB_STRIP <= area_width {
         let run_start = area_width - run_w;
-        let venv_start = run_start - venv_w;
-        (Some((venv_start, venv_start + venv_w)), Some((run_start, run_start + run_w)))
+        let target_start = run_start - target_w;
+        (Some((target_start, target_start + target_w)), Some((run_start, run_start + run_w)))
     } else if run_w + MIN_TAB_STRIP <= area_width {
         let run_start = area_width - run_w;
         (None, Some((run_start, run_start + run_w)))
@@ -347,9 +420,9 @@ pub fn toolbar_button_ranges(
 }
 
 /// Columns available to the tab strip once the toolbar buttons have taken their place.
-pub fn tab_strip_width(app: &App, area_width: u16, with_venv: bool) -> u16 {
-    let (venv_range, run_range) = toolbar_button_ranges(app, area_width, with_venv);
-    match venv_range.or(run_range) {
+pub fn tab_strip_width(app: &App, area_width: u16) -> u16 {
+    let (target_range, run_range) = toolbar_button_ranges(app, area_width);
+    match target_range.or(run_range) {
         Some((start, _)) => start,
         None => area_width,
     }
@@ -421,20 +494,22 @@ pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, full: Rect) -> Rect {
     }
 }
 
-/// Where the venv drop-down hangs: directly under its toolbar button, in the left/only editor
-/// pane's tab bar. `None` when that button isn't on screen, in which case there is nothing to
-/// drop down from. Shared by the renderer and by click handling, so both agree on the rows.
-pub fn venv_dropdown_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
-    let pane = editor_pane_rects(editor_area, app.split_view, app.settings.split_pct).first().copied()?;
+/// Where the run-target drop-down hangs: directly under the toolbar button of the pane it was
+/// opened from. `None` when that button isn't on screen, in which case there is nothing to drop
+/// down from. Shared by the renderer and by click handling, so both agree on the rows.
+pub fn run_menu_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
+    let menu = app.run_menu.as_ref()?;
+    let panes = editor_pane_rects(editor_area, app.split_view, app.settings.split_pct);
+    // A split closed while the menu was open leaves no right pane to hang from.
+    let pane = panes.get(menu.pane.index()).or_else(|| panes.first()).copied()?;
     let (tab_bar, _) = split_editor_area(pane);
     if tab_bar.height == 0 {
         return None;
     }
-    // The venv selector only ever renders in the left/only pane, hence with_venv = true.
-    let (venv_range, _) = toolbar_button_ranges(app, tab_bar.width, true);
-    let (start, _) = venv_range?;
+    let (target_range, _) = toolbar_button_ranges(app, tab_bar.width);
+    let (start, _) = target_range?;
 
-    let rows = app.venv_dropdown_rows();
+    let rows = app.run_menu_rows();
     let widest = rows
         .iter()
         .map(|r| r.label.chars().count() + r.detail.as_ref().map_or(0, |d| d.chars().count() + 3))
@@ -599,11 +674,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_save_as_modal(f, app, f.area());
     }
     // Drawn after the panes so it overlays the editor it hangs over.
-    if app.venv_dropdown.is_some() {
-        draw_venv_dropdown(f, app, areas.editor, f.area());
+    if app.run_menu.is_some() {
+        draw_run_menu(f, app, areas.editor, f.area());
     }
     if app.venv_register.is_some() {
         draw_venv_register_modal(f, app, f.area());
+    }
+    if app.run_command_edit.is_some() {
+        draw_run_command_modal(f, app, f.area());
     }
     if app.find.is_some() {
         draw_find_modal(f, app, f.area());
@@ -1147,19 +1225,21 @@ fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
     draw_input_modal(f, full, title, prompt, &app.new_entry_input);
 }
 
-fn draw_venv_dropdown(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
-    let Some(selected) = app.venv_dropdown else { return };
-    let Some(rect) = venv_dropdown_rect(app, editor_area, full) else { return };
+fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
+    let Some(menu) = app.run_menu.as_ref() else { return };
+    let Some(rect) = run_menu_rect(app, editor_area, full) else { return };
     f.render_widget(Clear, rect);
     let block = Block::default()
-        .title(format!(" {} ", i18n::t(app.settings.lang, Key::VenvPickerTitle)))
+        // Named after the extension, so it is plain that what's chosen here applies to every
+        // file of this kind rather than only to the one on screen.
+        .title(format!(" {} \u{00b7} .{} ", i18n::t(app.settings.lang, Key::RunMenuTitle), menu.ext))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
     let items: Vec<ListItem> = app
-        .venv_dropdown_rows()
+        .run_menu_rows()
         .into_iter()
         .map(|row| {
             let marker = if row.active { "● " } else { "  " };
@@ -1173,8 +1253,42 @@ fn draw_venv_dropdown(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
 
     let list = List::new(items).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
     let mut state = ListState::default();
-    state.select(Some(selected));
+    state.select(Some(menu.selected));
     f.render_stateful_widget(list, inner, &mut state);
+}
+
+/// The run command for one extension, typed in full. Its own box rather than the shared
+/// single-line one: a command line is long, and the placeholders are worth spelling out where
+/// they are being typed instead of leaving them to the manual.
+fn draw_run_command_modal(f: &mut Frame, app: &App, full: Rect) {
+    let Some((ext, scope)) = app.run_command_edit.as_ref() else { return };
+    let lang = app.settings.lang;
+    let rect = centered_rect(84, 7, full);
+    f.render_widget(Clear, rect);
+    // The file being written is named in the title. Two boxes that look alike but land in
+    // different places is exactly the confusion worth spending a title on.
+    let where_ = match scope {
+        crate::app::RunScope::Global => "settings.toml".to_string(),
+        crate::app::RunScope::Project => crate::settings::PROJECT_FILE.to_string(),
+    };
+    let block = Block::default()
+        .title(format!(" {} .{ext} \u{2192} {where_} ", i18n::t(lang, Key::RunMenuTitle)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let dim = Style::default().fg(Color::DarkGray);
+    let lines = vec![
+        Line::from(i18n::msg_run_command_prompt(lang, *scope)),
+        Line::from(Span::styled(app.run_command_input.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(""),
+        Line::from(Span::styled(i18n::msg_run_command_placeholders(lang), dim)),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+    // Clamped so a command longer than the box doesn't park the caret outside it.
+    let cursor_x = (inner.x + app.run_command_input.chars().count() as u16)
+        .min(inner.x + inner.width.saturating_sub(1));
+    f.set_cursor_position((cursor_x, inner.y + 1));
 }
 
 fn draw_venv_register_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -1526,22 +1640,28 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
     result
 }
 
-fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_venv: bool, pane: EditorPane) {
+fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pane: EditorPane) {
     let lang = app.settings.lang;
     let mut spans = Vec::new();
-    let strip_width = tab_strip_width(app, area.width, with_venv);
-    let strip = tab_strip_layout(&tab_widths(app), strip_width, app.tab_offsets[pane.index()]);
+    let strip_width = tab_strip_width(app, area.width);
+    let tabs = app.pane_tabs(pane);
+    let strip = tab_strip_layout(&tab_widths(app, pane), strip_width, app.tab_offsets[pane.index()]);
     let arrow_style = Style::default().fg(Color::Gray).bg(Color::DarkGray);
     if strip.left_arrow.is_some() {
         spans.push(Span::styled(SCROLL_LEFT_GLYPH, arrow_style));
     }
     let mut used = strip.tabs.first().map(|t| t.full.0).unwrap_or(0);
-    for (offset, editor) in app.editors[strip.first..].iter().take(strip.tabs.len()).enumerate() {
-        let i = strip.first + offset;
+    for (offset, &editor_idx) in tabs[strip.first.min(tabs.len())..]
+        .iter()
+        .take(strip.tabs.len())
+        .enumerate()
+    {
+        let Some(editor) = app.editors.get(editor_idx) else { continue };
+        let position = strip.first + offset;
         let dirty = if editor.dirty { "*" } else { "" };
         let prefix = format!(" {}{} ", editor.title(lang), dirty);
         used += prefix.chars().count() as u16 + 2; // + close glyph + trailing space
-        let style = if i == active_idx {
+        let style = if position == active_position {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
@@ -1558,59 +1678,134 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_idx: usize, with_ve
         spans.push(Span::styled(SCROLL_RIGHT_GLYPH, arrow_style));
         used = start + ARROW_W;
     }
-    let (venv_range, run_range) = toolbar_button_ranges(app, area.width, with_venv);
-    if let Some((start, _)) = venv_range.or(run_range) {
+    let (target_range, run_range) = toolbar_button_ranges(app, area.width);
+    if let Some((start, _)) = target_range.or(run_range) {
         let pad = start.saturating_sub(used);
         if pad > 0 {
             spans.push(Span::raw(" ".repeat(pad as usize)));
         }
     }
-    if venv_range.is_some() {
-        let label = venv_button_label(app);
+    if target_range.is_some() {
+        let label = run_target_button_label(app, app.pane_editor_index(pane));
         spans.push(Span::styled(label, Style::default().fg(Color::Gray).bg(Color::DarkGray)));
     }
     if run_range.is_some() {
-        let label = run_button_label(lang);
+        let label = run_button_label(app, app.pane_editor_index(pane));
         spans.push(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A picture in a tab: drawn by CleeCode itself, straight down the stdout ratatui already
+/// writes on, so it reaches the host terminal's graphics protocol where there is one and falls
+/// back to coloured half-blocks where there is not.
+///
+/// While it decodes, and when it cannot be decoded at all, the frame says so in the middle
+/// rather than sitting empty — an empty frame is exactly the silence this feature exists to
+/// replace.
+fn draw_preview_pane(f: &mut Frame, app: &mut App, idx: usize, content_area: Rect, focused: bool) {
+    use crate::preview::State as Preview;
+    let lang = app.settings.lang;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(focused, app.layout_resize_active()));
+    let inner = block.inner(content_area);
+    f.render_widget(block, content_area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let centred = |f: &mut Frame, text: String, colour: Color| {
+        let width = (text.chars().count() as u16).min(inner.width);
+        let rect = Rect {
+            x: inner.x + inner.width.saturating_sub(width) / 2,
+            y: inner.y + inner.height / 2,
+            width,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(colour))), rect);
+    };
+
+    // A document says which page it is on, along the bottom border where the horizontal
+    // scrollbar would be on a text tab — a page is what "where am I" means here.
+    if let Some(pages) = app.editors[idx].preview.as_ref().and_then(|p| p.pages.as_ref()) {
+        let label = match pages.total {
+            Some(total) => i18n::msg_page_of(lang, pages.current, total),
+            None => i18n::msg_page(lang, pages.current),
+        };
+        let width = (label.chars().count() as u16).min(content_area.width.saturating_sub(2));
+        if content_area.height >= 2 && width > 0 {
+            let rect = Rect {
+                x: content_area.x + content_area.width.saturating_sub(width + 2),
+                y: content_area.y + content_area.height - 1,
+                width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(label, Style::default().fg(Color::Gray))),
+                rect,
+            );
+        }
+    }
+
+    // Read before the buffer is borrowed mutably for its preview state.
+    let top_line = app.editors[idx].top_line;
+    match app.editors[idx].preview.as_mut().map(|p| &mut p.state) {
+        Some(Preview::Loading) => centred(f, i18n::msg_preview_loading(lang), Color::DarkGray),
+        Some(Preview::Failed(reason)) => {
+            let text = i18n::msg_preview_failed(lang, &reason.clone());
+            centred(f, text, Color::Red);
+        }
+        Some(Preview::Ready(protocol)) => {
+            f.render_stateful_widget(StatefulImage::default(), inner, protocol.as_mut());
+        }
+        Some(Preview::Rendered { lines, .. }) => {
+            // Wrapped here rather than when the lines were made: they are logical lines, and
+            // this is the only place that knows how wide the pane happens to be right now.
+            let scroll = top_line.min(lines.len().saturating_sub(1)) as u16;
+            let text = ratatui::text::Text::from(lines.clone());
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).scroll((scroll, 0)), inner);
+        }
+        None => {}
+    }
 }
 
 fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let panes = editor_pane_rects(area, app.split_view, app.settings.split_pct);
     if panes.len() == 1 {
         let focused = app.focus == Focus::Editor;
-        draw_editor_pane(f, app, panes[0], app.active_editor, focused, true, EditorPane::Left);
+        draw_editor_pane(f, app, panes[0], app.active_editor, focused, EditorPane::Left);
         return;
     }
     let left_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Left;
     let right_focused = app.focus == Focus::Editor && app.editor_pane_focus == EditorPane::Right;
-    // Both panes get a Run button so either focused file can be run; the (global) venv
-    // selector stays on the left pane only to avoid a redundant, space-hungry duplicate.
-    draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, true, EditorPane::Left);
-    draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, false, EditorPane::Right);
+    // Both panes carry both buttons: each describes the file in its own pane, so on the right
+    // one they are not the duplicate the venv-only selector would have been.
+    draw_editor_pane(f, app, panes[0], app.active_editor, left_focused, EditorPane::Left);
+    draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, EditorPane::Right);
 }
 
-fn draw_editor_pane(
-    f: &mut Frame,
-    app: &mut App,
-    area: Rect,
-    idx: usize,
-    focused: bool,
-    with_venv: bool,
-    pane: EditorPane,
-) {
+fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, pane: EditorPane) {
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
         // Only acts when the active tab changed; a manual scroll survives untouched.
-        app.reveal_active_tab(pane, tab_bar_area.width, with_venv);
-        draw_tab_bar(f, app, tab_bar_area, idx, with_venv, pane);
+        app.reveal_active_tab(pane, tab_bar_area.width);
+        // The strip is addressed by position within this pane's own tabs; `idx` is the buffer.
+        let position = app.pane_tab_position(pane);
+        draw_tab_bar(f, app, tab_bar_area, position, pane);
     }
 
     // No title here: the open tab right above already shows the filename and dirty marker.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(focused, app.layout_resize_active()));
+
+    // A picture takes the whole frame and none of the text machinery: no gutter, no wrapping,
+    // no syntax, and no scrollbars, because there is nothing to scroll through.
+    if app.editors[idx].preview.is_some() {
+        draw_preview_pane(f, app, idx, content_area, focused);
+        return;
+    }
 
     let inner = block.inner(content_area);
     let total_lines = app.editors[idx].rope.len_lines();
@@ -1692,10 +1887,84 @@ fn draw_editor_pane(
     }
     f.render_widget(paragraph, content_area);
 
+    // After the paragraph, so the bars sit over the frame it drew rather than under it.
+    app.editors[idx].observe_scroll();
+    draw_editor_scrollbars(f, app, idx, pane, content_area, viewport_height, text_width);
+
     if focused {
         let cursor_x = inner.x + gutter + app.editors[idx].cursor_col.saturating_sub(left_col) as u16;
         let cursor_y = inner.y + cursor_row as u16;
         f.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+/// The rows and text columns a pane's buffer gets, worked out from the pane's own rectangle.
+///
+/// Pure, and used by both the renderer and mouse handling, so the two agree on what a scrollbar
+/// is describing without either having to remember what the other did — the same reason the tab
+/// strip's layout is a function rather than a stored rect.
+pub fn editor_viewport(app: &App, idx: usize, pane_rect: Rect) -> (Rect, usize, usize) {
+    let (_, content_area) = split_editor_area(pane_rect);
+    let inner = inner_rect(content_area);
+    let gutter = gutter_width(app.editors[idx].rope.len_lines(), app.settings.show_line_numbers);
+    (content_area, inner.height as usize, inner.width.saturating_sub(gutter) as usize)
+}
+
+/// What a pane's scrollbar on `axis` describes: the whole content, where the view sits in it,
+/// and how much of it is on screen. `None` when it all fits, so there is no bar and a click on
+/// that border belongs to whatever lies behind it.
+pub fn editor_scroll_metrics(
+    app: &App,
+    idx: usize,
+    axis: Axis,
+    viewport_height: usize,
+    text_width: usize,
+) -> Option<(usize, usize, usize)> {
+    let editor = &app.editors[idx];
+    // The lines actually on screen, not the rows available to them: a collapsed fold hides
+    // lines without freeing rows, so counting rows would claim more of the file is in view
+    // than is.
+    let visible = editor.visible_rows_from(editor.top_line, viewport_height);
+    let (total, position, viewport) = match axis {
+        Axis::Vertical => (editor.rope.len_lines(), editor.top_line, visible.len()),
+        // Wrapped text has no sideways travel at all, so there is nothing a horizontal bar
+        // could say about it.
+        Axis::Horizontal if app.settings.word_wrap => return None,
+        Axis::Horizontal => {
+            // Measured across the lines on screen rather than the whole file: the width of a
+            // buffer is one long scan, repeated every frame, and what the bar answers — "is
+            // there more to the right of this?" — is about the text in front of you anyway.
+            let widest = visible.into_iter().map(|l| editor.line_char_len(l)).max().unwrap_or(0);
+            (widest, editor.left_col, text_width)
+        }
+    };
+    (total > viewport).then_some((total, position, viewport))
+}
+
+/// The editor's scrollbars, drawn over the frame's own borders so the text keeps every column
+/// and nothing reflows when they appear. They fade out once the view settles — a hint about
+/// where you are while you move, not permanent furniture — but come back the moment the pointer
+/// is on them, which is when they have to be aimable.
+fn draw_editor_scrollbars(
+    f: &mut Frame,
+    app: &App,
+    idx: usize,
+    pane: EditorPane,
+    area: Rect,
+    viewport_height: usize,
+    text_width: usize,
+) {
+    for axis in [Axis::Vertical, Axis::Horizontal] {
+        let engaged = app.scrollbar_engaged(crate::app::ScrollbarId::Editor(pane, axis), area, axis);
+        if !engaged && !app.editors[idx].scrolled_within(SCROLLBAR_LINGER) {
+            continue;
+        }
+        let Some((total, position, viewport)) =
+            editor_scroll_metrics(app, idx, axis, viewport_height, text_width)
+        else {
+            continue;
+        };
+        draw_scrollbar(f, area, axis, total, position, viewport, engaged);
     }
 }
 
@@ -1722,6 +1991,197 @@ pub fn terminal_close_cell(area: Rect) -> Option<(u16, u16)> {
 /// content is simply the interior, keeping selection hit-testing aligned with what is drawn.
 pub fn terminal_content_rect(area: Rect) -> Rect {
     inner_rect(area)
+}
+
+/// How long a scrollbar stays up after the last scroll before fading out again.
+const SCROLLBAR_LINGER: Duration = Duration::from_millis(1200);
+
+/// Which way a scrollbar runs. The two differ only in which border they live on and which
+/// coordinate they measure along, so everything else about them is shared.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+/// The strip a scrollbar occupies: the last column of the frame's *contents* for a vertical
+/// bar, the last row for a horizontal one — inside the frame, not on its border.
+///
+/// The border was the obvious place, since a bar drawn there costs the content nothing. It was
+/// also the wrong one: a border is already the seam you drag to resize the frame, and two
+/// controls sharing a column means aiming at either one is a gamble. Inside, the bar overlays
+/// the last column of text while it is showing, the way overlay scrollbars have always worked,
+/// and the seam is left alone.
+///
+/// `None` when the frame has no interior to spare.
+pub fn scrollbar_strip(area: Rect, axis: Axis) -> Option<Rect> {
+    let inner = inner_rect(area);
+    match axis {
+        Axis::Vertical if inner.width >= 1 && inner.height >= 2 => Some(Rect {
+            x: inner.x + inner.width - 1,
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        }),
+        // One column short of the right edge, left to the vertical bar: the two would otherwise
+        // both claim the inside corner, and a cell that belongs to two controls belongs to
+        // neither.
+        Axis::Horizontal if inner.width >= 2 && inner.height >= 1 => Some(Rect {
+            x: inner.x,
+            y: inner.y + inner.height - 1,
+            width: inner.width - 1,
+            height: 1,
+        }),
+        _ => None,
+    }
+}
+
+/// A scrollbar's parts, as drawn. Built in one place so the arrows the renderer paints and the
+/// cells a click lands on cannot drift apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScrollbarLayout {
+    /// The arrow at the low end — up, or left — which steps back by one line. Dropped, along
+    /// with its twin, on a strip too short to give up two cells and still leave a track worth
+    /// aiming at.
+    pub back: Option<Rect>,
+    pub forward: Option<Rect>,
+    /// The groove between the arrows: the thumb rides it, and a click on it jumps there.
+    pub track: Rect,
+}
+
+/// Arrows cost two of the strip's cells. Below this length the remaining track would be too
+/// short to point at, so the whole strip stays track.
+const SCROLLBAR_MIN_WITH_ARROWS: u16 = 5;
+
+pub fn scrollbar_layout(strip: Rect, axis: Axis) -> ScrollbarLayout {
+    let len = match axis {
+        Axis::Vertical => strip.height,
+        Axis::Horizontal => strip.width,
+    };
+    if len < SCROLLBAR_MIN_WITH_ARROWS {
+        return ScrollbarLayout { back: None, forward: None, track: strip };
+    }
+    let (back, forward, track) = match axis {
+        Axis::Vertical => (
+            Rect { height: 1, ..strip },
+            Rect { y: strip.y + len - 1, height: 1, ..strip },
+            Rect { y: strip.y + 1, height: len - 2, ..strip },
+        ),
+        Axis::Horizontal => (
+            Rect { width: 1, ..strip },
+            Rect { x: strip.x + len - 1, width: 1, ..strip },
+            Rect { x: strip.x + 1, width: len - 2, ..strip },
+        ),
+    };
+    ScrollbarLayout { back: Some(back), forward: Some(forward), track }
+}
+
+/// Where a position within `total` puts the thumb along a track `len` cells long, and back
+/// again. The two are each other's inverse at the ends, which is what makes dragging the thumb
+/// to the bottom of the track land on the last line rather than near it.
+///
+/// The travel is `total - viewport`: the furthest the *top* of the view can go, not the length
+/// of the content, or the last screenful would be unreachable.
+pub fn scroll_position_from_track(offset: u16, len: u16, total: usize, viewport: usize) -> usize {
+    let travel = total.saturating_sub(viewport);
+    if len <= 1 {
+        return 0;
+    }
+    // Rounded rather than truncated so the midpoint of the track is the middle of the file.
+    let cells = (len - 1) as usize;
+    (offset.min(len - 1) as usize * travel + cells / 2) / cells
+}
+
+/// Draws a scrollbar on `area`'s border: arrows at the ends, a groove, and the thumb. Nothing
+/// is drawn when the content already fits, so a bar never appears with nowhere to go.
+///
+/// `lit` marks the bar as being pointed at or dragged, which is the moment its click targets
+/// have to be legible rather than merely hinted at.
+#[allow(clippy::too_many_arguments)]
+fn draw_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    axis: Axis,
+    total: usize,
+    position: usize,
+    viewport: usize,
+    lit: bool,
+) {
+    if total <= viewport {
+        return;
+    }
+    let Some(strip) = scrollbar_strip(area, axis) else { return };
+    let layout = scrollbar_layout(strip, axis);
+
+    // The bar lies over the text, so idle it stays as small as it can be: the thumb alone, a
+    // hint about where you are. Pointed at, it becomes a control and earns the groove and the
+    // arrows that say where a click would land.
+    if lit {
+        let (back_glyph, forward_glyph) = match axis {
+            Axis::Vertical => ("\u{25b4}", "\u{25be}"),
+            Axis::Horizontal => ("\u{25c2}", "\u{25b8}"),
+        };
+        let arrow_style = Style::default().fg(Color::Gray);
+        if let Some(rect) = layout.back {
+            f.render_widget(Paragraph::new(Span::styled(back_glyph, arrow_style)), rect);
+        }
+        if let Some(rect) = layout.forward {
+            f.render_widget(Paragraph::new(Span::styled(forward_glyph, arrow_style)), rect);
+        }
+    }
+
+    let orientation = match axis {
+        Axis::Vertical => ScrollbarOrientation::VerticalRight,
+        Axis::Horizontal => ScrollbarOrientation::HorizontalBottom,
+    };
+    let mut state = ScrollbarState::new(total).position(position).viewport_content_length(viewport);
+    let mut bar = Scrollbar::new(orientation)
+        // The arrows are drawn above, into cells this widget never sees, so hit testing and
+        // painting read the same layout. The thumb always rides the track between them, so it
+        // does not jump when the arrows appear.
+        .begin_symbol(None)
+        .end_symbol(None)
+        .thumb_style(Style::default().fg(Color::Cyan));
+    bar = if lit {
+        bar.track_style(Style::default().fg(Color::DarkGray))
+    } else {
+        // Nothing but the thumb: a groove painted over the text would blank a column of it for
+        // no gain while nobody is aiming at the bar.
+        bar.track_symbol(None)
+    };
+    f.render_stateful_widget(bar, layout.track, &mut state);
+}
+
+/// A terminal's scrollbar. Shown only when output has actually scrolled away, and then only
+/// while the history is being moved through — except when the view is parked back in it, which
+/// is the one moment the position is worth stating rather than hinting at.
+fn draw_terminal_scrollbar(
+    f: &mut Frame,
+    terminal: &crate::terminal_panel::TerminalPanel,
+    area: Rect,
+    engaged: bool,
+) {
+    let Some((total, position, viewport)) = terminal_scroll_metrics(terminal) else { return };
+    // Parked back in the history the bar stays up whether or not it is being touched: that is
+    // the one moment its position is worth stating rather than hinting at.
+    if terminal.scrollback_offset() == 0 && !engaged && !terminal.scrolled_within(SCROLLBAR_LINGER) {
+        return;
+    }
+    draw_scrollbar(f, area, Axis::Vertical, total, position, viewport, engaged);
+}
+
+/// What a terminal's scrollbar describes: the held history followed by the live screen, with
+/// the view's top sitting `offset` lines back from the end. `None` when nothing has scrolled
+/// off yet, so there is no bar and a click on that border belongs to the seam behind it.
+pub fn terminal_scroll_metrics(
+    terminal: &crate::terminal_panel::TerminalPanel,
+) -> Option<(usize, usize, usize)> {
+    let held = terminal.scrollback_lines();
+    if held == 0 {
+        return None;
+    }
+    let rows = terminal.rows as usize;
+    Some((held + rows, held - terminal.scrollback_offset(), rows))
 }
 
 /// The stretch of the top border a multi-tab window shows its tabs on: from just inside the left
@@ -1851,6 +2311,10 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     let rows = content.height;
     let cols = content.width;
+    // Read before the pane is borrowed mutably below, since it is a question about the app as a
+    // whole — where the pointer is, and what is being dragged.
+    let engaged =
+        app.scrollbar_engaged(crate::app::ScrollbarId::Terminal(index), area, Axis::Vertical);
     let Some(terminal) = app.terminals.get_mut(index).map(|w| w.active_tab_mut()) else { return };
     terminal.resize(rows, cols);
 
@@ -1874,6 +2338,10 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
         }
         return;
     }
+
+    // Read before the parser is locked below: the lock is a plain mutex, so asking the panel
+    // anything about its scrollback while holding it would deadlock the whole app.
+    draw_terminal_scrollbar(f, terminal, area, engaged);
 
     let selection = terminal.selection;
     let parser = crate::terminal_panel::lock_poisoned(&terminal.parser);
@@ -2250,5 +2718,112 @@ mod tests {
         // folder-derived label.
         assert_eq!(venv_display_name("/opt/venvs/plain", &registered), "plain");
         assert_eq!(venv_display_name("/opt/venvs/other", &registered), "other");
+    }
+
+    #[test]
+    fn the_toolbar_names_a_command_by_its_program() {
+        assert_eq!(run_program_name("pdflatex -interaction=nonstopmode {file}"), "pdflatex");
+        assert_eq!(run_program_name("octave --persist {file}"), "octave");
+        // A command spelled out as a path is still named by the program, not by the path — the
+        // button has one short slot, and the full line is in the drop-down underneath.
+        assert_eq!(run_program_name("/opt/homebrew/bin/octave-cli {file}"), "octave-cli");
+        // A Windows path has to be quoted to survive the space in "Program Files", so the
+        // program is one token and both separators lead to the same short name.
+        assert_eq!(
+            run_program_name(r#""C:\Program Files\Octave\octave-cli.exe" {file}"#),
+            "octave-cli"
+        );
+        assert_eq!(run_program_name(""), "");
+    }
+
+    #[test]
+    fn scrollbars_sit_inside_the_frame_leaving_the_border_to_the_seam() {
+        // A frame at (10,5) 40x12 has its contents at (11,6) 38x10.
+        let area = Rect { x: 10, y: 5, width: 40, height: 12 };
+        let inner = inner_rect(area);
+
+        let bar = scrollbar_strip(area, Axis::Vertical).expect("a normal frame has room");
+        // Last column of the *contents*, one in from the border — the border is the resize seam
+        // and stays entirely its own.
+        assert_eq!(bar.x, 48);
+        assert_eq!(bar.x, inner.x + inner.width - 1);
+        assert_ne!(bar.x, area.x + area.width - 1, "the border belongs to the seam");
+        assert_eq!(bar.width, 1);
+        // The full height of the contents: inside the frame there are no corners to dodge.
+        assert_eq!(bar.y, 6);
+        assert_eq!(bar.height, 10);
+
+        let bar = scrollbar_strip(area, Axis::Horizontal).expect("a normal frame has room");
+        assert_eq!(bar.y, 15);
+        assert_eq!(bar.y, inner.y + inner.height - 1);
+        assert_eq!(bar.height, 1);
+        assert_eq!(bar.x, 11);
+        // One short of the right, which is the vertical bar's column: no cell answers to both.
+        assert_eq!(bar.width, 37);
+        let vertical = scrollbar_strip(area, Axis::Vertical).unwrap();
+        assert_eq!(bar.x + bar.width, vertical.x);
+
+        // Frames too small to have an interior get no bar rather than one drawn on the border.
+        let vert = |w, h| scrollbar_strip(Rect { x: 0, y: 0, width: w, height: h }, Axis::Vertical);
+        assert_eq!(vert(2, 12), None, "no interior width");
+        assert_eq!(vert(40, 3), None, "one row of contents is not a scrollbar");
+        assert_eq!(vert(0, 0), None);
+        let horiz = |w, h| scrollbar_strip(Rect { x: 0, y: 0, width: w, height: h }, Axis::Horizontal);
+        assert_eq!(horiz(3, 12), None, "one column of contents, all of it the vertical bar's");
+        assert_eq!(horiz(40, 2), None);
+    }
+
+    /// The arrows are painted by us and hit-tested by the app off this one layout, so the cells
+    /// it hands back have to tile the strip exactly — a gap would be a dead cell, an overlap a
+    /// click that did two things.
+    #[test]
+    fn arrows_take_the_ends_and_leave_the_rest_as_track() {
+        let strip = Rect { x: 7, y: 3, width: 1, height: 10 };
+        let layout = scrollbar_layout(strip, Axis::Vertical);
+        assert_eq!(layout.back.expect("room for arrows").y, 3);
+        assert_eq!(layout.forward.expect("room for arrows").y, 12);
+        assert_eq!(layout.track.y, 4);
+        assert_eq!(layout.track.height, 8);
+
+        let strip = Rect { x: 2, y: 9, width: 12, height: 1 };
+        let layout = scrollbar_layout(strip, Axis::Horizontal);
+        assert_eq!(layout.back.expect("room for arrows").x, 2);
+        assert_eq!(layout.forward.expect("room for arrows").x, 13);
+        assert_eq!(layout.track.x, 3);
+        assert_eq!(layout.track.width, 10);
+
+        // Too short to give up two cells and still leave a track worth aiming at: no arrows,
+        // and the whole strip stays track rather than becoming two arrows and nothing between.
+        let tiny = Rect { x: 0, y: 0, width: 1, height: 4 };
+        let layout = scrollbar_layout(tiny, Axis::Vertical);
+        assert_eq!(layout.back, None);
+        assert_eq!(layout.forward, None);
+        assert_eq!(layout.track, tiny);
+    }
+
+    /// Dragging the thumb to either end of the track has to land exactly on the first and last
+    /// line, not near them — landing one short of the end is the classic scrollbar bug.
+    #[test]
+    fn the_track_maps_onto_the_whole_travel_of_the_view() {
+        // 100 lines, 20 on screen: the top of the view can travel 0..=80.
+        let pos = |offset| scroll_position_from_track(offset, 11, 100, 20);
+        assert_eq!(pos(0), 0);
+        assert_eq!(pos(10), 80, "the far end of the track is the last screenful");
+        assert_eq!(pos(5), 40, "and the middle is the middle");
+        // Past the end is clamped rather than running off.
+        assert_eq!(pos(50), 80);
+
+        // Nothing to scroll, and a track with nowhere to move, both stay at the top instead of
+        // dividing by zero.
+        assert_eq!(scroll_position_from_track(3, 11, 20, 20), 0);
+        assert_eq!(scroll_position_from_track(0, 1, 100, 20), 0);
+        assert_eq!(scroll_position_from_track(0, 0, 100, 20), 0);
+    }
+
+    #[test]
+    fn an_overlong_label_is_cut_rather_than_widening_the_button() {
+        assert_eq!(fit("go run", 10), "go run");
+        assert_eq!(fit("exactly-10", 10), "exactly-10");
+        assert_eq!(fit("venv: some/very/long/name", 10), "venv: som\u{2026}");
     }
 }

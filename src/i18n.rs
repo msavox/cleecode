@@ -71,14 +71,16 @@ pub enum Key {
     ResizeModeHint,
     MenuRun,
     ItemRunFile,
-    ItemSelectVenv,
-    VenvPickerTitle,
+    ItemRunTarget,
+    RunMenuTitle,
     VenvRegisterItem,
     VenvBrowseItem,
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
     ToolbarRun,
+    ToolbarRefresh,
     ToolbarVenvNone,
+    ToolbarRunNone,
     PanelFile,
     SettingsTitle,
     AboutTitle,
@@ -262,11 +264,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemRunFile) => "Run current file",
         (Lang::It, ItemRunFile) => "Esegui file corrente",
 
-        (Lang::En, ItemSelectVenv) => "Python venv...",
-        (Lang::It, ItemSelectVenv) => "Venv Python...",
+        (Lang::En, ItemRunTarget) => "How this file runs...",
+        (Lang::It, ItemRunTarget) => "Come si esegue questo file...",
 
-        (Lang::En, VenvPickerTitle) => "Python venv",
-        (Lang::It, VenvPickerTitle) => "Venv Python",
+        (Lang::En, RunMenuTitle) => "Run",
+        (Lang::It, RunMenuTitle) => "Esecuzione",
 
         (Lang::En, VenvRegisterItem) => "Add a venv from elsewhere on disk...",
         (Lang::It, VenvRegisterItem) => "Aggiungi un venv da un altro percorso...",
@@ -282,8 +284,14 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",
 
+        (Lang::En, ToolbarRefresh) => "Refresh",
+        (Lang::It, ToolbarRefresh) => "Aggiorna",
+
         (Lang::En, ToolbarVenvNone) => "no venv",
         (Lang::It, ToolbarVenvNone) => "no venv",
+
+        (Lang::En, ToolbarRunNone) => "no command",
+        (Lang::It, ToolbarRunNone) => "nessun comando",
 
         (Lang::En, PanelFile) => "Files",
         (Lang::It, PanelFile) => "File",
@@ -767,6 +775,69 @@ pub fn msg_scp_result(lang: Lang, ok: usize, failed: usize, target: &str) -> Str
     }
 }
 
+/// Names the protocol the picture is being drawn with. Worth saying once on opening: "kitty"
+/// and "half-blocks" look very different on screen, and knowing which one you got is the
+/// difference between "my terminal cannot do better" and "something is wrong".
+pub fn msg_preview_opened(lang: Lang, protocol: &str) -> String {
+    match lang {
+        Lang::En => format!("Preview drawn with {protocol}"),
+        Lang::It => format!("Anteprima disegnata con {protocol}"),
+    }
+}
+
+pub fn msg_page_of(lang: Lang, page: usize, total: usize) -> String {
+    match lang {
+        Lang::En => format!(" page {page} of {total} "),
+        Lang::It => format!(" pagina {page} di {total} "),
+    }
+}
+
+/// When nothing available could say how many pages there are. Paging still works, so the label
+/// states what it knows rather than hiding.
+pub fn msg_page(lang: Lang, page: usize) -> String {
+    match lang {
+        Lang::En => format!(" page {page} "),
+        Lang::It => format!(" pagina {page} "),
+    }
+}
+
+pub fn msg_markdown_preview(lang: Lang, as_document: bool) -> String {
+    match (lang, as_document) {
+        (Lang::En, true) => "Markdown preview: rendered as a document".to_string(),
+        (Lang::It, true) => "Anteprima markdown: resa come documento".to_string(),
+        (Lang::En, false) => {
+            "Markdown preview: styled text (install pandoc, and a terminal with graphics, for a document)"
+                .to_string()
+        }
+        (Lang::It, false) => {
+            "Anteprima markdown: testo con stili (per il documento servono pandoc e un terminale con grafica)"
+                .to_string()
+        }
+    }
+}
+
+pub fn msg_preview_refreshed(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Preview refreshed".to_string(),
+        Lang::It => "Anteprima aggiornata".to_string(),
+    }
+}
+
+/// While a picture is being decoded on a background thread.
+pub fn msg_preview_loading(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Loading the picture...".to_string(),
+        Lang::It => "Carico l'immagine...".to_string(),
+    }
+}
+
+pub fn msg_preview_failed(lang: Lang, reason: &str) -> String {
+    match lang {
+        Lang::En => format!("Cannot show this file: {reason}"),
+        Lang::It => format!("Non riesco a mostrare questo file: {reason}"),
+    }
+}
+
 pub fn msg_run_no_file(lang: Lang) -> String {
     match lang {
         Lang::En => "Save the file first to run it".to_string(),
@@ -776,8 +847,97 @@ pub fn msg_run_no_file(lang: Lang) -> String {
 
 pub fn msg_run_no_command(lang: Lang, ext: &str) -> String {
     match lang {
-        Lang::En => format!("No run command configured for .{ext} files (edit run_commands in settings.toml)"),
-        Lang::It => format!("Nessun comando configurato per i file .{ext} (modifica run_commands in settings.toml)"),
+        Lang::En => format!("No run command for .{ext} files — set one from the button left of Run"),
+        Lang::It => format!("Nessun comando per i file .{ext} — impostalo dal pulsante a sinistra di Esegui"),
+    }
+}
+
+/// The toolbar button on a file with no extension, which is the one thing a run command can't
+/// be keyed on.
+pub fn msg_run_no_ext(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Run commands are set per file extension, and this file has none".to_string(),
+        Lang::It => "I comandi di esecuzione si impostano per estensione, e questo file non ne ha"
+            .to_string(),
+    }
+}
+
+pub fn msg_run_command_row(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!("Run command for .{ext}..."),
+        Lang::It => format!("Comando per i file .{ext}..."),
+    }
+}
+
+pub fn msg_run_command_unset_row(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!("Set a run command for .{ext}..."),
+        Lang::It => format!("Imposta un comando per i file .{ext}..."),
+    }
+}
+
+/// Deliberately not naming the extension again: it is already in the row above and in the
+/// menu's own title, and what this row adds is the *scope*, which is the whole distinction.
+pub fn msg_run_command_project_row(lang: Lang) -> String {
+    match lang {
+        Lang::En => "...only in this project (.cleecode.toml)".to_string(),
+        Lang::It => "...solo in questo progetto (.cleecode.toml)".to_string(),
+    }
+}
+
+pub fn msg_run_command_project_set(lang: Lang, ext: &str, command: &str) -> String {
+    match lang {
+        Lang::En => format!(".{ext} runs with, in this project only: {command}"),
+        Lang::It => format!("I file .{ext}, solo in questo progetto, si eseguono con: {command}"),
+    }
+}
+
+pub fn msg_run_command_project_cleared(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!(".{ext} is back to the run command every project shares"),
+        Lang::It => format!("I file .{ext} tornano al comando condiviso da tutti i progetti"),
+    }
+}
+
+/// What emptying the box does differs by scope, and it is the one thing about this box worth
+/// saying: globally it restores the built-in default, in a project it drops the override and
+/// hands the extension back to the shared command.
+pub fn msg_run_command_prompt(lang: Lang, scope: crate::app::RunScope) -> String {
+    match (lang, scope) {
+        (Lang::En, crate::app::RunScope::Global) => "Command (empty to go back to the default):",
+        (Lang::It, crate::app::RunScope::Global) => "Comando (vuoto per tornare al predefinito):",
+        (Lang::En, crate::app::RunScope::Project) => {
+            "Command for this project (empty to use the shared one):"
+        }
+        (Lang::It, crate::app::RunScope::Project) => {
+            "Comando per questo progetto (vuoto per usare quello condiviso):"
+        }
+    }
+    .to_string()
+}
+
+/// Spelled out in the box itself: the placeholders are the whole reason a command can do more
+/// than "interpreter, then file", and nobody would go looking for them in the manual.
+pub fn msg_run_command_placeholders(lang: Lang) -> String {
+    match lang {
+        Lang::En => "{file} full path  ·  {dir} its folder  ·  {name} file name  ·  {stem} name without extension"
+            .to_string(),
+        Lang::It => "{file} percorso  ·  {dir} sua cartella  ·  {name} nome file  ·  {stem} nome senza estensione"
+            .to_string(),
+    }
+}
+
+pub fn msg_run_command_set(lang: Lang, ext: &str, command: &str) -> String {
+    match lang {
+        Lang::En => format!(".{ext} runs with: {command}"),
+        Lang::It => format!("I file .{ext} si eseguono con: {command}"),
+    }
+}
+
+pub fn msg_run_command_cleared(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!(".{ext} files have no run command now"),
+        Lang::It => format!("I file .{ext} non hanno più un comando di esecuzione"),
     }
 }
 

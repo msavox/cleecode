@@ -1,7 +1,7 @@
 .\" Man page for CleeCode. Rendered with: man docs/clee.1
 .\" Kept in roff by hand rather than generated: it is short, and a generator would be one more
 .\" thing to keep in step with the key bindings.
-.TH CLEE 1 "August 2026" "CleeCode 0.3.2" "User Commands"
+.TH CLEE 1 "August 2026" "CleeCode 0.4.0" "User Commands"
 .SH NAME
 clee \- terminal IDE with a file tree, embedded terminals and syntax highlighting
 .SH SYNOPSIS
@@ -95,7 +95,8 @@ Settings.
 Context menu for the focused frame. Right\-click does the same.
 .TP
 .B Ctrl+Shift+R
-Run the current file, using the venv the toolbar selector names.
+Run the current file. The toolbar button beside \fBRun\fR sets what it uses: the Python venv
+on a .py file, the \fB[run_commands]\fR entry for any other extension.
 .TP
 .B Ctrl+Shift+U
 Resize mode: arrows grow the focused frame, Shift+arrow shrinks it, Esc or Enter leaves.
@@ -142,6 +143,15 @@ Name the focused terminal and give it a startup command.
 .TP
 .B Shift+arrows
 Select text inside a pane. The selection goes straight to the clipboard.
+.TP
+.B Shift+PageUp, Shift+PageDown
+Move a screenful through what has scrolled off the pane. The mouse wheel does the same without
+asking for Fn, and typing anything jumps back to the live output. How much is kept is
+\fBterminal_scrollback\fR in
+.IR settings.toml ,
+2000 lines by default; a shell reads it when it starts, so a change reaches the next shell
+opened rather than the ones already running. A full\-screen program (vim, less) keeps the wheel
+for itself, having no history of its own to walk.
 .SS File tree
 .RB \(bu " n" " / " N
 new file or folder \(bu
@@ -163,14 +173,108 @@ control. A built\-in
 .B "Default layout"
 is always offered and cannot be deleted or overwritten: it is the layout to go back to when the
 frames have wandered.
+.SH PICTURES
+A picture \(em .png, .jpg, .jpeg, .gif, .webp, .bmp, .ico, .tiff \(em opens in a tab that draws
+it, rather than the blank read\-only buffer a binary file gives. There is nothing in one to edit,
+so no buffer is made for it.
+.PP
+On a terminal with a graphics protocol (kitty, iTerm2, sixel) those are real pixels; elsewhere it
+falls back to coloured half\-blocks. The status line names which was used when the tab opens.
+CleeCode writes the graphics itself rather than leaving it to a program in a terminal pane \(em a
+pane is parsed into cells and repainted, and graphics escapes do not survive that \(em which is
+also why this works over
+.BR ssh (1).
+.PP
+Decoding happens on a background thread, so opening a large picture never stalls the window or
+the shells in it. In split view a picture opens in the pane that is not focused, leaving the file
+being worked on visible; the layout itself is never rearranged. Pressing \fBRun\fR on one
+still runs its \fB[run_commands]\fR entry, which by default shows it in a terminal with
+.BR chafa (1).
+.SH MARKDOWN
+A markdown file opens as text, since that is what you do with one. \fBRun\fR beside it shows it
+rendered in the other half of the editor, splitting it if it was not already.
+.PP
+Two tabs, one file, one copy of the text: the rendered tab owns nothing and is a view of the
+buffer being typed in, so the two cannot disagree, and closing the source closes the view. A
+\fB\(bu\fR glyph tells them apart in the strip.
+.PP
+Where the terminal can draw pictures and
+.BR pandoc (1)
+is installed, the rendering is a real document \(em proper fonts, and pictures the text refers to
+appearing in the flow of it, which a grid of characters cannot do. That takes around half a
+second, so it follows pauses in typing rather than each keystroke. Without either, it falls back
+to styled terminal text, which keeps up with the keys and works anywhere. \fBRun\fR on a rendered
+tab says \fBRefresh\fR and forces it.
+.SH PDFS
+A PDF opens as pages, drawn the same way a picture is. The plain arrow keys turn them \(em
+\fB\(<-\fR/\fB\(ua\fR back, \fB\(->\fR/\fB\(da\fR on \(em with no chord to remember, since a
+preview tab has no text for a cursor to move through. The page you are on is written along the
+bottom of the frame.
+.PP
+Pages are rasterised by
+.BR pdftoppm (1)
+from poppler, or failing that by
+.BR gs (1).
+Neither is bundled: a PDF renderer CleeCode could link is either under a licence this project
+cannot take or a prebuilt binary blob per platform. With neither installed the tab says so
+rather than sitting empty; any TeX distribution brings Ghostscript with it.
+.PP
+A PDF that changes on disk is re\-rendered in place, on the page being read \(em edit the source,
+press \fBRun\fR, and the page beside it becomes the one just typeset.
+.SH RUNNING CODE
+The button to the left of \fBRun\fR names what \fBRun\fR would use on the file currently on
+screen, and opens the menu that changes it. What that menu offers follows the file's extension,
+so the button is never a control that does nothing.
+.TP
+.B Python files
+The venv selector: the virtualenvs found in the project root, plus any registered from elsewhere
+on disk. The chosen one replaces \fBpython\fR/\fBpython3\fR in the run command and is remembered
+per workspace. A venv means nothing to any other interpreter, which is why it is offered nowhere
+else.
+.TP
+.B Every file type
+The last two entries edit the run command for that extension, written to \fB[run_commands]\fR in
+.I settings.toml
+(shared by every project) or in
+.I .cleecode.toml
+in the project root (that project alone, and it wins). A \(bu marks whichever one \fBRun\fR
+would actually use. This is how a file type with no built\-in entry \(em .tex, .sql, .rs \(em
+gets one, and how one project typesets its own master file while every other .tex keeps the
+shared command. Emptying the project box drops the override; emptying the shared one restores
+the built\-in default.
+.PP
+A command may use four placeholders, each shell\-quoted so paths with spaces survive:
+.B {file}
+the whole path,
+.B {dir}
+the folder it sits in,
+.B {name}
+the file name,
+.B {stem}
+that name without its extension. The command is typed at a real shell, so steps chain as they
+read \(em
+.RB ` "pdflatex {file} && open {dir}/{stem}.pdf" '.
+.PP
+An interpreter installed outside
+.B PATH
+goes under
+.BR [interpreter_paths] ,
+mapping a program name to an absolute path. Octave on Windows is found automatically in Program
+Files, and a .m file is handed to an Octave prompt that is already open rather than starting a
+second interpreter.
 .SH FILES
 .TP
 .I ~/.config/cleecode/settings.toml
-Preferences, layout, run commands per file extension, and interpreter paths. On Windows,
+Preferences, layout, terminal scrollback, run commands per file extension, and interpreter
+paths. On Windows,
 .IR %APPDATA%\ecleecode\e .
 .TP
 .I ~/.config/cleecode/workspaces/
 One TOML file per saved workspace.
+.TP
+.I <project root>/.cleecode.toml
+Run commands belonging to one project, overriding the shared ones. Written when a per\-project
+command is set and removed when the last one goes; meant to be committed with the project.
 .TP
 .I ~/.config/cleecode/panic.log
 Written if something goes wrong internally. CleeCode contains such a failure rather than closing,

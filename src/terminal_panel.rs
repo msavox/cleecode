@@ -2,7 +2,7 @@ use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,57 @@ const STARTUP_IDLE: Duration = Duration::from_millis(250);
 /// Safety cap: reveal no matter what after this long, so a shell that keeps its pty busy
 /// (e.g. an rc that launches a long-running program) can't stay blank forever.
 const STARTUP_MAX: Duration = Duration::from_secs(12);
+
+/// How many lines of scrolled-off output each new shell keeps, set once at startup from
+/// `terminal_scrollback` in settings.toml. A global rather than a constructor argument because
+/// vt100 fixes the length at `Parser::new` and offers no setter: changing the preference can
+/// only ever affect shells opened afterwards, and threading a value through four constructors
+/// would suggest otherwise.
+static SCROLLBACK_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_SCROLLBACK);
+
+/// Matches kitty's default. Worth being deliberate about: vt100 stores whole rows of 32-byte
+/// cells at the pane's full width, so the cost is rows x columns x 32 bytes per shell — 16 MB
+/// for 2000 lines across a wide 250-column pane, and every tab pays it separately.
+pub const DEFAULT_SCROLLBACK: usize = 2000;
+
+pub fn set_scrollback_len(lines: usize) {
+    SCROLLBACK_LEN.store(lines, Ordering::Relaxed);
+}
+
+/// How many lines have scrolled off the top and are still held.
+///
+/// vt100 publishes the configured cap and the current offset, but not how much is actually
+/// stored. Asking by clamping is exact: `set_scrollback` pins the offset to the real length
+/// when handed more than that, so pushing it past the end and reading it back *is* the count.
+/// The offset in use is restored before returning, so this stays a read.
+fn held_lines(parser: &mut vt100::Parser) -> usize {
+    let screen = parser.screen_mut();
+    let current = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let total = screen.scrollback();
+    screen.set_scrollback(current);
+    total
+}
+
+/// Feeds the shell's output to the parser, keeping a reader who has scrolled back where they
+/// are.
+///
+/// vt100 counts the scrollback offset from the live screen and never adjusts it itself, so
+/// every line that scrolls off would slide the view up by one: a build printing steadily would
+/// drag the page away while it was being read. Counting what got pushed and adding it back pins
+/// the view to the same output. Once the buffer is full the oldest lines really are gone, and
+/// the `saturating_sub` lets the view drift then rather than pretending otherwise.
+fn process_anchored(parser: &mut vt100::Parser, data: &[u8]) {
+    let offset = parser.screen().scrollback();
+    if offset == 0 {
+        parser.process(data);
+        return;
+    }
+    let before = held_lines(parser);
+    parser.process(data);
+    let pushed = held_lines(parser).saturating_sub(before);
+    parser.screen_mut().set_scrollback(offset + pushed);
+}
 
 /// Locks a mutex a terminal shares with its reader thread, stepping over poison. If that
 /// thread ever panics — on a malformed escape sequence, say — `unwrap()` here would turn one
@@ -54,6 +105,10 @@ pub struct TerminalPanel {
     pub startup_command: Option<String>,
     /// The startup command, held back until the shell is actually reading. See `run_command`.
     pending_command: Option<String>,
+    /// When the history was last scrolled through. The scrollbar is a hint rather than
+    /// furniture: it appears while it is being used and fades back out, so an idle pane stays
+    /// all output and no chrome.
+    last_scroll: Option<Instant>,
 }
 
 /// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
@@ -265,7 +320,8 @@ impl TerminalPanel {
             let _ = w.flush();
         }
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser =
+            Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LEN.load(Ordering::Relaxed))));
         let parser_clone = Arc::clone(&parser);
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = Arc::clone(&exited);
@@ -287,7 +343,7 @@ impl TerminalPanel {
                         let data = &buf[..n];
                         {
                             let mut p = lock_poisoned(&parser_clone);
-                            p.process(data);
+                            process_anchored(&mut p, data);
                         }
                         last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
                         produced_clone.store(true, Ordering::Relaxed);
@@ -332,6 +388,7 @@ impl TerminalPanel {
             name: None,
             startup_command: startup.map(str::to_string),
             pending_command: None,
+            last_scroll: None,
         })
     }
 
@@ -421,6 +478,58 @@ impl TerminalPanel {
         Some(selected_text(selection, cols, |row, col| {
             screen.cell(row, col).map(|c| c.contents().to_string()).unwrap_or_default()
         }))
+    }
+
+    /// How many lines of this shell's output have scrolled off and are still held.
+    pub fn scrollback_lines(&self) -> usize {
+        held_lines(&mut lock_poisoned(&self.parser))
+    }
+
+    /// How far back through those lines the pane is currently looking; 0 is the live output.
+    pub fn scrollback_offset(&self) -> usize {
+        lock_poisoned(&self.parser).screen().scrollback()
+    }
+
+    /// Moves the view through the history. `delta` follows the wheel's sign — negative goes back
+    /// in time, positive returns towards the live output — so callers don't have to flip it
+    /// against vt100's own count-backwards offset. Both ends clamp.
+    pub fn scroll_by(&mut self, delta: isize) {
+        {
+            let mut parser = lock_poisoned(&self.parser);
+            let screen = parser.screen_mut();
+            let offset = screen.scrollback() as isize;
+            screen.set_scrollback((offset - delta).max(0) as usize);
+        }
+        self.last_scroll = Some(Instant::now());
+    }
+
+    /// Parks the view a given number of lines back from the live output, for a scrollbar being
+    /// dragged to an absolute position rather than nudged. Clamped by vt100 at the far end.
+    pub fn scroll_to_offset(&mut self, offset: usize) {
+        lock_poisoned(&self.parser).screen_mut().set_scrollback(offset);
+        self.last_scroll = Some(Instant::now());
+    }
+
+    /// Back to the live output. Typing does this: a keystroke is going to the shell, and having
+    /// its answer arrive somewhere off-screen is worse than losing your place in the history.
+    ///
+    /// Deliberately not counted as scrolling: it is a side effect of typing, and flashing the
+    /// scrollbar up on every keystroke is exactly the twitch the fade-out exists to avoid.
+    pub fn scroll_to_bottom(&self) {
+        lock_poisoned(&self.parser).screen_mut().set_scrollback(0);
+    }
+
+    /// Whether the history was scrolled within `window`, for deciding if the scrollbar still
+    /// has a reason to be on screen.
+    pub fn scrolled_within(&self, window: Duration) -> bool {
+        self.last_scroll.is_some_and(|at| at.elapsed() < window)
+    }
+
+    /// Whether a full-screen program — vim, less, any pager — is in charge of the screen. vt100
+    /// gives the alternate screen a zero-length scrollback of its own, so there is nothing to
+    /// scroll back to and the wheel belongs to that program instead of to us.
+    pub fn alternate_screen(&self) -> bool {
+        lock_poisoned(&self.parser).screen().alternate_screen()
     }
 
     /// Keeps a cell inside the screen, so a drag that leaves the pane still selects up to the
@@ -708,5 +817,109 @@ mod tests {
     fn cursor_position_response_is_one_based() {
         assert_eq!(TerminalQuery::CursorPosition.response(0, 0), b"\x1b[1;1R");
         assert_eq!(TerminalQuery::CursorPosition.response(4, 9), b"\x1b[5;10R");
+    }
+
+    /// Feeds `count` numbered lines, the way a shell printing output would.
+    fn print_lines(parser: &mut vt100::Parser, from: usize, count: usize) {
+        for i in from..from + count {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+    }
+
+    /// The top row on screen, which is what "the view has not moved" has to be checked against.
+    fn top_row(parser: &vt100::Parser) -> String {
+        let (_, cols) = parser.screen().size();
+        (0..cols)
+            .filter_map(|c| parser.screen().cell(0, c).map(|cell| cell.contents().to_string()))
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// vt100 publishes the configured cap and the current offset but not how much is stored, so
+    /// the count is asked for by clamping. It has to be exact, and it has to leave no trace:
+    /// it runs on every frame that draws a scrollbar and inside the reader thread.
+    #[test]
+    fn held_lines_counts_what_is_stored_without_moving_the_view() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        assert_eq!(held_lines(&mut parser), 0, "a fresh screen holds nothing");
+
+        print_lines(&mut parser, 0, 10);
+        let held = held_lines(&mut parser);
+        assert!(held > 0 && held < 100, "10 lines on a 4-row screen push a few off, got {held}");
+
+        // Asking must not disturb where the reader is looking.
+        parser.screen_mut().set_scrollback(3);
+        assert_eq!(held_lines(&mut parser), held);
+        assert_eq!(parser.screen().scrollback(), 3);
+
+        // Past the cap the count stops at the cap, because the oldest lines are dropped.
+        let mut small = vt100::Parser::new(4, 20, 5);
+        print_lines(&mut small, 0, 200);
+        assert_eq!(held_lines(&mut small), 5);
+    }
+
+    /// The point of the whole thing: reading back through a build's output while it is still
+    /// printing must not drag the page out from under you.
+    #[test]
+    fn output_does_not_slide_the_view_of_someone_scrolled_back() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        print_lines(&mut parser, 0, 40);
+
+        parser.screen_mut().set_scrollback(10);
+        let parked_on = top_row(&parser);
+        assert!(parked_on.starts_with("line "), "expected to be parked on output, saw {parked_on:?}");
+
+        // The shell keeps printing while we read.
+        for batch in 0..5 {
+            process_anchored(&mut parser, format!("more {batch}\r\n").as_bytes());
+            assert_eq!(top_row(&parser), parked_on, "the view moved while output arrived");
+        }
+        // And the offset really did track the new lines rather than staying put.
+        assert_eq!(parser.screen().scrollback(), 15);
+    }
+
+    /// At the live end the view is *meant* to follow the output, so anchoring must keep out of
+    /// the way — this is the common case, every terminal that nobody has scrolled.
+    #[test]
+    fn output_still_follows_when_not_scrolled_back() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        print_lines(&mut parser, 0, 40);
+        assert_eq!(parser.screen().scrollback(), 0);
+
+        process_anchored(&mut parser, b"newest\r\n");
+        assert_eq!(parser.screen().scrollback(), 0, "the live view must stay at the bottom");
+    }
+
+    /// A full buffer genuinely loses its oldest lines, so the view cannot be held any longer.
+    /// What matters is that it degrades instead of underflowing — `offset + pushed` is computed
+    /// from a subtraction that would panic in debug if it were allowed to go negative.
+    #[test]
+    fn a_full_buffer_drifts_instead_of_underflowing() {
+        let mut parser = vt100::Parser::new(4, 20, 5);
+        print_lines(&mut parser, 0, 100);
+        parser.screen_mut().set_scrollback(5);
+        for _ in 0..20 {
+            process_anchored(&mut parser, b"flood\r\n");
+        }
+        assert_eq!(parser.screen().scrollback(), 5, "clamped to what is still held");
+    }
+
+    /// A full-screen program gets a scrollback-free grid from vt100, which is what makes
+    /// "the wheel belongs to vim, not to us" a fact about the data rather than a guess.
+    #[test]
+    fn the_alternate_screen_holds_no_history() {
+        let mut parser = vt100::Parser::new(4, 20, 100);
+        print_lines(&mut parser, 0, 40);
+        assert!(held_lines(&mut parser) > 0);
+
+        parser.process(b"\x1b[?1049h"); // enter the alternate screen, as vim/less do
+        assert!(parser.screen().alternate_screen());
+        print_lines(&mut parser, 0, 40);
+        assert_eq!(held_lines(&mut parser), 0);
+
+        parser.process(b"\x1b[?1049l"); // and back out
+        assert!(!parser.screen().alternate_screen());
+        assert!(held_lines(&mut parser) > 0, "the real screen keeps its history");
     }
 }

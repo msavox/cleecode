@@ -33,65 +33,129 @@ pub enum EditorPane {
     Right,
 }
 
-/// One row of the venv drop-down.
-pub struct VenvRow {
+/// One row of the run-target drop-down.
+pub struct RunRow {
     pub label: String,
-    /// Full path, shown dimmed after the label when the label alone is ambiguous.
+    /// Full path or command line, shown dimmed after the label when the label alone is
+    /// ambiguous.
     pub detail: Option<String>,
-    /// Whether this is the venv currently in use, marked in the list.
+    /// Whether this is what Run would use right now, marked in the list.
     pub active: bool,
-    pub action: VenvRowAction,
+    pub action: RunRowAction,
 }
 
-/// The drop-down's rows: "no venv" first, then every available venv, then the register entry.
+/// Extensions whose run command is a python interpreter, and which therefore get the venv
+/// selector. Everything else runs through its `run_commands` entry alone, where a venv would
+/// mean nothing — `apply_venv` has always refused to touch a non-python program.
+pub fn is_python_ext(ext: &str) -> bool {
+    matches!(ext, "py" | "pyw")
+}
+
+/// The run-target drop-down's rows for a file of extension `ext`. Python files get the venv
+/// list — "no venv" first, then every available venv, then browse/register — because for them
+/// "which interpreter" is a choice; every extension, python included, then gets the row that
+/// edits its run command. So the button answers one question for every file type: what will
+/// Run use here.
+///
 /// A free function so the index-to-action mapping a click relies on can be tested without
 /// standing up an App (which would need real ptys).
-fn venv_rows(
+fn run_rows(
+    ext: &str,
     active: Option<&str>,
     available: &[String],
     registered: &[settings::RegisteredVenv],
+    run_commands: &std::collections::HashMap<String, String>,
+    project_commands: &std::collections::HashMap<String, String>,
     lang: Lang,
-) -> Vec<VenvRow> {
-    let mut rows = vec![VenvRow {
-        label: i18n::t(lang, Key::ToolbarVenvNone).to_string(),
-        detail: None,
-        active: active.is_none(),
-        action: VenvRowAction::Select(None),
-    }];
-    for venv in available {
-        let label = ui::venv_display_name(venv, registered);
-        rows.push(VenvRow {
-            // The full path, dimmed, so two venvs with the same folder name stay tellable
-            // apart — but not when it would just repeat the label, as it does for the plain
-            // project-root venvs.
-            detail: (*venv != label).then(|| venv.clone()),
-            label,
-            active: active == Some(venv.as_str()),
-            action: VenvRowAction::Select(Some(venv.clone())),
+) -> Vec<RunRow> {
+    let mut rows = Vec::new();
+    if is_python_ext(ext) {
+        rows.push(RunRow {
+            label: i18n::t(lang, Key::ToolbarVenvNone).to_string(),
+            detail: None,
+            active: active.is_none(),
+            action: RunRowAction::SelectVenv(None),
+        });
+        for venv in available {
+            let label = ui::venv_display_name(venv, registered);
+            rows.push(RunRow {
+                // The full path, dimmed, so two venvs with the same folder name stay tellable
+                // apart — but not when it would just repeat the label, as it does for the plain
+                // project-root venvs.
+                detail: (*venv != label).then(|| venv.clone()),
+                label,
+                active: active == Some(venv.as_str()),
+                action: RunRowAction::SelectVenv(Some(venv.clone())),
+            });
+        }
+        rows.push(RunRow {
+            label: i18n::t(lang, Key::VenvBrowseItem).to_string(),
+            detail: None,
+            active: false,
+            action: RunRowAction::Browse,
+        });
+        rows.push(RunRow {
+            label: i18n::t(lang, Key::VenvRegisterItem).to_string(),
+            detail: None,
+            active: false,
+            action: RunRowAction::Register,
         });
     }
-    rows.push(VenvRow {
-        label: i18n::t(lang, Key::VenvBrowseItem).to_string(),
-        detail: None,
-        active: false,
-        action: VenvRowAction::Browse,
+    // Two places a command can live, always both offered, with the marker on whichever one Run
+    // would actually use. That marker is the whole point of showing them together: "which of
+    // these two wins" is otherwise invisible, and getting it wrong is how you compile the wrong
+    // master file and blame the editor.
+    let global = run_commands.get(ext);
+    let project = project_commands.get(ext);
+    rows.push(RunRow {
+        label: match global {
+            Some(_) => i18n::msg_run_command_row(lang, ext),
+            None => i18n::msg_run_command_unset_row(lang, ext),
+        },
+        // The command itself, so the button's one-word label ("octave") can be checked
+        // against what will actually be typed at the shell.
+        detail: global.cloned(),
+        active: global.is_some() && project.is_none(),
+        action: RunRowAction::EditCommand(RunScope::Global),
     });
-    rows.push(VenvRow {
-        label: i18n::t(lang, Key::VenvRegisterItem).to_string(),
-        detail: None,
-        active: false,
-        action: VenvRowAction::Register,
+    rows.push(RunRow {
+        label: i18n::msg_run_command_project_row(lang),
+        detail: project.cloned(),
+        active: project.is_some(),
+        action: RunRowAction::EditCommand(RunScope::Project),
     });
     rows
 }
 
-pub enum VenvRowAction {
+/// Which file a run command is written to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunScope {
+    /// settings.toml: every project, unless one of them overrides it.
+    Global,
+    /// .cleecode.toml in the project root: this project alone, and shareable with it.
+    Project,
+}
+
+pub enum RunRowAction {
     /// Use this venv, or the system python for `None`.
-    Select(Option<String>),
+    SelectVenv(Option<String>),
     /// Browse the disk for a venv folder, rather than typing its path by hand.
     Browse,
     /// Open the box that registers a venv from elsewhere on disk, path typed by hand.
     Register,
+    /// Type the run command for the extension the menu was opened on, into one of the two
+    /// files that can hold one.
+    EditCommand(RunScope),
+}
+
+/// The run-target drop-down while it is open.
+pub struct RunMenu {
+    /// Which pane's toolbar button it hangs from.
+    pub pane: EditorPane,
+    /// The extension the rows were built for, frozen when the menu opened. Rebuilding them
+    /// from the live active file would let a row change meaning under the pointer.
+    pub ext: String,
+    pub selected: usize,
 }
 
 /// Which field the terminal name/startup-command box is typing into.
@@ -185,6 +249,13 @@ pub struct App {
     /// Leftmost tab rendered in each pane's strip (indexed by `EditorPane::index`), so a long
     /// list of open files scrolls horizontally instead of running off the edge. Rendering
     /// still pulls the active tab back into view, so this is a starting point, not a promise.
+    /// Which buffers each half of the editor has open, in strip order. The two lists are
+    /// disjoint and together cover every buffer: a split is two independent editors sharing one
+    /// pool, not two windows onto one list, so no file is ever in both strips at once.
+    ///
+    /// Only `tabs[0]` is used while the split is closed; opening the split moves a tab across,
+    /// closing it pours the right list back onto the end of the left one.
+    pub tabs: [Vec<usize>; 2],
     pub tab_offsets: [usize; 2],
     /// The active tab each pane's offset was last reconciled against, so the strip is only
     /// scrolled to reveal the active tab when that tab actually changes.
@@ -197,6 +268,9 @@ pub struct App {
     pub should_quit: bool,
     pub status_message: String,
     pub editor_viewport: (usize, usize),
+    /// Where the pointer last was. Only used to light up the scrollbar it is resting on, which
+    /// is the one bit of the interface that has to react to the mouse merely being somewhere.
+    pointer: Option<(u16, u16)>,
     pub settings: Settings,
     pub show_settings: bool,
     pub settings_selected: usize,
@@ -231,13 +305,17 @@ pub struct App {
     pub show_rename: bool,
     pub rename_target: Option<PathBuf>,
     pub rename_input: String,
-    /// Selected row while the venv drop-down is open under its toolbar button.
-    pub venv_dropdown: Option<usize>,
+    /// The run-target drop-down, while it is open under its toolbar button.
+    pub run_menu: Option<RunMenu>,
     /// Which step the "register a venv" box is on, when it's open.
     pub venv_register: Option<VenvRegisterStep>,
     pub venv_register_input: String,
     /// The path accepted in step one, waiting for its nickname in step two.
     venv_register_path: Option<PathBuf>,
+    /// The extension whose run command is being typed and where it will be written, while
+    /// that box is open.
+    pub run_command_edit: Option<(String, RunScope)>,
+    pub run_command_input: String,
     /// Save As box, for a buffer that has never been written to disk.
     pub show_save_as: bool,
     pub save_as_input: String,
@@ -261,6 +339,9 @@ pub struct App {
     pub resize_mode: bool,
     pub dragging: Option<DragTarget>,
     pub available_venvs: Vec<String>,
+    /// What the open project says about itself, from its `.cleecode.toml`. Reloaded whenever
+    /// the root changes, since it belongs to the folder rather than to the session.
+    pub project_settings: settings::ProjectSettings,
     last_tree_click: Option<(usize, Instant)>,
     pub git_status: std::collections::HashMap<PathBuf, crate::git_status::FileStatus>,
     git_status_tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
@@ -268,6 +349,10 @@ pub struct App {
     git_status_pending: Arc<AtomicBool>,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
+    /// Pictures being decoded off the main thread, answering by path: a tab's index can change
+    /// while a decode is still running, but the file it was asked about cannot.
+    preview_tx: Sender<crate::preview::Decoded>,
+    preview_rx: Receiver<crate::preview::Decoded>,
 }
 
 /// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
@@ -399,6 +484,50 @@ fn resolve_interpreter(
     if rest.is_empty() { quoted } else { format!("{quoted} {rest}") }
 }
 
+/// Drops buffer `idx` from both strips and renumbers what is left, since removing it shifts
+/// every later buffer down one.
+///
+/// A free function so the renumbering can be tested on its own. It is the part of closing a tab
+/// where an off-by-one does not show up as a wrong tab but as a stale index surviving into a
+/// later draw, which in an app that hosts live shells is the expensive kind of bug.
+fn forget_buffer(tabs: &mut [Vec<usize>; 2], idx: usize) {
+    for strip in tabs.iter_mut() {
+        strip.retain(|&i| i != idx);
+        for i in strip.iter_mut() {
+            if *i > idx {
+                *i -= 1;
+            }
+        }
+    }
+}
+
+/// A path's extension, lowercased — the key everything about running a file is looked up by.
+fn file_ext(path: &std::path::Path) -> String {
+    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// Fills a run command's placeholders from the file being run, each shell-quoted so paths with
+/// spaces survive: `{file}` is the whole path, `{dir}` its folder, `{name}` the file name,
+/// `{stem}` that name without its extension.
+///
+/// `{file}` alone only ever covers "interpreter, then script". The rest are what let a command
+/// work where the file is rather than where the shell is (LaTeX's `-output-directory`) or name
+/// its own output (`{dir}/{stem}.pdf`). Nothing else is needed to chain steps: the command is
+/// typed at a real shell, so `&&` works as it reads.
+fn expand_placeholders(template: &str, path: &std::path::Path) -> String {
+    let quote = |s: std::borrow::Cow<'_, str>| shell_words::quote(&s).into_owned();
+    // A bare relative path has an empty parent, which as a directory means "here".
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    template
+        .replace("{file}", &quote(path.to_string_lossy()))
+        .replace("{dir}", &quote(dir.to_string_lossy()))
+        .replace("{name}", &quote(path.file_name().unwrap_or_default().to_string_lossy()))
+        .replace("{stem}", &quote(path.file_stem().unwrap_or_default().to_string_lossy()))
+}
+
 /// Collects files under `root` for the quick-open picker, capped so a huge tree can't
 /// stall the UI. Always skips VCS/build dirs; skips dotfiles unless `show_hidden`.
 fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) {
@@ -459,6 +588,29 @@ pub enum DragTarget {
     TextSelection,
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
+    /// Dragging a scrollbar's thumb along its track.
+    Scrollbar(ScrollbarId),
+}
+
+/// Which scrollbar a click, a drag or the pointer is on. A frame plus an axis is enough to name
+/// one, and both halves are cheap to compare, so nothing about a bar has to be remembered
+/// between frames.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollbarId {
+    Editor(EditorPane, ui::Axis),
+    /// The vertical bar of terminal window `i`. Terminals have no horizontal one: the pty is
+    /// sized to its pane, so output wraps rather than running off the side.
+    Terminal(usize),
+}
+
+/// Which part of a scrollbar a point falls on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollbarPart {
+    /// An end arrow: one line back, or one line on. The mouse's answer to an arrow key.
+    Step(isize),
+    /// The groove, `offset` cells along a track `len` cells long. Clicking jumps there and
+    /// dragging keeps following, which is the same gesture either way.
+    Track { offset: u16, len: u16 },
 }
 
 impl DragTarget {
@@ -816,15 +968,21 @@ fn cell_at(inner: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
 impl App {
     pub fn new(root: PathBuf, term_rows: u16, term_cols: u16) -> Result<Self> {
         let half_cols = (term_cols / 2).max(10);
+        // Loaded before the first shell is spawned: vt100 fixes a terminal's scrollback length
+        // at construction, so a shell started ahead of the preference would be stuck without one
+        // for the whole session.
+        let settings = Settings::load();
+        crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
         let t1 = TerminalWindow::new(term_rows, half_cols, &root)?;
         let t2 = TerminalWindow::new(term_rows, half_cols, &root)?;
         let (bg_tx, bg_rx) = mpsc::channel();
+        let (preview_tx, preview_rx) = mpsc::channel();
         let (git_status_tx, git_status_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
-        let settings = Settings::load();
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
+        let project_settings = settings::ProjectSettings::load(&root);
         let file_tree = FileTree::new(root.clone(), settings.show_hidden_files);
         Ok(App {
             file_tree,
@@ -834,6 +992,7 @@ impl App {
             split_view: false,
             active_editor_right: 0,
             editor_pane_focus: EditorPane::Left,
+            tabs: [vec![0], Vec::new()],
             tab_offsets: [0, 0],
             tab_revealed: [None, None],
             terminals: vec![t1, t2],
@@ -852,6 +1011,7 @@ impl App {
             should_quit: false,
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
+            pointer: None,
             settings,
             show_settings: false,
             settings_selected: 0,
@@ -867,10 +1027,12 @@ impl App {
             show_rename: false,
             rename_target: None,
             rename_input: String::new(),
-            venv_dropdown: None,
+            run_menu: None,
             venv_register: None,
             venv_register_input: String::new(),
             venv_register_path: None,
+            run_command_edit: None,
+            run_command_input: String::new(),
             show_save_as: false,
             save_as_input: String::new(),
             save_as_target: None,
@@ -886,6 +1048,7 @@ impl App {
             resize_mode: false,
             dragging: None,
             available_venvs,
+            project_settings,
             last_tree_click: None,
             git_status: std::collections::HashMap::new(),
             git_status_tx,
@@ -893,6 +1056,8 @@ impl App {
             git_status_pending,
             bg_tx,
             bg_rx,
+            preview_tx,
+            preview_rx,
         })
     }
 
@@ -948,6 +1113,41 @@ impl App {
     pub fn poll_background_messages(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             self.status_message = msg;
+        }
+    }
+
+    /// Hands decoded pictures to the tabs that asked for them. Matched by path rather than by
+    /// index: tabs can be closed or reordered while a decode is in flight, and a stale index
+    /// would put a picture in somebody else's tab.
+    pub fn poll_previews(&mut self) {
+        while let Ok(done) = self.preview_rx.try_recv() {
+            let Some(preview) = self.editors.iter_mut().find_map(|e| {
+                e.preview.as_mut().filter(|_| e.path.as_deref() == Some(done.path.as_path()))
+            }) else {
+                continue;
+            };
+            // A reply for a page that is no longer the one being looked at: the reader paged on
+            // while it was rendering, and putting it up would yank them back a page.
+            if done.page != preview.page() {
+                continue;
+            }
+            if let (Some(pages), Some(total)) = (preview.pages.as_mut(), done.total) {
+                pages.total = Some(total);
+            }
+            let rendered_view = preview.source.clone();
+            match done.result {
+                Ok(image) => preview.state = crate::preview::State::ready(image),
+                // A document that could not be made is not the end of a markdown preview: it
+                // still has styled text to offer, which is better than a red line where the
+                // document should be. The reason is said once, in the status line, and the tab
+                // stops trying until Refresh asks it to.
+                Err(message) if rendered_view.is_some() => {
+                    preview.document_failed = true;
+                    preview.shown_revision = u64::MAX;
+                    self.status_message = i18n::msg_preview_failed(self.settings.lang, &message);
+                }
+                Err(message) => preview.state = crate::preview::State::Failed(message),
+            }
         }
     }
 
@@ -1104,11 +1304,9 @@ impl App {
     pub fn toggle_split_view(&mut self) {
         self.split_view = !self.split_view;
         if self.split_view {
-            if self.editors.len() > 1 && self.active_editor_right == self.active_editor {
-                self.active_editor_right = (self.active_editor + 1) % self.editors.len();
-            }
+            self.open_split();
         } else {
-            self.editor_pane_focus = EditorPane::Left;
+            self.close_split();
         }
     }
 
@@ -1117,6 +1315,7 @@ impl App {
         if let Some(msg) = self.editor_mut().check_external_changes(lang) {
             self.status_message = msg;
         }
+        self.reload_changed_previews();
         self.file_tree.refresh();
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
     }
@@ -1129,21 +1328,38 @@ impl App {
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {
         let lang = self.settings.lang;
+        // A file with nothing in it to edit is shown rather than opened.
+        //
+        // Opening a PNG used to give a blank read-only tab — the binary guard had already
+        // emptied the buffer — and left you to work out that ▶ Run was the way to see it.
+        // Handled here rather than at the double click, so the tree's Enter and the quick-open
+        // take the same route: one way in, one behaviour.
+        let ext = file_ext(&path);
+        if crate::preview::is_previewable(&ext) || crate::preview::is_document(&ext) {
+            self.open_preview_tab(path, crate::preview::is_document(&ext));
+            return;
+        }
+        // Not a picture, but still not text, and we know a command that displays it: run that.
+        // A PDF with a viewer configured lands here, as does anything else somebody has taught
+        // the run commands about.
+        if Editor::looks_binary(&path) && self.run_command_for(&ext).is_some() {
+            // It lands in a terminal, so there had better be one on screen. Opening a file and
+            // having it appear nowhere visible would be worse than the blank tab this replaces
+            // — at least that was on screen.
+            self.settings.show_terminal = true;
+            self.run_path(&path);
+            return;
+        }
         if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
-            self.active_editor = idx;
-            self.focus = Focus::Editor;
+            self.focus_existing_tab(idx);
             self.status_message = i18n::msg_opened(lang, &self.editors[idx].title(lang));
             return;
         }
         match Editor::open(path) {
             Ok(editor) => {
-                if self.editors.len() == 1 && self.editors[0].path.is_none() && !self.editors[0].dirty {
-                    self.editors[0] = editor;
-                    self.active_editor = 0;
-                } else {
-                    self.editors.push(editor);
-                    self.active_editor = self.editors.len() - 1;
-                }
+                // Into the focused pane, leaving the other one on whatever it was showing.
+                let idx = self.adopt_editor(editor);
+                self.place_in_pane(self.editor_pane_focus, idx);
                 self.focus = Focus::Editor;
                 self.status_message = if self.editor().is_read_only() {
                     i18n::msg_opened_read_only(lang, &self.editor().title(lang))
@@ -1152,6 +1368,271 @@ impl App {
                 };
             }
             Err(e) => self.status_message = i18n::msg_open_error(lang, &e.to_string()),
+        }
+    }
+
+    /// Puts a new tab on screen, taking over the untouched scratch buffer when that is all
+    /// there is rather than leaving an empty tab beside the real one.
+    /// Returns where the tab landed without deciding which pane looks at it. Deliberately: a
+    /// caller that also chose a pane would otherwise be pointing *both* panes at the new tab —
+    /// one here and one of its own — and a split whose halves show the same file has stopped
+    /// being a split.
+    fn adopt_editor(&mut self, editor: Editor) -> usize {
+        if self.editors.len() == 1 && self.editors[0].path.is_none() && !self.editors[0].dirty {
+            self.editors[0] = editor;
+            0
+        } else {
+            self.editors.push(editor);
+            self.editors.len() - 1
+        }
+    }
+
+    /// Opens a picture in its own tab, decoding it on a background thread. A photo takes long
+    /// enough to decode that doing it here would stall the window, terminals included.
+    ///
+    /// In split view it opens in the pane that *isn't* focused, so the file being worked on
+    /// stays visible beside it. The layout itself is never changed: it is yours to shape, and
+    /// an opened file rearranging your frames would be a surprise every time it was not wanted.
+    fn open_preview_tab(&mut self, path: PathBuf, paged: bool) {
+        let lang = self.settings.lang;
+        if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
+            self.focus_existing_tab(idx);
+            self.status_message = i18n::msg_opened(lang, &self.editors[idx].title(lang));
+            return;
+        }
+        let first = paged.then_some(1);
+        let mut preview =
+            if paged { crate::preview::Preview::document(1) } else { crate::preview::Preview::picture() };
+        preview.state = crate::preview::start_loading(
+            match first {
+                Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                None => crate::preview::Job::Picture(path.clone()),
+            },
+            self.preview_tx.clone(),
+        );
+        let idx = self.adopt_editor(Editor::preview(path, preview));
+        // A preview goes to the half you are *not* working in when there is one, so the file it
+        // belongs to stays in front of you.
+        let pane = if self.split_view && self.editor_pane_focus == EditorPane::Left {
+            EditorPane::Right
+        } else {
+            self.editor_pane_focus
+        };
+        self.place_in_pane(pane, idx);
+        self.focus = Focus::Editor;
+        self.status_message = i18n::msg_preview_opened(lang, crate::preview::protocol_name());
+    }
+
+    /// Moves a document preview a page. The first page is the near end; the far one announces
+    /// itself by the render failing, since no page count is needed to reach it and none may be
+    /// available. The page number changes straight away so the label and the arrows keep up
+    /// even while the picture is still being made.
+    fn turn_page(&mut self, delta: isize) {
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let path = match self.editors.get(idx).and_then(|e| e.path.clone()) {
+            Some(path) => path,
+            None => return,
+        };
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return };
+        let Some(pages) = preview.pages.as_mut() else { return };
+        let wanted = (pages.current as isize + delta).max(1) as usize;
+        // Past a known last page there is nothing to ask for, so the key simply does nothing
+        // rather than flashing an error at the end of every document.
+        if pages.total.is_some_and(|total| wanted > total) || wanted == pages.current {
+            return;
+        }
+        pages.current = wanted;
+        // A markdown preview has no PDF on disk to page through: its document is made from the
+        // buffer, so another page means making it again. Asking a rasteriser for page two of a
+        // .md file is what the previous version did, and it failed exactly as it deserved to.
+        let rendered_from = preview.source.clone();
+        let job = match rendered_from {
+            Some(source) => {
+                let text = self
+                    .editors
+                    .iter()
+                    .find(|e| e.preview.is_none() && e.path.as_deref() == Some(source.as_path()))
+                    .map(|e| e.rope.to_string())
+                    .unwrap_or_default();
+                crate::preview::Job::Markdown { path: source, text, page: wanted }
+            }
+            None => crate::preview::Job::Page { path, page: wanted },
+        };
+        let started = crate::preview::start_loading(job, self.preview_tx.clone());
+        if let Some(preview) = self.editors[idx].preview.as_mut() {
+            // The page on screen stays up while the next one is made, rather than blanking.
+            if !matches!(preview.state, crate::preview::State::Rendered { .. }) {
+                preview.state = started;
+            }
+        }
+    }
+
+    /// Re-renders a preview whose file changed under it. This is the LaTeX loop: edit the
+    /// source, press Run, and the page beside it becomes the page that was just typeset —
+    /// without closing and reopening the tab to notice.
+    fn reload_changed_previews(&mut self) {
+        let stale: Vec<(usize, PathBuf, Option<usize>)> = self
+            .editors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let preview = e.preview.as_ref()?;
+                let path = e.path.clone()?;
+                let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+                (Some(mtime) != e.disk_mtime).then_some((i, path, preview.page()))
+            })
+            .collect();
+        for (i, path, page) in stale {
+            self.editors[i].disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            if let Some(preview) = self.editors[i].preview.as_mut() {
+                preview.state = crate::preview::start_loading(
+                    match page {
+                        Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                        None => crate::preview::Job::Picture(path.clone()),
+                    },
+                    self.preview_tx.clone(),
+                );
+            }
+        }
+    }
+
+    /// Brings tab `idx` on screen, in the pane that keeps the most work visible: the unfocused
+    /// half when the editor is split, the only pane otherwise.
+    /// The buffers a pane has open, in the order its strip shows them. With the split closed
+    /// the right pane has none, and everything belongs to the left one.
+    /// How many lines a rendered preview drew, or `None` when the tab is not one. Scrolling a
+    /// preview is scrolling those lines; there is no rope behind it to measure instead.
+    fn rendered_len(&self, idx: usize) -> Option<usize> {
+        match &self.editors.get(idx)?.preview.as_ref()?.state {
+            crate::preview::State::Rendered { lines, .. } => Some(lines.len()),
+            _ => None,
+        }
+    }
+
+    pub fn pane_tabs(&self, pane: EditorPane) -> &[usize] {
+        &self.tabs[pane.index()]
+    }
+
+    /// Where the pane's current buffer sits in its own strip. Clamped rather than optional: the
+    /// strip is drawn every frame, and a pane briefly out of step should show its first tab, not
+    /// take the window down.
+    pub fn pane_tab_position(&self, pane: EditorPane) -> usize {
+        let wanted = self.pane_editor_index(pane);
+        self.tabs[pane.index()].iter().position(|&i| i == wanted).unwrap_or(0)
+    }
+
+    /// Which pane holds a buffer, if any. The lists are disjoint, so there is at most one.
+    fn pane_holding(&self, editor: usize) -> Option<EditorPane> {
+        [EditorPane::Left, EditorPane::Right]
+            .into_iter()
+            .find(|&pane| self.tabs[pane.index()].contains(&editor))
+    }
+
+    /// Puts a buffer in a pane and shows it there, taking it away from the other pane if that is
+    /// where it was. Moving rather than copying is what keeps the two strips disjoint, which is
+    /// the whole of "a split does not duplicate tabs".
+    fn place_in_pane(&mut self, pane: EditorPane, editor: usize) {
+        for other in [EditorPane::Left, EditorPane::Right] {
+            if other != pane {
+                self.tabs[other.index()].retain(|&i| i != editor);
+            }
+        }
+        if !self.tabs[pane.index()].contains(&editor) {
+            self.tabs[pane.index()].push(editor);
+        }
+        self.set_pane_editor(pane, editor);
+        // A pane that just gave up the buffer it was showing has to land somewhere real.
+        self.settle_panes();
+    }
+
+    /// Points every pane at a buffer it actually holds, and makes sure no pane is left with an
+    /// empty strip. Called after anything that moves buffers between panes or removes one, so
+    /// that the invariants are restored in one place instead of at each call site.
+    fn settle_panes(&mut self) {
+        // The split closed: the left pane owns everything, and nothing is drawn from the right.
+        if !self.split_view {
+            return;
+        }
+        for pane in [EditorPane::Left, EditorPane::Right] {
+            if self.tabs[pane.index()].is_empty() {
+                // An editor with no tabs is not a thing this app can draw, so it gets a fresh
+                // empty buffer — the same one a brand-new window starts with.
+                self.editors.push(Editor::empty());
+                let idx = self.editors.len() - 1;
+                self.tabs[pane.index()].push(idx);
+            }
+            let held = self.tabs[pane.index()].clone();
+            if !held.contains(&self.pane_editor_index(pane)) {
+                self.set_pane_editor(pane, held[0]);
+            }
+        }
+    }
+
+    /// Splits the editor in two. The right half takes one tab from the left — the one after the
+    /// current file, since that is the one you were most likely reaching for — leaving the rest
+    /// where they are. Nothing is copied: with only one tab open the right half gets a new empty
+    /// buffer rather than a second view of the same file.
+    fn open_split(&mut self) {
+        let left = &self.tabs[0];
+        let taken = left
+            .iter()
+            .position(|&i| i == self.active_editor)
+            .and_then(|pos| left.get(pos + 1).or_else(|| left.first().filter(|_| left.len() > 1)))
+            .copied();
+        match taken {
+            Some(idx) => self.place_in_pane(EditorPane::Right, idx),
+            None => self.settle_panes(),
+        }
+    }
+
+    /// Closes the split, pouring the right half's tabs onto the end of the left half's. Nothing
+    /// is thrown away: the buffers were only ever parked in two lists, and closing the split is
+    /// about the frames, not about what is open.
+    fn close_split(&mut self) {
+        let right = std::mem::take(&mut self.tabs[1]);
+        let showing = self.active_editor_index();
+        for idx in right {
+            if !self.tabs[0].contains(&idx) {
+                self.tabs[0].push(idx);
+            }
+        }
+        // Whichever half you were reading stays on screen, so closing the split never also
+        // changes the file in front of you — unless that half is the one that just emptied,
+        // in which case its index means nothing and the merged strip decides.
+        let showing = if self.tabs[0].contains(&showing) {
+            showing
+        } else {
+            self.tabs[0].first().copied().unwrap_or(0)
+        };
+        self.active_editor = showing;
+        self.active_editor_right = showing;
+        self.editor_pane_focus = EditorPane::Left;
+    }
+
+    /// Brings a tab that is already open to the front.
+    ///
+    /// When a pane is already showing it, that pane is simply focused rather than the other one
+    /// being moved onto it too. Pointing both halves of a split at the same file is the one
+    /// thing a split must never do — it stops being a split — and "open something already on
+    /// screen" is precisely when it would otherwise happen.
+    fn focus_existing_tab(&mut self, idx: usize) {
+        self.focus = Focus::Editor;
+        // Already open somewhere: go to it rather than dragging it into this half. Moving it
+        // would take it out of the strip the reader put it in, which is not what "open" means.
+        if let Some(pane) = self.pane_holding(idx) {
+            self.editor_pane_focus = pane;
+            self.set_pane_editor(pane, idx);
+            return;
+        }
+        self.place_in_pane(self.editor_pane_focus, idx);
+    }
+
+    /// Points one pane at a tab, leaving the other one alone. The one place either index is
+    /// assigned from an "open this" path, so no caller can set both by accident.
+    fn set_pane_editor(&mut self, pane: EditorPane, idx: usize) {
+        match pane {
+            EditorPane::Left => self.active_editor = idx,
+            EditorPane::Right => self.active_editor_right = idx,
         }
     }
 
@@ -1826,27 +2307,43 @@ impl App {
         if self.editors.len() <= 1 {
             self.editors.clear();
             self.editors.push(Editor::empty());
+            self.tabs = [vec![0], Vec::new()];
             self.active_editor = 0;
             self.active_editor_right = 0;
+            self.settle_panes();
             return;
         }
+        // A rendered preview is a view of a buffer, not a copy of one: with the buffer gone it
+        // has nothing left to show, so it goes with it rather than reopening the file behind
+        // your back.
+        let closed = self.editors[idx].path.clone();
         self.editors.remove(idx);
-        if idx < self.active_editor {
-            self.active_editor -= 1;
+        forget_buffer(&mut self.tabs, idx);
+        if let Some(path) = closed {
+            if let Some(orphan) = self.editors.iter().position(|e| {
+                e.preview.as_ref().and_then(|p| p.source.as_deref()) == Some(path.as_path())
+            }) {
+                self.editors.remove(orphan);
+                forget_buffer(&mut self.tabs, orphan);
+            }
         }
-        if self.active_editor >= self.editors.len() {
-            self.active_editor = self.editors.len() - 1;
+        for active in [&mut self.active_editor, &mut self.active_editor_right] {
+            if *active > idx {
+                *active -= 1;
+            }
+            *active = (*active).min(self.editors.len() - 1);
         }
-        if idx < self.active_editor_right {
-            self.active_editor_right -= 1;
+        // A half left with nothing in it gives the split up rather than being handed a blank
+        // buffer to justify its own existence. Closing your last tab on one side is a way of
+        // saying you are done with that side.
+        if self.split_view && self.tabs.iter().any(|t| t.is_empty()) {
+            self.split_view = false;
+            self.close_split();
         }
-        if self.active_editor_right >= self.editors.len() {
-            self.active_editor_right = self.editors.len() - 1;
-        }
+        self.settle_panes();
         // Closing tabs shortens the strip, so an offset past the end would blank it out.
-        let last = self.editors.len() - 1;
-        for offset in &mut self.tab_offsets {
-            *offset = (*offset).min(last);
+        for (pane, offset) in self.tab_offsets.iter_mut().enumerate() {
+            *offset = (*offset).min(self.tabs[pane].len().saturating_sub(1));
         }
     }
 
@@ -1861,22 +2358,26 @@ impl App {
         }
     }
 
+    /// Sideways through the focused half's own strip. In a split each half cycles its own tabs
+    /// and never reaches across, which is the point of them being separate strips at all.
     fn cycle_editor(&mut self, forward: bool) {
-        if self.editors.is_empty() {
+        let pane = if self.split_view { self.editor_pane_focus } else { EditorPane::Left };
+        let tabs = self.pane_tabs(pane);
+        if tabs.is_empty() {
             return;
         }
-        let len = self.editors.len();
-        self.active_editor = if forward {
-            (self.active_editor + 1) % len
-        } else {
-            (self.active_editor + len - 1) % len
-        };
+        let len = tabs.len();
+        let at = self.pane_tab_position(pane);
+        let next = if forward { (at + 1) % len } else { (at + len - 1) % len };
+        let idx = tabs[next];
+        self.set_pane_editor(pane, idx);
     }
 
     fn set_root(&mut self, new_root: PathBuf) {
         self.file_tree = FileTree::new(new_root.clone(), self.settings.show_hidden_files);
         self.root = new_root;
         self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
+        self.project_settings = settings::ProjectSettings::load(&self.root);
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
         self.status_message = i18n::msg_project_folder(self.settings.lang, &self.root.display().to_string());
     }
@@ -2177,6 +2678,10 @@ impl App {
         if self.editors.is_empty() {
             self.editors.push(Editor::empty());
         }
+        // The buffers that survived are renumbered from scratch, so the strips are rebuilt from
+        // them rather than left pointing at what used to be there. Everything lands in the left
+        // half; `settle_panes` gives the right one a buffer if the workspace was split.
+        self.tabs = [(0..self.editors.len()).collect(), Vec::new()];
         self.active_editor = 0;
         self.active_editor_right = 0;
         self.tab_offsets = [0, 0];
@@ -2188,9 +2693,12 @@ impl App {
         }
         if let Some(active) = &ws.active_file {
             if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(active.as_path())) {
-                self.active_editor = idx;
+                let pane = self.pane_holding(idx).unwrap_or(EditorPane::Left);
+                self.set_pane_editor(pane, idx);
+                self.editor_pane_focus = pane;
             }
         }
+        self.settle_panes();
 
         self.rebuild_terminals(&ws, same_root);
         // Which shell you were looking at is part of the layout too, and it was being written to
@@ -2327,15 +2835,193 @@ impl App {
 
     pub fn run_active_file(&mut self) {
         let lang = self.settings.lang;
+        // A preview tab, or a markdown source: ▶ means "show me", not "run a command".
+        if self.run_as_preview() {
+            return;
+        }
         let Some(path) = self.editor().path.clone() else {
             self.status_message = i18n::msg_run_no_file(lang);
             return;
         };
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let Some(template) = self.settings.run_commands.get(&ext).cloned() else {
+        self.run_path(&path);
+    }
+
+    /// Runs one file's run command in a terminal. Split out from `run_active_file` because the
+    /// ▶ button is no longer the only way in: a file that can only be *shown* runs the moment it
+    /// is opened, with no buffer in between.
+    /// Re-renders whatever a preview tab is showing, or opens the markdown preview for the
+    /// source you are editing. `true` when it took the action, so Run can fall through to the
+    /// shell for everything else.
+    fn run_as_preview(&mut self) -> bool {
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        // Already a preview: ▶ means refresh. A rendered tab re-reads its buffer, a document
+        // re-rasterises the page in front of you.
+        if let Some(preview) = self.editors[idx].preview.as_ref() {
+            let page = preview.page();
+            let rendered = preview.source.is_some();
+            let path = self.editors[idx].path.clone();
+            if rendered {
+                // Forcing a mismatch is the whole refresh: the next frame sees stale lines.
+                // A document that failed before is worth one more try — that is what asking
+                // for a refresh by hand means.
+                if let Some(preview) = self.editors[idx].preview.as_mut() {
+                    preview.document_failed = false;
+                    preview.settled = None;
+                    preview.shown_revision = u64::MAX;
+                    preview.state = crate::preview::State::Rendered { lines: Vec::new(), revision: u64::MAX };
+                }
+            } else if let Some(path) = path {
+                if let Some(preview) = self.editors[idx].preview.as_mut() {
+                    preview.state = crate::preview::start_loading(
+                    match page {
+                        Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                        None => crate::preview::Job::Picture(path.clone()),
+                    },
+                    self.preview_tx.clone(),
+                );
+                }
+            }
+            self.status_message = i18n::msg_preview_refreshed(self.settings.lang);
+            return true;
+        }
+        // Markdown source: show it rendered beside itself.
+        let Some(path) = self.editors[idx].path.clone() else { return false };
+        if !crate::preview::is_renderable(&file_ext(&path)) {
+            return false;
+        }
+        self.open_rendered_preview(path);
+        true
+    }
+
+    /// Opens the rendered view of a markdown buffer in the other half, splitting the editor if
+    /// it is not already. Opening a file leaves the layout alone — that is passive — but asking
+    /// for a preview is an explicit request to see two things at once, and refusing to make room
+    /// for it would be answering a different question.
+    fn open_rendered_preview(&mut self, source: PathBuf) {
+        let lang = self.settings.lang;
+        // The same file now has two tabs, so a tab is found by path *and* kind: looking by path
+        // alone would hand back the source and the preview would never open.
+        if let Some(idx) = self
+            .editors
+            .iter()
+            .position(|e| e.path.as_deref() == Some(source.as_path()) && e.preview.is_some())
+        {
+            self.focus_existing_tab(idx);
+            return;
+        }
+        if !self.split_view {
+            self.split_view = true;
+            self.open_split();
+        }
+        let pane = match self.editor_pane_focus {
+            EditorPane::Left => EditorPane::Right,
+            EditorPane::Right => EditorPane::Left,
+        };
+        // The tab is *for* the source file and is a view *of* it: same path both times.
+        let idx =
+            self.adopt_editor(Editor::preview(source.clone(), crate::preview::Preview::rendered(source)));
+        self.place_in_pane(pane, idx);
+        // Says which of the two renderings you got: a document and styled text look very
+        // different, and knowing which is which is the difference between "my machine cannot do
+        // better" and "something is wrong".
+        self.status_message = i18n::msg_markdown_preview(lang, crate::preview::markdown_as_document());
+    }
+
+    /// How long the text must sit still before a document preview is made from it. Long enough
+    /// that a burst of typing is one render rather than dozens, short enough that a pause reads
+    /// as "done" — the render itself takes about half a second, so anything shorter would just
+    /// queue work behind work.
+    const PREVIEW_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Brings every live preview up to date with the buffer it is a view of. Called once a
+    /// frame; nothing happens at all while the text is not moving.
+    ///
+    /// Styled text is made here and now — it is only parsing, and it can follow the keystrokes.
+    /// A document goes out to pandoc and a rasteriser and takes about half a second, so it waits
+    /// for the typing to stop first.
+    pub fn refresh_rendered_previews(&mut self) {
+        let now = std::time::Instant::now();
+        let as_document = crate::preview::markdown_as_document();
+        // Gathered first: each preview needs a look at another editor, which cannot be done
+        // while holding a mutable borrow of the list.
+        let sources: Vec<(usize, Option<(u64, String)>)> = self
+            .editors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let source = e.preview.as_ref()?.source.as_ref()?;
+                let src = self
+                    .editors
+                    .iter()
+                    .find(|s| s.preview.is_none() && s.path.as_deref() == Some(source.as_path()));
+                Some((i, src.map(|s| (s.revision(), s.rope.to_string()))))
+            })
+            .collect();
+
+        for (i, source) in sources {
+            let Some((revision, text)) = source else { continue };
+            let Some(preview) = self.editors[i].preview.as_ref() else { continue };
+            if !preview.stale(revision) {
+                continue;
+            }
+            let failed = self.editors[i].preview.as_ref().is_some_and(|p| p.document_failed);
+            if !as_document || failed {
+                // Parsing is cheap enough to do on the spot, so the text view keeps up with the
+                // keys — which on a terminal without graphics is the whole of what it can offer.
+                let lines = crate::preview::render_markdown(&text);
+                if let Some(preview) = self.editors[i].preview.as_mut() {
+                    preview.state = crate::preview::State::Rendered { lines, revision };
+                    preview.shown_revision = revision;
+                }
+                continue;
+            }
+            // Wait for the text to stop moving before spending half a second on it.
+            let settled_at = match self.editors[i].preview.as_ref().and_then(|p| p.settled) {
+                Some((seen, at)) if seen == revision => at,
+                _ => {
+                    if let Some(preview) = self.editors[i].preview.as_mut() {
+                        preview.settled = Some((revision, now));
+                    }
+                    continue;
+                }
+            };
+            if now.duration_since(settled_at) < Self::PREVIEW_SETTLE {
+                continue;
+            }
+            let path = self.editors[i].path.clone().unwrap_or_default();
+            let page = self.editors[i].preview.as_ref().and_then(|p| p.page()).unwrap_or(1);
+            // Nothing on screen yet: put the styled-text rendering up as the interim, so the
+            // first half second shows the document rather than an empty frame. Later renders
+            // keep the previous page up instead, which is steadier than flashing back to text.
+            let first = matches!(
+                self.editors[i].preview.as_ref().map(|p| &p.state),
+                Some(crate::preview::State::Rendered { lines, .. }) if lines.is_empty()
+            );
+            if first {
+                let lines = crate::preview::render_markdown(&text);
+                if let Some(preview) = self.editors[i].preview.as_mut() {
+                    preview.state = crate::preview::State::Rendered { lines, revision };
+                }
+            }
+            let job = crate::preview::Job::Markdown { path, text, page };
+            if let Some(preview) = self.editors[i].preview.as_mut() {
+                // Marked as shown *now*, before the render finishes: what is on screen stays
+                // there meanwhile, and the same revision must not start a second render.
+                preview.shown_revision = revision;
+                let started = crate::preview::start_loading(job, self.preview_tx.clone());
+                // Only blank the pane when there is nothing better to leave up.
+                if !first {
+                    preview.state = started;
+                }
+            }
+        }
+    }
+
+    fn run_path(&mut self, path: &std::path::Path) {
+        let lang = self.settings.lang;
+        let path = path.to_path_buf();
+        let ext = file_ext(&path);
+        let Some(template) = self.run_command_for(&ext).cloned() else {
             self.status_message = i18n::msg_run_no_command(lang, &ext);
             return;
         };
@@ -2362,7 +3048,6 @@ impl App {
                 return;
             }
         }
-        let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
         // An active venv wins over a configured interpreter path: it is the more specific
         // choice, and only ever rewrites python programs.
         let venved = self.apply_venv(&template);
@@ -2375,7 +3060,7 @@ impl App {
         } else {
             venved
         };
-        let command = template.replace("{file}", &quoted);
+        let command = expand_placeholders(&template, &path);
         let idx = self
             .terminals
             .iter()
@@ -2413,52 +3098,182 @@ impl App {
         format!("{quoted} {rest}")
     }
 
-    /// Opens the venv drop-down under the toolbar button. Replaces cycling blindly to the next
-    /// venv, which with more than two meant clicking until the right one appeared.
-    pub fn open_venv_dropdown(&mut self) {
-        // Start on the entry that is currently active, so Enter alone changes nothing.
-        let selected = match &self.settings.active_venv {
-            None => 0,
-            Some(active) => {
-                self.available_venvs.iter().position(|v| v == active).map(|i| i + 1).unwrap_or(0)
-            }
-        };
-        self.venv_dropdown = Some(selected);
+    /// Which buffer a pane is showing. The toolbar button describes the file under it, so each
+    /// pane asks about its own.
+    pub fn pane_editor_index(&self, pane: EditorPane) -> usize {
+        match pane {
+            EditorPane::Left => self.active_editor,
+            EditorPane::Right => self.active_editor_right,
+        }
     }
 
-    /// The drop-down's rows: "no venv", every available venv, then the register entry. Built in
-    /// one place so what is drawn and what a click resolves to can't disagree.
-    pub fn venv_dropdown_rows(&self) -> Vec<VenvRow> {
-        venv_rows(
+    /// The extension that decides how a buffer runs, lowercased. Empty for a file with no
+    /// extension and for one that has never been saved — neither can be keyed on.
+    pub fn editor_ext(&self, idx: usize) -> String {
+        self.editors.get(idx).and_then(|e| e.path.as_deref()).map(file_ext).unwrap_or_default()
+    }
+
+    /// Opens the run-target drop-down under a pane's toolbar button: the venv list for python
+    /// files, and for every file type the run command behind the Run button. Replaces cycling
+    /// blindly to the next venv, which with more than two meant clicking until the right one
+    /// appeared.
+    pub fn open_run_menu(&mut self, pane: EditorPane) {
+        let ext = self.editor_ext(self.pane_editor_index(pane));
+        // Nothing to configure without an extension to key the command on; say so rather than
+        // opening a menu whose one row couldn't be saved anywhere.
+        if ext.is_empty() {
+            self.status_message = i18n::msg_run_no_ext(self.settings.lang);
+            return;
+        }
+        // Start on the entry that is currently active, so Enter alone changes nothing.
+        let selected = if is_python_ext(&ext) {
+            match &self.settings.active_venv {
+                None => 0,
+                Some(active) => {
+                    self.available_venvs.iter().position(|v| v == active).map(|i| i + 1).unwrap_or(0)
+                }
+            }
+        } else {
+            0
+        };
+        self.run_menu = Some(RunMenu { pane, ext, selected });
+    }
+
+    /// The open menu's rows. Built in one place so what is drawn and what a click resolves to
+    /// can't disagree.
+    pub fn run_menu_rows(&self) -> Vec<RunRow> {
+        let Some(menu) = &self.run_menu else { return Vec::new() };
+        run_rows(
+            &menu.ext,
             self.settings.active_venv.as_deref(),
             &self.available_venvs,
             &self.settings.registered_venvs,
+            &self.settings.run_commands,
+            &self.project_settings.run_commands,
             self.settings.lang,
         )
     }
 
-    fn handle_venv_dropdown_key(&mut self, key: KeyEvent) {
-        let Some(selected) = self.venv_dropdown else { return };
-        let len = self.venv_dropdown_rows().len();
+    fn handle_run_menu_key(&mut self, key: KeyEvent) {
+        let Some(menu) = &self.run_menu else { return };
+        let selected = menu.selected;
+        let len = self.run_menu_rows().len();
         match key.code {
-            KeyCode::Esc => self.venv_dropdown = None,
-            KeyCode::Up => self.venv_dropdown = Some((selected + len - 1) % len),
-            KeyCode::Down => self.venv_dropdown = Some((selected + 1) % len),
-            KeyCode::Enter => self.activate_venv_row(selected),
+            KeyCode::Esc => self.run_menu = None,
+            KeyCode::Up => {
+                if let Some(menu) = self.run_menu.as_mut() {
+                    menu.selected = (selected + len - 1) % len;
+                }
+            }
+            KeyCode::Down => {
+                if let Some(menu) = self.run_menu.as_mut() {
+                    menu.selected = (selected + 1) % len;
+                }
+            }
+            KeyCode::Enter => self.activate_run_row(selected),
             _ => {}
         }
     }
 
-    fn activate_venv_row(&mut self, index: usize) {
-        self.venv_dropdown = None;
-        let mut rows = self.venv_dropdown_rows();
+    fn activate_run_row(&mut self, index: usize) {
+        let mut rows = self.run_menu_rows();
+        let ext = self.run_menu.as_ref().map(|m| m.ext.clone()).unwrap_or_default();
+        self.run_menu = None;
         if index >= rows.len() {
             return;
         }
         match rows.swap_remove(index).action {
-            VenvRowAction::Select(venv) => self.select_venv(venv),
-            VenvRowAction::Browse => self.begin_venv_browse(),
-            VenvRowAction::Register => self.begin_venv_register(),
+            RunRowAction::SelectVenv(venv) => self.select_venv(venv),
+            RunRowAction::Browse => self.begin_venv_browse(),
+            RunRowAction::Register => self.begin_venv_register(),
+            RunRowAction::EditCommand(scope) => self.begin_run_command_edit(ext, scope),
+        }
+    }
+
+    /// The command a file of this extension runs with: the project's own if it has one, and the
+    /// global one otherwise. The single place that precedence is decided, so the toolbar label,
+    /// the menu's marker and Run itself cannot disagree about which command is in force.
+    pub fn run_command_for(&self, ext: &str) -> Option<&String> {
+        self.project_settings.run_commands.get(ext).or_else(|| self.settings.run_commands.get(ext))
+    }
+
+    /// Opens the box that types the run command for `ext`, pre-filled with what that scope
+    /// already holds, so the common edit is a tweak rather than a retype.
+    ///
+    /// Pre-filled from the scope being edited and not from what is in force: opening the
+    /// project row on a project with no override starts empty, which is the truth about the
+    /// file being written, and typing nothing then leaves it that way.
+    fn begin_run_command_edit(&mut self, ext: String, scope: RunScope) {
+        if ext.is_empty() {
+            return;
+        }
+        let existing = match scope {
+            RunScope::Global => self.settings.run_commands.get(&ext),
+            RunScope::Project => self.project_settings.run_commands.get(&ext),
+        };
+        self.run_command_input = existing.cloned().unwrap_or_default();
+        self.run_command_edit = Some((ext, scope));
+    }
+
+    fn handle_run_command_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_run_command_edit(),
+            KeyCode::Esc => self.cancel_run_command_edit(),
+            KeyCode::Backspace => {
+                self.run_command_input.pop();
+            }
+            KeyCode::Char(c) => self.run_command_input.push(c),
+            _ => {}
+        }
+    }
+
+    pub fn cancel_run_command_edit(&mut self) {
+        self.run_command_edit = None;
+        self.run_command_input.clear();
+    }
+
+    fn confirm_run_command_edit(&mut self) {
+        let lang = self.settings.lang;
+        let Some((ext, scope)) = self.run_command_edit.take() else { return };
+        let command = self.run_command_input.trim().to_string();
+        self.run_command_input.clear();
+        match scope {
+            RunScope::Project => {
+                if command.is_empty() {
+                    // Dropping the override hands the extension back to the global command,
+                    // which is a complete answer on its own — so there is nothing to restore
+                    // and the entry simply goes.
+                    self.project_settings.run_commands.remove(&ext);
+                    self.status_message = i18n::msg_run_command_project_cleared(lang, &ext);
+                } else {
+                    self.status_message = i18n::msg_run_command_project_set(lang, &ext, &command);
+                    self.project_settings.run_commands.insert(ext, command);
+                }
+                self.project_settings.save(&self.root);
+            }
+            RunScope::Global => {
+                if command.is_empty() {
+                    // An emptied box means "undo my customisation". For an extension that ships
+                    // with a default that is the default coming back, not the entry vanishing —
+                    // the defaults are re-merged at every start, so removing it would only look
+                    // like it worked until the next launch.
+                    match settings::default_run_command(&ext) {
+                        Some(default) => {
+                            self.status_message = i18n::msg_run_command_set(lang, &ext, &default);
+                            self.settings.run_commands.insert(ext, default);
+                        }
+                        None => {
+                            self.settings.run_commands.remove(&ext);
+                            self.status_message = i18n::msg_run_command_cleared(lang, &ext);
+                        }
+                    }
+                } else {
+                    self.status_message = i18n::msg_run_command_set(lang, &ext, &command);
+                    self.settings.run_commands.insert(ext, command);
+                }
+                // Persisted now rather than at exit, so a crash can't lose what was just typed.
+                self.settings.save();
+            }
         }
     }
 
@@ -2632,12 +3447,16 @@ impl App {
             self.handle_save_as_key(key);
             return;
         }
-        if self.venv_dropdown.is_some() {
-            self.handle_venv_dropdown_key(key);
+        if self.run_menu.is_some() {
+            self.handle_run_menu_key(key);
             return;
         }
         if self.venv_register.is_some() {
             self.handle_venv_register_key(key);
+            return;
+        }
+        if self.run_command_edit.is_some() {
+            self.handle_run_command_key(key);
             return;
         }
         if self.picker.is_some() {
@@ -2972,7 +3791,7 @@ impl App {
             // Deliberately available for a named buffer too, to save a copy under a new name.
             MenuAction::SaveAs => self.begin_save_as(self.active_editor, None),
             MenuAction::SaveAll => self.save_all(),
-            MenuAction::SelectVenv => self.open_venv_dropdown(),
+            MenuAction::RunTarget => self.open_run_menu(self.editor_pane_focus),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
             // Copy/Paste follow the focus: from a terminal they act on its selection and input,
@@ -3273,7 +4092,180 @@ impl App {
         false
     }
 
+    /// Every scrollbar that could be on screen, with the frame it rides and the way it runs.
+    /// One list, walked by hit testing and by the pointer test alike, so a bar can never be
+    /// clickable somewhere it isn't drawn.
+    fn scrollbar_frames(&self, areas: &ui::Areas) -> Vec<(ScrollbarId, Rect, ui::Axis)> {
+        let mut out = Vec::new();
+        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
+        for (i, pane_rect) in panes.iter().enumerate() {
+            let pane = if i == 0 { EditorPane::Left } else { EditorPane::Right };
+            // The bars ride the *content* frame, below the tab strip, which is the box the
+            // renderer draws them on.
+            let (_, content) = ui::split_editor_area(*pane_rect);
+            for axis in [ui::Axis::Vertical, ui::Axis::Horizontal] {
+                out.push((ScrollbarId::Editor(pane, axis), content, axis));
+            }
+        }
+        if let Some(terminals) = &areas.terminals {
+            for (i, rect) in terminals.iter().enumerate() {
+                out.push((ScrollbarId::Terminal(i), *rect, ui::Axis::Vertical));
+            }
+        }
+        out
+    }
+
+    /// What a scrollbar describes right now: the whole content, where the view sits in it, and
+    /// how much is on screen. `None` when it all fits and there is therefore no bar.
+    fn scrollbar_metrics(&self, id: ScrollbarId, areas: &ui::Areas) -> Option<(usize, usize, usize)> {
+        match id {
+            ScrollbarId::Editor(pane, axis) => {
+                let panes =
+                    ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
+                let rect = *panes.get(pane.index())?;
+                let idx = self.pane_editor_index(pane);
+                let (_, height, width) = ui::editor_viewport(self, idx, rect);
+                ui::editor_scroll_metrics(self, idx, axis, height, width)
+            }
+            ScrollbarId::Terminal(i) => ui::terminal_scroll_metrics(self.window_tab(i)?),
+        }
+    }
+
+    /// Whether a scrollbar should show itself in full rather than as a hint: the pointer is
+    /// resting on it, or it is the one being dragged. Both are the moment its arrows and groove
+    /// have to be aimable instead of merely suggestive.
+    pub fn scrollbar_engaged(&self, id: ScrollbarId, frame: Rect, axis: ui::Axis) -> bool {
+        if self.dragging == Some(DragTarget::Scrollbar(id)) {
+            return true;
+        }
+        let Some((col, row)) = self.pointer else { return false };
+        ui::scrollbar_strip(frame, axis).is_some_and(|strip| within(strip, col, row))
+    }
+
+    /// The scrollbar under a point, and which part of it.
+    ///
+    /// Only bars with somewhere to scroll are offered. The bars sit inside their frames, over
+    /// the last column or row of the contents, so this is what keeps that column ordinary text
+    /// — clickable, selectable — in every buffer that fits on screen.
+    fn scrollbar_at(
+        &self,
+        col: u16,
+        row: u16,
+        areas: &ui::Areas,
+    ) -> Option<(ScrollbarId, ScrollbarPart)> {
+        for (id, frame, axis) in self.scrollbar_frames(areas) {
+            let Some(strip) = ui::scrollbar_strip(frame, axis) else { continue };
+            if !within(strip, col, row) || self.scrollbar_metrics(id, areas).is_none() {
+                continue;
+            }
+            let layout = ui::scrollbar_layout(strip, axis);
+            if layout.back.is_some_and(|r| within(r, col, row)) {
+                return Some((id, ScrollbarPart::Step(-1)));
+            }
+            if layout.forward.is_some_and(|r| within(r, col, row)) {
+                return Some((id, ScrollbarPart::Step(1)));
+            }
+            let (start, len, at) = Self::track_axis(layout.track, axis, col, row);
+            return Some((id, ScrollbarPart::Track { offset: at.saturating_sub(start), len }));
+        }
+        None
+    }
+
+    /// A track reduced to the one dimension it runs along: where it starts, how long it is, and
+    /// where the pointer falls on it.
+    fn track_axis(track: Rect, axis: ui::Axis, col: u16, row: u16) -> (u16, u16, u16) {
+        match axis {
+            ui::Axis::Vertical => (track.y, track.height, row),
+            ui::Axis::Horizontal => (track.x, track.width, col),
+        }
+    }
+
+    fn apply_scrollbar(&mut self, id: ScrollbarId, part: ScrollbarPart, areas: &ui::Areas) {
+        match part {
+            ScrollbarPart::Step(delta) => self.nudge_scroll(id, delta),
+            ScrollbarPart::Track { offset, len } => {
+                let Some((total, _, viewport)) = self.scrollbar_metrics(id, areas) else { return };
+                let position = ui::scroll_position_from_track(offset, len, total, viewport);
+                self.set_scroll_position(id, position);
+            }
+        }
+    }
+
+    /// Keeps following the pointer while the thumb is held. The position is clamped to the
+    /// track rather than abandoned when the pointer wanders off it, so a drag that strays
+    /// sideways still scrolls — which is what every scrollbar does.
+    fn drag_scrollbar(&mut self, id: ScrollbarId, col: u16, row: u16, areas: &ui::Areas) {
+        let Some((_, frame, axis)) = self.scrollbar_frames(areas).into_iter().find(|(i, ..)| *i == id)
+        else {
+            return;
+        };
+        let Some(strip) = ui::scrollbar_strip(frame, axis) else { return };
+        let layout = ui::scrollbar_layout(strip, axis);
+        let (start, len, at) = Self::track_axis(layout.track, axis, col, row);
+        let offset = at.saturating_sub(start).min(len.saturating_sub(1));
+        self.apply_scrollbar(id, ScrollbarPart::Track { offset, len }, areas);
+    }
+
+    /// One line back or on — the mouse's version of pressing an arrow key.
+    fn nudge_scroll(&mut self, id: ScrollbarId, delta: isize) {
+        match id {
+            ScrollbarId::Editor(pane, axis) => {
+                let idx = self.pane_editor_index(pane);
+                let current = match axis {
+                    ui::Axis::Vertical => self.editors[idx].top_line,
+                    ui::Axis::Horizontal => self.editors[idx].left_col,
+                };
+                self.set_scroll_position(id, current.saturating_add_signed(delta));
+            }
+            // The terminal counts its offset backwards from the live output, and `scroll_by`
+            // already speaks the wheel's sign, so this needs no flipping of its own.
+            ScrollbarId::Terminal(i) => {
+                if let Some(term) = self.window_tab_mut(i) {
+                    term.scroll_by(delta);
+                }
+            }
+        }
+    }
+
+    fn set_scroll_position(&mut self, id: ScrollbarId, position: usize) {
+        match id {
+            ScrollbarId::Editor(pane, axis) => {
+                let idx = self.pane_editor_index(pane);
+                match axis {
+                    ui::Axis::Vertical => {
+                        let max = self.editors[idx].rope.len_lines().saturating_sub(1);
+                        self.editors[idx].top_line = position.min(max);
+                    }
+                    ui::Axis::Horizontal => self.editors[idx].left_col = position,
+                }
+            }
+            ScrollbarId::Terminal(i) => {
+                if let Some(term) = self.window_tab_mut(i) {
+                    // The bar counts from the start of the history; vt100 counts back from the
+                    // live end, so the two are mirror images of each other.
+                    let held = term.scrollback_lines();
+                    term.scroll_to_offset(held.saturating_sub(position));
+                }
+            }
+        }
+    }
+
     fn try_start_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
+        // The scrollbars live inside their frames, so they no longer compete with the seams on
+        // the borders — but they do sit over the contents, and this runs before the click
+        // reaches the text underneath.
+        if let Some((id, part)) = self.scrollbar_at(col, row, areas) {
+            self.apply_scrollbar(id, part, areas);
+            // An arrow is a click, not a grab; only the groove keeps following the pointer.
+            if matches!(part, ScrollbarPart::Track { .. }) {
+                self.dragging = Some(DragTarget::Scrollbar(id));
+            }
+            return true;
+        }
+        self.try_start_seam_drag(col, row, areas)
+    }
+
+    fn try_start_seam_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
         if let Some(sidebar) = areas.sidebar {
             let border_x = sidebar.x + sidebar.width;
             if row >= sidebar.y && row < sidebar.y + sidebar.height && (col == border_x.saturating_sub(1) || col == border_x) {
@@ -3368,8 +4360,11 @@ impl App {
                 }
             }
             Some(DragTarget::TerminalSplit(i)) => self.drag_terminal_split(i, col, row, full),
-            // Both are handled where the drag happens, against the pane they started in.
-            Some(DragTarget::TextSelection) | Some(DragTarget::TerminalSelection(_)) | None => {}
+            // All handled where the drag happens, against the frame it started in.
+            Some(DragTarget::TextSelection)
+            | Some(DragTarget::TerminalSelection(_))
+            | Some(DragTarget::Scrollbar(_))
+            | None => {}
         }
     }
 
@@ -3543,6 +4538,59 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
+        // A preview tab has no text to move a cursor through, so the plain arrows are free and
+        // mean the only thing they could mean here: the page before and the page after. No
+        // chord had to be found for it, which on a keyboard this crowded is worth something.
+        if self.editor().preview.is_some() && key.modifiers.is_empty() {
+            let paged = self.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
+            let idx = self.pane_editor_index(self.editor_pane_focus);
+            let page = self.rendered_len(idx).map(|len| len.saturating_sub(1));
+            let scroll = |app: &mut Self, delta: isize| {
+                let Some(max) = page else { return };
+                let top = &mut app.editors[idx].top_line;
+                *top = top.saturating_add_signed(delta).min(max);
+            };
+            match key.code {
+                KeyCode::Up if paged => {
+                    self.turn_page(-1);
+                    return;
+                }
+                KeyCode::Down if paged => {
+                    self.turn_page(1);
+                    return;
+                }
+                KeyCode::Left if paged => {
+                    self.turn_page(-1);
+                    return;
+                }
+                KeyCode::Right if paged => {
+                    self.turn_page(1);
+                    return;
+                }
+                // A rendered view is one long page, so the arrows scroll it instead.
+                KeyCode::Up => {
+                    scroll(self, -1);
+                    return;
+                }
+                KeyCode::Down => {
+                    scroll(self, 1);
+                    return;
+                }
+                KeyCode::PageUp => {
+                    scroll(self, -20);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    scroll(self, 20);
+                    return;
+                }
+                KeyCode::Home => {
+                    self.editors[idx].top_line = 0;
+                    return;
+                }
+                _ => {}
+            }
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -3687,6 +4735,23 @@ impl App {
                 self.move_terminal_selection(d_row, d_col);
                 return;
             }
+            // Shift+PageUp/PageDown through the history: what every terminal emulator binds it
+            // to, so the muscle memory already exists. It is not the only way in — both keys
+            // want Fn on a laptop — which is why the wheel does the same job.
+            let page = self.terminal_page(self.active_terminal);
+            let paged = match key.code {
+                KeyCode::PageUp => Some(-page),
+                KeyCode::PageDown => Some(page),
+                _ => None,
+            };
+            if let Some(delta) = paged {
+                if let Some(term) = self.window_tab_mut(self.active_terminal) {
+                    if !term.alternate_screen() {
+                        term.scroll_by(delta);
+                    }
+                }
+                return;
+            }
         }
         let index = self.active_terminal;
         if key.code == KeyCode::Esc && self.window_tab(index).is_some_and(|t| t.selection.is_some()) {
@@ -3698,9 +4763,19 @@ impl App {
         let bytes = key_to_bytes(key);
         if !bytes.is_empty() {
             if let Some(term) = self.focused_panel_mut() {
+                // Typing snaps back to the live output. The shell is about to answer, and an
+                // answer that lands off-screen is worse than losing your place in the history —
+                // which is exactly what every terminal emulator does for the same reason.
+                term.scroll_to_bottom();
                 term.write_input(&bytes);
             }
         }
+    }
+
+    /// One screenful of a terminal pane, for paging through its history. At least one line, so
+    /// a pane collapsed to nothing still moves rather than sticking.
+    fn terminal_page(&self, index: usize) -> isize {
+        self.window_tab(index).map(|t| (t.rows.saturating_sub(1)).max(1) as isize).unwrap_or(1)
     }
 
     /// Extends the active pane's selection by one cell, anchoring it at the terminal's own
@@ -3755,6 +4830,9 @@ impl App {
         }
         let col = mouse.column;
         let row = mouse.row;
+        // Every event, before any of the modal early-returns: a pointer that stopped being
+        // tracked while a menu was open would leave a scrollbar lit under it afterwards.
+        self.pointer = Some((col, row));
 
         // The manual is a reader, not a frame: while it is up the mouse only picks sections,
         // scrolls, or dismisses it.
@@ -3833,12 +4911,16 @@ impl App {
                     self.cancel_venv_register();
                     return;
                 }
-                if self.venv_dropdown.is_some() {
+                if self.run_command_edit.is_some() {
+                    self.cancel_run_command_edit();
+                    return;
+                }
+                if self.run_menu.is_some() {
                     // Inside the list picks a row; anywhere else dismisses it, like the menus.
-                    let rect = ui::venv_dropdown_rect(self, areas.editor, full);
+                    let rect = ui::run_menu_rect(self, areas.editor, full);
                     match rect.map(ui::inner_rect).filter(|inner| within(*inner, col, row)) {
-                        Some(inner) => self.activate_venv_row((row - inner.y) as usize),
-                        None => self.venv_dropdown = None,
+                        Some(inner) => self.activate_run_row((row - inner.y) as usize),
+                        None => self.run_menu = None,
                     }
                     return;
                 }
@@ -3960,6 +5042,7 @@ impl App {
                 | Some(DragTarget::TerminalSplit(_)) => {
                     self.continue_drag(col, row, full);
                 }
+                Some(DragTarget::Scrollbar(id)) => self.drag_scrollbar(id, col, row, areas),
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
                         // Stay within the pane the drag started in, regardless of which
@@ -4018,12 +5101,22 @@ impl App {
                 // than scrolling the text underneath.
                 let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
                 let step = if delta < 0 { -1 } else { 1 };
-                self.scroll_tabs(pane, step, tab_bar.width, pane == EditorPane::Left);
+                self.scroll_tabs(pane, step, tab_bar.width);
                 return;
             }
             if within(content, col, row) {
                 // Scroll whichever pane the pointer is over, independent of focus.
                 let idx = if pane_idx == 0 { self.active_editor } else { self.active_editor_right };
+                // A rendered preview holds no rope, so its length comes from the lines drawn.
+                if let Some(len) = self.rendered_len(idx) {
+                    let top = &mut self.editors[idx].top_line;
+                    *top = if delta < 0 {
+                        top.saturating_sub((-delta) as usize)
+                    } else {
+                        (*top + delta as usize).min(len.saturating_sub(1))
+                    };
+                    return;
+                }
                 if delta < 0 {
                     self.editors[idx].top_line = self.editors[idx].top_line.saturating_sub((-delta) as usize);
                 } else {
@@ -4033,42 +5126,56 @@ impl App {
             }
             return;
         }
+        if let Some(term_areas) = &areas.terminals {
+            if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {
+                // Like the editor panes: the wheel acts on what it is over, whether or not that
+                // shell has the focus.
+                if let Some(term) = self.window_tab_mut(i) {
+                    // A full-screen program owns the screen and gets no scrollback of its own,
+                    // so there is nothing here to scroll and the notch is simply dropped rather
+                    // than moving a view that isn't there.
+                    if !term.alternate_screen() {
+                        term.scroll_by(delta);
+                    }
+                }
+            }
+        }
     }
 
     fn mouse_tab_click(&mut self, col: u16, tab_bar: Rect, pane: EditorPane) {
         let rel_col = col.saturating_sub(tab_bar.x);
-        // Both panes show a Run button; the venv selector only renders in the left/only pane.
-        let with_venv = pane == EditorPane::Left;
-        let strip = self.tab_strip(tab_bar.width, with_venv, pane);
+        let strip = self.tab_strip(tab_bar.width, pane);
         if let Some((start, end)) = strip.left_arrow {
             if rel_col >= start && rel_col < end {
-                self.scroll_tabs(pane, -1, tab_bar.width, with_venv);
+                self.scroll_tabs(pane, -1, tab_bar.width);
                 return;
             }
         }
         if let Some((start, end)) = strip.right_arrow {
             if rel_col >= start && rel_col < end {
-                self.scroll_tabs(pane, 1, tab_bar.width, with_venv);
+                self.scroll_tabs(pane, 1, tab_bar.width);
                 return;
             }
         }
-        if let Some((i, layout)) = strip.tab_at(rel_col) {
+        if let Some((position, layout)) = strip.tab_at(rel_col) {
+            // A click lands on a position in *this* strip; which buffer that is depends on the
+            // pane, since the two halves hold different files.
+            let Some(&editor_idx) = self.pane_tabs(pane).get(position) else { return };
             if rel_col >= layout.close.0 && rel_col < layout.close.1 {
-                self.close_editor_at(i);
+                self.close_editor_at(editor_idx);
             } else {
-                match pane {
-                    EditorPane::Left => self.active_editor = i,
-                    EditorPane::Right => self.active_editor_right = i,
-                }
+                self.set_pane_editor(pane, editor_idx);
                 self.focus = Focus::Editor;
                 self.editor_pane_focus = pane;
             }
             return;
         }
-        let (venv_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width, with_venv);
-        if let Some((start, end)) = venv_range {
+        let (target_range, run_range) = ui::toolbar_button_ranges(self, tab_bar.width);
+        if let Some((start, end)) = target_range {
             if rel_col >= start && rel_col < end {
-                self.open_venv_dropdown();
+                // The button describes the file in the pane it sits on, so the menu opens on
+                // that pane's file even when the focus was elsewhere.
+                self.open_run_menu(pane);
                 return;
             }
         }
@@ -4083,10 +5190,10 @@ impl App {
 
     /// The tab strip exactly as rendered for `pane` — the same call the renderer makes, so a
     /// click maps to the row the user sees.
-    fn tab_strip(&self, tab_bar_width: u16, with_venv: bool, pane: EditorPane) -> ui::TabStrip {
+    fn tab_strip(&self, tab_bar_width: u16, pane: EditorPane) -> ui::TabStrip {
         ui::tab_strip_layout(
-            &ui::tab_widths(self),
-            ui::tab_strip_width(self, tab_bar_width, with_venv),
+            &ui::tab_widths(self, pane),
+            ui::tab_strip_width(self, tab_bar_width),
             self.tab_offsets[pane.index()],
         )
     }
@@ -4094,18 +5201,17 @@ impl App {
     /// Brings a pane's active tab into view, but only when the active tab has changed since the
     /// last time this ran. Doing it every frame is what broke scrolling left: the strip snapped
     /// back to the active tab immediately, so the `‹` arrow looked dead.
-    pub fn reveal_active_tab(&mut self, pane: EditorPane, tab_bar_width: u16, with_venv: bool) {
-        let active = match pane {
-            EditorPane::Left => self.active_editor,
-            EditorPane::Right => self.active_editor_right,
-        };
+    pub fn reveal_active_tab(&mut self, pane: EditorPane, tab_bar_width: u16) {
+        // Tracked by position in this pane's strip, not by buffer: the same buffer can sit at a
+        // different place in each half, and scrolling is about the strip.
+        let active = self.pane_tab_position(pane);
         let slot = pane.index();
         if self.tab_revealed[slot] == Some(active) {
             return;
         }
         self.tab_offsets[slot] = ui::offset_revealing(
-            &ui::tab_widths(self),
-            ui::tab_strip_width(self, tab_bar_width, with_venv),
+            &ui::tab_widths(self, pane),
+            ui::tab_strip_width(self, tab_bar_width),
             self.tab_offsets[slot],
             active,
         );
@@ -4114,9 +5220,9 @@ impl App {
 
     /// Scrolls a pane's tab strip by `delta` tabs, starting from what is on screen rather
     /// than from the stored offset, so the first step after an auto-scroll doesn't jump.
-    fn scroll_tabs(&mut self, pane: EditorPane, delta: isize, tab_bar_width: u16, with_venv: bool) {
-        let first = self.tab_strip(tab_bar_width, with_venv, pane).first as isize;
-        let last = self.editors.len().saturating_sub(1) as isize;
+    fn scroll_tabs(&mut self, pane: EditorPane, delta: isize, tab_bar_width: u16) {
+        let first = self.tab_strip(tab_bar_width, pane).first as isize;
+        let last = self.pane_tabs(pane).len().saturating_sub(1) as isize;
         self.tab_offsets[pane.index()] = (first + delta).clamp(0, last) as usize;
     }
 
@@ -4671,20 +5777,32 @@ mod tests {
     }
 
     #[test]
-    fn venv_dropdown_rows_map_positions_to_actions() {
+    fn python_run_rows_map_positions_to_actions() {
         let registered = vec![crate::settings::RegisteredVenv::Named {
             name: "ml".to_string(),
             path: "/opt/venvs/ml-3.12".to_string(),
         }];
         let available = vec![".venv".to_string(), "/opt/venvs/ml-3.12".to_string()];
-        let rows = venv_rows(Some("/opt/venvs/ml-3.12"), &available, &registered, Lang::En);
+        let commands = std::collections::HashMap::new();
+        let none = std::collections::HashMap::new();
+        let rows = run_rows(
+            "py",
+            Some("/opt/venvs/ml-3.12"),
+            &available,
+            &registered,
+            &commands,
+            &none,
+            Lang::En,
+        );
 
-        // "no venv", one row per venv, then the browse and register entries.
-        assert_eq!(rows.len(), 5);
-        assert!(matches!(rows[0].action, VenvRowAction::Select(None)));
-        assert!(matches!(rows[1].action, VenvRowAction::Select(Some(ref v)) if v == ".venv"));
-        assert!(matches!(rows[3].action, VenvRowAction::Browse));
-        assert!(matches!(rows[4].action, VenvRowAction::Register));
+        // "no venv", one row per venv, browse, register, then the two run-command rows.
+        assert_eq!(rows.len(), 7);
+        assert!(matches!(rows[0].action, RunRowAction::SelectVenv(None)));
+        assert!(matches!(rows[1].action, RunRowAction::SelectVenv(Some(ref v)) if v == ".venv"));
+        assert!(matches!(rows[3].action, RunRowAction::Browse));
+        assert!(matches!(rows[4].action, RunRowAction::Register));
+        assert!(matches!(rows[5].action, RunRowAction::EditCommand(RunScope::Global)));
+        assert!(matches!(rows[6].action, RunRowAction::EditCommand(RunScope::Project)));
 
         // The nickname is the label; the path stays as the dimmed detail.
         assert_eq!(rows[2].label, "ml");
@@ -4697,8 +5815,111 @@ mod tests {
         assert!(!rows[0].active && !rows[1].active && !rows[3].active && !rows[4].active);
 
         // With no venv selected, the marker moves to the first row.
-        let rows = venv_rows(None, &available, &registered, Lang::En);
+        let rows = run_rows("py", None, &available, &registered, &commands, &none, Lang::En);
         assert!(rows[0].active);
+    }
+
+    #[test]
+    fn non_python_run_rows_only_offer_the_command() {
+        let available = vec![".venv".to_string()];
+        let commands =
+            std::collections::HashMap::from([("tex".to_string(), "pdflatex {file}".to_string())]);
+        let none = std::collections::HashMap::new();
+
+        // A venv means nothing to pdflatex, so the venv list stays out of the way entirely and
+        // the two command rows are the whole of what decides how a .tex file runs.
+        let rows = run_rows("tex", Some(".venv"), &available, &[], &commands, &none, Lang::En);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
+        assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
+        assert!(matches!(rows[1].action, RunRowAction::EditCommand(RunScope::Project)));
+
+        // An extension with no command still gets both rows — that is how one is set.
+        let rows = run_rows("md", None, &available, &[], &commands, &none, Lang::En);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].detail, None);
+        assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
+    }
+
+    /// The marker is the only thing in the menu that answers "which of these two wins", and
+    /// getting it wrong is how you typeset the wrong master file and blame the editor.
+    #[test]
+    fn the_marker_follows_the_command_that_would_actually_run() {
+        let global =
+            std::collections::HashMap::from([("tex".to_string(), "pdflatex {file}".to_string())]);
+        let overridden =
+            std::collections::HashMap::from([("tex".to_string(), "latexmk main.tex".to_string())]);
+        let none = std::collections::HashMap::new();
+
+        // No override: the shared command is in force.
+        let rows = run_rows("tex", None, &[], &[], &global, &none, Lang::En);
+        assert!(rows[0].active && !rows[1].active);
+        assert_eq!(rows[1].detail, None, "nothing to show for a project that overrides nothing");
+
+        // Overridden: the marker moves, and both commands stay visible so the one being
+        // shadowed is not a mystery.
+        let rows = run_rows("tex", None, &[], &[], &global, &overridden, Lang::En);
+        assert!(!rows[0].active && rows[1].active);
+        assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
+        assert_eq!(rows[1].detail.as_deref(), Some("latexmk main.tex"));
+
+        // An override with no global command behind it still wins, and nothing is marked as
+        // shared because there is nothing shared to mark.
+        let rows = run_rows("tex", None, &[], &[], &none, &overridden, Lang::En);
+        assert!(!rows[0].active && rows[1].active);
+    }
+
+    /// Closing a buffer renumbers both strips. Getting this wrong does not show up as the wrong
+    /// tab being highlighted — it shows up later, as an index that no longer exists being handed
+    /// to a draw, in an app whose whole promise is that it does not fall over on you.
+    #[test]
+    fn closing_a_buffer_renumbers_both_strips() {
+        // Six buffers dealt between the halves, deliberately out of order and interleaved.
+        let mut tabs = [vec![0, 3, 1], vec![4, 2, 5]];
+        forget_buffer(&mut tabs, 2);
+        // 2 is gone from the half that held it; 3, 4 and 5 each shift down one, wherever they
+        // were, and the order within each strip survives.
+        assert_eq!(tabs, [vec![0, 2, 1], vec![3, 4]]);
+
+        // Removing the first shifts everything.
+        let mut tabs = [vec![0, 1], vec![2]];
+        forget_buffer(&mut tabs, 0);
+        assert_eq!(tabs, [vec![0], vec![1]]);
+
+        // Removing the last leaves the rest alone.
+        let mut tabs = [vec![0, 1], vec![2]];
+        forget_buffer(&mut tabs, 2);
+        assert_eq!(tabs, [vec![0, 1], vec![]]);
+
+        // A buffer no strip holds still renumbers the ones above it, and removes nothing.
+        let mut tabs = [vec![0, 5], vec![7]];
+        forget_buffer(&mut tabs, 3);
+        assert_eq!(tabs, [vec![0, 4], vec![6]]);
+
+        // Emptying a strip entirely is allowed here; giving that half something to show again
+        // is `settle_panes`'s job, not this one's.
+        let mut tabs = [vec![0], vec![1]];
+        forget_buffer(&mut tabs, 1);
+        assert_eq!(tabs, [vec![0], vec![]]);
+    }
+
+    #[test]
+    fn placeholders_expand_to_the_files_parts_and_survive_spaces() {
+        let path = std::path::Path::new("/work/my papers/report.tex");
+        let expanded = expand_placeholders(
+            "pdflatex -output-directory {dir} {file} && open {dir}/{stem}.pdf",
+            path,
+        );
+        assert_eq!(
+            expanded,
+            "pdflatex -output-directory '/work/my papers' '/work/my papers/report.tex' \
+             && open '/work/my papers'/report.pdf"
+        );
+
+        // {name} is the file name with its extension; a bare relative path has no folder of
+        // its own, which as a directory means "here".
+        let expanded = expand_placeholders("cd {dir} && lint {name}", std::path::Path::new("main.py"));
+        assert_eq!(expanded, "cd . && lint main.py");
     }
 
     #[test]
