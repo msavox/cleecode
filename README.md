@@ -23,8 +23,10 @@ undo with coalescing, find and replace, go-to-line, code folding, auto-indent an
 brackets. Selection works with the mouse or the keyboard, goes to the system clipboard, and can
 be **rectangular** — `Alt`+drag for a column selection over ragged text.
 
-`Ctrl+L` splits the editor into two panes, each with its own tab strip and Run button. Files
-changed underneath you are reloaded when they are not dirty, and a binary or non-UTF-8 file opens
+`Ctrl+L` splits the editor into two independent editors sharing one pool of buffers: each half
+has its own tabs, no file is in both strips at once, and closing the last tab of a half closes
+the split rather than leaving it empty. Files changed underneath you are reloaded when they are
+not dirty, and a binary or non-UTF-8 file opens
 read-only rather than being corrupted on save. Scrollbars appear inside the frame while the view
 moves or the pointer rests on them, and they are working controls: drag the thumb, click the
 groove to jump, click the end arrows to step a line.
@@ -135,6 +137,20 @@ macOS arm64/x86_64 and x86_64 Linux and Windows builds are attached to each
 checks they start, nothing more. The Linux binary needs glibc and libxcb — install `libxcb1`
 (Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it fails to start. For Alpine/musl, build from
 source.
+
+### Optional extras
+
+Previews reach for a few outside tools. None is required — without them CleeCode shows less
+rather than failing, and says so in the tab instead of leaving it blank.
+
+```bash
+brew install poppler        # PDF pages (ghostscript works too)
+brew install pandoc typst   # Markdown as a real document, pictures and all
+brew install chafa          # a picture inside a terminal pane
+```
+
+Real pixels also need a terminal with a graphics protocol — kitty, iTerm2, Ghostty, WezTerm.
+Anywhere else, pictures fall back to coloured half-blocks and Markdown to styled text.
 
 ### From source
 
