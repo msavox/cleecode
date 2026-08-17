@@ -1141,6 +1141,12 @@ impl Editor {
         }
     }
 
+    /// Marks the view as having just moved, for a scroll this buffer's own `top_line` cannot
+    /// record — a preview moves a window over a picture, not a cursor over lines.
+    pub fn mark_scrolled(&mut self) {
+        self.scroll_moved = Some(Instant::now());
+    }
+
     /// Whether the view moved within `window`, for deciding if a scrollbar still has a reason
     /// to be on screen.
     pub fn scrolled_within(&self, window: Duration) -> bool {

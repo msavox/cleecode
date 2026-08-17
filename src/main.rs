@@ -126,6 +126,10 @@ KEYS TO START WITH:
 More in the manual (Ctrl+Shift+M) and in man clee.
 ";
 
+/// A terminal whose writes go through a large buffer. See where it is built for why.
+type BufferedTerminal =
+    ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
+
 fn main() -> Result<()> {
     // Flags are checked before the terminal is taken over, so their output stays visible.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -179,7 +183,20 @@ fn main() -> Result<()> {
         }
     }
     install_panic_hook();
-    let mut terminal = ratatui::init();
+    // Not `ratatui::init()`, which writes to a bare `Stdout` — and Rust's `Stdout` is line
+    // buffered, so a payload with no newlines in it leaves in 8 KB pieces. That is exactly
+    // right for a TUI's usual traffic of a few changed cells, and exactly wrong for a picture:
+    // one image is megabytes of escape sequence, which became thousands of small writes onto a
+    // pty and seconds of waiting to see it. A big buffer sends it in a handful of them instead.
+    const FRAME_BUFFER: usize = 4 * 1024 * 1024;
+
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::BufWriter::with_capacity(
+        FRAME_BUFFER,
+        stdout(),
+    ));
+    let mut terminal = ratatui::Terminal::new(backend)?;
     crossterm::execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     // Ask for disambiguated key reporting where the terminal offers it. Without it Ctrl+Tab
     // arrives as a plain Tab — the two are the same byte, 0x09, in the encoding terminals have
@@ -214,7 +231,8 @@ fn main() -> Result<()> {
         let _ = crossterm::execute!(stdout(), crossterm::event::PopKeyboardEnhancementFlags);
     }
     let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
-    ratatui::restore();
+    let _ = crossterm::execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+    let _ = crossterm::terminal::disable_raw_mode();
     match result {
         Ok(r) => r,
         Err(text) => {
@@ -225,7 +243,7 @@ fn main() -> Result<()> {
 }
 
 fn run(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut BufferedTerminal,
     open_workspace: Option<String>,
     edit_file: Option<std::path::PathBuf>,
 ) -> Result<()> {
@@ -267,11 +285,10 @@ fn run(
         }
         Some(p) if p.is_dir() => p.clone(),
         Some(_) => cwd.clone(),
-        None => saved
-            .last_root
-            .clone()
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| cwd.clone()),
+        // Where you are. A shell command that ignores the directory it was typed in is a
+        // surprise every time it happens in a folder that is not the one you left — and the
+        // session you *did* leave is still restored, below, whenever you come back to it.
+        None => cwd.clone(),
     };
 
     let mut app = App::new(root, size.height, size.width)?;
@@ -320,7 +337,15 @@ fn run(
         None => match resumed {
             Some(ws) => app.apply_workspace(ws),
             None => {
-                for path in &saved.last_open_files {
+                // The files come back only where they belong. Reopening the last session's
+                // buffers in a different project would put somebody else's files in front of
+                // you, named after a folder you are not in.
+                // Compared after resolving symlinks, since the remembered path was written
+                // that way and the one you typed may not be.
+                let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+                let same_project =
+                    saved.last_root.as_deref().is_some_and(|last| real(last) == real(&app.root));
+                for path in saved.last_open_files.iter().filter(|_| same_project) {
                     if path.exists() {
                         app.open_file_in_tab(path.clone());
                     }

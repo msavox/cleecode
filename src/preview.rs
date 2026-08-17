@@ -101,8 +101,14 @@ pub enum State {
     /// PDF page long enough to rasterise, that doing either on the main thread would stall the
     /// whole window, terminals included.
     Loading,
-    /// Ready to draw. The protocol holds the picture and, once drawn, the version of it resized
-    /// to the pane — which is why the renderer needs it by `&mut`.
+    /// Ready to draw. The protocol holds the picture and, once drawn, the version of it fitted
+    /// to the pane.
+    ///
+    /// The crate offers a threaded protocol for this, and it was tried: the resize does happen
+    /// during the draw. But once the filter is chosen to suit what is being shown the work is
+    /// twenty-odd milliseconds, and moving it off the frame bought less than the extra frame of
+    /// latency it added — while the hand-off of a finished resize back to the tab that asked for
+    /// it had a way of losing one, leaving a pane blank with nothing to make it ask again.
     Ready(Box<StatefulProtocol>),
     /// Unreadable, unrenderable, or too big. Shown as a message in the tab: a preview that
     /// cannot be produced should say so where it was expected, not leave an empty frame.
@@ -119,6 +125,17 @@ pub enum State {
     },
 }
 
+/// How a page is sized against the pane it is shown in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// The whole page, shrunk until it fits. Nothing is hidden, and on a tall pane the text
+    /// ends up small.
+    Page,
+    /// The page's width fills the pane and the rest of it is scrolled to. What you want for
+    /// reading, which is why a document opens this way.
+    Width,
+}
+
 /// A preview tab: what is on screen, and — for a document — which page of how many.
 pub struct Preview {
     pub state: State,
@@ -132,6 +149,25 @@ pub struct Preview {
     pub settled: Option<(u64, std::time::Instant)>,
     /// The revision what is currently on screen was made from.
     pub shown_revision: u64,
+    /// How tall the pane was, in cells, the last time it was drawn. See `area_cols`.
+    pub area_rows: u16,
+    /// How wide the pane was, in cells, the last time it was drawn. Recorded by the renderer
+    /// because it is the only place that knows, and needed by the *next* render, which has to
+    /// ask a rasteriser for a number of pixels before it has a pane to look at.
+    pub area_cols: u16,
+    /// 1.0 is the page fitted to the pane; above that it is rasterised larger and scrolled.
+    pub zoom: f32,
+    /// Whether the page is shown inverted, for reading a white document on a dark screen.
+    pub inverted: bool,
+    /// Whole page, or page width filling the pane.
+    pub fit: Fit,
+    /// The rendered page, kept whole so scrolling can cut a new window out of it without going
+    /// back to the rasteriser. A page is a few megabytes; re-rendering one is a subprocess.
+    pub full: Option<image::DynamicImage>,
+    /// Where the visible window sits on the rendered page, in the page's own pixels. Two axes,
+    /// because zooming past the pane's width makes sideways travel real as well.
+    pub scroll_px: u32,
+    pub scroll_x: u32,
     /// Set once making a document out of this has failed. The tab then stays on the styled-text
     /// rendering rather than spending half a second failing the same way after every pause —
     /// the reason it failed will not have changed by itself. \u{25b6} Refresh clears it and tries again.
@@ -152,7 +188,7 @@ pub struct Pages {
 
 impl Preview {
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false }
+        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0 }
     }
 
     pub fn document(page: usize) -> Self {
@@ -163,6 +199,15 @@ impl Preview {
             settled: None,
             shown_revision: 0,
             document_failed: false,
+            area_cols: 0,
+            area_rows: 0,
+            zoom: 1.0,
+            inverted: false,
+            // A document is for reading, so it opens at the width that makes it readable.
+            fit: Fit::Width,
+            full: None,
+            scroll_px: 0,
+            scroll_x: 0,
         }
     }
 
@@ -177,6 +222,15 @@ impl Preview {
             settled: None,
             shown_revision: u64::MAX,
             document_failed: false,
+            area_cols: 0,
+            area_rows: 0,
+            zoom: 1.0,
+            inverted: false,
+            // A document is for reading, so it opens at the width that makes it readable.
+            fit: Fit::Width,
+            full: None,
+            scroll_px: 0,
+            scroll_x: 0,
         }
     }
 
@@ -186,6 +240,23 @@ impl Preview {
     }
 
 
+
+    /// How many pixels wide the next render of this should be, from the pane it last had and
+    /// the zoom in force. Falls back to a sensible page when it has never been drawn.
+    pub fn render_width(&self) -> u32 {
+        if self.area_cols == 0 || self.area_rows == 0 {
+            return FALLBACK_PAGE_WIDTH;
+        }
+        page_width_for(self.area_cols, self.area_rows, self.zoom, self.fit)
+    }
+
+    /// Steps the zoom by one notch, within bounds that keep a page readable and affordable.
+    pub fn zoom_by(&mut self, steps: i32) -> bool {
+        let next = (self.zoom * 1.25f32.powi(steps)).clamp(0.5, 4.0);
+        let changed = (next - self.zoom).abs() > f32::EPSILON;
+        self.zoom = next;
+        changed
+    }
 
     /// Whether re-making this would produce anything different. True for a document, whose
     /// pages are generated — from a file that may have been recompiled, or from a buffer being
@@ -222,12 +293,12 @@ const MAX_PIXELS: u64 = 80_000_000;
 pub enum Job {
     /// A picture, decoded as it is.
     Picture(PathBuf),
-    /// One page of a document already on disk.
-    Page { path: PathBuf, page: usize },
+    /// One page of a document already on disk, rasterised `width_px` pixels wide.
+    Page { path: PathBuf, page: usize, width_px: u32 },
     /// One page of a document made *from a buffer*: the markdown you are editing, turned into a
     /// real document so that pictures it refers to appear in the flow of the text — which a grid
     /// of cells cannot do, and which is the whole reason this goes the long way round.
-    Markdown { path: PathBuf, text: String, page: usize },
+    Markdown { path: PathBuf, text: String, page: usize, width_px: u32 },
 }
 
 impl Job {
@@ -253,15 +324,15 @@ pub fn start_loading(job: Job, tx: Sender<Decoded>) -> State {
         let page = job.page();
         let (result, total) = match &job {
             Job::Picture(path) => (decode(path), None),
-            Job::Page { path, page } => {
+            Job::Page { path, page, width_px } => {
                 // The count is asked for alongside the first page rather than in its own pass:
                 // it needs the same tool, and a second subprocess for a number nobody is
                 // waiting on would only slow the page down.
-                (render_page(path, *page), page_count(path))
+                (render_page(path, *page, *width_px), page_count(path))
             }
-            Job::Markdown { path, text, page } => match markdown_to_pdf(path, text) {
+            Job::Markdown { path, text, page, width_px } => match markdown_to_pdf(path, text) {
                 Ok(pdf) => {
-                    let rendered = render_page(pdf.path(), *page);
+                    let rendered = render_page(pdf.path(), *page, *width_px);
                     (rendered, page_count(pdf.path()))
                 }
                 Err(e) => (Err(e), None),
@@ -392,10 +463,134 @@ pub fn is_document(ext: &str) -> bool {
     ext == "pdf"
 }
 
-/// What a page is rendered at. Generous next to a pane's own pixel count — a wide pane is maybe
-/// 1000 pixels across — so the picture is downscaled to fit rather than stretched, which is the
-/// difference between readable body text and a blur.
-const PAGE_DPI: u32 = 150;
+/// How wide a page is rasterised, when nothing better is known about the pane it is going into.
+const FALLBACK_PAGE_WIDTH: u32 = 1600;
+
+/// Never ask a rasteriser for less than this, or more.
+const PAGE_WIDTH_RANGE: (u32, u32) = (600, 4000);
+
+/// How many pixels a *rasterised page* may be.
+///
+/// A budget on work, not on transmission — a distinction worth being exact about, because
+/// getting it wrong cost a picture 41ms for nothing. What reaches the terminal is decided by
+/// `Resize::Fit`, which scales whatever it is given to the pane's own size: shrinking the source
+/// first changes the quality and the effort, never the bytes.
+///
+/// So it is applied where the effort is ours to spend — choosing how large to rasterise a PDF
+/// page, which is a subprocess, a decode and a resize — and *not* to pictures, which arrive at
+/// whatever size they are and gain nothing from being reduced before the widget reduces them.
+/// A page is never rasterised beyond this. Not a quality setting and not tunable: a page has to
+/// be *exactly* as big as the pane it is drawn in, because the widget fits by shrinking and
+/// never enlarges — so anything that trims it below the pane silently breaks fitting, which is
+/// what a configurable version of this did.
+const MAX_PREVIEW_PIXELS: u32 = 16_000_000;
+
+fn pixel_budget() -> u32 {
+    MAX_PREVIEW_PIXELS
+}
+
+/// The size of one character cell in pixels, as the terminal reported it. This is what turns a
+/// pane measured in cells into a pane measured in pixels, which is the only unit a rasteriser
+/// understands.
+pub fn cell_size() -> Option<(u16, u16)> {
+    picker().map(|p| {
+        let size = p.font_size();
+        (size.width, size.height)
+    })
+}
+
+/// The shape of a page, tall side over wide side. A4 and US Letter are within 3% of each other,
+/// and being a few per cent out only means the raster is a few per cent bigger than needed.
+const PAGE_ASPECT: f32 = 1.414;
+
+/// How many pixels wide to rasterise a page for a pane `cols` x `rows` cells.
+///
+/// Both dimensions matter, and using only the width was expensive: a portrait page rasterised
+/// as wide as the pane comes out far taller than the pane is, and every one of those extra rows
+/// is decoded, resampled and then thrown away. A page 1984 wide was producing 4.6 times the
+/// pixels that reached the screen. Sizing it to *fit* the pane instead is both sharper than the
+/// old fixed resolution and cheaper than either.
+///
+/// Fixed at 150dpi before, which on anything but a small window meant rendering a page smaller
+/// than the space it had to fill and then stretching it — the graininess was never aliasing, it
+/// was enlargement.
+pub fn page_width_for(cols: u16, rows: u16, zoom: f32, fit: Fit) -> u32 {
+    let (cw, ch) = cell_size().unwrap_or((8, 16));
+    let pane_w = u32::from(cols) * u32::from(cw);
+    let pane_h = u32::from(rows) * u32::from(ch).max(1);
+    let wanted = match fit {
+        // As wide as the pane, and as tall as the page turns out to be.
+        Fit::Width => pane_w,
+        // Narrow enough that the whole page is no taller than the pane.
+        Fit::Page => pane_w.min((pane_h as f32 / PAGE_ASPECT) as u32).max(1),
+    };
+    let wanted = (wanted as f32 * zoom.max(0.1)) as u32;
+    budgeted(wanted, pane_w, pane_h, fit).clamp(PAGE_WIDTH_RANGE.0, PAGE_WIDTH_RANGE.1)
+}
+
+/// Trims a page width, but only to stop something absurd.
+///
+/// This used to be a working constraint rather than a backstop, and it broke fitting: a band
+/// narrower than the pane stays narrow, because `Resize::Fit` never enlarges — so "fit the
+/// width" quietly produced a small page in the corner. The budget was there for a slowness that
+/// turned out to be an unoptimised build, so it costs nothing to let a page be the size of the
+/// pane it is going into, which is the size it has to be for fitting to mean anything.
+fn budgeted(width: u32, pane_w: u32, pane_h: u32, fit: Fit) -> u32 {
+    let budget = pixel_budget();
+    let shown = match fit {
+        Fit::Page => width.saturating_mul((width as f32 * PAGE_ASPECT) as u32),
+        // A band as wide as the page and as tall as the pane is, in proportion.
+        Fit::Width => {
+            let band = (width as u64 * pane_h.max(1) as u64 / pane_w.max(1) as u64) as u32;
+            width.saturating_mul(band.max(1))
+        }
+    };
+    if shown <= budget {
+        return width;
+    }
+    // Both sides shrink together, so the reduction goes as the square root.
+    ((width as f32) * (budget as f32 / shown as f32).sqrt()) as u32
+}
+
+/// The pane, measured in the page's own pixels.
+pub fn pane_pixels(cols: u16, rows: u16) -> (u32, u32) {
+    let (cw, ch) = cell_size().unwrap_or((8, 16));
+    (u32::from(cols) * u32::from(cw), u32::from(rows) * u32::from(ch))
+}
+
+/// The part of a rendered page the pane can show, cut at `(x, y)` in the page's own pixels.
+///
+/// Cutting the window here rather than handing the whole page to the widget is what makes zoom
+/// mean anything at all. `Resize::Fit` shrinks whatever it is given until it fits, so a page
+/// rasterised twice as large comes back exactly the same size on screen — zooming changed the
+/// detail and nothing else. Cropping first is what turns "bigger" into "closer".
+///
+/// It also bounds the cost: the terminal is sent a pane's worth of pixels whether the page is
+/// one screen across or five.
+pub fn visible_window(
+    page: &image::DynamicImage,
+    cols: u16,
+    rows: u16,
+    scroll_x: u32,
+    scroll_y: u32,
+) -> image::DynamicImage {
+    let (pane_w, pane_h) = pane_pixels(cols, rows);
+    // Smaller than the pane in both directions: nothing to cut, and the widget will centre it.
+    if page.height() <= pane_h && page.width() <= pane_w {
+        return page.clone();
+    }
+    let w = pane_w.min(page.width()).max(1);
+    let h = pane_h.min(page.height()).max(1);
+    let x = scroll_x.min(page.width().saturating_sub(w));
+    let y = scroll_y.min(page.height().saturating_sub(h));
+    image::GenericImageView::view(page, x, y, w, h).to_image().into()
+}
+
+/// How far a page can be scrolled on each axis before its far edge is on screen.
+pub fn max_scroll(page: &image::DynamicImage, cols: u16, rows: u16) -> (u32, u32) {
+    let (pane_w, pane_h) = pane_pixels(cols, rows);
+    (page.width().saturating_sub(pane_w), page.height().saturating_sub(pane_h))
+}
 
 /// A PDF is not decoded in-process. The Rust libraries that could are either AGPL (`mupdf`),
 /// which this project's MIT licence cannot take, or want a prebuilt native blob shipped per
@@ -411,7 +606,7 @@ fn rasterisers() -> [&'static str; 2] {
 }
 
 /// Renders one page to a temporary PNG and decodes it. One-based, as printed on the page.
-fn render_page(path: &Path, page: usize) -> Result<image::DynamicImage, String> {
+fn render_page(path: &Path, page: usize, width_px: u32) -> Result<image::DynamicImage, String> {
     let out = std::env::temp_dir().join(format!(
         "cleecode-page-{}-{:?}-{page}.png",
         std::process::id(),
@@ -431,17 +626,25 @@ fn render_page(path: &Path, page: usize) -> Result<image::DynamicImage, String> 
     for tool in rasterisers() {
         let status = match tool {
             // -singlefile makes it write exactly `out.png` rather than numbering the name.
+            // Sized to the pane rather than to a fixed resolution, and told to antialias:
+            // pdftoppm does by default, Ghostscript emphatically does not.
             "pdftoppm" => std::process::Command::new(tool)
-                .args(["-png", "-r", &PAGE_DPI.to_string()])
+                .args(["-png", "-scale-to-x", &width_px.to_string(), "-scale-to-y", "-1"])
+                .args(["-aa", "yes", "-aaVector", "yes"])
                 .args(["-f", &page.to_string(), "-l", &page.to_string()])
                 .arg("-singlefile")
                 .arg(path)
                 // pdftoppm appends its own ".png", so it is handed the name without one.
                 .arg(out.with_extension(""))
                 .output(),
+            // Ghostscript has no "this many pixels wide" flag, so the resolution is worked back
+            // from one. Assuming A4 puts a US Letter page 3% out, which is invisible next to
+            // getting the order of magnitude right — the alternative is another subprocess to
+            // ask how big the page is.
             _ => std::process::Command::new(tool)
                 .args(["-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-sDEVICE=png16m"])
-                .arg(format!("-r{PAGE_DPI}"))
+                .args(["-dTextAlphaBits=4", "-dGraphicsAlphaBits=4"])
+                .arg(format!("-r{}", (width_px as f32 / 8.27).round().max(36.0)))
                 .arg(format!("-dFirstPage={page}"))
                 .arg(format!("-dLastPage={page}"))
                 .arg(format!("-sOutputFile={}", out.display()))
@@ -499,11 +702,21 @@ fn ghostscript_pages(path: &Path) -> Option<usize> {
 }
 
 impl State {
-    /// Takes a rendered image and readies it for drawing. Fails loudly rather than silently when
-    /// the terminal was never asked what it can do — that would be a startup-order bug, and a
-    /// blank tab would hide it.
-    pub fn ready(image: image::DynamicImage) -> State {
-        match picker() {
+    /// Takes a rendered image and readies it for drawing, with `tx` the channel the resizing
+    /// work goes down. Fails loudly rather than silently when the terminal was never asked what
+    /// it can do — that would be a startup-order bug, and a blank tab would hide it.
+    pub fn ready(image: image::DynamicImage, inverted: bool) -> State {
+        // Inversion is applied to the pixels rather than asked of the terminal, which has no way
+        // to be asked. A white page becomes a dark one with light text, which is what every PDF
+        // reader means by a dark mode.
+        let image = if inverted {
+            let mut rgba = image.to_rgba8();
+            image::imageops::invert(&mut rgba);
+            image::DynamicImage::ImageRgba8(rgba)
+        } else {
+            image
+        };
+        match picker().cloned() {
             Some(picker) => State::Ready(Box::new(picker.new_resize_protocol(image))),
             None => State::Failed("the terminal was never asked what it can draw".to_string()),
         }
@@ -718,8 +931,8 @@ mod tests {
 
         // Whether a rasteriser is installed or not, this must be an error and must not hang or
         // panic: no tool at all, and a tool that refuses the file, are the same to the caller.
-        assert!(render_page(&not_a_pdf, 1).is_err());
-        assert!(render_page(&not_a_pdf, 99).is_err());
+        assert!(render_page(&not_a_pdf, 1, 1200).is_err());
+        assert!(render_page(&not_a_pdf, 99, 1200).is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

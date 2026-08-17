@@ -105,6 +105,8 @@ pub struct TerminalPanel {
     pub startup_command: Option<String>,
     /// The startup command, held back until the shell is actually reading. See `run_command`.
     pending_command: Option<String>,
+    /// Whether the banner has been scrubbed since this shell started. See `flush_pending`.
+    cleared: bool,
     /// When the history was last scrolled through. The scrollbar is a hint rather than
     /// furniture: it appears while it is being used and fades back out, so an idle pane stays
     /// all output and no chrome.
@@ -388,6 +390,7 @@ impl TerminalPanel {
             name: None,
             startup_command: startup.map(str::to_string),
             pending_command: None,
+            cleared: false,
             last_scroll: None,
         })
     }
@@ -404,15 +407,30 @@ impl TerminalPanel {
         self.pending_command = Some(command.to_string());
     }
 
-    /// Types the held command once the shell has settled — the same moment the pane is revealed,
-    /// by which point the `clear` has been consumed and there is a prompt to type at. Does
-    /// nothing until then, and only ever fires once.
+    /// Types the held command once the shell has settled, and otherwise makes sure the pane
+    /// starts clean. Does nothing until the shell is ready, and each part only ever fires once.
+    ///
+    /// The `clear` queued into the pty at spawn is a bet on ordering: it assumes the shell's
+    /// line editor picks the line up *after* the rc has run. On some shells it does, on others
+    /// the banner is printed afterwards and survives — which is how a fastfetch ends up sitting
+    /// in a pane on Linux and not on macOS. Here there is no bet: the shell has been quiet for
+    /// a quarter of a second, so there is a prompt, and a form feed is what a prompt understands
+    /// as "clear and redraw yourself". Every interactive shell binds it, and unlike re-running
+    /// `clear` it leaves nothing behind in the history.
     pub fn flush_pending(&mut self) {
-        if self.pending_command.is_some() && self.is_ready() {
-            if let Some(command) = self.pending_command.take() {
-                self.write_input(command.as_bytes());
-                self.write_input(b"\r");
-            }
+        if !self.is_ready() {
+            return;
+        }
+        if let Some(command) = self.pending_command.take() {
+            self.write_input(command.as_bytes());
+            self.write_input(b"\r");
+            // A command of its own scrubs the banner by pushing it off, so no clearing needed.
+            self.cleared = true;
+            return;
+        }
+        if !self.cleared {
+            self.cleared = true;
+            self.write_input(b"\x0c");
         }
     }
 

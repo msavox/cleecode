@@ -999,7 +999,15 @@ fn draw_input_modal(f: &mut Frame, full: Rect, title: &str, prompt: &str, input:
 
 fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
-    draw_input_modal(f, full, "Go to line", i18n::msg_goto_prompt(lang), &app.goto_input);
+    // What the number will mean depends on what is being looked at.
+    let pages = app.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
+    draw_input_modal(
+        f,
+        full,
+        i18n::goto_title(lang, pages),
+        i18n::msg_goto_prompt(lang, pages),
+        &app.goto_input,
+    );
 }
 
 /// The terminal's name and its startup command, in one box: two prompts, two values, and a
@@ -1696,6 +1704,179 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// One control on a preview's navigation bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NavControl {
+    PageBack,
+    PageForward,
+    GoToPage,
+    ZoomOut,
+    ZoomIn,
+    FitPage,
+    FitWidth,
+    Invert,
+}
+
+/// The bar's controls with the cells each occupies, left to right.
+///
+/// One function for the renderer and for hit testing, so a button cannot be drawn where it
+/// cannot be clicked. Page controls only appear on something that has pages.
+pub fn nav_bar_layout(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, Rect)> {
+    let Some(preview) = app.editors.get(idx).and_then(|e| e.preview.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(row) = nav_bar_rect(area) else { return Vec::new() };
+    let mut controls = Vec::new();
+    if preview.pages.is_some() {
+        controls.extend([NavControl::PageBack, NavControl::PageForward, NavControl::GoToPage]);
+    }
+    controls.extend([
+        NavControl::ZoomOut,
+        NavControl::ZoomIn,
+        NavControl::FitPage,
+        NavControl::FitWidth,
+    ]);
+    // Only where there is a document to invert. A dark mode turns a white page dark and its
+    // text light; done to a photograph it is not a mode, it is a negative.
+    if preview.pages.is_some() || preview.source.is_some() {
+        controls.push(NavControl::Invert);
+    }
+
+    let mut out = Vec::new();
+    let mut x = row.x + 1;
+    for control in controls {
+        let width = nav_width(control);
+        if x + width > row.x + row.width {
+            break;
+        }
+        out.push((control, Rect { x, y: row.y, width, height: 1 }));
+        x += width + 1;
+    }
+    out
+}
+
+/// The row a preview's navigation bar sits on: the last line inside the frame.
+fn nav_bar_rect(area: Rect) -> Option<Rect> {
+    let inner = inner_rect(area);
+    (inner.height >= 2 && inner.width >= 8)
+        .then(|| Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 })
+}
+
+/// A button's name, and the key that does the same thing.
+///
+/// The two are drawn together, on the button. They used to be apart — buttons on the left, a
+/// list of keys on the right — which put the words "go", "fit", "wide" and "dark" on the bar
+/// twice, once as a label and once as a reminder of the label.
+fn nav_label(control: NavControl) -> (&'static str, &'static str) {
+    match control {
+        NavControl::PageBack => ("\u{25c2}", "\u{2190}"),
+        NavControl::PageForward => ("\u{25b8}", "\u{2192}"),
+        NavControl::GoToPage => ("go", "g"),
+        NavControl::ZoomOut => ("\u{2212}", "-"),
+        NavControl::ZoomIn => ("+", "+"),
+        NavControl::FitPage => ("fit", "f"),
+        NavControl::FitWidth => ("wide", "w"),
+        NavControl::Invert => ("dark", "d"),
+    }
+}
+
+/// How many cells a button takes: a space, the name, the key, a space. The zoom buttons name
+/// themselves with their own key, so it is not written twice.
+fn nav_width(control: NavControl) -> u16 {
+    let (name, key) = nav_label(control);
+    if name == key {
+        name.chars().count() as u16 + 2
+    } else {
+        (name.chars().count() + key.chars().count()) as u16 + 3
+    }
+}
+
+/// The area a preview's picture gets, once the navigation bar has taken its row.
+fn preview_image_rect(area: Rect) -> Rect {
+    let inner = inner_rect(area);
+    match nav_bar_rect(area) {
+        Some(_) => Rect { height: inner.height.saturating_sub(1), ..inner },
+        None => inner,
+    }
+}
+
+/// The navigation bar: the controls, then what they are acting on — page, and zoom — pushed to
+/// the right so the numbers stay in one place while the buttons stay in another.
+fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
+    let Some(row) = nav_bar_rect(area) else { return };
+    let Some(preview) = app.editors.get(idx).and_then(|e| e.preview.as_ref()) else { return };
+    let lang = app.settings.lang;
+    f.render_widget(
+        Paragraph::new(" ".repeat(row.width as usize)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+        row,
+    );
+
+    for (control, rect) in nav_bar_layout(app, idx, area) {
+        // The key that does the same thing is written under the label, so the bar teaches the
+        // keyboard rather than competing with it.
+        let style = Style::default().fg(Color::Gray).bg(Color::Rgb(45, 45, 45));
+        let style = match control {
+            NavControl::FitWidth if preview.fit == crate::preview::Fit::Width => {
+                style.fg(Color::Black).bg(Color::Cyan)
+            }
+            NavControl::FitPage if preview.fit == crate::preview::Fit::Page => {
+                style.fg(Color::Black).bg(Color::Cyan)
+            }
+            NavControl::Invert if preview.inverted => style.fg(Color::Black).bg(Color::Cyan),
+            _ => style,
+        };
+        let (name, key) = nav_label(control);
+        let dim = Style::default().fg(Color::DarkGray).bg(style.bg.unwrap_or(Color::Reset));
+        let line = if name == key {
+            Line::from(Span::styled(format!(" {name} "), style))
+        } else {
+            Line::from(vec![
+                Span::styled(format!(" {name} "), style),
+                Span::styled(format!("{key} "), dim),
+            ])
+        };
+        f.render_widget(Paragraph::new(line), rect);
+    }
+
+    // The state and the key hint, right-aligned — but never over the buttons, which are drawn
+    // first and own their cells. What does not fit is dropped whole rather than truncated: half
+    // a hint reads as a glitch, and the hint is the least important thing on the bar.
+    let buttons_end = nav_bar_layout(app, idx, area)
+        .last()
+        .map(|(_, r)| r.x + r.width)
+        .unwrap_or(row.x);
+    let free = (row.x + row.width).saturating_sub(buttons_end + 1);
+
+    let mut state = String::new();
+    if let Some(pages) = &preview.pages {
+        state.push_str(&match pages.total {
+            Some(total) => i18n::msg_page_of(lang, pages.current, total),
+            None => i18n::msg_page(lang, pages.current),
+        });
+    }
+    if (preview.zoom - 1.0).abs() > f32::EPSILON {
+        state.push_str(&format!(" {}% ", (preview.zoom * 100.0).round() as i32));
+    }
+    // No list of keys here any more: each button carries its own, so a list would spell out
+    // "fit", "wide" and "dark" a second time beside the buttons already saying them.
+    let text = if state.chars().count() <= free as usize { state } else { String::new() };
+    if text.is_empty() {
+        return;
+    }
+    let width = text.chars().count() as u16;
+    let rect = Rect { x: row.x + row.width - width, width, ..row };
+    f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))), rect);
+}
+
+/// The box a pane's scrollbars ride: its contents, less any row another control has claimed.
+pub fn scrollbar_area(app: &App, idx: usize, area: Rect) -> Rect {
+    if app.editors.get(idx).is_some_and(|e| e.preview.is_some()) {
+        preview_image_rect(area)
+    } else {
+        inner_rect(area)
+    }
+}
+
 /// A picture in a tab: drawn by CleeCode itself, straight down the stdout ratatui already
 /// writes on, so it reaches the host terminal's graphics protocol where there is one and falls
 /// back to coloured half-blocks where there is not.
@@ -1703,16 +1884,35 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
 /// While it decodes, and when it cannot be decoded at all, the frame says so in the middle
 /// rather than sitting empty — an empty frame is exactly the silence this feature exists to
 /// replace.
-fn draw_preview_pane(f: &mut Frame, app: &mut App, idx: usize, content_area: Rect, focused: bool) {
+fn draw_preview_pane(
+    f: &mut Frame,
+    app: &mut App,
+    idx: usize,
+    pane: EditorPane,
+    content_area: Rect,
+    focused: bool,
+) {
     use crate::preview::State as Preview;
     let lang = app.settings.lang;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(focused, app.layout_resize_active()));
-    let inner = block.inner(content_area);
     f.render_widget(block, content_area);
+    let inner = preview_image_rect(content_area);
     if inner.width == 0 || inner.height == 0 {
         return;
+    }
+    draw_nav_bar(f, app, idx, content_area);
+    // A zoomed page is larger than its pane, so it gets the same bars the text does — and they
+    // are the one thing that shows there is more page off to the side.
+    for axis in [Axis::Vertical, Axis::Horizontal] {
+        let id = crate::app::ScrollbarId::Editor(pane, axis);
+        let engaged = app.scrollbar_engaged(id, content_area, axis);
+        if let Some((total, position, viewport)) = app.preview_scroll_view(idx, axis) {
+            if engaged || app.editors[idx].scrolled_within(SCROLLBAR_LINGER) {
+                draw_scrollbar(f, scrollbar_area(app, idx, content_area), axis, total, position, viewport, engaged);
+            }
+        }
     }
 
     let centred = |f: &mut Frame, text: String, colour: Color| {
@@ -1726,30 +1926,15 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, idx: usize, content_area: Rec
         f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(colour))), rect);
     };
 
-    // A document says which page it is on, along the bottom border where the horizontal
-    // scrollbar would be on a text tab — a page is what "where am I" means here.
-    if let Some(pages) = app.editors[idx].preview.as_ref().and_then(|p| p.pages.as_ref()) {
-        let label = match pages.total {
-            Some(total) => i18n::msg_page_of(lang, pages.current, total),
-            None => i18n::msg_page(lang, pages.current),
-        };
-        let width = (label.chars().count() as u16).min(content_area.width.saturating_sub(2));
-        if content_area.height >= 2 && width > 0 {
-            let rect = Rect {
-                x: content_area.x + content_area.width.saturating_sub(width + 2),
-                y: content_area.y + content_area.height - 1,
-                width,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(label, Style::default().fg(Color::Gray))),
-                rect,
-            );
-        }
-    }
-
     // Read before the buffer is borrowed mutably for its preview state.
     let top_line = app.editors[idx].top_line;
+    let is_document = app.editors[idx].preview.as_ref().is_some_and(|p| p.pages.is_some());
+    // The next render needs a number of pixels, and this is the only place that knows how wide
+    // the pane actually is. Recorded every frame, so a resize is picked up by the render after.
+    if let Some(preview) = app.editors[idx].preview.as_mut() {
+        preview.area_cols = inner.width;
+        preview.area_rows = inner.height;
+    }
     match app.editors[idx].preview.as_mut().map(|p| &mut p.state) {
         Some(Preview::Loading) => centred(f, i18n::msg_preview_loading(lang), Color::DarkGray),
         Some(Preview::Failed(reason)) => {
@@ -1757,7 +1942,20 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, idx: usize, content_area: Rec
             centred(f, text, Color::Red);
         }
         Some(Preview::Ready(protocol)) => {
-            f.render_stateful_widget(StatefulImage::default(), inner, protocol.as_mut());
+            // The filter is chosen per kind, because the two want opposite things.
+            //
+            // A document is text: `Nearest` makes every stroke either survive whole or vanish,
+            // which is most of why pages looked gritty, so it is worth a better filter. A
+            // photograph is not: on a 4K picture CatmullRom measured 41ms against Nearest's 7,
+            // for a difference nobody looks for — and that cost lands between asking for the
+            // picture and seeing it.
+            let filter = if is_document {
+                ratatui_image::FilterType::CatmullRom
+            } else {
+                ratatui_image::FilterType::Triangle
+            };
+            let widget = StatefulImage::default().resize(ratatui_image::Resize::Fit(Some(filter)));
+            f.render_stateful_widget(widget, inner, protocol.as_mut());
         }
         Some(Preview::Rendered { lines, .. }) => {
             // Wrapped here rather than when the lines were made: they are logical lines, and
@@ -1803,7 +2001,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     // A picture takes the whole frame and none of the text machinery: no gutter, no wrapping,
     // no syntax, and no scrollbars, because there is nothing to scroll through.
     if app.editors[idx].preview.is_some() {
-        draw_preview_pane(f, app, idx, content_area, focused);
+        draw_preview_pane(f, app, idx, pane, content_area, focused);
         return;
     }
 
@@ -1964,7 +2162,7 @@ fn draw_editor_scrollbars(
         else {
             continue;
         };
-        draw_scrollbar(f, area, axis, total, position, viewport, engaged);
+        draw_scrollbar(f, scrollbar_area(app, idx, area), axis, total, position, viewport, engaged);
     }
 }
 
@@ -2013,9 +2211,12 @@ pub enum Axis {
 /// the last column of text while it is showing, the way overlay scrollbars have always worked,
 /// and the seam is left alone.
 ///
-/// `None` when the frame has no interior to spare.
-pub fn scrollbar_strip(area: Rect, axis: Axis) -> Option<Rect> {
-    let inner = inner_rect(area);
+/// Takes the box the bars ride rather than the frame around it, because that box is not always
+/// the whole interior: a preview keeps its last row for the navigation bar, and a horizontal
+/// scrollbar drawn on the frame's own terms landed straight on top of it.
+///
+/// `None` when there is no room to spare.
+pub fn scrollbar_strip(inner: Rect, axis: Axis) -> Option<Rect> {
     match axis {
         Axis::Vertical if inner.width >= 1 && inner.height >= 2 => Some(Rect {
             x: inner.x + inner.width - 1,
@@ -2100,7 +2301,7 @@ pub fn scroll_position_from_track(offset: u16, len: u16, total: usize, viewport:
 #[allow(clippy::too_many_arguments)]
 fn draw_scrollbar(
     f: &mut Frame,
-    area: Rect,
+    box_: Rect,
     axis: Axis,
     total: usize,
     position: usize,
@@ -2110,7 +2311,7 @@ fn draw_scrollbar(
     if total <= viewport {
         return;
     }
-    let Some(strip) = scrollbar_strip(area, axis) else { return };
+    let Some(strip) = scrollbar_strip(box_, axis) else { return };
     let layout = scrollbar_layout(strip, axis);
 
     // The bar lies over the text, so idle it stays as small as it can be: the thumb alone, a
@@ -2135,7 +2336,15 @@ fn draw_scrollbar(
         Axis::Horizontal => ScrollbarOrientation::HorizontalBottom,
     };
     let mut state = ScrollbarState::new(total).position(position).viewport_content_length(viewport);
+    // A horizontal bar is one cell tall whatever it draws, and the default thumb is a full
+    // block — which reads as a bar as thick as a line of text sitting under the content. An
+    // eighth-block sits on the floor of its cell and looks like the thin rule it is meant to be.
+    let (thumb_glyph, track_glyph) = match axis {
+        Axis::Vertical => ("\u{2588}", "\u{2502}"),
+        Axis::Horizontal => ("\u{2581}", "\u{2581}"),
+    };
     let mut bar = Scrollbar::new(orientation)
+        .thumb_symbol(thumb_glyph)
         // The arrows are drawn above, into cells this widget never sees, so hit testing and
         // painting read the same layout. The thumb always rides the track between them, so it
         // does not jump when the arrows appear.
@@ -2143,7 +2352,7 @@ fn draw_scrollbar(
         .end_symbol(None)
         .thumb_style(Style::default().fg(Color::Cyan));
     bar = if lit {
-        bar.track_style(Style::default().fg(Color::DarkGray))
+        bar.track_symbol(Some(track_glyph)).track_style(Style::default().fg(Color::DarkGray))
     } else {
         // Nothing but the thumb: a groove painted over the text would blank a column of it for
         // no gain while nobody is aiming at the bar.
@@ -2167,7 +2376,7 @@ fn draw_terminal_scrollbar(
     if terminal.scrollback_offset() == 0 && !engaged && !terminal.scrolled_within(SCROLLBAR_LINGER) {
         return;
     }
-    draw_scrollbar(f, area, Axis::Vertical, total, position, viewport, engaged);
+    draw_scrollbar(f, inner_rect(area), Axis::Vertical, total, position, viewport, engaged);
 }
 
 /// What a terminal's scrollbar describes: the held history followed by the live screen, with
@@ -2736,13 +2945,67 @@ mod tests {
         assert_eq!(run_program_name(""), "");
     }
 
+    /// The bar is drawn from this layout and clicked through it, so every button it paints has
+    /// to be one that can be hit — same cells, no overlaps, nothing a single column wide.
+    #[test]
+    fn every_nav_button_drawn_is_a_button_that_can_be_clicked() {
+        let mut x = 5u16;
+        let mut last_end = 0u16;
+        for control in [NavControl::PageBack, NavControl::GoToPage, NavControl::Invert] {
+            let width = nav_width(control);
+            assert!(width >= 3, "a one-cell target is not clickable");
+            // Name and key are drawn together on the button, so neither is repeated elsewhere.
+            let (name, key) = nav_label(control);
+            assert!(!name.is_empty() && !key.is_empty());
+            assert!(x > last_end, "buttons must not overlap");
+            last_end = x + width;
+            x += width + 1;
+        }
+    }
+
+    /// The state text and the buttons share one row, and the state is drawn second — so if it
+    /// were allowed to start too far left it would paint over a button, which is how the
+    /// "wide" button once ended up reading "page".
+    #[test]
+    fn the_state_text_never_reaches_the_buttons() {
+        // A row 60 wide with buttons ending at 30 leaves 29 cells for state and hint.
+        let row_end = 60u16;
+        let buttons_end = 30u16;
+        let free = row_end.saturating_sub(buttons_end + 1);
+        assert_eq!(free, 29);
+
+        // Anything that fits is right-aligned *within* what is free, never over a button.
+        for text_len in [1u16, 10, 29] {
+            let x = row_end - text_len;
+            assert!(x > buttons_end, "text of {text_len} would overlap a button ending at {buttons_end}");
+        }
+        // And one cell too long no longer fits, so it is dropped rather than overlapping.
+        assert!(30 > free);
+    }
+
+    /// The bar takes a row from the picture, and the two must not both claim it.
+    #[test]
+    fn the_bar_and_the_picture_divide_the_frame() {
+        let area = Rect { x: 2, y: 3, width: 40, height: 12 };
+        let inner = inner_rect(area);
+        let bar = nav_bar_rect(area).expect("a normal frame has room");
+        let image = preview_image_rect(area);
+        assert_eq!(bar.y, inner.y + inner.height - 1);
+        assert_eq!(image.height, inner.height - 1);
+        assert_eq!(image.y + image.height, bar.y, "the picture stops where the bar starts");
+
+        // A frame with no room inside keeps neither, rather than drawing one over the other.
+        assert_eq!(nav_bar_rect(Rect { x: 0, y: 0, width: 40, height: 2 }), None);
+        assert_eq!(nav_bar_rect(Rect { x: 0, y: 0, width: 4, height: 12 }), None);
+    }
+
     #[test]
     fn scrollbars_sit_inside_the_frame_leaving_the_border_to_the_seam() {
         // A frame at (10,5) 40x12 has its contents at (11,6) 38x10.
         let area = Rect { x: 10, y: 5, width: 40, height: 12 };
         let inner = inner_rect(area);
 
-        let bar = scrollbar_strip(area, Axis::Vertical).expect("a normal frame has room");
+        let bar = scrollbar_strip(inner_rect(area), Axis::Vertical).expect("a normal frame has room");
         // Last column of the *contents*, one in from the border — the border is the resize seam
         // and stays entirely its own.
         assert_eq!(bar.x, 48);
@@ -2753,22 +3016,22 @@ mod tests {
         assert_eq!(bar.y, 6);
         assert_eq!(bar.height, 10);
 
-        let bar = scrollbar_strip(area, Axis::Horizontal).expect("a normal frame has room");
+        let bar = scrollbar_strip(inner_rect(area), Axis::Horizontal).expect("a normal frame has room");
         assert_eq!(bar.y, 15);
         assert_eq!(bar.y, inner.y + inner.height - 1);
         assert_eq!(bar.height, 1);
         assert_eq!(bar.x, 11);
         // One short of the right, which is the vertical bar's column: no cell answers to both.
         assert_eq!(bar.width, 37);
-        let vertical = scrollbar_strip(area, Axis::Vertical).unwrap();
+        let vertical = scrollbar_strip(inner_rect(area), Axis::Vertical).unwrap();
         assert_eq!(bar.x + bar.width, vertical.x);
 
         // Frames too small to have an interior get no bar rather than one drawn on the border.
-        let vert = |w, h| scrollbar_strip(Rect { x: 0, y: 0, width: w, height: h }, Axis::Vertical);
+        let vert = |w, h| scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Vertical);
         assert_eq!(vert(2, 12), None, "no interior width");
         assert_eq!(vert(40, 3), None, "one row of contents is not a scrollbar");
         assert_eq!(vert(0, 0), None);
-        let horiz = |w, h| scrollbar_strip(Rect { x: 0, y: 0, width: w, height: h }, Axis::Horizontal);
+        let horiz = |w, h| scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Horizontal);
         assert_eq!(horiz(3, 12), None, "one column of contents, all of it the vertical bar's");
         assert_eq!(horiz(40, 2), None);
     }

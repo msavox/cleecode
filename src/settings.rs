@@ -62,6 +62,12 @@ pub struct Settings {
     // the shells opened afterwards, not the ones already running.
     #[serde(default = "default_terminal_scrollback")]
     pub terminal_scrollback: usize,
+    // Whether previews are shown inverted — a light document turned dark. A preference about
+    // how you read rather than about one file, so it belongs here and outlives the tab: turning
+    // it on for one PDF and having the next one open bright again is exactly the annoyance a
+    // dark mode exists to remove.
+    #[serde(default)]
+    pub preview_dark: bool,
     // Auto-close brackets/quotes and expand pairs on Enter. Hand-editable; on by default.
     #[serde(default = "default_true")]
     pub auto_pairs: bool,
@@ -205,6 +211,7 @@ impl Default for Settings {
             registered_venvs: Vec::new(),
             interpreter_paths: std::collections::HashMap::new(),
             show_hidden_files: false,
+            preview_dark: false,
             terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
             last_root: None,

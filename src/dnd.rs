@@ -23,6 +23,35 @@ pub fn parse_dropped_paths(text: &str) -> Vec<PathBuf> {
     paths
 }
 
+/// Whether a paste looks like a file drop whose files are somewhere else.
+///
+/// `parse_dropped_paths` keeps only what exists on *this* machine, so dragging a file onto a
+/// CleeCode running over ssh yields nothing at all — the path is real, just not here. Silence is
+/// the worst answer to that, so this recognises the shape of a dropped path without requiring it
+/// to exist: absolute, one per line, and nothing that looks like prose.
+pub fn looks_like_dropped_paths(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() || lines.len() > 32 {
+        return false;
+    }
+    lines.iter().all(|line| {
+        let tokens = shell_words::split(line).unwrap_or_else(|_| vec![line.to_string()]);
+        !tokens.is_empty()
+            && tokens.iter().all(|t| {
+                // A path, not a sentence: rooted, and with a name at the end of it.
+                (t.starts_with('/') || t.starts_with("~/") || t.starts_with("file://"))
+                    && !t.ends_with('.')
+                    && t.len() > 2
+            })
+    })
+}
+
+/// Whether this process is itself running over ssh, which is what turns "those files are not
+/// here" into the more useful "those files are on the machine you connected from".
+pub fn running_over_ssh() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
 /// Snapshot of the process table with each process's command line and parent pid, taken
 /// via `sysinfo` so it works identically on macOS, Linux and Windows (no reliance on a
 /// `ps` binary or its output format).
@@ -185,5 +214,24 @@ mod tests {
         assert_eq!(parse_ssh_command("ssh -p 2222 user@host.com"), Some("user@host.com".to_string()));
         assert_eq!(parse_ssh_command("/usr/bin/ssh host"), Some("host".to_string()));
         assert_eq!(parse_ssh_command("bash"), None);
+    }
+
+
+    /// A drop that cannot be honoured has to be recognised without the files being there, since
+    /// not being there is the whole problem. It must not mistake ordinary pasted prose for one,
+    /// or a stray paste in the file tree would start explaining ssh to somebody.
+    #[test]
+    fn a_drop_from_elsewhere_is_told_apart_from_prose() {
+        assert!(looks_like_dropped_paths("/Users/someone/Desktop/photo.png"));
+        assert!(looks_like_dropped_paths("'/Users/someone/my papers/report.pdf'"));
+        assert!(looks_like_dropped_paths("/a/one.txt\n/a/two.txt"));
+        assert!(looks_like_dropped_paths("~/Desktop/thing.md"));
+
+        // Prose, a bare word, a relative path and an empty paste are all not drops.
+        assert!(!looks_like_dropped_paths("the files are in /tmp, have a look"));
+        assert!(!looks_like_dropped_paths("hello"));
+        assert!(!looks_like_dropped_paths("src/main.rs"));
+        assert!(!looks_like_dropped_paths(""));
+        assert!(!looks_like_dropped_paths("   "));
     }
 }

@@ -21,6 +21,12 @@ impl Clipboard {
         if let Some(cb) = self.sys.as_mut() {
             let _ = cb.set_text(text.to_string());
         }
+        // Over ssh the system clipboard is the *server's*, which nobody can paste from. OSC 52
+        // hands the text to the terminal instead, and the terminal is on the machine sitting in
+        // front of you — the only route a copy has out of a remote session.
+        if crate::dnd::running_over_ssh() {
+            set_via_terminal(text);
+        }
     }
 
     pub fn get(&mut self) -> String {
@@ -31,4 +37,22 @@ impl Clipboard {
         }
         self.fallback.clone()
     }
+}
+
+/// Asks the terminal to put `text` on its own clipboard (OSC 52).
+///
+/// Written straight to stdout, which ratatui also owns: safe because the sequence moves no
+/// cursor and paints no cell, so a frame drawn around it is unaffected. Terminals cap how much
+/// they will accept, so an oversized copy is dropped rather than sent as a truncated half.
+fn set_via_terminal(text: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    const LIMIT: usize = 64 * 1024;
+    if text.len() > LIMIT {
+        return;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
 }

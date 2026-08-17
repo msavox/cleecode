@@ -3,6 +3,10 @@
 An editor, a file tree and real terminals in one window. Written in Rust, driven from the
 keyboard, with the mouse as an alternative rather than the only way.
 
+Best in a terminal that can draw pictures — **Ghostty**, **kitty**, **WezTerm** or **iTerm2** —
+where pictures, PDFs and Markdown are shown as themselves rather than as coloured blocks. It
+works anywhere; those are where it looks like the screenshots.
+
 By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
 ![CleeCode in action](docs/demo.gif)
@@ -50,8 +54,8 @@ brew install pandoc typst   # Markdown as a real document, pictures and all
 brew install chafa          # a picture inside a terminal pane
 ```
 
-Real pixels also need a terminal with a graphics protocol — kitty, iTerm2, Ghostty, WezTerm.
-Anywhere else, pictures fall back to coloured half-blocks and Markdown to styled text.
+Without a graphics-capable terminal (see the top of this file), pictures fall back to coloured
+half-blocks and Markdown to styled terminal text — less to look at, nothing missing.
 
 ### From source
 

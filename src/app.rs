@@ -1096,7 +1096,10 @@ impl App {
             // the thing on it. Anything the user has done since has more right to be there.
             let tagline = i18n::t(self.settings.lang, Key::SplashTagline);
             if let Some(displaced) = self.turtle.as_mut().and_then(|t| t.displaced.take()) {
-                if self.status_message == tagline {
+                // Put back only something worth putting back. Restoring an *empty* line was
+                // indistinguishable from the joke having eaten it: the bar simply went blank and
+                // stayed blank, which is the one outcome a joke on the status line must not have.
+                if self.status_message == tagline && !displaced.trim().is_empty() {
                     self.status_message = displaced;
                 }
             }
@@ -1136,7 +1139,23 @@ impl App {
             }
             let rendered_view = preview.source.clone();
             match done.result {
-                Ok(image) => preview.state = crate::preview::State::ready(image),
+                Ok(image) => {
+                    let inverted = preview.inverted;
+                    let (cols, rows) = (preview.area_cols, preview.area_rows);
+                    // The whole page is kept and only the window being looked at is handed to
+                    // the terminal. That is what makes zoom and scrolling cost a crop instead
+                    // of a rasteriser — and what makes zoom visible at all, since the widget
+                    // would otherwise shrink a larger page straight back to the pane.
+                    let window = crate::preview::visible_window(
+                        &image,
+                        cols,
+                        rows,
+                        preview.scroll_x,
+                        preview.scroll_px,
+                    );
+                    preview.full = Some(image);
+                    preview.state = crate::preview::State::ready(window, inverted)
+                }
                 // A document that could not be made is not the end of a markdown preview: it
                 // still has styled text to offer, which is better than a red line where the
                 // document should be. The reason is said once, in the status line, and the tab
@@ -1195,6 +1214,7 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        let lang = self.settings.lang;
         if self.show_splash {
             self.show_splash = false;
             return;
@@ -1207,6 +1227,12 @@ impl App {
                 let paths = dnd::parse_dropped_paths(&text);
                 if !paths.is_empty() {
                     self.copy_dropped_paths(paths);
+                } else if dnd::looks_like_dropped_paths(&text) {
+                    // Dropped files that are not on this machine. Copying them is not something
+                    // this side can do — the file is on the other end of the connection, and
+                    // nothing here can read it — so it says so instead of doing nothing, which
+                    // is what it used to do.
+                    self.status_message = i18n::msg_drop_not_here(lang, dnd::running_over_ssh());
                 }
             }
             Focus::Editor => self.editor_mut().insert_multiline(&text),
@@ -1401,11 +1427,16 @@ impl App {
             return;
         }
         let first = paged.then_some(1);
+        let dark = self.settings.preview_dark;
+        // Never drawn yet, so nothing is known about the pane it will land in; the preview's
+        // own default stands in until the first frame records a real width.
+        let width_px = crate::preview::Preview::picture().render_width();
         let mut preview =
             if paged { crate::preview::Preview::document(1) } else { crate::preview::Preview::picture() };
+        preview.inverted = dark;
         preview.state = crate::preview::start_loading(
             match first {
-                Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
                 None => crate::preview::Job::Picture(path.clone()),
             },
             self.preview_tx.clone(),
@@ -1421,6 +1452,167 @@ impl App {
         self.place_in_pane(pane, idx);
         self.focus = Focus::Editor;
         self.status_message = i18n::msg_preview_opened(lang, crate::preview::protocol_name());
+    }
+
+    /// Runs one of the navigation bar's controls. The bar and the keyboard both come through
+    /// here, so a button and its key can never drift apart — the bar even writes the key on
+    /// itself, and that promise has to hold.
+    pub fn preview_control(&mut self, control: ui::NavControl) {
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return };
+        match control {
+            ui::NavControl::PageBack => return self.turn_page(-1),
+            ui::NavControl::PageForward => return self.turn_page(1),
+            ui::NavControl::GoToPage => return self.begin_goto_page(),
+            ui::NavControl::ZoomOut if !preview.zoom_by(-1) => return,
+            ui::NavControl::ZoomIn if !preview.zoom_by(1) => return,
+            ui::NavControl::ZoomOut | ui::NavControl::ZoomIn => {}
+            ui::NavControl::FitPage => {
+                preview.fit = crate::preview::Fit::Page;
+                preview.zoom = 1.0;
+            }
+            ui::NavControl::FitWidth => {
+                preview.fit = crate::preview::Fit::Width;
+                preview.zoom = 1.0;
+            }
+            ui::NavControl::Invert if preview.pages.is_some() || preview.source.is_some() => {
+                preview.inverted = !preview.inverted;
+                // Remembered, so the next document opens the way this one is being read.
+                let dark = preview.inverted;
+                self.settings.preview_dark = dark;
+                for editor in self.editors.iter_mut() {
+                    if let Some(other) = editor.preview.as_mut() {
+                        if other.pages.is_some() || other.source.is_some() {
+                            other.inverted = dark;
+                        }
+                    }
+                }
+            }
+            ui::NavControl::Invert => return,
+        }
+        // Everything that reaches here changes how the page must be made, not merely where it
+        // is looked at, so it is made again.
+        self.rerender_preview(idx);
+    }
+
+    /// Moves a width-fitted page up or down within itself, by a fraction of the pane. Cuts a
+    /// new band out of the page already in hand rather than asking for the page again.
+    /// Zooms the preview the pointer is over, if it is over one. Answers whether it did, so the
+    /// wheel can fall back to scrolling when it is not.
+    fn zoom_preview_under(&mut self, col: u16, row: u16, areas: &ui::Areas, in_: bool) -> bool {
+        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
+        let Some((pane_idx, rect)) = panes.iter().enumerate().find(|(_, r)| within(**r, col, row))
+        else {
+            return false;
+        };
+        let (_, content) = ui::split_editor_area(*rect);
+        if !within(content, col, row) {
+            return false;
+        }
+        let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+        if self.editors[self.pane_editor_index(pane)].preview.is_none() {
+            return false;
+        }
+        self.editor_pane_focus = pane;
+        self.preview_control(if in_ { ui::NavControl::ZoomIn } else { ui::NavControl::ZoomOut });
+        true
+    }
+
+    /// Drops the window on a rendered page at an absolute position, for a scrollbar dragged
+    /// there rather than a key pressed.
+    fn set_preview_scroll(&mut self, idx: usize, axis: ui::Axis, position: u32) {
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return };
+        let (cols, rows) = (preview.area_cols, preview.area_rows);
+        let Some(full) = preview.full.as_ref() else { return };
+        let (max_x, max_y) = crate::preview::max_scroll(full, cols, rows);
+        match axis {
+            ui::Axis::Vertical => preview.scroll_px = position.min(max_y),
+            ui::Axis::Horizontal => preview.scroll_x = position.min(max_x),
+        }
+        let window =
+            crate::preview::visible_window(full, cols, rows, preview.scroll_x, preview.scroll_px);
+        let inverted = preview.inverted;
+        preview.state = crate::preview::State::ready(window, inverted);
+        self.editors[idx].mark_scrolled();
+    }
+
+    /// Moves the window over a zoomed or width-fitted page. `true` when it handled the gesture,
+    /// so a caller can fall through to scrolling text when there is no page to move.
+    fn scroll_page(&mut self, dx: isize, dy: isize) -> bool {
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return false };
+        let (cols, rows) = (preview.area_cols, preview.area_rows);
+        let Some(full) = preview.full.as_ref() else { return false };
+        let (max_x, max_y) = crate::preview::max_scroll(full, cols, rows);
+        if max_x == 0 && max_y == 0 {
+            return false;
+        }
+        // A step is a fraction of the pane, so the gesture feels the same whatever the zoom.
+        let (pane_w, pane_h) = crate::preview::pane_pixels(cols, rows);
+        let step_x = (pane_w / 6).max(20) as isize;
+        let step_y = (pane_h / 6).max(20) as isize;
+        let x = (preview.scroll_x as isize + dx * step_x).clamp(0, max_x as isize) as u32;
+        let y = (preview.scroll_px as isize + dy * step_y).clamp(0, max_y as isize) as u32;
+        if (x, y) == (preview.scroll_x, preview.scroll_px) {
+            return true;
+        }
+        preview.scroll_x = x;
+        preview.scroll_px = y;
+        let window = crate::preview::visible_window(full, cols, rows, x, y);
+        let inverted = preview.inverted;
+        preview.state = crate::preview::State::ready(window, inverted);
+        // The bars fade on idleness, and a page being moved is not idle.
+        self.editors[idx].mark_scrolled();
+        true
+    }
+
+    /// Rebuilds a preview at its current zoom, fit and colour. A picture is decoded again, which
+    /// costs milliseconds; a document is rasterised again, which costs a fraction of a second —
+    /// either way less than keeping a second copy of it around against the chance of a change.
+    fn rerender_preview(&mut self, idx: usize) {
+        let Some(path) = self.editors[idx].path.clone() else { return };
+        let Some(preview) = self.editors[idx].preview.as_ref() else { return };
+        let (page, width_px, source) = (preview.page(), preview.render_width(), preview.source.clone());
+        let job = match (source, page) {
+            (Some(source), page) => {
+                let text = self
+                    .editors
+                    .iter()
+                    .find(|e| e.preview.is_none() && e.path.as_deref() == Some(source.as_path()))
+                    .map(|e| e.rope.to_string())
+                    .unwrap_or_default();
+                crate::preview::Job::Markdown { path: source, text, page: page.unwrap_or(1), width_px }
+            }
+            (None, Some(page)) => crate::preview::Job::Page { path, page, width_px },
+            (None, None) => crate::preview::Job::Picture(path),
+        };
+        let started = crate::preview::start_loading(job, self.preview_tx.clone());
+        if let Some(preview) = self.editors[idx].preview.as_mut() {
+            // What is up stays up while the new one is made, rather than blanking the pane.
+            if !matches!(preview.state, crate::preview::State::Ready(_)) {
+                preview.state = started;
+            }
+        }
+    }
+
+    /// Jumps a document preview to a page, clamped to the ones it has. Past a known last page
+    /// it lands on that instead of asking a rasteriser for something that is not there.
+    fn goto_page(&mut self, page: usize) {
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return };
+        let Some(pages) = preview.pages.as_mut() else { return };
+        let wanted = pages.total.map_or(page, |total| page.min(total)).max(1);
+        if wanted == pages.current {
+            return;
+        }
+        let delta = wanted as isize - pages.current as isize;
+        self.turn_page(delta);
+    }
+
+    /// Asks which page to jump to. Reuses the Go-to-line box, which is the same question.
+    fn begin_goto_page(&mut self) {
+        self.show_goto = true;
+        self.goto_input.clear();
     }
 
     /// Moves a document preview a page. The first page is the near end; the far one announces
@@ -1446,6 +1638,7 @@ impl App {
         // buffer, so another page means making it again. Asking a rasteriser for page two of a
         // .md file is what the previous version did, and it failed exactly as it deserved to.
         let rendered_from = preview.source.clone();
+        let width_px = preview.render_width();
         let job = match rendered_from {
             Some(source) => {
                 let text = self
@@ -1454,9 +1647,9 @@ impl App {
                     .find(|e| e.preview.is_none() && e.path.as_deref() == Some(source.as_path()))
                     .map(|e| e.rope.to_string())
                     .unwrap_or_default();
-                crate::preview::Job::Markdown { path: source, text, page: wanted }
+                crate::preview::Job::Markdown { path: source, text, page: wanted, width_px }
             }
-            None => crate::preview::Job::Page { path, page: wanted },
+            None => crate::preview::Job::Page { path, page: wanted, width_px },
         };
         let started = crate::preview::start_loading(job, self.preview_tx.clone());
         if let Some(preview) = self.editors[idx].preview.as_mut() {
@@ -1484,10 +1677,12 @@ impl App {
             .collect();
         for (i, path, page) in stale {
             self.editors[i].disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            let width_px =
+                self.editors[i].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
             if let Some(preview) = self.editors[i].preview.as_mut() {
                 preview.state = crate::preview::start_loading(
                     match page {
-                        Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                        Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
                         None => crate::preview::Job::Picture(path.clone()),
                     },
                     self.preview_tx.clone(),
@@ -1869,9 +2064,14 @@ impl App {
                 self.show_goto = false;
             }
             KeyCode::Enter => {
-                if let Ok(line) = self.goto_input.trim().parse::<usize>() {
-                    if line > 0 {
-                        self.editor_mut().goto_line(line);
+                if let Ok(number) = self.goto_input.trim().parse::<usize>() {
+                    if number > 0 {
+                        // The same question means a page on a document and a line in a buffer.
+                        if self.editor().preview.as_ref().is_some_and(|p| p.pages.is_some()) {
+                            self.goto_page(number);
+                        } else {
+                            self.editor_mut().goto_line(number);
+                        }
                     }
                 }
                 self.show_goto = false;
@@ -2871,10 +3071,12 @@ impl App {
                     preview.state = crate::preview::State::Rendered { lines: Vec::new(), revision: u64::MAX };
                 }
             } else if let Some(path) = path {
+                let width_px =
+                    self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
                 if let Some(preview) = self.editors[idx].preview.as_mut() {
                     preview.state = crate::preview::start_loading(
                     match page {
-                        Some(page) => crate::preview::Job::Page { path: path.clone(), page },
+                        Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
                         None => crate::preview::Job::Picture(path.clone()),
                     },
                     self.preview_tx.clone(),
@@ -2918,8 +3120,9 @@ impl App {
             EditorPane::Right => EditorPane::Left,
         };
         // The tab is *for* the source file and is a view *of* it: same path both times.
-        let idx =
-            self.adopt_editor(Editor::preview(source.clone(), crate::preview::Preview::rendered(source)));
+        let mut preview = crate::preview::Preview::rendered(source.clone());
+        preview.inverted = self.settings.preview_dark;
+        let idx = self.adopt_editor(Editor::preview(source, preview));
         self.place_in_pane(pane, idx);
         // Says which of the two renderings you got: a document and styled text look very
         // different, and knowing which is which is the difference between "my machine cannot do
@@ -2990,6 +3193,8 @@ impl App {
             }
             let path = self.editors[i].path.clone().unwrap_or_default();
             let page = self.editors[i].preview.as_ref().and_then(|p| p.page()).unwrap_or(1);
+            let width_px =
+                self.editors[i].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
             // Nothing on screen yet: put the styled-text rendering up as the interim, so the
             // first half second shows the document rather than an empty frame. Later renders
             // keep the previous page up instead, which is steadier than flashing back to text.
@@ -3003,7 +3208,7 @@ impl App {
                     preview.state = crate::preview::State::Rendered { lines, revision };
                 }
             }
-            let job = crate::preview::Job::Markdown { path, text, page };
+            let job = crate::preview::Job::Markdown { path, text, page, width_px };
             if let Some(preview) = self.editors[i].preview.as_mut() {
                 // Marked as shown *now*, before the render finishes: what is on screen stays
                 // there meanwhile, and the same revision must not start a second render.
@@ -3100,10 +3305,18 @@ impl App {
 
     /// Which buffer a pane is showing. The toolbar button describes the file under it, so each
     /// pane asks about its own.
+    /// Which buffer a pane is showing, clamped to one that exists.
+    ///
+    /// Clamped for the same reason `active_editor_index` is: a pane's index is written from a
+    /// dozen places — opening, closing, splitting, merging, restoring a workspace — and about
+    /// thirty callers index straight into `editors` with what this returns. One of those writes
+    /// lagging by a frame would be a panic, and a panic here takes the window down with every
+    /// shell running in it. Showing the last tab for one frame is the cheaper wrong answer.
     pub fn pane_editor_index(&self, pane: EditorPane) -> usize {
+        let last = self.editors.len().saturating_sub(1);
         match pane {
-            EditorPane::Left => self.active_editor,
-            EditorPane::Right => self.active_editor_right,
+            EditorPane::Left => self.active_editor.min(last),
+            EditorPane::Right => self.active_editor_right.min(last),
         }
     }
 
@@ -4124,11 +4337,37 @@ impl App {
                     ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
                 let rect = *panes.get(pane.index())?;
                 let idx = self.pane_editor_index(pane);
+                // A preview measures in the rendered page's pixels, not in lines: the bar shows
+                // where the window sits on a page that zoom may have made larger than the pane.
+                if let Some(metrics) = self.preview_scroll_view(idx, axis) {
+                    return Some(metrics);
+                }
                 let (_, height, width) = ui::editor_viewport(self, idx, rect);
                 ui::editor_scroll_metrics(self, idx, axis, height, width)
             }
             ScrollbarId::Terminal(i) => ui::terminal_scroll_metrics(self.window_tab(i)?),
         }
+    }
+
+    /// What a preview's scrollbar describes: the rendered page, the window on it, and how much
+    /// of it fits. `None` when the tab is not a preview, or the page fits whole.
+    pub fn preview_scroll_view(&self, idx: usize, axis: ui::Axis) -> Option<(usize, usize, usize)> {
+        let preview = self.editors.get(idx)?.preview.as_ref()?;
+        let full = preview.full.as_ref()?;
+        let (pane_w, pane_h) = crate::preview::pane_pixels(preview.area_cols, preview.area_rows);
+        let (total, position, viewport) = match axis {
+            ui::Axis::Vertical => (full.height(), preview.scroll_px, pane_h),
+            ui::Axis::Horizontal => (full.width(), preview.scroll_x, pane_w),
+        };
+        // A page fitted to the width lands within a few pixels of the pane, not exactly on it:
+        // the resolution is worked back from a pixel count and rounded, so the raster overshoots
+        // or undershoots by a hair. Comparing exactly made the bar appear, vanish and reappear
+        // as pages were re-made. A page has to be more than one cell too big to be worth a bar.
+        let slack = crate::preview::cell_size().map_or(8, |(w, h)| {
+            u32::from(if axis == ui::Axis::Horizontal { w } else { h })
+        });
+        (total > viewport.saturating_add(slack))
+            .then_some((total as usize, position as usize, viewport as usize))
     }
 
     /// Whether a scrollbar should show itself in full rather than as a hint: the pointer is
@@ -4139,7 +4378,7 @@ impl App {
             return true;
         }
         let Some((col, row)) = self.pointer else { return false };
-        ui::scrollbar_strip(frame, axis).is_some_and(|strip| within(strip, col, row))
+        ui::scrollbar_strip(ui::inner_rect(frame), axis).is_some_and(|strip| within(strip, col, row))
     }
 
     /// The scrollbar under a point, and which part of it.
@@ -4154,7 +4393,7 @@ impl App {
         areas: &ui::Areas,
     ) -> Option<(ScrollbarId, ScrollbarPart)> {
         for (id, frame, axis) in self.scrollbar_frames(areas) {
-            let Some(strip) = ui::scrollbar_strip(frame, axis) else { continue };
+            let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else { continue };
             if !within(strip, col, row) || self.scrollbar_metrics(id, areas).is_none() {
                 continue;
             }
@@ -4169,6 +4408,18 @@ impl App {
             return Some((id, ScrollbarPart::Track { offset: at.saturating_sub(start), len }));
         }
         None
+    }
+
+    /// The box a frame's scrollbars ride, which on a preview stops short of its navigation bar.
+    fn scrollbar_box(&self, frame: Rect, _axis: ui::Axis) -> Rect {
+        let panes = [EditorPane::Left, EditorPane::Right];
+        for pane in panes {
+            let idx = self.pane_editor_index(pane);
+            if self.editors.get(idx).is_some_and(|e| e.preview.is_some()) {
+                return ui::scrollbar_area(self, idx, frame);
+            }
+        }
+        ui::inner_rect(frame)
     }
 
     /// A track reduced to the one dimension it runs along: where it starts, how long it is, and
@@ -4199,7 +4450,7 @@ impl App {
         else {
             return;
         };
-        let Some(strip) = ui::scrollbar_strip(frame, axis) else { return };
+        let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else { return };
         let layout = ui::scrollbar_layout(strip, axis);
         let (start, len, at) = Self::track_axis(layout.track, axis, col, row);
         let offset = at.saturating_sub(start).min(len.saturating_sub(1));
@@ -4231,6 +4482,10 @@ impl App {
         match id {
             ScrollbarId::Editor(pane, axis) => {
                 let idx = self.pane_editor_index(pane);
+                if self.editors[idx].preview.is_some() {
+                    self.set_preview_scroll(idx, axis, position as u32);
+                    return;
+                }
                 match axis {
                     ui::Axis::Vertical => {
                         let max = self.editors[idx].rope.len_lines().saturating_sub(1);
@@ -4541,54 +4796,58 @@ impl App {
         // A preview tab has no text to move a cursor through, so the plain arrows are free and
         // mean the only thing they could mean here: the page before and the page after. No
         // chord had to be found for it, which on a keyboard this crowded is worth something.
+        // A preview tab holds no text, so plain keys are free here and mean the one thing they
+        // could mean. Every one of them is also a button on the bar, which writes the key beside
+        // the label so neither has to be discovered twice.
         if self.editor().preview.is_some() && key.modifiers.is_empty() {
             let paged = self.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
             let idx = self.pane_editor_index(self.editor_pane_focus);
-            let page = self.rendered_len(idx).map(|len| len.saturating_sub(1));
+            let scroll_limit = self.rendered_len(idx).map(|len| len.saturating_sub(1));
+            let control = match key.code {
+                KeyCode::Left if paged => Some(ui::NavControl::PageBack),
+                KeyCode::Right if paged => Some(ui::NavControl::PageForward),
+                KeyCode::Up if paged => Some(ui::NavControl::PageBack),
+                KeyCode::Down if paged => Some(ui::NavControl::PageForward),
+                KeyCode::Char('g') => Some(ui::NavControl::GoToPage),
+                KeyCode::Char('-') | KeyCode::Char('_') => Some(ui::NavControl::ZoomOut),
+                KeyCode::Char('+') | KeyCode::Char('=') => Some(ui::NavControl::ZoomIn),
+                KeyCode::Char('f') => Some(ui::NavControl::FitPage),
+                KeyCode::Char('w') => Some(ui::NavControl::FitWidth),
+                // Only a document has a dark mode; a picture has no white page to invert.
+                KeyCode::Char('d') if paged || self.editor().is_rendered_view() => {
+                    Some(ui::NavControl::Invert)
+                }
+                _ => None,
+            };
+            if let Some(control) = control {
+                self.preview_control(control);
+                return;
+            }
+            // What is left of the arrows scrolls a rendered markdown view, which is one long
+            // page rather than a set of them.
             let scroll = |app: &mut Self, delta: isize| {
-                let Some(max) = page else { return };
+                // A width-fitted page scrolls inside itself; a rendered markdown view scrolls
+                // its lines. Both answer the same keys.
+                if app.scroll_page(0, delta.signum()) {
+                    return;
+                }
+                let Some(max) = scroll_limit else { return };
                 let top = &mut app.editors[idx].top_line;
                 *top = top.saturating_add_signed(delta).min(max);
             };
             match key.code {
-                KeyCode::Up if paged => {
-                    self.turn_page(-1);
-                    return;
-                }
-                KeyCode::Down if paged => {
-                    self.turn_page(1);
-                    return;
-                }
-                KeyCode::Left if paged => {
-                    self.turn_page(-1);
-                    return;
-                }
-                KeyCode::Right if paged => {
-                    self.turn_page(1);
-                    return;
-                }
-                // A rendered view is one long page, so the arrows scroll it instead.
-                KeyCode::Up => {
-                    scroll(self, -1);
-                    return;
-                }
-                KeyCode::Down => {
-                    scroll(self, 1);
-                    return;
-                }
-                KeyCode::PageUp => {
-                    scroll(self, -20);
-                    return;
-                }
-                KeyCode::PageDown => {
-                    scroll(self, 20);
-                    return;
-                }
-                KeyCode::Home => {
-                    self.editors[idx].top_line = 0;
-                    return;
-                }
+                KeyCode::Up => scroll(self, -1),
+                KeyCode::Down => scroll(self, 1),
+                KeyCode::PageUp => scroll(self, -20),
+                KeyCode::PageDown => scroll(self, 20),
+                KeyCode::Home => self.editors[idx].top_line = 0,
                 _ => {}
+            }
+            if matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home
+            ) {
+                return;
             }
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -4984,6 +5243,16 @@ impl App {
                     self.focus = Focus::Editor;
                     self.editor_pane_focus = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
                     let (tab_bar, content) = ui::split_editor_area(pane_rect);
+                    // A preview's controls sit inside its frame, so they are claimed before the
+                    // click can reach the picture behind them.
+                    let idx = self.pane_editor_index(self.editor_pane_focus);
+                    if let Some((control, _)) = ui::nav_bar_layout(self, idx, content)
+                        .into_iter()
+                        .find(|(_, r)| within(*r, col, row))
+                    {
+                        self.preview_control(control);
+                        return;
+                    }
                     if within(tab_bar, col, row) {
                         self.mouse_tab_click(col, tab_bar, self.editor_pane_focus);
                     } else {
@@ -5077,8 +5346,16 @@ impl App {
                 }
                 self.dragging = None;
             }
-            MouseEventKind::ScrollUp => self.scroll(col, row, areas, -3),
-            MouseEventKind::ScrollDown => self.scroll(col, row, areas, 3),
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+                let delta = if down { 3 } else { -3 };
+                // Ctrl and the wheel is zoom everywhere else; without it the wheel keeps
+                // meaning "move", which is what it means over every other frame here.
+                if mouse.modifiers.contains(KeyModifiers::CONTROL) && self.zoom_preview_under(col, row, areas, !down) {
+                    return;
+                }
+                self.scroll(col, row, areas, delta)
+            }
             _ => {}
         }
     }

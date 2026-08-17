@@ -1,6 +1,6 @@
 [package]
 name = "cleecode"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A terminal IDE: editor with a file-tree sidebar, embedded terminals, syntax highlighting and a run button"
 authors = ["Matteo Savoia"]
@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3.4.1"
+base64 = "0.23.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 image = "0.25.10"
@@ -43,3 +44,13 @@ vt100 = "0.16.2"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59.0", features = ["Win32_Graphics_Gdi"] }
 winreg = "0.52.0"
+
+# Dependencies are optimised even in a debug build, the crate itself is not.
+#
+# Previews do real arithmetic — decoding a 4K photograph, resampling it to the pane — inside
+# `image`, and unoptimised that is tens of times slower: `cargo run` took seconds to show a
+# picture that the release build shows in a tenth of one, which is long enough to look like a
+# bug in CleeCode rather than in the build profile. Dependencies rarely need stepping through,
+# so they are compiled properly; our own code stays debuggable and quick to rebuild.
+[profile.dev.package."*"]
+opt-level = 2

@@ -502,10 +502,24 @@ pub fn msg_find_hint(lang: Lang) -> &'static str {
     }
 }
 
-pub fn msg_goto_prompt(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => "Go to line:",
-        Lang::It => "Vai alla riga:",
+/// The same box asks for a line in a buffer and a page in a document, because it is the same
+/// question — a number — and a second box for it would be a second thing to learn. It does have
+/// to say which, though: being asked for a line while looking at a PDF is a small betrayal.
+pub fn msg_goto_prompt(lang: Lang, pages: bool) -> &'static str {
+    match (lang, pages) {
+        (Lang::En, false) => "Go to line:",
+        (Lang::It, false) => "Vai alla riga:",
+        (Lang::En, true) => "Go to page:",
+        (Lang::It, true) => "Vai alla pagina:",
+    }
+}
+
+pub fn goto_title(lang: Lang, pages: bool) -> &'static str {
+    match (lang, pages) {
+        (Lang::En, false) => "Go to line",
+        (Lang::It, false) => "Vai alla riga",
+        (Lang::En, true) => "Go to page",
+        (Lang::It, true) => "Vai alla pagina",
     }
 }
 
@@ -813,6 +827,23 @@ pub fn msg_markdown_preview(lang: Lang, as_document: bool) -> String {
             "Anteprima markdown: testo con stili (per il documento servono pandoc e un terminale con grafica)"
                 .to_string()
         }
+    }
+}
+
+/// A file drop whose files are not on this machine. Over ssh that is the whole explanation and
+/// worth giving; locally it is stranger, and the honest answer is just that they are not there.
+pub fn msg_drop_not_here(lang: Lang, over_ssh: bool) -> String {
+    match (lang, over_ssh) {
+        (Lang::En, true) => {
+            "Those files are on the machine you connected from; CleeCode is running here, and cannot reach them"
+                .to_string()
+        }
+        (Lang::It, true) => {
+            "Quei file sono sulla macchina da cui ti sei collegato; CleeCode gira qui e non può raggiungerli"
+                .to_string()
+        }
+        (Lang::En, false) => "Nothing to copy: those paths do not exist on this machine".to_string(),
+        (Lang::It, false) => "Niente da copiare: quei percorsi non esistono su questa macchina".to_string(),
     }
 }
 
