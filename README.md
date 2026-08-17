@@ -1,20 +1,109 @@
 # CleeCode 🐢
 
-A terminal IDE written in Rust: a `micro`-style editor with a file tree sidebar, integrated
-terminals, syntax highlighting, and a classic drop-down menu bar. No mouse required, but it's
-there if you want it.
+An editor, a file tree and real terminals in one window. Written in Rust, driven from the
+keyboard, with the mouse as an alternative rather than the only way.
 
 By **Matteo Savoia** ([msavox](https://github.com/msavox)).
 
 ![CleeCode in action](docs/demo.gif)
 
-*Recorded from [`docs/demo.tape`](docs/demo.tape); the stills come from
-[`docs/shots.tape`](docs/shots.tape). Both replay a fixed script, so they can be re-made after a
-UI change instead of re-shot by hand.*
+## Installing
+
+### macOS and Linux — Homebrew
+
+```bash
+brew tap msavox/clee
+brew trust msavox/clee
+brew install clee
+```
+
+The `brew trust` step is required, not a formality: a formula is Ruby code Homebrew executes
+locally, so recent versions refuse to load one from a third-party tap until you trust its
+source — tapping alone doesn't grant that. Without it you get `Refusing to load formula
+msavox/clee/clee from untrusted tap`.
+
+The formula builds from source (well under a minute on macOS; longer on Linux, where it also
+pulls `libxcb`). [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap
+and CI verifies that install on Ubuntu, but only the *install* is tested.
+
+### Prebuilt binaries
+
+macOS arm64/x86_64 and x86_64 Linux and Windows builds are attached to each
+[release](https://github.com/msavox/cleecode/releases). Outside macOS they're experimental: CI
+checks they start, nothing more. The Linux binary needs glibc and libxcb — install `libxcb1`
+(Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it fails to start. For Alpine/musl, build from
+source.
+
+### Optional extras
+
+Previews reach for a few outside tools. None is required — without them CleeCode shows less
+rather than failing, and says so in the tab instead of leaving it blank.
+
+```bash
+brew install poppler        # PDF pages (ghostscript works too)
+brew install pandoc typst   # Markdown as a real document, pictures and all
+brew install chafa          # a picture inside a terminal pane
+```
+
+Real pixels also need a terminal with a graphics protocol — kitty, iTerm2, Ghostty, WezTerm.
+Anywhere else, pictures fall back to coloured half-blocks and Markdown to styled text.
+
+### From source
+
+Needs a [Rust toolchain](https://rustup.rs) 1.85+ (edition 2024). On Linux the clipboard also
+needs the X11/xcb headers; on Windows, the MSVC toolchain plus *Desktop development with C++*.
+
+```bash
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+# Fedora
+sudo dnf install gcc pkgconf-pkg-config libxcb-devel
+# Arch
+sudo pacman -S base-devel libxcb
+
+cargo install --locked --git https://github.com/msavox/cleecode
+```
+
+That puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so make sure it's on your
+`PATH`.
+
+### From a clone
+
+```bash
+cargo build --release
+./target/release/clee              # the last project, its open files and your layout
+./target/release/clee src/main.rs  # current directory, with a file pre-opened
+./target/release/clee ./some-dir   # that directory as the project root
+./target/release/clee -w work      # open the saved workspace called "work"
+./target/release/clee -w           # list the saved workspaces
+./target/release/clee -e notes.md  # just that file, everything else hidden
+./target/release/clee --help       # usage, --version, --install-font
+```
+
+An argument skips the startup splash; the splash only shows on a bare `clee` or with `-w`,
+where it names the workspace being opened.
+
+### Nerd Font icons
+
+The file tree's icons need a [Nerd Font](https://www.nerdfonts.com/). CleeCode bundles
+JetBrainsMono Nerd Font Mono and can install it:
+
+```bash
+./target/release/clee --install-font
+```
+
+It copies the font into your per-user font directory (`~/Library/Fonts`,
+`~/.local/share/fonts`, or `%LOCALAPPDATA%\Microsoft\Windows\Fonts`), points Ghostty at it if
+present on macOS/Linux, and registers it on Windows. Restart your terminal afterwards — or
+just point your terminal at a Nerd Font you already have.
+
+## What it does
 
 ![CleeCode main view](docs/screenshots/main.png)
 
-## What it does
+*The demo and the stills are replayed from [`docs/demo.tape`](docs/demo.tape) and
+[`docs/shots.tape`](docs/shots.tape), so they are re-made after a UI change rather than re-shot
+by hand and left to go stale.*
 
 ### Editing
 
@@ -110,96 +199,6 @@ CleeCode hosts long-running shells, so a crash costing you an `ssh` session or a
 the worst thing it could do. An internal failure is contained and reported in the status line
 rather than ending the process: a broken terminal costs you that terminal, at most. Details go to
 `~/.config/cleecode/panic.log`.
-
-## Installing
-
-### macOS and Linux — Homebrew
-
-```bash
-brew tap msavox/clee
-brew trust msavox/clee
-brew install clee
-```
-
-The `brew trust` step is required, not a formality: a formula is Ruby code Homebrew executes
-locally, so recent versions refuse to load one from a third-party tap until you trust its
-source — tapping alone doesn't grant that. Without it you get `Refusing to load formula
-msavox/clee/clee from untrusted tap`.
-
-The formula builds from source (well under a minute on macOS; longer on Linux, where it also
-pulls `libxcb`). [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap
-and CI verifies that install on Ubuntu, but only the *install* is tested.
-
-### Prebuilt binaries
-
-macOS arm64/x86_64 and x86_64 Linux and Windows builds are attached to each
-[release](https://github.com/msavox/cleecode/releases). Outside macOS they're experimental: CI
-checks they start, nothing more. The Linux binary needs glibc and libxcb — install `libxcb1`
-(Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it fails to start. For Alpine/musl, build from
-source.
-
-### Optional extras
-
-Previews reach for a few outside tools. None is required — without them CleeCode shows less
-rather than failing, and says so in the tab instead of leaving it blank.
-
-```bash
-brew install poppler        # PDF pages (ghostscript works too)
-brew install pandoc typst   # Markdown as a real document, pictures and all
-brew install chafa          # a picture inside a terminal pane
-```
-
-Real pixels also need a terminal with a graphics protocol — kitty, iTerm2, Ghostty, WezTerm.
-Anywhere else, pictures fall back to coloured half-blocks and Markdown to styled text.
-
-### From source
-
-Needs a [Rust toolchain](https://rustup.rs) 1.85+ (edition 2024). On Linux the clipboard also
-needs the X11/xcb headers; on Windows, the MSVC toolchain plus *Desktop development with C++*.
-
-```bash
-# Debian/Ubuntu
-sudo apt install build-essential pkg-config libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-# Fedora
-sudo dnf install gcc pkgconf-pkg-config libxcb-devel
-# Arch
-sudo pacman -S base-devel libxcb
-
-cargo install --locked --git https://github.com/msavox/cleecode
-```
-
-That puts `clee` in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin`), so make sure it's on your
-`PATH`.
-
-### From a clone
-
-```bash
-cargo build --release
-./target/release/clee              # the last project, its open files and your layout
-./target/release/clee src/main.rs  # current directory, with a file pre-opened
-./target/release/clee ./some-dir   # that directory as the project root
-./target/release/clee -w work      # open the saved workspace called "work"
-./target/release/clee -w           # list the saved workspaces
-./target/release/clee -e notes.md  # just that file, everything else hidden
-./target/release/clee --help       # usage, --version, --install-font
-```
-
-An argument skips the startup splash; the splash only shows on a bare `clee` or with `-w`,
-where it names the workspace being opened.
-
-### Nerd Font icons
-
-The file tree's icons need a [Nerd Font](https://www.nerdfonts.com/). CleeCode bundles
-JetBrainsMono Nerd Font Mono and can install it:
-
-```bash
-./target/release/clee --install-font
-```
-
-It copies the font into your per-user font directory (`~/Library/Fonts`,
-`~/.local/share/fonts`, or `%LOCALAPPDATA%\Microsoft\Windows\Fonts`), points Ghostty at it if
-present on macOS/Linux, and registers it on Windows. Restart your terminal afterwards — or
-just point your terminal at a Nerd Font you already have.
 
 ## Key bindings
 

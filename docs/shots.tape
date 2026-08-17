@@ -92,6 +92,12 @@ Ctrl+l
 Sleep 2.5s
 Screenshot docs/screenshots/split.png
 
+# No shot of a picture or a PDF preview here. vhs has no graphics protocol, so those tabs can
+# only fall back to half-blocks, and the picture would show the fallback while claiming to show
+# the feature. Worse, a modal closing over an image pane currently leaves its old cells behind —
+# the image widget marks them as not-to-be-repainted — so the shot came out with a stale command
+# palette drawn across it. Those pictures are taken by hand, on a terminal that can draw them.
+
 # ---- manual.png: the built-in guide, left on Overview, which carries the diagram of the whole
 #      window and shows the colouring — chords yellow, headings cyan, rules dimmed.
 Ctrl+p

@@ -1,3 +1,5 @@
 /target
 octave-workspace
 .venv/
+# vhs insists on a GIF alongside the screenshots; only the .png files are kept.
+docs/.shots-scratch.gif
