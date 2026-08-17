@@ -3,3 +3,7 @@ octave-workspace
 .venv/
 # vhs insists on a GIF alongside the screenshots; only the .png files are kept.
 docs/.shots-scratch.gif
+
+# Virtualenvs for the examples folder: they make the venv picker demo work locally,
+# but they are 24 MB of machine-specific paths and belong to nobody else's checkout.
+examples/.venv*

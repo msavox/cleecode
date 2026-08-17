@@ -1,0 +1,12 @@
+% Caso 3 — LaTeX: estensione che prima non aveva niente, ora ha un default
+% che usa {dir} per scrivere .aux/.log/.pdf accanto al sorgente invece che
+% nella cartella da cui parte la shell.
+%
+% Da provare nel menu del pulsante: cambiare il comando in
+%   pdflatex -interaction=nonstopmode -output-directory {dir} {file} && open {dir}/{stem}.pdf
+% e vedere che il PDF si apre da solo.
+\documentclass{article}
+\begin{document}
+\section{Prova}
+Se questo diventa un PDF, i segnaposto funzionano.
+\end{document}

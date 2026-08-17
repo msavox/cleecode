@@ -1,0 +1,142 @@
+% Documento fittizio per provare la navigazione fra pagine.
+%
+% Ogni pagina porta un numero enorme al centro: serve a capire a colpo d'occhio
+% se le frecce ti hanno portato dove pensavi, senza dover leggere il testo.
+% Le pagine hanno contenuti diversi apposta - testo fitto, una tabella, una
+% figura geometrica - così si vede anche come rende la rasterizzazione.
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[italian]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{xcolor}
+\usepackage{tikz}
+
+% Il numerone in cima alla pagina. Contenuto normale e non un overlay tikz: un
+% overlay come primissima cosa del documento si porta via una pagina tutta sua,
+% e il numero finiva sfasato rispetto al contenuto.
+\newcommand{\numerone}[1]{%
+  {\centering\fontsize{90}{90}\selectfont\bfseries\textcolor{gray!30}{#1}\par}%
+  \vspace{0.5em}%
+}
+
+\title{Manuale di prova}
+\author{Cartella dimostrativa di CleeCode}
+\date{}
+
+\begin{document}
+
+% ---- 1 -------------------------------------------------------------------
+\maketitle
+\thispagestyle{empty}
+\numerone{1}
+\begin{center}
+\Large Se stai leggendo questa pagina, la prima si è aperta da sola.\\[1em]
+\large Premi $\rightarrow$ per andare avanti, $\leftarrow$ per tornare.
+\end{center}
+\vfill
+\noindent In basso a destra nel riquadro dovresti vedere \texttt{pagina 1 di 6}.
+Se dice solo \texttt{pagina 1}, vuol dire che né \texttt{pdfinfo} né
+\texttt{ghostscript} hanno saputo dire quante pagine ci sono: sfogliare funziona
+lo stesso, si ferma da solo quando le pagine finiscono.
+\newpage
+
+% ---- 2 -------------------------------------------------------------------
+\numerone{2}
+\section{Testo fitto}
+Questa pagina serve a vedere se il corpo del testo resta leggibile alla
+risoluzione con cui viene rasterizzata la pagina.
+Nel mezzo del riquadro di un editor che gira dentro un terminale, la domanda
+non è se una pagina si possa disegnare, ma chi la disegna. Un programma che
+scrive dentro un riquadro non parla mai col terminale ospite: parla con
+l'emulatore che sta in mezzo, e quello traduce tutto in una griglia di celle
+prima di ridipingerla. Le sequenze grafiche non sopravvivono a quel passaggio,
+perché il parser non le riconosce affatto e le lascia cadere.
+
+Da qui, invece, i byte escono sullo stesso canale su cui esce tutto il resto
+dell'interfaccia, e arrivano al terminale ospite intatti. È una differenza di
+percorso, non di qualità del terminale, ed è anche il motivo per cui la stessa
+immagine continua a vedersi attraverso una sessione remota: quello che viaggia
+sul filo è l'uscita dell'editor, non quella di un programma dentro una shell.
+
+La risoluzione con cui questa pagina è stata rasterizzata è la stessa per tutte
+le pagine del documento, e viene poi ridimensionata per stare nel riquadro. Se
+il testo qui sotto si legge senza fatica, il compromesso è quello giusto; se
+sfarfalla, il numero da cambiare è uno solo, e sta accanto alla ragione per cui
+è stato scelto.
+\newpage
+
+% ---- 3 -------------------------------------------------------------------
+\numerone{3}
+\section{Una tabella}
+Le righe sottili sono la cosa che si rovina per prima quando un'immagine viene
+ridimensionata male.
+
+\vspace{1em}
+\begin{center}
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Cosa} & \textbf{Prima} & \textbf{Dopo} \\
+\hline
+Scrollback terminali & 0 righe & 2000 righe \\
+Scrollbar & assenti & dentro il frame \\
+Comandi di esecuzione & globali & anche per progetto \\
+Immagini & buffer vuoto & pixel veri \\
+PDF & buffer vuoto & pagine sfogliabili \\
+\hline
+\end{tabular}
+\end{center}
+\newpage
+
+% ---- 4 -------------------------------------------------------------------
+\numerone{4}
+\section{Una figura}
+\begin{center}
+\begin{tikzpicture}[scale=1.1]
+  \draw[thick, fill=blue!10] (0,0) rectangle (8,4.5);
+  \draw[thick, fill=green!10] (0,3.6) rectangle (8,4.5);
+  \node at (4,4.05) {\small barra dei menu};
+  \draw[thick, fill=yellow!10] (0,0) rectangle (2.2,3.6);
+  \node[rotate=90] at (1.1,1.8) {\small albero file};
+  \draw[thick] (2.2,1.6) -- (8,1.6);
+  \node at (5.1,2.6) {\small editor};
+  \node at (5.1,0.8) {\small terminali};
+\end{tikzpicture}
+\end{center}
+Linee diagonali e curve sono il caso peggiore per i mezzi blocchi, e il caso in
+cui i pixel veri si notano di più.
+\newpage
+
+% ---- 5 -------------------------------------------------------------------
+\numerone{5}
+\section{Il ciclo che conta}
+Prova questo, che è il motivo per cui esiste tutto il resto:
+\begin{enumerate}
+  \item dividi l'editor con \texttt{Ctrl+L};
+  \item tieni questo \texttt{.tex} da una parte e il \texttt{.pdf} dall'altra;
+  \item cambia una parola qui sotto e salva con \texttt{Ctrl+S};
+  \item premi \texttt{Ctrl+Shift+R}.
+\end{enumerate}
+La pagina accanto deve diventare quella appena composta, restando sulla pagina
+che stavi guardando, senza chiudere e riaprire niente.
+
+\vspace{1em}
+\noindent\fbox{\parbox{0.9\textwidth}{\centering\large
+Cambia questa frase e ricompila: dovresti vederla cambiare accanto.}}
+\newpage
+
+% ---- 6 -------------------------------------------------------------------
+\numerone{6}
+\section{Ultima pagina}
+Da qui in avanti le frecce non devono fare niente: non un errore, non una pagina
+bianca, proprio niente. Il conteggio dice che siamo alla fine, e anche se non lo
+sapesse il rasterizzatore non produrrebbe nessun file per la pagina 7, che è il
+modo in cui la fine si annuncia da sola.
+
+\vspace{2em}
+\noindent Torna indietro con $\leftarrow$ fino alla prima: anche lì le frecce
+devono fermarsi senza lamentarsi.
+
+\end{document}
