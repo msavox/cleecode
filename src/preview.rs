@@ -187,6 +187,15 @@ impl Preview {
 
 
 
+    /// Whether re-making this would produce anything different. True for a document, whose
+    /// pages are generated — from a file that may have been recompiled, or from a buffer being
+    /// typed in. False for a picture: the file *is* the picture, so "refresh" would mean
+    /// decoding the same bytes again, and the button is better spent on the run command, which
+    /// for an image shows it in a terminal instead.
+    pub fn refreshable(&self) -> bool {
+        self.pages.is_some() || self.source.is_some()
+    }
+
     /// The page a document is on, or `None` for a picture.
     pub fn page(&self) -> Option<usize> {
         self.pages.as_ref().map(|p| p.current)

@@ -295,7 +295,7 @@ pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize) -> TabStrip {
 /// "run" would mean nothing there, and a button that means nothing is worse than one that means
 /// something small.
 fn run_button_label(app: &App, idx: usize) -> String {
-    let key = if app.editors.get(idx).is_some_and(|e| e.preview.is_some()) {
+    let key = if app.editors.get(idx).is_some_and(|e| e.preview.as_ref().is_some_and(|p| p.refreshable())) {
         Key::ToolbarRefresh
     } else {
         Key::ToolbarRun

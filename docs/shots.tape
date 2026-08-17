@@ -2,12 +2,18 @@
 #
 #   cargo build --release && vhs docs/shots.tape
 #
-# Also needs tmux. These used to be shot by hand, which meant they quietly went stale — menus
-# gained entries and key bindings moved while the pictures did not. Regenerating them is now the
-# same one command as the demo, and it produces the same images every time.
+# These used to be shot by hand, which meant they quietly went stale — menus gained entries and
+# key bindings moved while the pictures did not. Regenerating them is now one command, and it
+# produces the same images every time.
 #
-# The GIF output is a by-product vhs insists on; only the .png files are kept. Keys come from
-# docs/shots-keys.sh, for the reasons given at the top of docs/demo.tape.
+# They used to run CleeCode inside tmux, for a fixed pane size. That stopped working: keys sent
+# through tmux no longer reached the application, so every shot timed out waiting for a state
+# that never arrived. vhs sets the size by itself, so tmux was buying nothing and costing the
+# whole pipeline — it is gone, and the keys are pressed here rather than by a companion script.
+#
+# Each shot waits for text that only appears once the state is up (`Wait+Screen`), so a slow
+# machine delays a screenshot rather than mis-taking it. The GIF output is a by-product vhs
+# insists on; only the .png files are kept.
 
 Output docs/.shots-scratch.gif
 
@@ -18,36 +24,93 @@ Set Width 1400
 Set Height 800
 Set Padding 12
 
+# A throwaway config, so whatever layout the author happens to be using cannot leak into the
+# pictures — and so taking them cannot overwrite it either.
 Hide
-Type "tmux kill-server 2>/dev/null; export CLEE_SHOT_CONF=$(mktemp -d); clear"
+Type "export XDG_CONFIG_HOME=$(mktemp -d) && clear"
 Enter
 Sleep 1s
 Show
 
-Type "tmux new-session -d -s shots -x 172 -y 48 -e XDG_CONFIG_HOME=$CLEE_SHOT_CONF './target/release/clee .' \; set -g status off && bash docs/shots-keys.sh shots & sleep 1; tmux attach -t shots"
+Type "./target/release/clee ."
 Enter
+Sleep 4s
 
-# Each shot waits for text that only shows once the state is up, so the timing of the key
-# script and the timing of the camera never have to agree.
-# The computed total, which only exists once the program has actually run — the source line
-# that prints it says "{total}", so waiting on the wording would match the editor and fire early.
+# ---- main.png: the whole window doing something. A Python file open and highlighted, and its
+#      output sitting in the first terminal. The wait is on the script's own arithmetic, which
+#      can only be on screen once the run has finished.
+Ctrl+o
+Sleep 1s
+Type "hello.py"
+Sleep 1.5s
+Enter
+Sleep 2s
+Ctrl+p
+Sleep 1s
+Type "run current"
+Sleep 1.5s
+Enter
 Wait+Screen@40s /= 385/
 Sleep 1s
 Screenshot docs/screenshots/main.png
 
+# ---- menu.png: the menu bar open on Layout, where the presets live. The initials are
+#      underlined only while it is open, which is the only time pressing one does anything.
+Ctrl+p
+Sleep 1s
+Type "open the menu bar"
+Sleep 1.5s
+Enter
+Sleep 1s
+Right
+Sleep 0.4s
+Right
+Sleep 0.4s
+Right
+Sleep 0.4s
+Right
 Wait+Screen@30s /Triple/
 Sleep 1s
 Screenshot docs/screenshots/menu.png
-
-Wait+Screen@30s /mod workspace/
+Escape
 Sleep 1s
+
+# ---- split.png: two independent editors, each with its own tabs and its own Run button.
+#
+#      The second file is opened *before* the split, so the split has a real one to move across:
+#      it hands the other half a tab rather than showing the same file twice, and with only one
+#      file open that other half would get an empty buffer — true to the design, but a dull
+#      picture of it.
+Ctrl+o
+Sleep 1s
+Type "main.rs"
+Sleep 1.5s
+Enter
+Wait+Screen@30s /mod workspace/
+Sleep 1.5s
+Ctrl+l
+Sleep 2.5s
 Screenshot docs/screenshots/split.png
 
+# ---- manual.png: the built-in guide, left on Overview, which carries the diagram of the whole
+#      window and shows the colouring — chords yellow, headings cyan, rules dimmed.
+Ctrl+p
+Sleep 1s
+Type "manual"
+Sleep 1.5s
+Enter
 Wait+Screen@30s /CleeCode manual/
 Sleep 2s
 Screenshot docs/screenshots/manual.png
+Escape
 Sleep 1s
 
+# ---- palette.png: the command palette, which is how anything is reached without a shortcut.
+Ctrl+p
+Sleep 1s
+Type "term"
 Wait+Screen@30s /Command palette/
 Sleep 1s
 Screenshot docs/screenshots/palette.png
+Escape
+Sleep 1s

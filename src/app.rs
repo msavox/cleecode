@@ -2856,7 +2856,7 @@ impl App {
         let idx = self.pane_editor_index(self.editor_pane_focus);
         // Already a preview: ▶ means refresh. A rendered tab re-reads its buffer, a document
         // re-rasterises the page in front of you.
-        if let Some(preview) = self.editors[idx].preview.as_ref() {
+        if let Some(preview) = self.editors[idx].preview.as_ref().filter(|p| p.refreshable()) {
             let page = preview.page();
             let rendered = preview.source.is_some();
             let path = self.editors[idx].path.clone();
