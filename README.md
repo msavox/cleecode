@@ -17,10 +17,15 @@ brew trust msavox/clee
 brew install clee
 ```
 
-The `brew trust` step is required, not a formality: a formula is Ruby code Homebrew executes
-locally, so recent versions refuse to load one from a third-party tap until you trust its
-source — tapping alone doesn't grant that. Without it you get `Refusing to load formula
-msavox/clee/clee from untrusted tap`.
+`brew trust` exists from Homebrew 6 onwards, and there it is required rather than a formality:
+a formula is Ruby code Homebrew executes locally, so it refuses to load one from a third-party
+tap until you trust the source — tapping alone doesn't grant that. Without it you get `Refusing
+to load formula msavox/clee/clee from untrusted tap`. On older Homebrew the command does not
+exist (`Unknown command: brew trust`) and is not needed: skip it and install.
+
+If `brew tap` itself fails with `git@github.com: Permission denied (publickey)`, that is not
+about this tap — a global git rule is rewriting HTTPS URLs to SSH and you have no key on that
+machine. `git config --global --get-regexp 'url\..*\.insteadof'` shows it.
 
 The formula builds from source (well under a minute on macOS; longer on Linux, where it also
 pulls `libxcb`). [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap
