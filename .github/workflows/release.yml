@@ -153,7 +153,20 @@ jobs:
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           url="https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz"
-          curl -fsSL "$url" -o source.tar.gz
+          # GitHub answers an anonymous archive request under load with a 200 and a
+          # two-line "429: Too Many Requests" body. Hashing that ships a checksum no
+          # user can ever match, so authenticate, retry, and refuse anything that is
+          # not a readable tarball.
+          for attempt in 1 2 3 4 5; do
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$url" -o source.tar.gz && \
+              tar -tzf source.tar.gz >/dev/null 2>&1 && break
+            if [ "$attempt" = 5 ]; then
+              echo "Could not fetch a valid source tarball from ${url}:" >&2
+              head -c 400 source.tar.gz >&2 || true
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
           sum=$(sha256sum source.tar.gz | cut -d' ' -f1)
           {
             echo "### Homebrew formula values for \`${tag}\`"
