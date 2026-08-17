@@ -20,13 +20,16 @@ palette() {
 
 sleep 3.5
 
-# ---- main.png: the whole window doing something. A Python file open and highlighted, the
-#      venv chosen, and its output sitting in the first terminal.
+# ---- main.png: the whole window doing something. A Python file open and highlighted, and its
+#      output sitting in the first terminal.
+#
+#      The venv was once picked here too, through a palette entry called "venv". That entry is
+#      now "How this file runs...", and its menu offers whatever venvs the project actually has
+#      — none, in a Rust repository — so the old blind "down, enter" landed on the disk browser
+#      and the shot never happened. What the picture is for is the window working, so it now
+#      does the one thing that always works.
 k C-o; sleep 0.8
 t "hello.py"; sleep 1.2
-k Enter; sleep 1.5
-palette "venv" 1.4
-k Down; sleep 1.0
 k Enter; sleep 1.5
 palette "run current" 6.0
 sleep 4                            # held for the shot
@@ -41,7 +44,7 @@ k Right; sleep 1.0
 sleep 4                            # held for the shot
 k Escape; sleep 1.0
 
-# ---- split.png: two editor panes, each with its own tab strip and Run button.
+# ---- split.png: two independent editors, each with its own tabs and its own Run button.
 k C-l; sleep 1.8
 k C-o; sleep 0.8
 t "main.rs"; sleep 1.2
