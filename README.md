@@ -136,7 +136,15 @@ instead of the blank read-only buffer a binary file used to give. A PDF opens as
 with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
 Run, and the page beside it is the one you just typeset.
 
-![A picture in a tab, and the same picture through chafa in a terminal](docs/screenshots/preview-image.png)
+Every preview carries a navigation bar along its bottom edge: the page arrows, `go` to jump to a
+page by number, `-` and `+` for zoom, and `fit` or `wide` to size the page to the pane or to its
+width. Each control is labelled with its own key, so the bar is also the reminder of how to work
+without the mouse — though the wheel zooms as well, and the scrollbars drag. Documents get one
+control pictures do not, `dark`, which inverts the page for reading at night: inverting a
+photograph is not a reading aid, it is just a wrong photograph. The setting is remembered
+between sessions.
+
+![A picture in a tab, and the same picture through chafa in a terminal](docs/screenshots/preview-image.jpg)
 
 *The same file twice: real pixels in the tab, and `chafa` putting it into a terminal pane with
 the Run button beside it.*
@@ -153,6 +161,9 @@ tab the button says Refresh instead, because there the file is generated and can
 different.*
 
 ![Markdown source and its rendered document](docs/screenshots/preview-md.png)
+
+*Two tabs onto one file. The glyph in the strip tells them apart, and typing in the source moves
+the document beside it without a save.*
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.
