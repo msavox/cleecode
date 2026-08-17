@@ -2,6 +2,15 @@
 #
 #   cargo build --release && vhs docs/demo.tape
 #
+# Then shrink it, because vhs writes a full-colour GIF and this one lands around 3.5 MB:
+#
+#   ffmpeg -y -i docs/demo.gif -vf palettegen=max_colors=64:stats_mode=diff /tmp/p.png
+#   ffmpeg -y -i docs/demo.gif -i /tmp/p.png -lavfi paletteuse=dither=none docs/demo.gif
+#
+# 2.8 MB, and nothing visibly changes: a terminal is flat colour, so 64 of them is plenty.
+# `dither=none` is the load-bearing half — dithering adds noise, noise defeats the GIF's
+# run-length compression, and the "optimised" file comes out *larger* than the original.
+#
 # Deterministic: the same tape produces the same GIF, so the demo can be re-recorded after a UI
 # change rather than re-shot by hand.
 #
@@ -138,13 +147,12 @@ Sleep 3.5s
 # ---- Frames: the tree, each editor half and every shell is one, and focus moves between them.
 #      Ctrl+Tab cycles them in real use — vhs cannot send that chord, so this goes through the
 #      palette, which is the other honest route to the same thing.
-Ctrl+p
-Sleep 1s
-Type "focus terminal"
-Sleep 1.2s
-Enter
-Sleep 1.8s
-
+#
+#      Only between the tree and the editor, never into a terminal. A focused shell is handed
+#      every Ctrl chord, deliberately — it needs its own Ctrl+C and Ctrl+R — so Ctrl+P stops
+#      opening the palette and starts editing the command line instead. A tape that focuses a
+#      terminal and then keeps driving from the palette types the rest of the demo into zsh:
+#      the recording ends up full of `command not found`, and every later step is lost.
 Ctrl+p
 Sleep 1s
 Type "focus file tree"
@@ -167,6 +175,11 @@ Type "save workspace"
 Sleep 1.2s
 Enter
 Sleep 1.4s
+# The name field opens prefilled with the folder's name, so typing straight into it appends and
+# the workspace comes out called "cleecodedemo". Backspace pops one character and popping an
+# empty string does nothing, so a run of them clears the field whatever the checkout is called.
+Backspace 24
+Sleep 0.8s
 Type "demo"
 Sleep 1.2s
 Enter
