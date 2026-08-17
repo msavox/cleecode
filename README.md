@@ -101,9 +101,10 @@ just point your terminal at a Nerd Font you already have.
 
 ![CleeCode main view](docs/screenshots/main.png)
 
-*The demo and the stills are replayed from [`docs/demo.tape`](docs/demo.tape) and
-[`docs/shots.tape`](docs/shots.tape), so they are re-made after a UI change rather than re-shot
-by hand and left to go stale.*
+*The demo and most stills are replayed from [`docs/demo.tape`](docs/demo.tape) and
+[`docs/shots.tape`](docs/shots.tape), so they are re-made after a UI change rather than left to
+go stale. The preview shots below are taken by hand: they need a terminal that can draw
+pictures, and the recorder has none.*
 
 ### Editing
 
@@ -126,10 +127,23 @@ instead of the blank read-only buffer a binary file used to give. A PDF opens as
 with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
 Run, and the page beside it is the one you just typeset.
 
-Markdown gets a live preview beside the source — one file, two tabs, one copy of the text.
-Where `pandoc` is installed it is a real document, so pictures the text refers to appear in the
-flow of it; elsewhere it falls back to styled terminal text. CleeCode draws all of it itself, so
-it works over `ssh` too.
+![A picture in a tab, and the same picture through chafa in a terminal](docs/screenshots/preview-image.png)
+
+*The same file twice: real pixels in the tab, and `chafa` putting it into a terminal pane with
+the Run button beside it.*
+
+Markdown gets a live preview beside the source — one file, two tabs, one copy of the text, so
+the two can never disagree about what it says. Where `pandoc` is installed it is a real
+document, pictures the text refers to included; elsewhere it falls back to styled terminal text.
+CleeCode draws all of it itself, so it works over `ssh` too.
+
+![A LaTeX source and its typeset PDF side by side](docs/screenshots/preview-pdf.png)
+
+*Edit the `.tex`, press Run, and the page beside it is the one you just typeset. On a preview
+tab the button says Refresh instead, because there the file is generated and can come out
+different.*
+
+![Markdown source and its rendered document](docs/screenshots/preview-md.png)
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.
