@@ -2213,8 +2213,10 @@ pub fn terminal_content_rect(area: Rect) -> Rect {
     inner_rect(area)
 }
 
-/// How long a scrollbar stays up after the last scroll before fading out again.
-const SCROLLBAR_LINGER: Duration = Duration::from_millis(1200);
+/// How long a scrollbar stays up after the last scroll before fading out again. Long enough to
+/// still be there when a hand leaves the trackpad and goes for it: at 1.2s it was gone by the
+/// time anyone tried to grab the thing they had just been watching.
+const SCROLLBAR_LINGER: Duration = Duration::from_millis(2500);
 
 /// Which way a scrollbar runs. The two differ only in which border they live on and which
 /// coordinate they measure along, so everything else about them is shared.
@@ -2257,6 +2259,29 @@ pub fn scrollbar_strip(inner: Rect, axis: Axis) -> Option<Rect> {
         }),
         _ => None,
     }
+}
+
+/// How far from a scrollbar the pointer counts as being on it, for the purpose of showing it.
+/// A bar is one cell wide and invisible until reached, so an exact hit meant aiming at something
+/// that was not there yet — hard with a mouse and a matter of luck with a trackpad. Approaching
+/// is enough to bring it up; the click still has to land on the bar.
+const SCROLLBAR_REVEAL: u16 = 3;
+
+/// The band the pointer has to be in for a scrollbar to show itself: the strip it would occupy,
+/// grown inwards. Used for revealing only — `scrollbar_at`, which decides what a click hits,
+/// keeps to the strip, so the cells beside a bar stay ordinary text.
+pub fn scrollbar_reveal_zone(inner: Rect, axis: Axis) -> Option<Rect> {
+    let strip = scrollbar_strip(inner, axis)?;
+    Some(match axis {
+        Axis::Vertical => {
+            let width = SCROLLBAR_REVEAL.min(inner.width);
+            Rect { x: strip.x + 1 - width, width, ..strip }
+        }
+        Axis::Horizontal => {
+            let height = SCROLLBAR_REVEAL.min(inner.height);
+            Rect { y: strip.y + 1 - height, height, ..strip }
+        }
+    })
 }
 
 /// A scrollbar's parts, as drawn. Built in one place so the arrows the renderer paints and the
@@ -3085,6 +3110,36 @@ mod tests {
         let horiz = |w, h| scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Horizontal);
         assert_eq!(horiz(3, 12), None, "one column of contents, all of it the vertical bar's");
         assert_eq!(horiz(40, 2), None);
+    }
+
+    /// A one-cell bar that is invisible until the pointer is exactly on it has to be aimed at
+    /// blind. The band that brings it up is wider than the bar; what a click hits is not.
+    #[test]
+    fn a_scrollbar_shows_itself_before_the_pointer_is_on_it() {
+        let inner = inner_rect(Rect { x: 10, y: 5, width: 40, height: 12 });
+        let strip = scrollbar_strip(inner, Axis::Vertical).unwrap();
+        let zone = scrollbar_reveal_zone(inner, Axis::Vertical).unwrap();
+
+        // Wider than the bar, ending on it, and never outside the contents.
+        assert!(zone.width > strip.width);
+        assert_eq!(zone.x + zone.width, strip.x + strip.width);
+        assert!(zone.x >= inner.x);
+        assert_eq!((zone.y, zone.height), (strip.y, strip.height));
+
+        let horiz_strip = scrollbar_strip(inner, Axis::Horizontal).unwrap();
+        let horiz_zone = scrollbar_reveal_zone(inner, Axis::Horizontal).unwrap();
+        assert!(horiz_zone.height > horiz_strip.height);
+        assert_eq!(horiz_zone.y + horiz_zone.height, horiz_strip.y + horiz_strip.height);
+        assert!(horiz_zone.y >= inner.y);
+
+        // A frame narrower than the band keeps the band inside it rather than off the left edge.
+        let narrow = inner_rect(Rect { x: 0, y: 0, width: 4, height: 12 });
+        let zone = scrollbar_reveal_zone(narrow, Axis::Vertical).unwrap();
+        assert_eq!((zone.x, zone.width), (narrow.x, narrow.width));
+
+        // No bar, no band: the two agree about frames with nothing to spare.
+        let cramped = inner_rect(Rect { x: 0, y: 0, width: 2, height: 12 });
+        assert_eq!(scrollbar_reveal_zone(cramped, Axis::Vertical), None);
     }
 
     /// The arrows are painted by us and hit-tested by the app off this one layout, so the cells

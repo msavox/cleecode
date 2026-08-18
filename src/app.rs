@@ -4498,7 +4498,7 @@ impl App {
             return true;
         }
         let Some((col, row)) = self.pointer else { return false };
-        ui::scrollbar_strip(ui::inner_rect(frame), axis).is_some_and(|strip| within(strip, col, row))
+        ui::scrollbar_reveal_zone(ui::inner_rect(frame), axis).is_some_and(|zone| within(zone, col, row))
     }
 
     /// The scrollbar under a point, and which part of it.
