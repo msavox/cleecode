@@ -1420,7 +1420,9 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
 fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     let Some(fs) = app.find.as_ref() else { return };
     let lang = app.settings.lang;
-    let rect = centered_rect(72, 7, full);
+    // Two rows more than the fields need: the flag line always, and the pattern error when there
+    // is one. A modal that grew and shrank as you typed would move the fields under the cursor.
+    let rect = centered_rect(72, 9, full);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(" Find / Replace ")
@@ -1440,7 +1442,17 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     let repl_marker = if fs.focus_replace { "▶ " } else { "  " };
     let label = Style::default().fg(Color::Gray);
     let value = Style::default().fg(Color::Yellow);
-    let lines = vec![
+    // A pattern that will not compile takes the place of the count: it is the answer to what
+    // the query is doing, and "no matches" would be a lie about a search that never ran.
+    let count = match &fs.error {
+        Some(_) => String::new(),
+        None => count,
+    };
+    let flags = Line::from(Span::styled(
+        i18n::msg_find_flags(lang, fs.case_sensitive, fs.regex),
+        Style::default().fg(if fs.case_sensitive || fs.regex { Color::Cyan } else { Color::DarkGray }),
+    ));
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("{find_marker}Find:    "), label),
             Span::styled(fs.query.clone(), value),
@@ -1450,8 +1462,15 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
             Span::styled(format!("{repl_marker}Replace: "), label),
             Span::styled(fs.replace.clone(), value),
         ]),
-        Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(Color::DarkGray))),
+        flags,
     ];
+    if let Some(detail) = &fs.error {
+        lines.push(Line::from(Span::styled(
+            i18n::msg_find_pattern_error(lang, detail),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(Color::DarkGray))));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
     // Cursor sits at the end of whichever field is focused.

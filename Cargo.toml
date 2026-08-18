@@ -26,6 +26,12 @@ arboard = "3.4.1"
 base64 = "0.23.1"
 crossterm = "0.29.0"
 dirs = "6.0.0"
+# The regex engine for Find. Deliberately fancy-regex rather than `regex`: syntect already pulls
+# it in for `regex-fancy`, so it is compiled into the binary either way and asking for it here
+# adds no crate, no build time and no C. It also backtracks, which is what makes lookaround work,
+# and it has a backtrack limit — a pattern typed by hand that would otherwise hang returns an
+# error the overlay can show instead of freezing the editor.
+fancy-regex = "0.16.2"
 image = "0.25.10"
 portable-pty = "0.9.0"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["simd", "html"] }
