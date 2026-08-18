@@ -675,6 +675,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_goto {
         draw_goto_modal(f, app, f.area());
     }
+    if app.show_search {
+        draw_search_modal(f, app, f.area());
+    }
     if app.show_new_entry {
         draw_new_entry_modal(f, app, f.area());
     }
@@ -1016,6 +1019,34 @@ fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
         i18n::msg_goto_prompt(lang, pages),
         &app.goto_input,
     );
+}
+
+/// What to look for across the project. Its own box rather than the shared input modal, because
+/// it carries the same two switches as the Find box and by the same keys — a query typed here
+/// and a query typed there have to be the same kind of thing, and the only way to know which way
+/// they are set is to be told.
+fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
+    let lang = app.settings.lang;
+    let rect = centered_rect(66, 7, full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(" Search in project ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let flags_on = app.search_case_sensitive || app.search_regex;
+    let lines = vec![
+        Line::from(Span::styled(i18n::msg_search_prompt(lang), Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(app.search_input.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            i18n::msg_find_flags(lang, app.search_case_sensitive, app.search_regex),
+            Style::default().fg(if flags_on { Color::Cyan } else { Color::DarkGray }),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    f.set_cursor_position((inner.x + app.search_input.chars().count() as u16, inner.y + 1));
 }
 
 /// The terminal's name and its startup command, in one box: two prompts, two values, and a

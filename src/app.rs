@@ -353,6 +353,17 @@ pub struct App {
     /// while a decode is still running, but the file it was asked about cannot.
     preview_tx: Sender<crate::preview::Decoded>,
     preview_rx: Receiver<crate::preview::Decoded>,
+    /// The box asking what to look for across the project, when open.
+    pub show_search: bool,
+    pub search_input: String,
+    /// How the project search reads its query. Kept on the app rather than in the Find box: a
+    /// search across files outlives the box it was typed in, and asking for a pattern twice —
+    /// once per place you can search — would be asking the same question twice.
+    pub search_regex: bool,
+    pub search_case_sensitive: bool,
+    search_tx: Sender<crate::search::Outcome>,
+    search_rx: Receiver<crate::search::Outcome>,
+    search_pending: Arc<AtomicBool>,
 }
 
 /// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
@@ -570,7 +581,7 @@ fn expand_placeholders(template: &str, path: &std::path::Path) -> String {
 
 /// Collects files under `root` for the quick-open picker, capped so a huge tree can't
 /// stall the UI. Always skips VCS/build dirs; skips dotfiles unless `show_hidden`.
-fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) {
+pub fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) {
     const LIMIT: usize = 8000;
     if out.len() >= LIMIT {
         return;
@@ -1019,6 +1030,7 @@ impl App {
         let (bg_tx, bg_rx) = mpsc::channel();
         let (preview_tx, preview_rx) = mpsc::channel();
         let (git_status_tx, git_status_rx) = mpsc::channel();
+        let (search_tx, search_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
@@ -1098,6 +1110,13 @@ impl App {
             bg_rx,
             preview_tx,
             preview_rx,
+            show_search: false,
+            search_input: String::new(),
+            search_regex: false,
+            search_case_sensitive: false,
+            search_tx,
+            search_rx,
+            search_pending: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1400,6 +1419,109 @@ impl App {
         while let Ok(status) = self.git_status_rx.try_recv() {
             self.git_status = status;
         }
+    }
+
+    // ---- Project search -------------------------------------------------------------------
+
+    /// Asks what to look for across the project, starting from whatever you were already
+    /// looking for: the selection, or the last thing typed into the Find box. Searching for the
+    /// word under the cursor is the common case and this is the cheapest way to serve it.
+    fn begin_project_search(&mut self) {
+        self.search_input = self
+            .editor()
+            .selected_text()
+            .filter(|s| !s.contains('\n') && !s.trim().is_empty())
+            .or_else(|| self.find.as_ref().map(|f| f.query.clone()).filter(|q| !q.is_empty()))
+            .unwrap_or_default();
+        self.show_search = true;
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.show_search = false;
+                self.search_input.clear();
+            }
+            KeyCode::Enter => self.start_project_search(),
+            // The same two switches as the Find box, by the same two keys: one idea, one pair
+            // of keys, wherever a query is typed.
+            KeyCode::Char('u') if ctrl => self.search_case_sensitive = !self.search_case_sensitive,
+            KeyCode::Char('n') if ctrl => self.search_regex = !self.search_regex,
+            KeyCode::Backspace => {
+                self.search_input.pop();
+            }
+            KeyCode::Char(c) if !ctrl => self.search_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn start_project_search(&mut self) {
+        let query = self.search_input.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        self.show_search = false;
+        let lang = self.settings.lang;
+        self.status_message = i18n::msg_search_running(lang, &query);
+        crate::search::spawn(
+            self.root.clone(),
+            query,
+            self.search_regex,
+            self.search_case_sensitive,
+            self.settings.show_hidden_files,
+            self.search_tx.clone(),
+            self.search_pending.clone(),
+        );
+    }
+
+    /// Picks up a finished search. The results become an ordinary picker, so the list is
+    /// navigated, filtered and clicked with everything already built for the palette — and the
+    /// query typed there narrows a search that found too much without running it again.
+    pub fn poll_search(&mut self) {
+        let lang = self.settings.lang;
+        while let Ok(outcome) = self.search_rx.try_recv() {
+            if let Some(detail) = &outcome.error {
+                self.status_message = i18n::msg_find_pattern_error(lang, detail);
+                continue;
+            }
+            if outcome.hits.is_empty() {
+                self.status_message = i18n::msg_search_none(lang, &outcome.query, outcome.files_searched);
+                continue;
+            }
+            self.status_message = i18n::msg_search_done(
+                lang,
+                outcome.hits.len(),
+                outcome.files_searched,
+                outcome.truncated,
+            );
+            let root = self.root.clone();
+            let items = outcome
+                .hits
+                .iter()
+                .map(|hit| crate::picker::PickItem {
+                    label: crate::search::label(hit, &root),
+                    shortcut: None,
+                    action: crate::picker::PickAction::FileLine(hit.path.clone(), hit.line, hit.col),
+                })
+                .collect();
+            self.picker = Some(crate::picker::Picker::new(
+                "Search results",
+                crate::picker::PickerKind::SearchResults,
+                items,
+            ));
+        }
+    }
+
+    /// Opens a file at a line and column, for a result chosen out of the search list.
+    fn open_file_at(&mut self, path: PathBuf, line: usize, col: usize) {
+        self.open_file_in_tab(path);
+        self.editor_mut().goto_line(line);
+        // The column is clamped by the same rule as any other cursor move: a file edited since
+        // the search ran may have a shorter line there now, or none.
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let len = self.editors[idx].line_char_len(self.editors[idx].cursor_line);
+        self.editors[idx].cursor_col = col.min(len);
     }
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {
@@ -2432,13 +2554,22 @@ impl App {
         let mut file = None;
         let mut venv_dir = None;
         let mut workspace = None;
+        let mut file_line = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
                 crate::picker::PickAction::OpenFile(p) => file = Some(p.clone()),
                 crate::picker::PickAction::VenvDir(p) => venv_dir = Some(p.clone()),
                 crate::picker::PickAction::Workspace(name) => workspace = Some(name.clone()),
+                crate::picker::PickAction::FileLine(p, line, col) => {
+                    file_line = Some((p.clone(), *line, *col))
+                }
             }
+        }
+        if let Some((path, line, col)) = file_line {
+            self.picker = None;
+            self.open_file_at(path, line, col);
+            return;
         }
         if let Some(name) = workspace {
             // Which of the two workspace pickers is open decides what Enter means.
@@ -3828,6 +3959,10 @@ impl App {
             self.handle_goto_key(key);
             return;
         }
+        if self.show_search {
+            self.handle_search_key(key);
+            return;
+        }
         if self.show_new_entry {
             self.handle_new_entry_key(key);
             return;
@@ -3950,6 +4085,12 @@ impl App {
             }
             KeyCode::Char('g') | KeyCode::Char('G') if ctrl && shift => {
                 self.open_context_menu_for_focus();
+                return;
+            }
+            // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
+            // key that does two things is a key that does the wrong one.
+            KeyCode::Char('h') | KeyCode::Char('H') if ctrl && shift => {
+                self.begin_project_search();
                 return;
             }
             // Navigation lives on the arrows: the same physical keys on every layout, and no Fn
@@ -4204,6 +4345,7 @@ impl App {
             MenuAction::MoveLineDown => self.editor_mut().move_line_down(),
             MenuAction::Find => self.open_find(false),
             MenuAction::GotoLine => self.open_goto(),
+            MenuAction::SearchProject => self.begin_project_search(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
             MenuAction::Rename => self.start_rename(),
@@ -5321,6 +5463,11 @@ impl App {
                 }
                 if self.show_workspace_save {
                     self.cancel_save_workspace();
+                    return;
+                }
+                if self.show_search {
+                    self.show_search = false;
+                    self.search_input.clear();
                     return;
                 }
                 if self.show_save_as {
