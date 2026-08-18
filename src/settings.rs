@@ -62,12 +62,24 @@ pub struct Settings {
     // the shells opened afterwards, not the ones already running.
     #[serde(default = "default_terminal_scrollback")]
     pub terminal_scrollback: usize,
-    // Whether previews are shown inverted — a light document turned dark. A preference about
-    // how you read rather than about one file, so it belongs here and outlives the tab: turning
-    // it on for one PDF and having the next one open bright again is exactly the annoyance a
-    // dark mode exists to remove.
+    // Whether documents are shown inverted — a light page turned dark. A preference about how
+    // you read rather than about one file, so it belongs here and outlives the tab: turning it
+    // on for one PDF and having the next one open bright again is exactly the annoyance a dark
+    // mode exists to remove.
+    //
+    // Kept apart from the markdown one on purpose. A paper and a README are read in different
+    // places for different reasons, and one answer for both meant that setting either changed
+    // the other. Pictures are in neither: inverting a photograph is a negative, not a mode, so
+    // it stays with the tab it was asked for and is never remembered.
     #[serde(default)]
     pub preview_dark: bool,
+    #[serde(default)]
+    pub preview_dark_markdown: bool,
+    // Whether a markdown preview opens as styled text rather than as a rendered document. Only
+    // ever a choice where pandoc can make the document at all; without it there is nothing to
+    // choose between and the text view is all there is.
+    #[serde(default)]
+    pub preview_markdown_text: bool,
     // Auto-close brackets/quotes and expand pairs on Enter. Hand-editable; on by default.
     #[serde(default = "default_true")]
     pub auto_pairs: bool,
@@ -212,6 +224,8 @@ impl Default for Settings {
             interpreter_paths: std::collections::HashMap::new(),
             show_hidden_files: false,
             preview_dark: false,
+            preview_dark_markdown: false,
+            preview_markdown_text: false,
             terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
             last_root: None,
@@ -360,6 +374,9 @@ mod tests {
             [("octave-cli".to_string(), "/opt/homebrew/bin/octave-cli".to_string())].into_iter().collect();
         settings.active_venv = Some(".venv".to_string());
         settings.tab_size = 2;
+        // How documents are read: one answer per kind, and each has to come back on its own.
+        settings.preview_dark = true;
+        settings.preview_markdown_text = true;
 
         let text = toml::to_string_pretty(&settings).expect("settings must serialize");
         let back: Settings = toml::from_str(&text).expect("settings must parse back");
@@ -369,6 +386,9 @@ mod tests {
         assert_eq!(back.active_venv, settings.active_venv);
         assert_eq!(back.tab_size, 2);
         assert_eq!(back.run_commands.get("m"), settings.run_commands.get("m"));
+        assert!(back.preview_dark, "a PDF read dark stays dark");
+        assert!(back.preview_markdown_text, "markdown left as text opens as text");
+        assert!(!back.preview_dark_markdown, "markdown keeps its own answer, untouched by the PDF one");
     }
 
     /// Both hand-written forms must parse. A parse failure is silent (`load()` falls back to

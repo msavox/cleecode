@@ -125,6 +125,22 @@ pub enum State {
     },
 }
 
+/// What a preview tab is a view of.
+///
+/// Worth a name of its own: the three differ in what the navigation bar may offer them, and
+/// spelling the question out as `pages.is_none() && source.is_none()` in every place that asks
+/// is how a photograph ended up with a dark mode that turned it into a negative.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// A picture file: one image, shown as it is.
+    Picture,
+    /// A PDF: pages, rasterised one at a time.
+    Document,
+    /// The rendered view of a markdown buffer — a document when pandoc can make one, styled
+    /// text otherwise, and either way a second view of something being edited.
+    Markdown,
+}
+
 /// How a page is sized against the pane it is shown in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fit {
@@ -176,6 +192,11 @@ pub struct Preview {
     /// even before the page count is known: paging has to work while that is still being asked
     /// for, and on a file whose count cannot be established at all.
     pub pages: Option<Pages>,
+    /// Markdown only: show it as styled text even where a document could be made. The rendered
+    /// document is the prettier of the two and the text one is the faster — it follows the
+    /// keystrokes, needs no pandoc and no graphics — so which is wanted is a matter of what is
+    /// being done, not of what the machine can manage. The `text` button on the bar sets it.
+    pub text_only: bool,
 }
 
 pub struct Pages {
@@ -188,7 +209,7 @@ pub struct Pages {
 
 impl Preview {
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0 }
+        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false }
     }
 
     pub fn document(page: usize) -> Self {
@@ -208,6 +229,7 @@ impl Preview {
             full: None,
             scroll_px: 0,
             scroll_x: 0,
+            text_only: false,
         }
     }
 
@@ -231,12 +253,68 @@ impl Preview {
             full: None,
             scroll_px: 0,
             scroll_x: 0,
+            text_only: false,
         }
     }
 
     /// Whether the buffer has moved since what is on screen was made.
     pub fn stale(&self, revision: u64) -> bool {
         self.shown_revision != revision
+    }
+
+    /// What this tab is a view of. A markdown preview keeps its `source` whichever of its two
+    /// renderings is up, so that is the question asked first.
+    pub fn kind(&self) -> Kind {
+        match (self.source.is_some(), self.pages.is_some()) {
+            (true, _) => Kind::Markdown,
+            (false, true) => Kind::Document,
+            (false, false) => Kind::Picture,
+        }
+    }
+
+    /// Switches a markdown preview between the rendered document and the styled text, and makes
+    /// sure the next pass over the buffers remakes it: one has pages and the other is a single
+    /// scroll, so what is on screen cannot be reused for the other.
+    pub fn set_text_only(&mut self, text_only: bool) {
+        if self.text_only == text_only {
+            return;
+        }
+        self.text_only = text_only;
+        self.pages = (!text_only && markdown_as_document()).then(|| Pages { current: 1, total: None });
+        self.settled = None;
+        self.scroll_px = 0;
+        self.scroll_x = 0;
+        // No revision can equal this, so the buffer counts as moved and the view is made again.
+        self.shown_revision = u64::MAX;
+    }
+
+    /// Whether this is showing styled text rather than a page of pixels — markdown that cannot
+    /// be made into a document, or that was asked to stay as text. Zoom, fit and dark mode are
+    /// all properties of a rasterised page, so a bar over a text view offers none of them.
+    pub fn text_view(&self) -> bool {
+        self.kind() == Kind::Markdown && (self.text_only || !markdown_as_document())
+    }
+
+    /// The box a picture is scaled into for the pane it last had, at the zoom in force. Zero
+    /// when the pane has never been drawn, which `scale_picture` reads as "leave it alone".
+    ///
+    /// Capped at the same pixel budget a rasterised page gets: four times a large pane is tens
+    /// of megapixels, and every one of them would be resampled on a zoom step.
+    pub fn picture_box(&self) -> (u32, u32) {
+        if self.area_cols == 0 || self.area_rows == 0 {
+            return (0, 0);
+        }
+        let (pane_w, pane_h) = pane_pixels(self.area_cols, self.area_rows);
+        let zoom = self.zoom.max(0.1);
+        let (w, h) = ((pane_w as f32 * zoom) as u32, (pane_h as f32 * zoom) as u32);
+        let (w, h) = (w.max(1), h.max(1));
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels <= u64::from(pixel_budget()) {
+            return (w, h);
+        }
+        // Both sides shrink together, so the reduction goes as the square root.
+        let scale = (f64::from(pixel_budget()) / pixels as f64).sqrt() as f32;
+        (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1))
     }
 
 
@@ -291,8 +369,12 @@ const MAX_PIXELS: u64 = 80_000_000;
 
 /// What a preview tab has been asked to produce.
 pub enum Job {
-    /// A picture, decoded as it is.
-    Picture(PathBuf),
+    /// A picture, decoded and then scaled to the box the pane and the zoom ask for. A page is
+    /// *rasterised* at its zoom; a picture arrives at whatever size it was saved at, so the same
+    /// job is done here — without it the widget shrinks every picture to the pane and the zoom
+    /// buttons do nothing at all. A zero box means "as it is": the pane has never been drawn, so
+    /// there is nothing yet to scale against.
+    Picture { path: PathBuf, box_px: (u32, u32), fit: Fit },
     /// One page of a document already on disk, rasterised `width_px` pixels wide.
     Page { path: PathBuf, page: usize, width_px: u32 },
     /// One page of a document made *from a buffer*: the markdown you are editing, turned into a
@@ -304,13 +386,13 @@ pub enum Job {
 impl Job {
     fn path(&self) -> &Path {
         match self {
-            Job::Picture(path) | Job::Page { path, .. } | Job::Markdown { path, .. } => path,
+            Job::Picture { path, .. } | Job::Page { path, .. } | Job::Markdown { path, .. } => path,
         }
     }
 
     fn page(&self) -> Option<usize> {
         match self {
-            Job::Picture(_) => None,
+            Job::Picture { .. } => None,
             Job::Page { page, .. } | Job::Markdown { page, .. } => Some(*page),
         }
     }
@@ -323,7 +405,9 @@ pub fn start_loading(job: Job, tx: Sender<Decoded>) -> State {
         let path = job.path().to_path_buf();
         let page = job.page();
         let (result, total) = match &job {
-            Job::Picture(path) => (decode(path), None),
+            Job::Picture { path, box_px, fit } => {
+                (decode(path).map(|image| scale_picture(image, *box_px, *fit)), None)
+            }
             Job::Page { path, page, width_px } => {
                 // The count is asked for alongside the first page rather than in its own pass:
                 // it needs the same tool, and a second subprocess for a number nobody is
@@ -456,6 +540,47 @@ fn decode(path: &Path) -> Result<image::DynamicImage, String> {
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())
+}
+
+/// Sizes a picture for the pane it is going into, at the zoom and fit in force.
+///
+/// A photograph has a size of its own and no idea what a pane is, so "fit", "wide" and the zoom
+/// buttons have to be answered here in pixels. `Resize::Fit` in the widget only ever shrinks to
+/// the pane, so a picture left at its own size looks identical at every zoom — which is exactly
+/// what it did before this existed.
+///
+/// A zero box means the pane has never been drawn and there is nothing to scale against, so the
+/// picture is passed through untouched.
+pub fn scale_picture(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -> image::DynamicImage {
+    let Some((width, height)) = picture_size_in((image.width(), image.height()), box_px, fit) else {
+        return image;
+    };
+    // Already that size: the worker scaled it on the way in, and resampling it a second time
+    // would cost the same as the first for no change at all.
+    if (image.width(), image.height()) == (width, height) {
+        return image;
+    }
+    image.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+}
+
+/// The size a picture of `(w, h)` takes in a box, or `None` when there is nothing to work from.
+fn picture_size_in((w, h): (u32, u32), (box_w, box_h): (u32, u32), fit: Fit) -> Option<(u32, u32)> {
+    if box_w == 0 || box_h == 0 || w == 0 || h == 0 {
+        return None;
+    }
+    Some(match fit {
+        // The whole picture, as large as fits the box — enlarged as well as shrunk, since past
+        // 100% the point of a zoom is to see the pixels closer.
+        Fit::Page => {
+            let scale = (f64::from(box_w) / f64::from(w)).min(f64::from(box_h) / f64::from(h));
+            (((f64::from(w) * scale) as u32).max(1), ((f64::from(h) * scale) as u32).max(1))
+        }
+        // As wide as the box, however tall that makes it. What falls past the pane is scrolled to.
+        Fit::Width => {
+            let height = (u64::from(box_w) * u64::from(h) / u64::from(w)).min(u64::from(u32::MAX));
+            (box_w, (height as u32).max(1))
+        }
+    })
 }
 
 /// Extensions shown a page at a time, by rasterising them first.
@@ -899,6 +1024,76 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a tab is a view of, which decides what its bar may offer. A markdown preview keeps
+    /// its source whichever rendering is up, so it must not read as a PDF when pandoc gave it
+    /// pages, nor as a picture when it has none.
+    #[test]
+    fn a_preview_knows_what_it_is_a_view_of() {
+        assert_eq!(Preview::picture().kind(), Kind::Picture);
+        assert_eq!(Preview::document(1).kind(), Kind::Document);
+        let markdown = Preview::rendered(PathBuf::from("notes.md"));
+        assert_eq!(markdown.kind(), Kind::Markdown);
+        let mut paged_markdown = Preview::rendered(PathBuf::from("notes.md"));
+        paged_markdown.pages = Some(Pages { current: 1, total: None });
+        assert_eq!(paged_markdown.kind(), Kind::Markdown, "a rendered document is still markdown");
+    }
+
+    /// The zoom buttons did nothing on a picture: the file was decoded at its own size whatever
+    /// the zoom, and the widget shrank it to the pane either way. The zoom has to reach the
+    /// pixels, which means the box a picture is scaled into has to grow with it.
+    #[test]
+    fn a_picture_is_scaled_to_the_zoom_it_is_looked_at() {
+        use image::GenericImageView;
+        let mut preview = Preview::picture();
+        // Never drawn: nothing to scale against, and `scale_picture` leaves it alone.
+        assert_eq!(preview.picture_box(), (0, 0));
+        let untouched = image::DynamicImage::new_rgb8(640, 480);
+        assert_eq!(scale_picture(untouched, (0, 0), Fit::Page).dimensions(), (640, 480));
+
+        preview.area_cols = 100;
+        preview.area_rows = 40;
+        let (base_w, base_h) = preview.picture_box();
+        assert!(base_w > 0 && base_h > 0);
+        preview.zoom = 2.0;
+        let (zoomed_w, zoomed_h) = preview.picture_box();
+        assert!(zoomed_w > base_w && zoomed_h > base_h, "a zoomed picture is made larger");
+    }
+
+    /// How a picture lands in that box: the whole of it for "fit", the width of it for "wide".
+    #[test]
+    fn a_picture_fits_the_box_it_is_given() {
+        use image::GenericImageView;
+        let wide = image::DynamicImage::new_rgb8(1000, 200);
+        // The whole picture inside the box, aspect kept: the width binds here.
+        assert_eq!(scale_picture(wide.clone(), (500, 500), Fit::Page).dimensions(), (500, 100));
+        // As wide as the box, however tall that makes it — the rest is scrolled to.
+        assert_eq!(scale_picture(wide.clone(), (2000, 500), Fit::Width).dimensions(), (2000, 400));
+        // Already the right size: handed back untouched rather than resampled a second time.
+        let exact = scale_picture(wide, (500, 500), Fit::Page);
+        assert_eq!(scale_picture(exact, (500, 500), Fit::Page).dimensions(), (500, 100));
+    }
+
+    /// Markdown's two renderings. Switching between them changes what the view *is* — pages
+    /// against one long scroll — so what is on screen cannot be kept, and the next pass over the
+    /// buffers has to make the other one.
+    #[test]
+    fn markdown_switches_between_the_document_and_the_text() {
+        let mut preview = Preview::rendered(PathBuf::from("notes.md"));
+        preview.shown_revision = 7;
+        preview.set_text_only(true);
+        assert!(preview.text_only && preview.text_view());
+        assert!(preview.pages.is_none(), "styled text is one scroll, not a set of pages");
+        assert_ne!(preview.shown_revision, 7, "the view has to be made again");
+
+        preview.shown_revision = 9;
+        preview.set_text_only(false);
+        assert!(!preview.text_only);
+        assert_ne!(preview.shown_revision, 9);
+        // Whether it *can* be a document depends on the machine; that it is no longer pinned to
+        // text does not.
+        assert_eq!(preview.text_view(), !markdown_as_document());
+    }
 
     /// The list decides which files stop being text, so it has to stay narrow. Being unreadable
     /// as text is not evidence of being an image — a .zip is binary too, and a preview tab that

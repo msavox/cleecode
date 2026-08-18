@@ -1715,6 +1715,8 @@ pub enum NavControl {
     FitPage,
     FitWidth,
     Invert,
+    /// Markdown only: the rendered document, or the styled text.
+    TextMode,
 }
 
 /// The bar's controls with the cells each occupies, left to right.
@@ -1726,26 +1728,32 @@ pub fn nav_bar_layout(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, Rec
         return Vec::new();
     };
     let Some(row) = nav_bar_rect(area) else { return Vec::new() };
+    let kind = preview.kind();
     let mut controls = Vec::new();
-    if preview.pages.is_some() {
-        controls.extend([NavControl::PageBack, NavControl::PageForward, NavControl::GoToPage]);
-    }
-    controls.extend([
-        NavControl::ZoomOut,
-        NavControl::ZoomIn,
-        NavControl::FitPage,
-        NavControl::FitWidth,
-    ]);
-    // Only where there is a document to invert. A dark mode turns a white page dark and its
-    // text light; done to a photograph it is not a mode, it is a negative.
-    if preview.pages.is_some() || preview.source.is_some() {
+    // Styled text is scrolled, not paged, and has no pixels to zoom or invert: over it the bar
+    // carries the one control that means anything there, the way back to the document.
+    if !preview.text_view() {
+        if preview.pages.is_some() {
+            controls.extend([NavControl::PageBack, NavControl::PageForward, NavControl::GoToPage]);
+        }
+        controls.extend([
+            NavControl::ZoomOut,
+            NavControl::ZoomIn,
+            NavControl::FitPage,
+            NavControl::FitWidth,
+        ]);
         controls.push(NavControl::Invert);
+    }
+    // Only where there is something to switch to: without pandoc the text view is not a choice,
+    // it is the only rendering there is.
+    if kind == crate::preview::Kind::Markdown && crate::preview::markdown_as_document() {
+        controls.push(NavControl::TextMode);
     }
 
     let mut out = Vec::new();
     let mut x = row.x + 1;
     for control in controls {
-        let width = nav_width(control);
+        let width = nav_width(control, kind);
         if x + width > row.x + row.width {
             break;
         }
@@ -1767,7 +1775,7 @@ fn nav_bar_rect(area: Rect) -> Option<Rect> {
 /// The two are drawn together, on the button. They used to be apart — buttons on the left, a
 /// list of keys on the right — which put the words "go", "fit", "wide" and "dark" on the bar
 /// twice, once as a label and once as a reminder of the label.
-fn nav_label(control: NavControl) -> (&'static str, &'static str) {
+fn nav_label(control: NavControl, kind: crate::preview::Kind) -> (&'static str, &'static str) {
     match control {
         NavControl::PageBack => ("\u{25c2}", "\u{2190}"),
         NavControl::PageForward => ("\u{25b8}", "\u{2192}"),
@@ -1776,14 +1784,19 @@ fn nav_label(control: NavControl) -> (&'static str, &'static str) {
         NavControl::ZoomIn => ("+", "+"),
         NavControl::FitPage => ("fit", "f"),
         NavControl::FitWidth => ("wide", "w"),
+        // The same operation, named for what it does to the thing in front of you: a page has a
+        // dark mode, a photograph has a negative. Calling both "dark" was how a picture came to
+        // open inverted because a PDF had been read that way.
+        NavControl::Invert if kind == crate::preview::Kind::Picture => ("invert", "i"),
         NavControl::Invert => ("dark", "d"),
+        NavControl::TextMode => ("text", "t"),
     }
 }
 
 /// How many cells a button takes: a space, the name, the key, a space. The zoom buttons name
 /// themselves with their own key, so it is not written twice.
-fn nav_width(control: NavControl) -> u16 {
-    let (name, key) = nav_label(control);
+fn nav_width(control: NavControl, kind: crate::preview::Kind) -> u16 {
+    let (name, key) = nav_label(control, kind);
     if name == key {
         name.chars().count() as u16 + 2
     } else {
@@ -1823,9 +1836,10 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
                 style.fg(Color::Black).bg(Color::Cyan)
             }
             NavControl::Invert if preview.inverted => style.fg(Color::Black).bg(Color::Cyan),
+            NavControl::TextMode if preview.text_only => style.fg(Color::Black).bg(Color::Cyan),
             _ => style,
         };
-        let (name, key) = nav_label(control);
+        let (name, key) = nav_label(control, preview.kind());
         let dim = Style::default().fg(Color::DarkGray).bg(style.bg.unwrap_or(Color::Reset));
         let line = if name == key {
             Line::from(Span::styled(format!(" {name} "), style))
@@ -2949,18 +2963,38 @@ mod tests {
     /// to be one that can be hit — same cells, no overlaps, nothing a single column wide.
     #[test]
     fn every_nav_button_drawn_is_a_button_that_can_be_clicked() {
+        use crate::preview::Kind;
         let mut x = 5u16;
         let mut last_end = 0u16;
-        for control in [NavControl::PageBack, NavControl::GoToPage, NavControl::Invert] {
-            let width = nav_width(control);
+        let controls = [
+            (NavControl::PageBack, Kind::Document),
+            (NavControl::GoToPage, Kind::Document),
+            (NavControl::Invert, Kind::Document),
+            // The same button under its other name, which is the longer of the two.
+            (NavControl::Invert, Kind::Picture),
+            (NavControl::TextMode, Kind::Markdown),
+        ];
+        for (control, kind) in controls {
+            let width = nav_width(control, kind);
             assert!(width >= 3, "a one-cell target is not clickable");
             // Name and key are drawn together on the button, so neither is repeated elsewhere.
-            let (name, key) = nav_label(control);
+            let (name, key) = nav_label(control, kind);
             assert!(!name.is_empty() && !key.is_empty());
             assert!(x > last_end, "buttons must not overlap");
             last_end = x + width;
             x += width + 1;
         }
+    }
+
+    /// A picture's button says "invert" and a document's says "dark", because they are not the
+    /// same act: one makes a negative of a photograph, the other turns a white page dark. They
+    /// shared a name once, and a picture opened inverted because a PDF had been read that way.
+    #[test]
+    fn a_picture_is_inverted_and_a_document_is_darkened() {
+        use crate::preview::Kind;
+        assert_eq!(nav_label(NavControl::Invert, Kind::Picture), ("invert", "i"));
+        assert_eq!(nav_label(NavControl::Invert, Kind::Document), ("dark", "d"));
+        assert_eq!(nav_label(NavControl::Invert, Kind::Markdown), ("dark", "d"));
     }
 
     /// The state text and the buttons share one row, and the state is drawn second — so if it

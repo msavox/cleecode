@@ -1142,6 +1142,16 @@ impl App {
                 Ok(image) => {
                     let inverted = preview.inverted;
                     let (cols, rows) = (preview.area_cols, preview.area_rows);
+                    // A picture asked for before the pane had ever been drawn comes back at its
+                    // own size, since there was no box to scale it into then. There is one now,
+                    // so it is fitted here rather than left at whatever a camera produced — a
+                    // 4000-pixel photograph would otherwise show as a pane-sized crop of itself.
+                    let image = match preview.kind() {
+                        crate::preview::Kind::Picture => {
+                            crate::preview::scale_picture(image, preview.picture_box(), preview.fit)
+                        }
+                        _ => image,
+                    };
                     // The whole page is kept and only the window being looked at is handed to
                     // the terminal. That is what makes zoom and scrolling cost a crop instead
                     // of a rasteriser — and what makes zoom visible at all, since the widget
@@ -1427,17 +1437,22 @@ impl App {
             return;
         }
         let first = paged.then_some(1);
-        let dark = self.settings.preview_dark;
         // Never drawn yet, so nothing is known about the pane it will land in; the preview's
         // own default stands in until the first frame records a real width.
         let width_px = crate::preview::Preview::picture().render_width();
         let mut preview =
             if paged { crate::preview::Preview::document(1) } else { crate::preview::Preview::picture() };
-        preview.inverted = dark;
+        // A document opens the way documents were last read. A picture never does: inverting one
+        // is a negative rather than a dark mode, so it is per-tab and starts off.
+        preview.inverted = paged && self.settings.preview_dark;
         preview.state = crate::preview::start_loading(
             match first {
                 Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
-                None => crate::preview::Job::Picture(path.clone()),
+                None => crate::preview::Job::Picture {
+                    path: path.clone(),
+                    box_px: preview.picture_box(),
+                    fit: preview.fit,
+                },
             },
             self.preview_tx.clone(),
         );
@@ -1475,20 +1490,49 @@ impl App {
                 preview.fit = crate::preview::Fit::Width;
                 preview.zoom = 1.0;
             }
-            ui::NavControl::Invert if preview.pages.is_some() || preview.source.is_some() => {
+            ui::NavControl::Invert => {
                 preview.inverted = !preview.inverted;
-                // Remembered, so the next document opens the way this one is being read.
-                let dark = preview.inverted;
-                self.settings.preview_dark = dark;
-                for editor in self.editors.iter_mut() {
-                    if let Some(other) = editor.preview.as_mut() {
-                        if other.pages.is_some() || other.source.is_some() {
-                            other.inverted = dark;
+                let (dark, kind) = (preview.inverted, preview.kind());
+                // A dark mode is a way of reading, so it is remembered and every other document
+                // of the same kind follows: turning it on for one PDF and having the next open
+                // bright again is the annoyance a dark mode exists to remove. PDFs and markdown
+                // keep separate answers — a rendered README and a paper are not read alike — and
+                // a picture keeps none at all, its inversion being a negative of that one image.
+                match kind {
+                    crate::preview::Kind::Document => self.settings.preview_dark = dark,
+                    crate::preview::Kind::Markdown => self.settings.preview_dark_markdown = dark,
+                    crate::preview::Kind::Picture => {}
+                }
+                if kind != crate::preview::Kind::Picture {
+                    // Written out now rather than at exit, so a session that ends badly still
+                    // remembers how its documents were being read.
+                    self.settings.save();
+                    for editor in self.editors.iter_mut() {
+                        if let Some(other) = editor.preview.as_mut() {
+                            if other.kind() == kind {
+                                other.inverted = dark;
+                            }
                         }
                     }
                 }
             }
-            ui::NavControl::Invert => return,
+            // Markdown only: the rendered document and the styled text are two ways of reading
+            // the same buffer, and which is wanted changes with what is being done to it.
+            ui::NavControl::TextMode if preview.kind() == crate::preview::Kind::Markdown => {
+                let text_only = !preview.text_only;
+                self.settings.preview_markdown_text = text_only;
+                self.settings.save();
+                for editor in self.editors.iter_mut() {
+                    if let Some(other) = editor.preview.as_mut() {
+                        if other.kind() == crate::preview::Kind::Markdown {
+                            other.set_text_only(text_only);
+                        }
+                    }
+                }
+                // The next pass over the buffers makes the other rendering; nothing here does.
+                return;
+            }
+            ui::NavControl::TextMode => return,
         }
         // Everything that reaches here changes how the page must be made, not merely where it
         // is looked at, so it is made again.
@@ -1572,7 +1616,14 @@ impl App {
     fn rerender_preview(&mut self, idx: usize) {
         let Some(path) = self.editors[idx].path.clone() else { return };
         let Some(preview) = self.editors[idx].preview.as_ref() else { return };
+        // Styled text is not made out here — it is parsed from the buffer a frame at a time —
+        // and asking pandoc for a document this tab has been told not to show would be work
+        // thrown away.
+        if preview.text_view() {
+            return;
+        }
         let (page, width_px, source) = (preview.page(), preview.render_width(), preview.source.clone());
+        let (box_px, fit) = (preview.picture_box(), preview.fit);
         let job = match (source, page) {
             (Some(source), page) => {
                 let text = self
@@ -1584,7 +1635,7 @@ impl App {
                 crate::preview::Job::Markdown { path: source, text, page: page.unwrap_or(1), width_px }
             }
             (None, Some(page)) => crate::preview::Job::Page { path, page, width_px },
-            (None, None) => crate::preview::Job::Picture(path),
+            (None, None) => crate::preview::Job::Picture { path, box_px, fit },
         };
         let started = crate::preview::start_loading(job, self.preview_tx.clone());
         if let Some(preview) = self.editors[idx].preview.as_mut() {
@@ -1679,11 +1730,16 @@ impl App {
             self.editors[i].disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
             let width_px =
                 self.editors[i].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
+            let (box_px, fit) = self.editors[i]
+                .preview
+                .as_ref()
+                .map(|p| (p.picture_box(), p.fit))
+                .unwrap_or(((0, 0), crate::preview::Fit::Page));
             if let Some(preview) = self.editors[i].preview.as_mut() {
                 preview.state = crate::preview::start_loading(
                     match page {
                         Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
-                        None => crate::preview::Job::Picture(path.clone()),
+                        None => crate::preview::Job::Picture { path: path.clone(), box_px, fit },
                     },
                     self.preview_tx.clone(),
                 );
@@ -2923,9 +2979,9 @@ impl App {
         for wt in &ws.terminals {
             let mut tabs = Vec::new();
             for tab in &wt.tabs {
-                // A shell spawned for this tab gets the command instead of the startup `clear`,
-                // so only one line is ever queued. A reused one is already past that, and takes
-                // the command the patient way — held until it is back at a prompt.
+                // A shell spawned for this tab is handed the command; a reused one is told to
+                // run it. Both end up in the same place — held until the shell is at a prompt,
+                // then typed onto an empty line.
                 let startup = tab.startup_command.as_deref();
                 let (panel, reused) = match spare.pop_front() {
                     Some(p) => (Some(p), true),
@@ -3073,11 +3129,16 @@ impl App {
             } else if let Some(path) = path {
                 let width_px =
                     self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
+                let (box_px, fit) = self.editors[idx]
+                    .preview
+                    .as_ref()
+                    .map(|p| (p.picture_box(), p.fit))
+                    .unwrap_or(((0, 0), crate::preview::Fit::Page));
                 if let Some(preview) = self.editors[idx].preview.as_mut() {
                     preview.state = crate::preview::start_loading(
                     match page {
                         Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
-                        None => crate::preview::Job::Picture(path.clone()),
+                        None => crate::preview::Job::Picture { path: path.clone(), box_px, fit },
                     },
                     self.preview_tx.clone(),
                 );
@@ -3121,7 +3182,8 @@ impl App {
         };
         // The tab is *for* the source file and is a view *of* it: same path both times.
         let mut preview = crate::preview::Preview::rendered(source.clone());
-        preview.inverted = self.settings.preview_dark;
+        preview.inverted = self.settings.preview_dark_markdown;
+        preview.set_text_only(self.settings.preview_markdown_text);
         let idx = self.adopt_editor(Editor::preview(source, preview));
         self.place_in_pane(pane, idx);
         // Says which of the two renderings you got: a document and styled text look very
@@ -3168,7 +3230,8 @@ impl App {
                 continue;
             }
             let failed = self.editors[i].preview.as_ref().is_some_and(|p| p.document_failed);
-            if !as_document || failed {
+            let text_only = self.editors[i].preview.as_ref().is_some_and(|p| p.text_only);
+            if !as_document || failed || text_only {
                 // Parsing is cheap enough to do on the spot, so the text view keeps up with the
                 // keys — which on a terminal without graphics is the whole of what it can offer.
                 let lines = crate::preview::render_markdown(&text);
@@ -4801,6 +4864,10 @@ impl App {
         // the label so neither has to be discovered twice.
         if self.editor().preview.is_some() && key.modifiers.is_empty() {
             let paged = self.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
+            let kind = self.editor().preview.as_ref().map(|p| p.kind());
+            // Styled text has no page to zoom, fit or darken, so those keys stay unbound over it
+            // — the bar does not offer them there either.
+            let text_view = self.editor().preview.as_ref().is_some_and(|p| p.text_view());
             let idx = self.pane_editor_index(self.editor_pane_focus);
             let scroll_limit = self.rendered_len(idx).map(|len| len.saturating_sub(1));
             let control = match key.code {
@@ -4808,14 +4875,21 @@ impl App {
                 KeyCode::Right if paged => Some(ui::NavControl::PageForward),
                 KeyCode::Up if paged => Some(ui::NavControl::PageBack),
                 KeyCode::Down if paged => Some(ui::NavControl::PageForward),
-                KeyCode::Char('g') => Some(ui::NavControl::GoToPage),
-                KeyCode::Char('-') | KeyCode::Char('_') => Some(ui::NavControl::ZoomOut),
-                KeyCode::Char('+') | KeyCode::Char('=') => Some(ui::NavControl::ZoomIn),
-                KeyCode::Char('f') => Some(ui::NavControl::FitPage),
-                KeyCode::Char('w') => Some(ui::NavControl::FitWidth),
-                // Only a document has a dark mode; a picture has no white page to invert.
-                KeyCode::Char('d') if paged || self.editor().is_rendered_view() => {
+                KeyCode::Char('g') if paged => Some(ui::NavControl::GoToPage),
+                KeyCode::Char('-') | KeyCode::Char('_') if !text_view => Some(ui::NavControl::ZoomOut),
+                KeyCode::Char('+') | KeyCode::Char('=') if !text_view => Some(ui::NavControl::ZoomIn),
+                KeyCode::Char('f') if !text_view => Some(ui::NavControl::FitPage),
+                KeyCode::Char('w') if !text_view => Some(ui::NavControl::FitWidth),
+                // `d` for a document's dark mode, `i` for a picture's negative: two different
+                // things, so two keys rather than one word stretched over both.
+                KeyCode::Char('d') if !text_view && kind != Some(crate::preview::Kind::Picture) => {
                     Some(ui::NavControl::Invert)
+                }
+                KeyCode::Char('i') if kind == Some(crate::preview::Kind::Picture) => {
+                    Some(ui::NavControl::Invert)
+                }
+                KeyCode::Char('t') if kind == Some(crate::preview::Kind::Markdown) => {
+                    Some(ui::NavControl::TextMode)
                 }
                 _ => None,
             };

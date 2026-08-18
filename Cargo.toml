@@ -1,6 +1,6 @@
 [package]
 name = "cleecode"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 description = "A terminal IDE: editor with a file-tree sidebar, embedded terminals, syntax highlighting and a run button"
 authors = ["Matteo Savoia"]
@@ -34,9 +34,16 @@ ratatui-image = { version = "11.0.6", default-features = false, features = ["cro
 ropey = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }
 shell-words = "1.1.1"
-syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+# The highlighting engine, with its own grammars turned off: two-face supplies bat's set
+# instead — syntect's defaults plus TypeScript, TOML, Kotlin, Swift, Zig, Dockerfile, Vue and
+# a hundred more — and shipping both would put two dumps of the same grammars in the binary.
+# The themes stay syntect's, since that is where base16-ocean.dark comes from. `regex-fancy`
+# keeps the build pure Rust (the alternative, onig, needs a C compiler), so two-face is asked
+# for the matching flavour.
+syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "parsing", "regex-fancy"] }
 sysinfo = "0.33.1"
 toml = "1.1.4"
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 vt100 = "0.16.2"
 
 # Windows-only: register the bundled Nerd Font with the OS so `--install-font` makes it
