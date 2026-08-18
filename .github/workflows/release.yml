@@ -131,8 +131,14 @@ jobs:
           # The first matrix job to finish creates the release; the rest add their files.
           # Notes live in a file rather than a heredoc, which inside this indented block
           # would need its terminator at column zero.
+          #
+          # Two jobs can pass the "does it exist" check at the same moment and both try to
+          # create it — which is exactly what happened on v0.5.1: the second one got a 422,
+          # failed before uploading, and the release went out without its Linux archive. The
+          # create is allowed to lose that race, since losing it means the release is there.
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$tag" --notes-file .github/release-notes.md
+            gh release create "$tag" --title "$tag" --notes-file .github/release-notes.md \
+              || gh release view "$tag" >/dev/null
           fi
           gh release upload "$tag" \
             "${{ steps.package.outputs.archive }}" \
