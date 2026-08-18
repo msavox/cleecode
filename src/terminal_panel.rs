@@ -189,6 +189,49 @@ fn typed_line(command: &str) -> Vec<u8> {
     bytes
 }
 
+/// A wheel notch written the way the program asked to receive it.
+///
+/// Wheel up is button 64 and wheel down 65, and both are reported as presses with no release —
+/// there is no such thing as letting go of a wheel. Coordinates are one-based, counted from the
+/// top-left of the pane rather than of the window, since the pane is the whole world as far as
+/// the program inside it knows.
+///
+/// The two older encodings pack each number into one byte with an offset of 32, which is why
+/// they cannot describe anything past column 223; a program that asked for one of them gets the
+/// events it can express and none of the ones it cannot, rather than a byte that would land it
+/// somewhere else entirely. SGR has no such limit and is what anything modern asks for.
+fn encode_wheel(
+    encoding: vt100::MouseProtocolEncoding,
+    up: bool,
+    row: u16,
+    col: u16,
+) -> Vec<u8> {
+    let button: u16 = if up { 64 } else { 65 };
+    let (row, col) = (row.saturating_add(1), col.saturating_add(1));
+    match encoding {
+        vt100::MouseProtocolEncoding::Sgr => {
+            format!("\x1b[<{button};{col};{row}M").into_bytes()
+        }
+        vt100::MouseProtocolEncoding::Utf8 => {
+            let mut out = b"\x1b[M".to_vec();
+            let mut push = |n: u32| {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(
+                    char::from_u32(n + 32).unwrap_or(' ').encode_utf8(&mut buf).as_bytes(),
+                );
+            };
+            push(u32::from(button));
+            push(u32::from(col));
+            push(u32::from(row));
+            out
+        }
+        vt100::MouseProtocolEncoding::Default => {
+            let byte = |n: u16| u8::try_from(n + 32).unwrap_or(u8::MAX);
+            vec![0x1b, b'[', b'M', byte(button), byte(col.min(223)), byte(row.min(223))]
+        }
+    }
+}
+
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
 /// `%ComSpec%` on Windows, falling back to `/bin/bash` and `cmd.exe` respectively.
 fn default_shell() -> String {
@@ -553,6 +596,24 @@ impl TerminalPanel {
         lock_poisoned(&self.parser).screen().alternate_screen()
     }
 
+    /// A wheel notch as the program in this pane asked to be told about it, at cell `(row, col)`
+    /// counted from the pane's top-left. `None` when it never asked, in which case the notch is
+    /// ours to spend on the scrollback.
+    ///
+    /// This is what a terminal emulator does and what this did not: Claude Code, htop, a
+    /// mouse-mode vim all turn mouse reporting on, scroll their own view, and draw their own
+    /// scrollbar. Dropping the notch — which is what happened here for anything on the alternate
+    /// screen — left them no way to be scrolled at all, from the wheel or from anywhere else,
+    /// while our own history stayed empty because a full-screen program never fills one.
+    pub fn wheel_report(&self, up: bool, row: u16, col: u16) -> Option<Vec<u8>> {
+        let screen = lock_poisoned(&self.parser);
+        let screen = screen.screen();
+        if screen.mouse_protocol_mode() == vt100::MouseProtocolMode::None {
+            return None;
+        }
+        Some(encode_wheel(screen.mouse_protocol_encoding(), up, row, col))
+    }
+
     /// Keeps a cell inside the screen, so a drag that leaves the pane still selects up to the
     /// edge instead of being ignored.
     fn clamp_cell(&self, (row, col): (u16, u16)) -> (u16, u16) {
@@ -798,6 +859,57 @@ mod tests {
         );
     }
 
+    /// What a program that asked for the mouse expects a wheel notch to look like. Coordinates
+    /// are one-based and counted from the pane, which is the only screen the program has.
+    #[test]
+    fn a_wheel_notch_is_reported_the_way_the_program_asked() {
+        use vt100::MouseProtocolEncoding::{Default, Sgr, Utf8};
+        // SGR: button 64 up, 65 down, and a press (M) — there is no letting go of a wheel.
+        assert_eq!(encode_wheel(Sgr, true, 0, 0), b"\x1b[<64;1;1M".to_vec());
+        assert_eq!(encode_wheel(Sgr, false, 11, 29), b"\x1b[<65;30;12M".to_vec());
+        // The old encodings offset every number by 32 and spend one byte on each.
+        assert_eq!(encode_wheel(Default, true, 0, 0), vec![0x1b, b'[', b'M', 96, 33, 33]);
+        assert_eq!(encode_wheel(Default, false, 11, 29), vec![0x1b, b'[', b'M', 97, 62, 44]);
+        // Past what one byte can hold, the column is pinned rather than wrapped round to a
+        // position on the other side of the pane.
+        assert_eq!(encode_wheel(Default, true, 0, 400)[4], 255);
+        // UTF-8 puts the same numbers through as characters, so the limit does not apply.
+        assert_eq!(encode_wheel(Utf8, true, 0, 0), b"\x1b[M`!!".to_vec());
+    }
+
+    /// The regression: a program that turns mouse reporting on scrolls a view of its own — the
+    /// wheel has to reach it. It did not, so anything on the alternate screen (Claude Code,
+    /// htop, a mouse-mode vim) could not be scrolled at all: our own history is empty there, and
+    /// the notch was dropped rather than delivered.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_asked_for_the_mouse_gets_the_wheel() {
+        let mut panel = TerminalPanel::with_startup(
+            10,
+            40,
+            Path::new("/"),
+            // What a full-screen program sends on startup: alternate screen, mouse reporting,
+            // SGR encoding. `sleep` keeps it in that state while this looks at it.
+            Some("printf '\\033[?1049h\\033[?1000h\\033[?1006h' && sleep 30"),
+        )
+        .expect("a shell must be spawnable to test one");
+
+        let deadline = Instant::now() + STARTUP_MAX;
+        while Instant::now() < deadline {
+            panel.flush_pending();
+            if panel.wheel_report(true, 0, 0).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            panel.wheel_report(true, 4, 9).as_deref(),
+            Some(&b"\x1b[<64;10;5M"[..]),
+            "the wheel must be handed to a program that asked for it"
+        );
+        assert!(panel.alternate_screen(), "and that is exactly where we have no history of our own");
+    }
+
     /// What a shell actually needs to receive. Ctrl+letter is the control byte, and an Alt chord
     /// carries the ESC prefix — without it Alt+D reached readline as a literal "d".
     #[test]
@@ -1016,3 +1128,4 @@ mod tests {
         assert!(held_lines(&mut parser) > 0, "the real screen keeps its history");
     }
 }
+
