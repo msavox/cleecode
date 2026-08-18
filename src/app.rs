@@ -2064,13 +2064,15 @@ impl App {
         self.editor_mut().select_char_range(m.0, m.1);
     }
 
+    /// The text a match covers, for a replacement that wants to quote parts of it back.
+    fn matched_text(&self, m: (usize, usize)) -> String {
+        self.editor().rope.slice(m.0..m.1).to_string()
+    }
+
     fn replace_current(&mut self) {
-        let (Some(m), replace) = (
-            self.find.as_ref().and_then(|f| f.current_match()),
-            self.find.as_ref().map(|f| f.replace.clone()).unwrap_or_default(),
-        ) else {
-            return;
-        };
+        let Some(m) = self.find.as_ref().and_then(|f| f.current_match()) else { return };
+        let matched = self.matched_text(m);
+        let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else { return };
         self.editor_mut().replace_char_range(m.0, m.1, &replace);
         // Matches shifted; recompute and land on the next one from the edit point.
         self.recompute_find();
@@ -2081,11 +2083,14 @@ impl App {
         if f.query.is_empty() || f.matches.is_empty() {
             return;
         }
-        let replace = f.replace.clone();
-        // Replace from the last match backwards so earlier char indices stay valid.
+        // Replace from the last match backwards so earlier char indices stay valid. Each
+        // replacement is worked out from the text it covers, since a pattern's groups differ
+        // from match to match.
         let matches: Vec<(usize, usize)> = f.matches.clone();
         let count = matches.len();
         for &(s, e) in matches.iter().rev() {
+            let matched = self.matched_text((s, e));
+            let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else { break };
             self.editor_mut().replace_char_range(s, e, &replace);
         }
         let lang = self.settings.lang;
@@ -2102,6 +2107,25 @@ impl App {
             }
             KeyCode::Char('a') if ctrl => self.replace_all(),
             KeyCode::Char('r') if ctrl => self.replace_current(),
+            // The two readings of the query. Both recompute straight away, so the match count
+            // answers before anything else is typed — which is how you find out what they do.
+            //
+            // U and N because they are what is left: every other letter is spoken for somewhere
+            // (Ctrl+D closes a tab, Ctrl+T is the terminal), and h/i/m are backspace, tab and
+            // return by the time a terminal has finished with them. Both are printed in the box
+            // for exactly that reason — they are not going to be guessed.
+            KeyCode::Char('u') if ctrl => {
+                if let Some(f) = self.find.as_mut() {
+                    f.case_sensitive = !f.case_sensitive;
+                }
+                self.recompute_find();
+            }
+            KeyCode::Char('n') if ctrl => {
+                if let Some(f) = self.find.as_mut() {
+                    f.regex = !f.regex;
+                }
+                self.recompute_find();
+            }
             KeyCode::Enter | KeyCode::Down => {
                 if let Some(f) = self.find.as_mut() {
                     f.next();

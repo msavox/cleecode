@@ -502,6 +502,35 @@ pub fn msg_find_hint(lang: Lang) -> &'static str {
     }
 }
 
+/// The two switches that decide how the query is read, drawn as the state they are in rather
+/// than as things to do: which reading is in force is what you need to know when a search comes
+/// back with a count you did not expect.
+pub fn msg_find_flags(lang: Lang, case_sensitive: bool, regex: bool) -> String {
+    let mark = |on: bool| if on { "on" } else { "off" };
+    let segno = |on: bool| if on { "sì" } else { "no" };
+    match lang {
+        Lang::En => format!(
+            "Ctrl+U case {} · Ctrl+N regex {}",
+            mark(case_sensitive),
+            mark(regex)
+        ),
+        Lang::It => format!(
+            "Ctrl+U maiuscole {} · Ctrl+N regex {}",
+            segno(case_sensitive),
+            segno(regex)
+        ),
+    }
+}
+
+/// Said when a pattern will not compile, or gave up. Without it a half-typed pattern is
+/// indistinguishable from one that simply matches nothing.
+pub fn msg_find_pattern_error(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("pattern: {detail}"),
+        Lang::It => format!("pattern: {detail}"),
+    }
+}
+
 /// The same box asks for a line in a buffer and a page in a document, because it is the same
 /// question — a number — and a second box for it would be a second thing to learn. It does have
 /// to say which, though: being asked for a line while looking at a PDF is a small betrayal.
