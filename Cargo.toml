@@ -1,6 +1,6 @@
 [package]
 name = "cleecode"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 description = "A terminal IDE: editor with a file-tree sidebar, embedded terminals, syntax highlighting and a run button"
 authors = ["Matteo Savoia"]

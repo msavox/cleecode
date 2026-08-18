@@ -1,3 +1,50 @@
+## What's new in 0.6.0
+
+Finding things, and seeing what changed.
+
+**Find reads patterns, and stops minding case unless asked.** It was a case-sensitive substring
+scan, which could not answer "where is this word, however it is spelled" — the search anyone
+actually types. `Ctrl+U` makes case matter; `Ctrl+N` reads the query as a regular expression, and
+with it on the replacement can quote the groups back: search `(\w+)@(\w+)`, replace `$2.$1`. A
+literal search has no groups, so there a `$` stays a dollar. Both switches, and which way they
+are set, are printed in the box. A pattern that will not compile says so instead of reporting no
+matches — half-typed and no-results want different fixes.
+
+**Search the whole project with `Ctrl+Shift+H`.** The results are an ordinary list: type to narrow
+them further, Enter or a click to open one at its line with the cursor on the word. It starts
+from the selection, or from the last thing in the Find box. It walks the project itself rather
+than shelling out to ripgrep — one engine means a pattern means the same thing in a file and
+across the project, and it works where rg is not installed. The walk runs on a thread, skips
+`.git`, `target` and `node_modules`, ignores anything over 2 MB or not text, and takes one hit
+per line.
+
+**A read-only git panel on `Ctrl+Shift+D`.** Three tabs. *Changes* is the diff of the file you
+are looking at — the whole tree with none open — against the last commit, so staged and unstaged
+work both show. *History* is the last fifty commits. *Branches* lists them with the current one
+marked and how far each is from its upstream. `Tab` or `←→` switch, `↑↓` scroll, `R` asks again,
+`Esc` closes. It reads through `git` itself rather than a linked library, so what it says is what
+the terminal beside it would say — hooks, signing and credential helpers included. Nothing here
+writes: stage and commit in a shell, where you can see what happened.
+
+### Fixed
+
+**The wheel no longer stops after one screen.** Scrolling with a trackpad worked until the cursor
+line left the view, and from there every notch was undone before it was drawn — the only way on
+was to click into the text, which moved the cursor and so moved the wall with it. The view now
+goes where it is sent and stays there; the next arrow key or keystroke brings it back to the
+cursor, as everywhere else.
+
+**Scrollbars can be aimed at.** They are one cell wide and invisible until reached, so hitting
+one was luck. Approaching now brings the bar up while the click still has to land on it, and it
+stays 2.5s after the last scroll instead of 1.2 — long enough for a hand to leave the trackpad
+and go for it.
+
+**Changing the project folder no longer destroys the workspace you were in.** It stayed attached,
+and on exit the workspace file was rewritten to describe the folder you had wandered into, with
+its files and its shells — silently. Changing folder now steps out of the workspace, leaving its
+file exactly as it was. Reopen it from the Workspace menu, from any folder. The built-in layout
+travels with you, since it belongs to no project.
+
 ## What's new in 0.5.2
 
 **The wheel reaches the program in the pane.** A pane running something full-screen could not be
