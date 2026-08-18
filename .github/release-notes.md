@@ -1,3 +1,27 @@
+## What's new in 0.5.1
+
+Windows only, and all of it the same mistake: POSIX rules applied to a platform that does not
+use them. macOS and Linux are unaffected.
+
+**Run commands reach the shell intact.** Paths were quoted the way a POSIX shell wants them —
+single quotes, backslash escapes — and cmd.exe has neither, so a resolved interpreter arrived as
+`'C:\Users\me\octave-cli.exe' script.m` and was looked for under that name, verbatim. Quoting now
+answers for the shell the line is typed at: double quotes, and only where there is something to
+protect.
+
+**Dragging a file in works.** The drop was split by a POSIX splitter, where a backslash escapes
+the character after it, so `C:\Users\me\notes.txt` became `C:Usersmenotes.txt` — a path that
+exists nowhere, which is why a drop there did nothing at all and said nothing about it. A line
+that yields no file is now also tried whole, so a path with spaces pasted from an address bar is
+one file rather than four words.
+
+**A drop from a Windows machine over ssh is recognised** as one, and says where the files are
+instead of going quiet. It wanted a leading slash before, which no Windows path has.
+
+**The venv label is a name again, not a whole path**, for a venv registered on one platform and
+read on the other: the check for "is this a path" was `is_absolute`, which on Windows is false for
+`/opt/venvs/ml-3.12` — no drive letter — and a settings.toml does get carried between machines.
+
 ## What's new in 0.5.0
 
 **Two hundred languages, highlighted.** The grammars used to be syntect's own, which stop at the

@@ -6290,11 +6290,21 @@ mod tests {
             "pdflatex -output-directory {dir} {file} && open {dir}/{stem}.pdf",
             path,
         );
+        // Which placeholder becomes which part of the path, and that a space in one survives as
+        // a single argument. *How* it is quoted belongs to the shell the line is typed at —
+        // single quotes on a Unix shell, double on cmd.exe — and has its own tests, so the
+        // expectation is built with the same helper rather than spelling one platform's out.
         assert_eq!(
             expanded,
-            "pdflatex -output-directory '/work/my papers' '/work/my papers/report.tex' \
-             && open '/work/my papers'/report.pdf"
+            format!(
+                "pdflatex -output-directory {dir} {file} && open {dir}/report.pdf",
+                dir = shell_quote("/work/my papers"),
+                file = shell_quote("/work/my papers/report.tex"),
+            )
         );
+        // Whatever the platform, the space is protected rather than left to split the argument.
+        assert!(expanded.contains(&shell_quote("/work/my papers")));
+        assert!(!expanded.contains("-output-directory /work/my papers"));
 
         // {name} is the file name with its extension; a bare relative path has no folder of
         // its own, which as a directory means "here".
