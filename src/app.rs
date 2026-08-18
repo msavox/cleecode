@@ -364,6 +364,37 @@ pub struct App {
     search_tx: Sender<crate::search::Outcome>,
     search_rx: Receiver<crate::search::Outcome>,
     search_pending: Arc<AtomicBool>,
+    /// The read-only git panel, when open.
+    pub git_panel: Option<GitPanel>,
+    git_panel_tx: Sender<crate::git::Snapshot>,
+    git_panel_rx: Receiver<crate::git::Snapshot>,
+}
+
+/// Which of the three questions the git panel is answering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GitTab {
+    Diff,
+    Log,
+    Branches,
+}
+
+impl GitTab {
+    pub const ALL: [GitTab; 3] = [GitTab::Diff, GitTab::Log, GitTab::Branches];
+
+    fn cycle(self, delta: isize) -> GitTab {
+        let at = Self::ALL.iter().position(|t| *t == self).unwrap_or(0) as isize;
+        let len = Self::ALL.len() as isize;
+        Self::ALL[(((at + delta) % len) + len) as usize % Self::ALL.len()]
+    }
+}
+
+/// The git panel: which tab, how far down it, and the answers — `None` until they arrive, since
+/// three `git` invocations on a large repository are not instant and the frame loop does not
+/// wait for anything.
+pub struct GitPanel {
+    pub tab: GitTab,
+    pub scroll: usize,
+    pub snap: Option<crate::git::Snapshot>,
 }
 
 /// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
@@ -1031,6 +1062,7 @@ impl App {
         let (preview_tx, preview_rx) = mpsc::channel();
         let (git_status_tx, git_status_rx) = mpsc::channel();
         let (search_tx, search_rx) = mpsc::channel();
+        let (git_panel_tx, git_panel_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
@@ -1117,6 +1149,9 @@ impl App {
             search_tx,
             search_rx,
             search_pending: Arc::new(AtomicBool::new(false)),
+            git_panel: None,
+            git_panel_tx,
+            git_panel_rx,
         })
     }
 
@@ -1510,6 +1545,92 @@ impl App {
                 crate::picker::PickerKind::SearchResults,
                 items,
             ));
+        }
+    }
+
+    // ---- Git panel ------------------------------------------------------------------------
+
+    /// Opens the panel and asks the repository the three questions at once. Fetched together so
+    /// switching tabs never waits, and on a thread so a slow repository — a big diff, a network
+    /// filesystem — costs a moment of "…" rather than a frozen editor.
+    fn toggle_git_panel(&mut self) {
+        if self.git_panel.is_some() {
+            self.git_panel = None;
+            return;
+        }
+        self.git_panel = Some(GitPanel { tab: GitTab::Diff, scroll: 0, snap: None });
+        self.refresh_git_panel();
+    }
+
+    fn refresh_git_panel(&mut self) {
+        let root = self.root.clone();
+        // The diff is of the file in front of you when there is one: that is what "what have I
+        // changed" means while you are looking at it. With no file open it is the whole tree.
+        let file = self.editor().path.clone();
+        let tx = self.git_panel_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::git::snapshot(&root, file));
+        });
+    }
+
+    pub fn poll_git_panel(&mut self) {
+        while let Ok(snap) = self.git_panel_rx.try_recv() {
+            if let Some(panel) = self.git_panel.as_mut() {
+                panel.snap = Some(snap);
+                panel.scroll = 0;
+            }
+        }
+    }
+
+    fn handle_git_panel_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.git_panel = None,
+            KeyCode::Tab | KeyCode::Right => {
+                if let Some(p) = self.git_panel.as_mut() {
+                    p.tab = p.tab.cycle(1);
+                    p.scroll = 0;
+                }
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                if let Some(p) = self.git_panel.as_mut() {
+                    p.tab = p.tab.cycle(-1);
+                    p.scroll = 0;
+                }
+            }
+            KeyCode::Down => self.scroll_git_panel(1),
+            KeyCode::Up => self.scroll_git_panel(-1),
+            KeyCode::PageDown => self.scroll_git_panel(10),
+            KeyCode::PageUp => self.scroll_git_panel(-10),
+            KeyCode::Home => {
+                if let Some(p) = self.git_panel.as_mut() {
+                    p.scroll = 0;
+                }
+            }
+            // Asking again is the only action a read-only panel needs: the answer goes stale the
+            // moment you type in the shell next to it.
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if let Some(p) = self.git_panel.as_mut() {
+                    p.snap = None;
+                }
+                self.refresh_git_panel();
+            }
+            _ => {}
+        }
+    }
+
+    /// Scrolls the panel, stopping at the end of what it has rather than running off it. The
+    /// length is the tab's own, so switching tabs cannot leave the view past the bottom.
+    pub fn scroll_git_panel(&mut self, delta: isize) {
+        let Some(panel) = self.git_panel.as_ref() else { return };
+        let len = match (&panel.snap, panel.tab) {
+            (None, _) => 0,
+            (Some(s), GitTab::Diff) => s.diff.len(),
+            (Some(s), GitTab::Log) => s.log.len(),
+            (Some(s), GitTab::Branches) => s.branches.len(),
+        };
+        let max = len.saturating_sub(1);
+        if let Some(panel) = self.git_panel.as_mut() {
+            panel.scroll = (panel.scroll as isize + delta).clamp(0, max as isize) as usize;
         }
     }
 
@@ -3983,6 +4104,10 @@ impl App {
             self.handle_workspace_save_key(key);
             return;
         }
+        if self.git_panel.is_some() {
+            self.handle_git_panel_key(key);
+            return;
+        }
         if self.manual.is_some() {
             self.handle_manual_key(key);
             return;
@@ -4085,6 +4210,10 @@ impl App {
             }
             KeyCode::Char('g') | KeyCode::Char('G') if ctrl && shift => {
                 self.open_context_menu_for_focus();
+                return;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') if ctrl && shift => {
+                self.toggle_git_panel();
                 return;
             }
             // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
@@ -4346,6 +4475,7 @@ impl App {
             MenuAction::Find => self.open_find(false),
             MenuAction::GotoLine => self.open_goto(),
             MenuAction::SearchProject => self.begin_project_search(),
+            MenuAction::ToggleGitPanel => self.toggle_git_panel(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
             MenuAction::Rename => self.start_rename(),
@@ -5396,6 +5526,22 @@ impl App {
         // tracked while a menu was open would leave a scrollbar lit under it afterwards.
         self.pointer = Some((col, row));
 
+        // The git panel is a reader too: the wheel moves through it, a click outside puts it
+        // away. Its tabs are on the keyboard — Tab and the arrows, as the title bar says.
+        if self.git_panel.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_git_panel(-3),
+                MouseEventKind::ScrollDown => self.scroll_git_panel(3),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !within(ui::git_panel_rect(full), col, row) {
+                        self.git_panel = None;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The manual is a reader, not a frame: while it is up the mouse only picks sections,
         // scrolls, or dismisses it.
         if self.manual.is_some() {
@@ -6110,6 +6256,17 @@ mod tests {
         assert_eq!(workspace_after_root_change(Some("default  LAYOUT")), Some("default  LAYOUT".to_string()));
         // Someone's own workspace called "default" is an ordinary one and is left behind.
         assert_eq!(workspace_after_root_change(Some("default")), None);
+    }
+
+    /// Three tabs on one key: Tab has to come back round in both directions, or the last tab is
+    /// reachable only by passing through the other two.
+    #[test]
+    fn the_git_panel_tabs_cycle_both_ways() {
+        assert_eq!(GitTab::Diff.cycle(1), GitTab::Log);
+        assert_eq!(GitTab::Log.cycle(1), GitTab::Branches);
+        assert_eq!(GitTab::Branches.cycle(1), GitTab::Diff, "round, not stuck at the end");
+        assert_eq!(GitTab::Diff.cycle(-1), GitTab::Branches, "and round the other way");
+        assert_eq!(GitTab::Log.cycle(-1), GitTab::Diff);
     }
 
     #[test]

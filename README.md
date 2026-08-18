@@ -269,6 +269,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
 | `Ctrl+U` / `Ctrl+N` | Inside Find: case sensitivity / read the query as a regex |
 | `Ctrl+Shift+H` | Search the project; results are a list, `Enter` opens one at its line |
+| `Ctrl+Shift+D` | Git panel: changes, history, branches — read-only, straight from `git` |
 | `Ctrl+K` | Toggle line comment |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
