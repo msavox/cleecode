@@ -1,0 +1,403 @@
+# CleeCode — roadmap
+
+> **Come si legge questo file.** Le prime due parti sono un piano di implementazione per LSP e
+> Git scritto da opencode, riportato **invariato**; la terza è la valutazione che lo corregge, e
+> la quarta la decisione presa, con lo stato di avanzamento. Se leggi solo una sezione, leggi
+> **DECISIONE**: è quella che vale.
+>
+> Ricostruito il 2026-08-18 dal transcript della sessione del 17/08 — l'originale, mai
+> committato, era andato perso dal disco. Si chiamava `PIANO_LSP_GIT.md` e stava nella root.
+
+---
+
+# PIANO: Implementazione LSP e Git Enhancement in CleeCode
+*(di opencode, riportato invariato — le correzioni sono più sotto)*
+
+## Contesto
+
+CleeCode è un terminal IDE scritto in Rust (edition 2024) con ratatui. Attualmente ha:
+- Editor con syntax highlighting (syntect)
+- File tree con indicatori git (solo status colorato)
+- Terminali PTY reali
+- Workspace persistente
+
+**Obiettivo:** Aggiungere LSP (Language Server Protocol) e Git integration completa.
+
+---
+
+## FASE 1: Git Enhancement
+
+### 1.1 Aggiungere dipendenza `git2`
+
+Aggiungere a `Cargo.toml`:
+```toml
+git2 = "0.19"
+```
+
+`git2` è un binding Rust per libgit2 - più affidabile di chiamare `git` via `std::process::Command`.
+
+### 1.2 Nuovo modulo `src/git.rs` (sostituisce/espande `git_status.rs`)
+
+```rust
+// Funzioni da implementare:
+pub fn diff_file(repo: &Repository, path: &Path) -> Result<String>  // diff di un file
+pub fn commit(repo: &Repository, message: &str, paths: &[PathBuf]) -> Result<Commit>  // commit
+pub fn log(repo: &Repository, limit: usize) -> Result<Vec<CommitInfo>>  // history
+pub fn branches(repo: &Repository) -> Result<Vec<Branch>>  // lista branch
+pub fn checkout(repo: &Repository, branch: &str) -> Result<()>  // switch branch
+pub fn stage(repo: &Repository, paths: &[PathBuf]) -> Result<()>  // git add
+pub fn unstage(repo: &Repository, paths: &[PathBuf]) -> Result<()>  // git reset
+```
+
+### 1.3 Aggiungere campi a `App` in `app.rs`
+
+```rust
+pub struct App {
+    // ... esistente ...
+    pub git_diff: Option<String>,        // diff del file corrente
+    pub git_log: Vec<CommitInfo>,        // ultimi N commit
+    pub git_branches: Vec<BranchInfo>,   // branch disponibili
+    pub git_panel_open: bool,            // visibilità pannello git
+    pub git_focus: GitPanelTab,          // quale tab è attivo
+}
+
+pub enum GitPanelTab {
+    Diff,
+    Log,
+    Branches,
+}
+```
+
+### 1.4 Nuovo pannello UI in `ui.rs`
+
+Aggiungere `draw_git_panel()` che mostra:
+- **Tab Diff**: diff del file attivo con colori (verde=aggiunto, rosso=rimosso)
+- **Tab Log**: lista commit con hash, message, autore
+- **Tab Branches**: branch con indicatori (corrente, ahead/behind)
+
+Layout: pannello dedicato nella sidebar o sotto il terminale.
+
+### 1.5 Estendere `MenuAction` in `menu.rs`
+
+```rust
+pub enum MenuAction {
+    // ... esistente ...
+    ToggleGitPanel,
+    GitCommit,
+    GitStage,
+    GitUnstage,
+    GitCheckout,
+}
+```
+
+### 1.6 Aggiungere tasti rapidi
+
+| Tasto | Azione |
+|-------|--------|
+| `Ctrl+Shift+G` | Toggle Git Panel |
+| `Ctrl+Shift+C` | Commit (apre box messaggio) |
+| `Ctrl+Shift+A` | Stage file corrente |
+| `Ctrl+Shift+U` | Unstage file corrente |
+
+---
+
+## FASE 2: LSP Integration
+
+### 2.1 Aggiungere dipendenze
+
+```toml
+tower-lsp = "0.20"
+lsp-types = "0.95"
+tokio = { version = "1", features = ["full"] }  // async runtime per LSP
+```
+
+### 2.2 Nuovo modulo `src/lsp.rs`
+
+```rust
+pub struct LspClient {
+    pub language: Language,
+    pub server: Option<Child>,
+    pub rx: Receiver<LspMessage>,
+    pub tx: Sender<LspMessage>,
+}
+
+pub enum Language {
+    Rust,      // rust-analyzer
+    Python,    // pyright o pylsp
+    TypeScript,// typescript-language-server
+    JavaScript,// typescript-language-server
+    Go,        // gopls
+    // ... espandere gradualmente
+}
+
+pub struct LspState {
+    pub clients: HashMap<Language, LspClient>,
+    pub completions: Vec<CompletionItem>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub hover_info: Option<HoverInfo>,
+}
+
+// Funzioni principali:
+pub fn start_server(lang: Language) -> Result<LspClient>
+pub fn send_did_open(client: &LspClient, path: &Path, content: &str)
+pub fn send_did_change(client: &LspClient, path: &Path, changes: TextEdit)
+pub fn request_completion(client: &LspClient, path: &Path, position: Position)
+pub fn request_hover(client: &LspClient, path: &Path, position: Position)
+pub fn request_definition(client: &LspClient, path: &Path, position: Position)
+```
+
+### 2.3 Aggiungere campi a `Editor`
+
+```rust
+pub struct Editor {
+    // ... esistente ...
+    pub lsp_diagnostics: Vec<Diagnostic>,  // errori/warning LSP
+    pub lsp_completions: Vec<CompletionItem>,  // completamenti disponibili
+    pub show_completions: bool,  // se il menu completamenti è visibile
+    pub completion_index: usize,  // indice selezionato
+}
+```
+
+### 2.4 Integrazione nel ciclo di vita dell'editor
+
+```rust
+// In app.rs, quando si apre un file:
+if let Some(lang) = detect_language(path) {
+    lsp_state.ensure_server(lang)?;
+    lsp_client.send_did_open(path, content);
+}
+
+// Dopo ogni modifica:
+if let Some(client) = lsp_state.get_client(lang) {
+    client.send_did_change(path, edits);
+}
+
+// Al salvataggio:
+if let Some(client) = lsp_state.get_client(lang) {
+    client.send_did_save(path);
+}
+```
+
+### 2.5 UI per LSP
+
+**Autocompletamento** (`draw_completion_menu` in `ui.rs`):
+- Mostra sotto il cursore quando si digita
+- Navigabile con frecce/focus
+- Selezione con `Tab` o `Enter`
+
+**Diagnostics** (barra laterale o inline):
+- Errori/warning evidenziati nel margin
+- Hover per messaggio completo
+- Click per navigare alla posizione
+
+**Hover** (tooltip):
+- Mostra tipo/firma quando il mouse è su un simbolo
+- Richiede `Ctrl+K Ctrl+I` o simile
+
+### 2.6 Tasti rapidi LSP
+
+| Tasto | Azione |
+|-------|--------|
+| `Ctrl+Space` | Trigger completion |
+| `Ctrl+K Ctrl+I` | Hover info |
+| `F12` | Go to definition |
+| `Shift+F12` | Find references |
+| `Ctrl+.` | Quick fix (code actions) |
+
+---
+
+## ORDINE DI IMPLEMENTAZIONE
+
+### Sprint 1: Git Foundation (2-3 giorni)
+1. Aggiungere `git2` a Cargo.toml
+2. Creare `src/git.rs` con funzioni base (diff, log, branches)
+3. Testare le funzioni in isolamento
+
+### Sprint 2: Git UI (2-3 giorni)
+1. Aggiungere campi a `App`
+2. Creare `draw_git_panel()` in `ui.rs`
+3. Aggiungere `MenuAction` e wiring
+4. Collegare al file tree (doppio click per diff)
+
+### Sprint 3: LSP Foundation (3-4 giorni)
+1. Aggiungere dipendenze LSP
+2. Creare `src/lsp.rs` con client base
+3. Implementare `start_server` per rust-analyzer (il più maturo)
+4. Testare connessione a rust-analyzer
+
+### Sprint 4: LSP Features (4-5 giorni)
+1. Implementare `textDocument/didOpen` e `textDocument/didChange`
+2. Implementare `textDocument/completion`
+3. Implementare `textDocument/hover`
+4. Implementare `textDocument/definition`
+5. Aggiungere UI per completamenti e diagnostics
+
+### Sprint 5: Polish (2 giorni)
+1. Aggiungere supporto Python (pyright)
+2. Aggiungere supporto TypeScript
+3. Testing e bug fixing
+4. Aggiornare README
+
+---
+
+## NOTE TECNICHE IMPORTANTI
+
+1. **LSP è async**: tower-lsp richiede un async runtime. CleeCode è attualmente sync. Servirà aggiungere `tokio` e gestire il runtime in un thread separato.
+
+2. **Thread safety**: I client LSP girano in thread separati. Usare `Arc<Mutex<LspState>>` per condividere lo stato.
+
+3. **Performance**: Non bloccare il main thread per risposte LSP. Usare canali (mpsc) per comunicare.
+
+4. **Graceful degradation**: Se LSP non è disponibile (server non installato), il programma deve funzionare lo stesso - solo senza intellisense.
+
+5. **Git via git2**: Più affidabile di chiamare `git` via shell. Gestisce errori meglio e non richiede `git` installato.
+
+6. **Memory**: Ogni client LSP consuma ~50-100MB. Limitare a 2-3 server contemporanei.
+
+---
+
+## DIPENDENZE FINALI
+
+```toml
+[dependencies]
+# ... esistente ...
+git2 = "0.19"
+tower-lsp = "0.20"
+lsp-types = "0.95"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+```
+
+---
+---
+
+# VALUTAZIONE (Claude, 2026-08-17) — cosa tenere e cosa cambiare
+
+Quanto segue è la revisione richiesta del piano qui sopra. Non è di opencode.
+
+## Cosa è messo bene
+
+L'ordine **Git prima di LSP**, la **degradazione se il server manca** (senza language server
+il programma deve funzionare lo stesso, solo senza intellisense) e l'uso di **canali invece
+del blocco del main thread**. Su questi tre punti il piano ha ragione e restano.
+
+## Tre scelte tecniche da cambiare
+
+### `tower-lsp` è la crate sbagliata
+
+`tower-lsp` serve a **scrivere** un language server, non a parlarci. A CleeCode serve un
+*client*: con quella dipendenza si finisce a costruire l'estremità opposta del protocollo.
+
+Serve `lsp-types` per i tipi, e JSON-RPC su stdio scritto a mano — meno lavoro di quanto
+sembri: intestazioni `Content-Length`, un thread lettore, un canale.
+
+### `tokio` introduce un secondo modello di concorrenza
+
+Il piano dice "LSP è async, serve tokio". Ma CleeCode **ha già il suo schema** e lo usa tre
+volte: thread che lavora, `mpsc` che risponde, `poll_*` nel ciclo a 30 fps. Git status,
+decodifica anteprime e scp funzionano tutti così. Un server LSP su stdio è JSON-RPC a righe:
+quel modello gli calza. Aggiungere tokio significa due modelli di concorrenza nella stessa
+app, e ogni contributore deve sapere quale vale dove.
+
+### `git2` costa più di quanto rende
+
+Il piano dice "più affidabile di chiamare `git`". Non in questo caso:
+
+- **libgit2 è una dipendenza C**, e qui si costruisce per macOS, Linux, Windows MSVC e da
+  sorgente via brew. È lo stesso tipo di dipendenza che ha già morso con chafa/pkg-config.
+- **Non fa firma GPG, hook, né credential helper.** Un commit fatto con git2 salta l'hook
+  pre-commit e non firma: cambio di comportamento silenzioso.
+- `git` è già chiamato a shell per lo status, e l'identità del prodotto è "terminali veri".
+
+Per leggere (diff, log, branch) *e* per scrivere, `Command::new("git")` costa meno e si
+comporta come il git dell'utente.
+
+## Le scorciatoie violano le regole del progetto
+
+Il piano propone `F12`, `Shift+F12`, `Ctrl+Space`, `Ctrl+K Ctrl+I`, `Ctrl+.`. Il manuale dice,
+per scelta motivata: **niente tasti funzione** (su laptop vogliono Fn) e niente simboli che su
+layout italiano richiedono già Shift. E collidono con l'esistente: `Ctrl+Shift+G` è il menu
+contestuale, `Ctrl+Shift+U` è la modalità ridimensiona. Delle lettere restano libere
+`a c d h i j l p q v x y`.
+
+## Due omissioni che diventerebbero bug
+
+**Nessun `didChange` ritardato.** Il piano lo manda "dopo ogni modifica": un messaggio per
+tasto premuto, con il testo intero se non si fa sync incrementale. Su un file grande è la
+stessa lezione delle anteprime markdown, dove è servito aspettare la pausa nella digitazione.
+L'aggancio esiste già: il `revision` di `Editor`.
+
+**Ignora una decisione già presa.** Sul completamento la scelta era fatta: popup tradizionale
+sulle parole del buffer, non ghost text, con regole di ranking e non-modalità. Il piano
+riparte da zero con il completamento LSP.
+
+## Riordino proposto
+
+1. **Prima Git, tutto a shell, in due passi.** Sola lettura (diff, log, branch), poi le azioni
+   (stage, commit). Zero dipendenze nuove, nessun rischio per le build, hook e firma
+   preservati.
+2. **Prima di LSP, due giorni di debito**: spezzare `handle_key` (294 righe) e `handle_mouse`
+   (277) per modalità, e test sulle anteprime (`preview.rs`: 957 righe, 3 test). LSP aggiunge
+   una modalità — il popup — proprio a quelle due funzioni.
+3. **Poi LSP come release a sé, cominciando dai soli diagnostici.** Un server
+   (rust-analyzer), una funzionalità. I diagnostici sono non-modali e non possono corrompere
+   un buffer: se il server muore, si perdono delle sottolineature. Il completamento tocca il
+   testo mentre scrivi ed è dove un difetto costa caro — va dopo, seguendo la decisione già
+   presa sul popup a parole di buffer.
+
+Punto di partenza consigliato: **Git a sola lettura**. È piccolo, si vede subito, e non tocca
+il ciclo di input.
+
+---
+
+# DECISIONE (2026-08-18)
+
+Discusso e deciso con l'utente. Il piano di opencode qui sopra **non si esegue come scritto**:
+le tre correzioni tecniche (niente `tower-lsp`, niente `tokio`, niente `git2`) valgono, e
+l'ordine diventa questo.
+
+## L'intuizione che riordina il piano
+
+Il completamento **non è una funzionalità LSP: è un pezzo di UI**. Il popup — lista sotto il
+cursore, frecce, Tab/Invio, non-modale — è lo stesso lavoro sia che i candidati vengano dalle
+parole del buffer sia che arrivino da rust-analyzer. Quindi il popup si costruisce **una volta
+sola**, alimentato dalle parole del buffer (la decisione già presa, che funziona in qualsiasi
+linguaggio e anche in un file di config); quando arriva l'LSP non è una funzionalità nuova da
+disegnare, è **una seconda sorgente** che si innesta in un popup già collaudato.
+
+## Le release
+
+**0.6 — Cercare e confrontare** ← *fatta, non ancora rilasciata*
+1. ✅ `find.rs`: regex + maiuscole/minuscole. Motore `fancy-regex` (già nel binario via syntect:
+   +1 riga di lock, zero crate nuovi). `Ctrl+U` maiuscole, `Ctrl+N` regex — **non** D e T, che
+   sono già presi da "chiudi tab" e dal terminale. Gruppi `$1` nella sostituzione.
+   Default cambiato: la ricerca ora ignora le maiuscole.
+2. ✅ Ricerca nel progetto (`Ctrl+Shift+H`), `src/search.rs`. **Camminata nostra, non `rg`**:
+   scelta rivista in corsa perché due dialetti di "pattern" — uno per il file, uno per il
+   progetto — sono esattamente il difetto contestato a `tokio` nel piano di opencode.
+   `find::compile` è ora l'unico posto dove una query diventa un pattern. Thread + `mpsc` +
+   poll; risultati in un picker normale (si filtrano scrivendo).
+3. ✅ Pannello Git in sola lettura (`Ctrl+Shift+D`), `src/git.rs`. Diff vs `HEAD` (stage e non
+   stage insieme), 50 commit, branch con `[ahead/behind]`. Modale, non un quarto frame.
+
+Zero dipendenze nuove a parte fancy-regex, che era già compilata. Nessuna nuova modalità nel
+ciclo di input.
+
+**0.7 — Completamento**
+1. Spezzare `handle_key` (294 righe) e `handle_mouse` (277) per modalità. Il refactor **si
+   ripaga subito**: è il popup a richiederlo, non è debito pagato per virtù.
+2. Popup di completamento sulle parole del buffer, secondo il design già deciso.
+
+**0.8 — LSP**
+Client JSON-RPC scritto a mano su stdio, `lsp-types` per i tipi, **un solo server**
+(rust-analyzer) e **solo diagnostici**: sono non-modali e non possono corrompere un buffer — se
+il server muore si perdono delle sottolineature. Poi rust-analyzer diventa una sorgente in più
+per il popup della 0.7. `didChange` **ritardato**, agganciato al `revision` di `Editor`.
+
+**Dopo:** azioni Git che scrivono (stage, commit), altri server LSP. Le azioni che scrivono
+stanno in fondo di proposito: leggere ha rischio zero, scrivere no, e il commit si fa già nel
+terminale accanto — che è il punto del prodotto.
+
+## Scorciatoie
+
+Libere: `Ctrl+Shift+` `A C D H I J L P Q V X Y Z`. Occupate: `B E F G K M N O R S T U W`.
+Restano vietati i tasti funzione e i simboli che il layout italiano mette già sotto Shift.
