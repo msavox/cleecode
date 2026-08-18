@@ -5107,8 +5107,14 @@ impl App {
                 _ => None,
             };
             if let Some(delta) = paged {
+                let bytes = key_to_bytes(key);
                 if let Some(term) = self.window_tab_mut(self.active_terminal) {
-                    if !term.alternate_screen() {
+                    if term.alternate_screen() {
+                        // A full-screen program has no history of ours to page through, and it
+                        // is the one with something to scroll — so the key goes to it rather
+                        // than being swallowed on the way, which is what used to happen.
+                        term.write_input(&bytes);
+                    } else {
                         term.scroll_by(delta);
                     }
                 }
@@ -5510,15 +5516,35 @@ impl App {
             if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {
                 // Like the editor panes: the wheel acts on what it is over, whether or not that
                 // shell has the focus.
-                if let Some(term) = self.window_tab_mut(i) {
-                    // A full-screen program owns the screen and gets no scrollback of its own,
-                    // so there is nothing here to scroll and the notch is simply dropped rather
-                    // than moving a view that isn't there.
-                    if !term.alternate_screen() {
-                        term.scroll_by(delta);
-                    }
-                }
+                let cell = cell_at(ui::terminal_content_rect(term_areas[i]), col, row);
+                self.wheel_over_terminal(i, delta, cell);
             }
+        }
+    }
+
+    /// Spends a wheel notch on the pane it is over: on the program running there if it asked to
+    /// hear about the mouse, otherwise on our own history.
+    ///
+    /// The first case is what a terminal emulator does and what this did not. Claude Code, htop,
+    /// a mouse-mode vim all turn mouse reporting on and scroll a view of their own; the notch was
+    /// being dropped instead, so they could not be scrolled at all — while our own history stayed
+    /// empty, because a program on the alternate screen never puts anything in one.
+    fn wheel_over_terminal(&mut self, index: usize, delta: isize, cell: Option<(u16, u16)>) {
+        let Some(term) = self.window_tab_mut(index) else { return };
+        let up = delta < 0;
+        if let Some((row, col)) = cell {
+            // One notch, one report: the lines-per-notch that `delta` carries is our own idea of
+            // how far a notch goes through a scrollback, and a program that handles the wheel
+            // has its own.
+            if let Some(report) = term.wheel_report(up, row, col) {
+                term.write_input(&report);
+                return;
+            }
+        }
+        // Nothing asked for the mouse. A full-screen program still owns the screen and has no
+        // scrollback of its own, so there the notch has nowhere to go.
+        if !term.alternate_screen() {
+            term.scroll_by(delta);
         }
     }
 
