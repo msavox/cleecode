@@ -337,14 +337,22 @@ pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) ->
 /// The program a run command starts with, as the toolbar should name it: the first word,
 /// reduced to its file name when the template spells out a whole path.
 ///
-/// Split the way a shell would, so a program path quoted because it has spaces in it — the
-/// usual shape on Windows — is one token rather than two. Both separators are cut on either
-/// platform: a settings.toml is copied between machines.
+/// A quoted program path — one with spaces in it, the usual shape on Windows — is split the way
+/// a shell would, so it stays one token rather than two. An unquoted one is taken at its word
+/// instead: `shell_words` is a POSIX splitter, where a backslash escapes the character after it,
+/// and putting `C:\Octave\octave-cli.exe` through it produced `C:Octaveoctave-cli.exe` — a name
+/// with no separator left in it to cut, so the whole mangled thing ended up on the button. Both
+/// separators are cut on either platform: a settings.toml is copied between machines.
 pub fn run_program_name(template: &str) -> String {
-    let program = shell_words::split(template)
-        .ok()
-        .and_then(|words| words.into_iter().next())
-        .unwrap_or_else(|| template.split_whitespace().next().unwrap_or("").to_string());
+    let first_word = || template.split_whitespace().next().unwrap_or("").to_string();
+    let program = if template.trim_start().starts_with(['"', '\'']) {
+        shell_words::split(template)
+            .ok()
+            .and_then(|words| words.into_iter().next())
+            .unwrap_or_else(first_word)
+    } else {
+        first_word()
+    };
     let name = program.rsplit(['/', '\\']).next().unwrap_or(&program);
     name.strip_suffix(".exe").unwrap_or(name).to_string()
 }
@@ -2961,6 +2969,10 @@ mod tests {
             run_program_name(r#""C:\Program Files\Octave\octave-cli.exe" {file}"#),
             "octave-cli"
         );
+        // Unquoted, because it has no spaces to protect: the backslashes have to survive being
+        // read, or there is no separator left to cut the name at and the whole path lands on the
+        // button.
+        assert_eq!(run_program_name(r"C:\Octave\bin\octave-cli.exe {file}"), "octave-cli");
         assert_eq!(run_program_name(""), "");
     }
 
