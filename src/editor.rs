@@ -48,6 +48,10 @@ pub struct Editor {
     /// catches every one of them — including the ones added later.
     scroll_seen: (usize, usize),
     scroll_moved: Option<Instant>,
+    /// Where the cursor was, and how big the viewport was, as of the last frame. The view is
+    /// dragged back to the cursor only when one of the two has changed — see `follow_cursor`.
+    cursor_seen: (usize, usize),
+    viewport_seen: (usize, usize),
     /// Bumped by every change to the text. A live preview watches it to know whether what it
     /// drew is still what the buffer says — the cheapest honest answer to "has this moved since
     /// I last rendered it", and far cheaper than comparing the text itself every frame.
@@ -92,6 +96,8 @@ impl Editor {
             left_col: 0,
             scroll_seen: (0, 0),
             scroll_moved: None,
+            cursor_seen: (0, 0),
+            viewport_seen: (0, 0),
             revision: 0,
             dirty: false,
             disk_mtime: None,
@@ -1153,6 +1159,29 @@ impl Editor {
         self.scroll_moved.is_some_and(|at| at.elapsed() < window)
     }
 
+    /// Keeps the cursor on screen, but only when the cursor is what moved — or when the viewport
+    /// changed size under it.
+    ///
+    /// The renderer is the only place that knows the viewport, so it used to call `adjust_scroll`
+    /// on every frame unconditionally. That quietly made the cursor a wall: the wheel could move
+    /// the view until the cursor line fell off the edge, and from there every further notch was
+    /// undone before it was ever drawn. Scrolling a long file with a trackpad stopped dead after
+    /// one screen, and the only way on was to click into the text — moving the cursor, so the
+    /// wall moved with it.
+    ///
+    /// Scrolling is a look, not a move: the view goes where it is sent and stays there, and the
+    /// next arrow key or edit brings it back to the cursor, which is what every editor does.
+    pub fn follow_cursor(&mut self, viewport_height: usize, viewport_width: usize) {
+        let cursor = (self.cursor_line, self.cursor_col);
+        let viewport = (viewport_height, viewport_width);
+        if cursor == self.cursor_seen && viewport == self.viewport_seen {
+            return;
+        }
+        self.cursor_seen = cursor;
+        self.viewport_seen = viewport;
+        self.adjust_scroll(viewport_height, viewport_width);
+    }
+
     pub fn adjust_scroll(&mut self, viewport_height: usize, viewport_width: usize) {
         if viewport_height > 0 {
             if self.cursor_line < self.top_line {
@@ -1641,6 +1670,42 @@ mod tests {
         assert!(!Editor::looks_binary(&dir.join("nope.txt")));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The wheel used to be able to scroll exactly one screen: `adjust_scroll` ran every frame,
+    /// so the moment the cursor line left the viewport the view was yanked back to it, undoing
+    /// each further notch before it was drawn. The view has to be allowed to leave the cursor
+    /// behind, and to come back only when the cursor itself moves.
+    #[test]
+    fn the_wheel_can_scroll_past_the_cursor_and_the_cursor_still_pulls_the_view_back() {
+        let rows = 10;
+        let mut ed = Editor::empty();
+        ed.rope = Rope::from_str(&(0..200).map(|i| format!("line {i}\n")).collect::<String>());
+
+        // A first frame with everything where it started leaves the view alone.
+        ed.follow_cursor(rows, 80);
+        assert_eq!(ed.top_line, 0);
+
+        // Two screens' worth of notches, with the cursor left on line 0 — the case that used to
+        // stop dead at the first screen.
+        for _ in 0..7 {
+            ed.top_line += 3;
+            ed.follow_cursor(rows, 80);
+        }
+        assert_eq!(ed.top_line, 21, "the view goes where it is sent and stays there");
+
+        // Moving the cursor is what asks the view to follow: it comes back, showing the cursor.
+        ed.cursor_line = 4;
+        ed.follow_cursor(rows, 80);
+        assert_eq!(ed.top_line, 4);
+
+        // A viewport that shrinks under a still cursor must also keep it on screen: the cursor is
+        // on the last visible row and the frame loses half its height.
+        ed.cursor_line = 13;
+        ed.follow_cursor(rows, 80);
+        assert_eq!(ed.top_line, 4, "still visible, so nothing moves");
+        ed.follow_cursor(5, 80);
+        assert_eq!(ed.top_line, 9);
     }
 
     /// The scrollbars appear off one comparison made once a frame, so what counts as "the view

@@ -2035,7 +2035,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     if focused {
         app.editor_viewport = (viewport_height, text_width);
     }
-    app.editors[idx].adjust_scroll(viewport_height, if app.settings.word_wrap { 0 } else { text_width });
+    app.editors[idx].follow_cursor(viewport_height, if app.settings.word_wrap { 0 } else { text_width });
 
     if app.editors[idx].syntax_dirty {
         if app.settings.syntax_highlighting {
