@@ -18,6 +18,11 @@ one file rather than four words.
 **A drop from a Windows machine over ssh is recognised** as one, and says where the files are
 instead of going quiet. It wanted a leading slash before, which no Windows path has.
 
+**The toolbar names the program, not a mangled path.** An unquoted Windows path in a run command
+went through the same POSIX splitter, so `C:\Octave\bin\octave-cli.exe` arrived as
+`C:Octavebinoctave-cli.exe` — with no separator left to cut the name at, the whole thing sat on
+the button.
+
 **The venv label is a name again, not a whole path**, for a venv registered on one platform and
 read on the other: the check for "is this a path" was `is_absolute`, which on Windows is false for
 `/opt/venvs/ml-3.12` — no drive letter — and a settings.toml does get carried between machines.
