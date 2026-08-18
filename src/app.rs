@@ -480,8 +480,37 @@ fn resolve_interpreter(
                 .flatten()
         });
     let Some(path) = resolved else { return template.to_string() };
-    let quoted = shell_words::quote(&path.to_string_lossy()).into_owned();
+    let quoted = shell_quote(&path.to_string_lossy());
     if rest.is_empty() { quoted } else { format!("{quoted} {rest}") }
+}
+
+/// Quotes a path for the shell the command is about to be typed at.
+///
+/// POSIX quoting is single quotes with backslash escapes, and on Windows both halves are wrong:
+/// cmd.exe has no single quotes at all, and a Windows path is mostly backslashes. Every run
+/// command there came out as `'C:\Users\me\octave-cli.exe' script.m`, which cmd looks for
+/// verbatim and never finds — the interpreter was resolved correctly and then handed over
+/// unusable.
+fn shell_quote(text: &str) -> String {
+    if cfg!(windows) {
+        quote_for_cmd(text)
+    } else {
+        shell_words::quote(text).into_owned()
+    }
+}
+
+/// Double quotes are what cmd.exe understands, and inside them a backslash is just a backslash
+/// and the operators lose their meaning. A path with nothing to protect is left bare, which is
+/// what keeps a command line readable when it is echoed into a pane. `"` cannot appear in a
+/// Windows path at all, so there is nothing to escape inside the quotes.
+fn quote_for_cmd(text: &str) -> String {
+    if text.is_empty() {
+        return "\"\"".to_string();
+    }
+    if text.contains([' ', '\t', '&', '|', '<', '>', '^', '(', ')', ',', ';', '=']) {
+        return format!("\"{text}\"");
+    }
+    text.to_string()
 }
 
 /// Drops buffer `idx` from both strips and renumbers what is left, since removing it shifts
@@ -515,7 +544,7 @@ fn file_ext(path: &std::path::Path) -> String {
 /// its own output (`{dir}/{stem}.pdf`). Nothing else is needed to chain steps: the command is
 /// typed at a real shell, so `&&` works as it reads.
 fn expand_placeholders(template: &str, path: &std::path::Path) -> String {
-    let quote = |s: std::borrow::Cow<'_, str>| shell_words::quote(&s).into_owned();
+    let quote = |s: std::borrow::Cow<'_, str>| shell_quote(&s);
     // A bare relative path has an empty parent, which as a directory means "here".
     let dir = path
         .parent()
@@ -3362,7 +3391,7 @@ impl App {
         if !venv_bin.exists() {
             return template.to_string();
         }
-        let quoted = shell_words::quote(&venv_bin.to_string_lossy()).into_owned();
+        let quoted = shell_quote(&venv_bin.to_string_lossy());
         format!("{quoted} {rest}")
     }
 
@@ -6359,6 +6388,26 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(resolve_interpreter("node {file}", &stale, None), "node {file}");
+    }
+
+    /// cmd.exe has no single quotes, and a Windows path is mostly backslashes — the two things
+    /// POSIX quoting uses. Every run command on Windows came out as `'C:\...\octave-cli.exe'`,
+    /// which cmd looks for verbatim and never finds. Tested from any platform, since the branch
+    /// that is wrong here is the one that runs there.
+    #[test]
+    fn a_windows_command_is_quoted_the_way_cmd_reads_it() {
+        // Nothing to protect: left bare, so an echoed command line stays readable.
+        assert_eq!(quote_for_cmd(r"C:\Users\me\octave-cli.exe"), r"C:\Users\me\octave-cli.exe");
+        // A space, or anything cmd would otherwise act on, gets double quotes — inside which a
+        // backslash is just a backslash.
+        assert_eq!(
+            quote_for_cmd(r"C:\Program Files\GNU Octave\octave-cli.exe"),
+            "\"C:\\Program Files\\GNU Octave\\octave-cli.exe\""
+        );
+        assert_eq!(quote_for_cmd("a&b"), "\"a&b\"");
+        assert_eq!(quote_for_cmd(""), "\"\"");
+        // What POSIX quoting does to the same path, and why it is not used there.
+        assert_eq!(shell_words::quote(r"C:\Users\me\octave-cli.exe"), r"'C:\Users\me\octave-cli.exe'");
     }
 
     #[test]
