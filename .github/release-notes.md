@@ -1,3 +1,14 @@
+## What's new in 0.5.2
+
+**The wheel reaches the program in the pane.** A pane running something full-screen could not be
+scrolled at all: the notch was dropped, on the reasoning that a program owning the screen has no
+scrollback of ours to move through. True, and beside the point — it has one of its own, and it
+asked to be told about the mouse so it could move it. htop, `less --mouse`, a mouse-mode vim,
+Claude Code all turn mouse reporting on and were sitting there unscrollable. A notch now becomes
+the report the program asked for (SGR, UTF-8 or the old single-byte encoding) at the cell under
+the pointer, and Shift+PageUp goes to it too instead of being swallowed. Only the wheel: click and
+drag stay with the pane, or selecting text out of it would stop working.
+
 ## What's new in 0.5.1
 
 Windows only, and all of it the same mistake: POSIX rules applied to a platform that does not
