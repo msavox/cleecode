@@ -396,6 +396,17 @@ pub fn effective_venv<'a>(active: Option<&'a str>, available: &[String]) -> Opti
     available.iter().any(|v| v == active).then_some(active)
 }
 
+/// Which workspace, if any, survives a change of project folder. A saved one does not: its file
+/// describes the project being left, and staying attached to it meant the next exit wrote the new
+/// folder's files and shells over it. The built-in layout does travel — it belongs to no project
+/// and is never written to disk, so carrying it along costs nothing and keeps the badge honest.
+pub fn workspace_after_root_change(active: Option<&str>) -> Option<String> {
+    match active {
+        Some(name) if crate::workspace::is_default(name) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
 /// What makes a directory a virtualenv: an activate script in its executables directory.
 /// Shared by auto-discovery and by the box that registers one by hand, so both agree on what
 /// counts — a path that merely exists is not a venv.
@@ -2664,7 +2675,24 @@ impl App {
         self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
         self.project_settings = settings::ProjectSettings::load(&self.root);
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
-        self.status_message = i18n::msg_project_folder(self.settings.lang, &self.root.display().to_string());
+        // Changing folder steps *out* of the workspace rather than dragging it along. A saved
+        // workspace is the set-up of its own project, and staying attached meant exit wrote this
+        // folder's files and shells over it — silently, so the workspace was gone before anyone
+        // could notice. Reopening it is one trip through the Workspace menu; getting the
+        // overwritten one back was impossible. The built-in layout is exempt: it belongs to no
+        // project, so it travels.
+        let lang = self.settings.lang;
+        let path = self.root.display().to_string();
+        let kept = workspace_after_root_change(self.active_workspace.as_deref());
+        let left = if kept.is_none() { self.active_workspace.take() } else { None };
+        self.active_workspace = kept;
+        self.status_message = match left {
+            Some(name) => {
+                self.settings.last_workspace = None;
+                i18n::msg_workspace_left(lang, &name, &path)
+            }
+            None => i18n::msg_project_folder(lang, &path),
+        };
     }
 
     fn toggle_hidden_files(&mut self) {
@@ -5895,6 +5923,22 @@ mod tests {
         // A registered path that no longer exists is dropped, not offered as a dead entry.
         let _ = std::fs::remove_dir_all(&elsewhere);
         assert_eq!(available_venvs(&root, &[registered]), vec![".venv".to_string()]);
+    }
+
+    /// Changing project folder used to keep the workspace attached, and exit then wrote the new
+    /// folder's root, files and shells into its file — so a workspace was destroyed by walking
+    /// into another project, without a word on screen. Leaving it is what keeps the file intact.
+    #[test]
+    fn changing_folder_leaves_a_saved_workspace_but_not_the_built_in_one() {
+        assert_eq!(workspace_after_root_change(Some("Marunja")), None);
+        assert_eq!(workspace_after_root_change(None), None);
+        // The built-in layout is not a file and belongs to no project, so it travels.
+        let built_in = crate::workspace::DEFAULT_NAME;
+        assert_eq!(workspace_after_root_change(Some(built_in)), Some(built_in.to_string()));
+        // Matched by slug, like everywhere else the built-in is recognised.
+        assert_eq!(workspace_after_root_change(Some("default  LAYOUT")), Some("default  LAYOUT".to_string()));
+        // Someone's own workspace called "default" is an ordinary one and is left behind.
+        assert_eq!(workspace_after_root_change(Some("default")), None);
     }
 
     #[test]

@@ -1075,6 +1075,16 @@ pub fn msg_workspace_loaded(lang: Lang, name: &str) -> String {
     }
 }
 
+/// Said when changing project folder steps out of the workspace in use. Both halves matter: the
+/// folder is what was asked for, and the workspace leaving is what would otherwise be noticed
+/// only later, by finding it pointing somewhere else.
+pub fn msg_workspace_left(lang: Lang, name: &str, path: &str) -> String {
+    match lang {
+        Lang::En => format!("Left workspace \"{name}\" — project folder: {path}"),
+        Lang::It => format!("Uscito dal workspace \"{name}\" — cartella progetto: {path}"),
+    }
+}
+
 pub fn msg_workspace_deleted(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("Workspace \"{name}\" deleted"),
