@@ -117,7 +117,9 @@ pictures, and the recorder has none.*
 
 ### Editing
 
-[syntect](https://github.com/trishume/syntect) highlighting, line numbers, multi-file tabs,
+[syntect](https://github.com/trishume/syntect) highlighting over
+[two-face](https://github.com/CosmicHorrorDev/two-face)'s grammars — 200-odd languages, the
+ones written this decade included — line numbers, multi-file tabs,
 undo with coalescing, find and replace, go-to-line, code folding, auto-indent and auto-closing
 brackets. Selection works with the mouse or the keyboard, goes to the system clipboard, and can
 be **rectangular** — `Alt`+drag for a column selection over ragged text.
@@ -304,4 +306,8 @@ Personal project, actively evolving.
 ## License
 
 [MIT](LICENSE). The bundled font (`assets/fonts/`) is a Nerd Font-patched build of JetBrains
-Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own terms.
+Mono under the [SIL Open Font License 1.1](assets/fonts/OFL.txt) and keeps its own terms. The
+syntax definitions compiled into the binary come from
+[two-face](https://github.com/CosmicHorrorDev/two-face), which collects bat's grammars: each
+keeps the licence it was published under (MIT or Apache-2.0 in almost every case), listed in
+full by `two_face::acknowledgement::listing()` and in that project's `generated/` directory.

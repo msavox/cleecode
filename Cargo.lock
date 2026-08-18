@@ -360,7 +360,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cleecode"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -378,6 +378,7 @@ dependencies = [
  "syntect",
  "sysinfo",
  "toml",
+ "two-face",
  "vt100",
  "windows 0.59.0",
  "winreg 0.52.0",
@@ -2814,6 +2815,17 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+
+[[package]]
+name = "two-face"
+version = "0.5.2+bat-0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "915be7adc2ff6f4338acbf71f3eda0a146f46003b992a1669c674308610efdac"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "syntect",
+]
 
 [[package]]
 name = "typenum"

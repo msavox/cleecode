@@ -1,3 +1,37 @@
+## What's new in 0.5.0
+
+**Two hundred languages, highlighted.** The grammars used to be syntect's own, which stop at the
+Sublime Text packages: no TypeScript, no TOML, no Kotlin, no Swift, no Zig, no Dockerfile, no Vue.
+They now come from [two-face](https://github.com/CosmicHorrorDev/two-face), which collects bat's
+set — 213 of them, the ones written this decade included. A file name is also asked before its
+extension, so `CMakeLists.txt` is CMake rather than prose, and spellings without a grammar of
+their own (`.cjs`, `.mts`, `.jsonc`, `.astro`, a bare `Gemfile`) are read as the language they
+are. `Ctrl+/` knows the comment syntax of about a hundred and twenty file types now, up from
+fifty, `Makefile` and `Dockerfile` among them.
+
+**The startup command no longer collides with the `clear`.** It came back: a shell inherited from
+the previous layout was handed its command while the queued `clear` was still sitting in its line
+editor, and the two arrived as `clearclaude`. Nothing is written into a pty before the shell has
+read from it any more — the command waits for the prompt, the line is emptied first, and exactly
+one line is ever typed. Tested against bash, zsh and fish rather than argued about.
+
+**A picture is inverted, a document is darkened.** They shared one button, one name and one
+remembered preference, so reading a PDF at night meant the next photograph opened as a negative.
+Now a picture has its own **invert** (`i`), which belongs to that tab and is never carried to the
+next one, while **dark** (`d`) is for documents and is remembered *separately for PDFs and for
+markdown* — a paper and a README are read in different places, and setting one no longer changes
+the other. Both are written to disk when you press them rather than at exit.
+
+**The zoom buttons work on pictures.** They did nothing: a photograph was decoded at whatever size
+it was saved at, and the widget shrank it to the pane no matter how far you had zoomed. The zoom
+now reaches the pixels, which also gives `fit` and `wide` something to mean on an image.
+
+**Markdown renders both ways, on demand.** A new **text** (`t`) button switches between the
+rendered document and the styled terminal text — the first is prettier, the second follows your
+keystrokes and needs neither pandoc nor a graphics protocol — and which you chose is remembered.
+Over the text view the bar carries nothing else, since there are no pixels there to zoom, fit or
+darken.
+
 ## What's new in 0.3.2
 
 **Column selection.** `Alt`+drag makes a rectangular selection, or turn it on from the Edit menu

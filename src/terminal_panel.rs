@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long the shell's output must be quiet before we consider startup finished and
-/// reveal the pane. The injected `clear` runs as the shell's first interactive command
-/// (after its rc/banner), so by the time output idles the screen is already clean.
+/// reveal the pane. Quiet means the rc has run and there is a prompt, which is when the
+/// banner is scrubbed and any startup command typed — see `flush_pending`.
 const STARTUP_IDLE: Duration = Duration::from_millis(250);
 /// Safety cap: reveal no matter what after this long, so a shell that keeps its pty busy
 /// (e.g. an rc that launches a long-running program) can't stay blank forever.
@@ -172,6 +172,23 @@ pub fn selected_text(selection: TermSelection, cols: u16, cell: impl Fn(u16, u16
     rows.join("\n")
 }
 
+/// End-of-line then kill-line: empties whatever the line editor is holding before a command is
+/// typed onto it. Every Unix shell binds both, and `\x15` is the tty's own kill character even
+/// for a shell that binds nothing. cmd.exe binds neither, so on Windows the command is typed as
+/// it is rather than after two characters it would take literally.
+const LINE_RESET: &[u8] = if cfg!(windows) { b"" } else { b"\x05\x15" };
+
+/// The bytes that type `command` into a shell and run it: clear the line, the command, one
+/// carriage return. One line goes in and one line comes out, whatever the line editor was
+/// holding before — see `flush_pending` for why each piece is there. Any newlines inside the
+/// command itself would each submit a line of their own, so they are flattened to spaces.
+fn typed_line(command: &str) -> Vec<u8> {
+    let mut bytes = LINE_RESET.to_vec();
+    bytes.extend(command.replace(['\r', '\n'], " ").as_bytes());
+    bytes.push(b'\r');
+    bytes
+}
+
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
 /// `%ComSpec%` on Windows, falling back to `/bin/bash` and `cmd.exe` respectively.
 fn default_shell() -> String {
@@ -282,13 +299,12 @@ impl TerminalPanel {
 
     /// Spawns a shell, optionally with the command this pane exists to run.
     ///
-    /// The command takes the place of the startup `clear` rather than following it. Queueing
-    /// both put two lines in the pty's input buffer before the shell had read a byte, and a
-    /// shell with its own line editor takes over the tty part-way through that: it reads what is
-    /// already waiting as raw typing, the carriage return between them goes missing, and you get
-    /// `clearclaude` on one line. Only ever queueing one line makes that impossible. Nothing is
-    /// lost by dropping the clear here — the command's own output covers the banner it existed
-    /// to scrub.
+    /// Nothing is written into the pty here. Queueing input before the shell has read a byte is
+    /// a bet on ordering that a shell with its own line editor (zsh, fish) loses: it takes over
+    /// the tty part-way through and reads whatever is already waiting as raw typing, so a
+    /// carriage return goes missing and two lines land as one — the `clearclaude` this used to
+    /// produce. The command goes through `pending_command` like every other injected line, typed
+    /// once the shell is genuinely at a prompt. See `flush_pending`.
     pub fn with_startup(rows: u16, cols: u16, cwd: &Path, startup: Option<&str>) -> Result<Self> {
         let (rows, cols) = buildable_size(rows, cols);
         let pty_system = native_pty_system();
@@ -309,18 +325,6 @@ impl TerminalPanel {
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
-        // One line, queued in the pty's input buffer for the shell to consume as soon as it
-        // starts reading interactively: either the command this pane is for, or `clear` to scrub
-        // a startup banner (fastfetch/neofetch and friends) when there is no command.
-        let opening = match startup {
-            Some(command) => format!("{command}\r"),
-            None if cfg!(windows) => "cls\r".to_string(),
-            None => "clear\r".to_string(),
-        };
-        if let Ok(mut w) = writer.lock() {
-            let _ = w.write_all(opening.as_bytes());
-            let _ = w.flush();
-        }
 
         let parser =
             Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LEN.load(Ordering::Relaxed))));
@@ -389,7 +393,7 @@ impl TerminalPanel {
             selection: None,
             name: None,
             startup_command: startup.map(str::to_string),
-            pending_command: None,
+            pending_command: startup.map(str::to_string),
             cleared: false,
             last_scroll: None,
         })
@@ -397,46 +401,45 @@ impl TerminalPanel {
 
     /// Holds a command to be typed into the shell once it is genuinely reading.
     ///
-    /// It used to be written straight into the pty, on the theory that the input buffer would
-    /// keep it until the shell got there — the same trick as the startup `clear`. It does not
-    /// hold for two lines in a row: a shell with its own line editor (zsh, fish) takes over the
-    /// tty part-way through and reads what is already queued as raw typing, so the carriage
-    /// return between them is swallowed and you get `clearclaude` on one line. Waiting for the
-    /// prompt is the only reliable answer, so the command sits here until `flush_pending`.
+    /// Nothing is ever written into a pty before the shell has read from it: the input buffer
+    /// looks like it would keep a line safe until the shell got there, but a shell with its own
+    /// line editor (zsh, fish) takes over the tty part-way through and reads what is already
+    /// queued as raw typing, so a carriage return is swallowed and two lines land as one —
+    /// `clearclaude`. Waiting for the prompt is the only reliable answer, so the command sits
+    /// here until `flush_pending`.
     pub fn run_command(&mut self, command: &str) {
         self.pending_command = Some(command.to_string());
     }
 
-    /// Types the held command once the shell has settled, and otherwise makes sure the pane
-    /// starts clean. Does nothing until the shell is ready, and each part only ever fires once.
+    /// Scrubs the startup banner and types the held command, once the shell has settled. Does
+    /// nothing until the shell is ready, and each part only ever fires once.
     ///
-    /// The `clear` queued into the pty at spawn is a bet on ordering: it assumes the shell's
-    /// line editor picks the line up *after* the rc has run. On some shells it does, on others
-    /// the banner is printed afterwards and survives — which is how a fastfetch ends up sitting
-    /// in a pane on Linux and not on macOS. Here there is no bet: the shell has been quiet for
-    /// a quarter of a second, so there is a prompt, and a form feed is what a prompt understands
-    /// as "clear and redraw yourself". Every interactive shell binds it, and unlike re-running
-    /// `clear` it leaves nothing behind in the history.
+    /// The shell has been quiet for a quarter of a second, so there is a prompt: a form feed is
+    /// what a prompt understands as "clear and redraw yourself". Every interactive shell binds
+    /// it, and unlike running `clear` it leaves nothing behind in the history. It also has to
+    /// come *before* the command rather than instead of it — a fastfetch that the rc prints
+    /// after the pane was spawned survives otherwise, whether or not this pane has a command.
+    ///
+    /// The command itself goes in through `typed_line`, which empties the line first: whatever
+    /// the editor happens to be holding — a leftover from the rc, half a word someone typed
+    /// into a pane while it was still starting — goes, so the command can never be glued onto
+    /// the end of something else.
     pub fn flush_pending(&mut self) {
         if !self.is_ready() {
-            return;
-        }
-        if let Some(command) = self.pending_command.take() {
-            self.write_input(command.as_bytes());
-            self.write_input(b"\r");
-            // A command of its own scrubs the banner by pushing it off, so no clearing needed.
-            self.cleared = true;
             return;
         }
         if !self.cleared {
             self.cleared = true;
             self.write_input(b"\x0c");
         }
+        if let Some(command) = self.pending_command.take() {
+            self.write_input(&typed_line(&command));
+        }
     }
 
     /// Whether the pane should be shown yet. Stays hidden during the shell's startup
-    /// (banner/rc output) and reveals once output has been quiet for `STARTUP_IDLE` — by
-    /// which point the injected `clear` has scrubbed the banner and left a clean prompt.
+    /// (banner/rc output) and reveals once output has been quiet for `STARTUP_IDLE`, which is
+    /// also when `flush_pending` scrubs the banner and leaves a clean prompt.
     /// Latches, so it only ever transitions hidden -> shown once.
     pub fn is_ready(&mut self) -> bool {
         if self.revealed {
@@ -721,6 +724,78 @@ mod tests {
         }
         // Anything already usable is passed through untouched.
         assert_eq!(buildable_size(40, 120), (40, 120));
+    }
+
+    /// The regression behind "my startup command came out stuck to the `clear`": `clear` and
+    /// the command were both handed to the shell as text, and one of them lost its carriage
+    /// return on the way in, so `claude` arrived as `clearclaude`. Two things prevent it now,
+    /// and this pins both: exactly one line is ever typed, and it is typed onto an empty one.
+    #[test]
+    fn one_line_goes_in_and_it_is_the_command() {
+        let bytes = typed_line("npm run dev");
+        assert!(bytes.starts_with(LINE_RESET), "the line has to be cleared before anything is typed");
+        assert_eq!(bytes.iter().filter(|b| **b == b'\r').count(), 1, "one line, submitted once");
+        assert!(bytes.ends_with(b"npm run dev\r"));
+
+        // A command someone pasted a newline into is still one line, not two.
+        assert_eq!(typed_line("a\nb").iter().filter(|b| **b == b'\r').count(), 1);
+        assert!(typed_line("a\nb").ends_with(b"a b\r"));
+    }
+
+    /// The other half of it: a shell is handed nothing at all until it is at a prompt. Writing
+    /// into the pty at spawn is what put a line in front of the shell's own line editor in the
+    /// first place, so the command has to be waiting in `pending_command` instead.
+    #[test]
+    fn a_shell_is_typed_into_only_once_it_is_ready() {
+        let mut panel = TerminalPanel::with_startup(24, 80, Path::new("/"), Some("echo hello"))
+            .expect("a shell must be spawnable to test one");
+        assert_eq!(panel.pending_command.as_deref(), Some("echo hello"));
+
+        // Nothing has been typed yet, and nothing will be until the shell settles.
+        panel.revealed = false;
+        panel.produced_output.store(false, Ordering::Relaxed);
+        panel.flush_pending();
+        assert_eq!(panel.pending_command.as_deref(), Some("echo hello"), "not before the prompt");
+        assert!(!panel.cleared);
+    }
+
+    /// And the whole of it against a real shell, because the failure lived in the line editor
+    /// rather than in our arithmetic: spawn one, give it a startup command, ask what ended up
+    /// on its screen.
+    #[cfg(unix)]
+    #[test]
+    fn a_startup_command_is_typed_onto_a_line_of_its_own() {
+        let marker = "clee-startup-ok";
+        let mut panel =
+            TerminalPanel::with_startup(24, 80, Path::new("/"), Some(&format!("echo {marker}")))
+                .expect("a shell must be spawnable to test one");
+
+        // Generous: this waits out the shell's own startup (up to `STARTUP_MAX`), then the
+        // command running. It returns as soon as the output shows up, so the wait is only ever
+        // paid in full by a failure.
+        let deadline = Instant::now() + STARTUP_MAX + Duration::from_secs(8);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            panel.flush_pending();
+            screen = lock_poisoned(&panel.parser).screen().contents();
+            if screen.lines().any(|l| l.trim() == marker) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The echo ran, so the command reached the shell as a command and not as a fragment
+        // glued to the end of something else.
+        assert!(
+            screen.lines().any(|l| l.trim() == marker),
+            "the startup command never ran; the shell's screen was:\n{screen}"
+        );
+        // And nothing was clearing the pane by typing `clear` at the shell, which is what the
+        // command used to be concatenated with.
+        assert!(
+            !screen.contains("clear"),
+            "no `clear` should ever be typed into the shell; screen:\n{screen}"
+        );
     }
 
     /// What a shell actually needs to receive. Ctrl+letter is the control byte, and an Alt chord

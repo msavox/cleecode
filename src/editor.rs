@@ -1198,18 +1198,31 @@ fn word_class(c: char) -> u8 {
     }
 }
 
-/// The line-comment token for a file, chosen by extension. None means "no known line
-/// comment syntax", in which case the comment-toggle command is a no-op.
+/// The line-comment token for a file, chosen by extension — or by file name, for the ones
+/// that have no extension to go on (`Makefile`, `Dockerfile`, `Gemfile`). None means "no known
+/// line comment syntax", in which case the comment-toggle command is a no-op. Languages whose
+/// only comment is a block (HTML, CSS, plain JSON) belong in that None on purpose: half a
+/// `<!--` on every line would be worse than nothing.
 pub fn comment_token(path: Option<&std::path::Path>) -> Option<&'static str> {
-    let ext = path?.extension()?.to_str()?.to_lowercase();
-    let token = match ext.as_str() {
-        "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "js" | "jsx" | "ts" | "tsx" | "go" | "java"
-        | "kt" | "swift" | "scala" | "php" | "dart" | "zig" => "//",
-        "py" | "rb" | "sh" | "bash" | "zsh" | "fish" | "toml" | "yaml" | "yml" | "pl" | "r"
-        | "makefile" | "mk" | "conf" | "cfg" | "ini" => "#",
-        "lua" | "sql" | "hs" | "elm" => "--",
-        "vim" => "\"",
-        "lisp" | "clj" | "scm" | "el" => ";",
+    let path = path?;
+    let token = match path.extension().or_else(|| path.file_name())?.to_str()?.to_lowercase().as_str() {
+        "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" | "hh" | "cs" | "js" | "jsx" | "mjs"
+        | "cjs" | "ts" | "tsx" | "mts" | "cts" | "jsonc" | "json5" | "go" | "java" | "kt"
+        | "kts" | "swift" | "scala" | "sbt" | "groovy" | "gradle" | "php" | "dart" | "zig"
+        | "mm" | "d" | "v" | "sv" | "proto" | "sol" | "glsl" | "hlsl" | "wgsl" | "scss"
+        | "less" | "styl" | "rego" | "jsonnet" => "//",
+        "py" | "pyi" | "rb" | "gemspec" | "rake" | "sh" | "bash" | "zsh" | "fish" | "ps1"
+        | "psm1" | "toml" | "yaml" | "yml" | "pl" | "r" | "jl" | "ex" | "exs" | "cr" | "nim"
+        | "nix" | "tf" | "tfvars" | "hcl" | "awk" | "tcl" | "gd" | "cmake" | "pp" | "just"
+        | "star" | "bzl" | "bazel" | "mk" | "conf" | "cfg" | "ini" | "env" | "makefile"
+        | "dockerfile" | "containerfile" | "justfile" | "gemfile" | "rakefile" | "vagrantfile"
+        | "brewfile" | "podfile" | "cmakelists.txt" | "gitignore" | ".gitignore" => "#",
+        "lua" | "sql" | "hs" | "elm" | "purs" | "adb" | "ads" | "vhd" | "vhdl" => "--",
+        "vim" | "vimrc" => "\"",
+        "lisp" | "clj" | "cljs" | "cljc" | "scm" | "rkt" | "el" | "asm" => ";",
+        // `.m` is Octave/MATLAB here — that is the language the Run button knows it as — not
+        // Objective-C, whose `.mm` sibling is in the `//` list above.
+        "tex" | "sty" | "cls" | "bib" | "erl" | "hrl" | "m" | "mat" => "%",
         _ => return None,
     };
     Some(token)
@@ -1498,6 +1511,16 @@ mod tests {
         assert_eq!(comment_token(Some(std::path::Path::new("a.rs"))), Some("//"));
         assert_eq!(comment_token(Some(std::path::Path::new("a.py"))), Some("#"));
         assert_eq!(comment_token(Some(std::path::Path::new("a.unknownext"))), None);
+        // `.m` is Octave here, like everywhere else in the app.
+        assert_eq!(comment_token(Some(std::path::Path::new("plot.m"))), Some("%"));
+        assert_eq!(comment_token(Some(std::path::Path::new("api.ts"))), Some("//"));
+        assert_eq!(comment_token(Some(std::path::Path::new("main.tf"))), Some("#"));
+        // No extension to go on: the file name is the only thing that says what it is.
+        assert_eq!(comment_token(Some(std::path::Path::new("src/Makefile"))), Some("#"));
+        assert_eq!(comment_token(Some(std::path::Path::new("Dockerfile"))), Some("#"));
+        // Block comments only: better left alone than half-applied per line.
+        assert_eq!(comment_token(Some(std::path::Path::new("index.html"))), None);
+        assert_eq!(comment_token(Some(std::path::Path::new("main.css"))), None);
     }
 
     #[test]
