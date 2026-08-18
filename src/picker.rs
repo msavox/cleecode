@@ -9,6 +9,9 @@ pub enum PickAction {
     VenvDir(PathBuf),
     /// A saved workspace, by name: opened, or deleted, depending on the picker's kind.
     Workspace(String),
+    /// A line found by the project search: the file to open and where in it to land. The column
+    /// travels with the line so the cursor arrives on the word rather than beside it.
+    FileLine(PathBuf, usize, usize),
 }
 
 pub struct PickItem {
@@ -31,6 +34,10 @@ pub enum PickerKind {
     /// The same list, but Enter deletes instead of opening. A separate kind rather than a flag
     /// so nothing can confuse the two — one of them destroys a file.
     WorkspaceDelete,
+    /// Lines found across the project. The list is fixed once the search is done, and the query
+    /// typed here narrows it further — which is how a search that found too much is salvaged
+    /// without running it again.
+    SearchResults,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds

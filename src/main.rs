@@ -12,6 +12,7 @@ mod manual;
 mod menu;
 mod picker;
 mod preview;
+mod search;
 mod settings;
 mod terminal_panel;
 mod ui;
@@ -437,6 +438,7 @@ fn run(
             app.refresh_rendered_previews();
             app.poll_terminal_exits();
             app.poll_git_status();
+            app.poll_search();
         }));
         if let Err(text) = polled {
             app.status_message = i18n::msg_internal_error(app.settings.lang, &text);

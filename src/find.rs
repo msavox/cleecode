@@ -11,6 +11,27 @@
 
 use fancy_regex::{Regex, RegexBuilder};
 
+/// Turns what was typed into a compiled query, or into one line saying why it isn't one.
+///
+/// The single place a query becomes a pattern, so the box in a file and the search across the
+/// project cannot drift into two dialects: what `(\w+)` means has to be the same question
+/// wherever it is asked.
+///
+/// A literal query is escaped rather than searched for by hand, and case-insensitivity is an
+/// inline flag rather than a builder switch, so both kinds of search reach the engine by the
+/// same route.
+pub fn compile(query: &str, regex: bool, case_sensitive: bool) -> Result<Regex, String> {
+    let pattern = if regex { query.to_string() } else { fancy_regex::escape(query).into_owned() };
+    let pattern = if case_sensitive { pattern } else { format!("(?i){pattern}") };
+    RegexBuilder::new(&pattern).build().map_err(|e| first_line(&e.to_string(), "invalid pattern"))
+}
+
+/// Engine errors run to several lines with a diagram under the offending character; an overlay
+/// has one line. The first is the sentence that says what is wrong.
+pub fn first_line(message: &str, fallback: &str) -> String {
+    message.lines().next().unwrap_or(fallback).to_string()
+}
+
 pub struct FindState {
     pub query: String,
     pub replace: String,
@@ -57,19 +78,10 @@ impl FindState {
             return;
         }
 
-        let pattern = if self.regex {
-            self.query.clone()
-        } else {
-            fancy_regex::escape(&self.query).into_owned()
-        };
-        // The flag goes in the pattern rather than through a builder switch so both kinds of
-        // search get it by the same route.
-        let pattern = if self.case_sensitive { pattern } else { format!("(?i){pattern}") };
-        let compiled = match RegexBuilder::new(&pattern).build() {
+        let compiled = match compile(&self.query, self.regex, self.case_sensitive) {
             Ok(re) => re,
             Err(e) => {
-                // Engine errors are several lines with a diagram; the overlay has one line.
-                self.error = Some(e.to_string().lines().next().unwrap_or("invalid pattern").to_string());
+                self.error = Some(e);
                 return;
             }
         };
@@ -85,7 +97,7 @@ impl FindState {
                 Err(e) => {
                     // A pattern that exceeded the backtrack limit. Whatever was found before it
                     // gave up is still true, so it is kept and the reason is shown alongside.
-                    self.error = Some(e.to_string().lines().next().unwrap_or("pattern gave up").to_string());
+                    self.error = Some(first_line(&e.to_string(), "pattern gave up"));
                     break;
                 }
             };

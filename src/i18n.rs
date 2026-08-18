@@ -112,6 +112,7 @@ pub enum Key {
     ItemMoveLineDown,
     ItemFind,
     ItemGotoLine,
+    ItemSearchProject,
     ItemNewFile,
     ItemNewFolder,
     ItemRename,
@@ -393,6 +394,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemGotoLine) => "Go to line...",
         (Lang::It, ItemGotoLine) => "Vai alla riga...",
+        (Lang::En, ItemSearchProject) => "Search in project...",
+        (Lang::It, ItemSearchProject) => "Cerca nel progetto...",
 
         (Lang::En, ItemNewFile) => "New file...",
         (Lang::It, ItemNewFile) => "Nuovo file...",
@@ -519,6 +522,38 @@ pub fn msg_find_flags(lang: Lang, case_sensitive: bool, regex: bool) -> String {
             segno(case_sensitive),
             segno(regex)
         ),
+    }
+}
+
+pub fn msg_search_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Search the project for:".to_string(),
+        Lang::It => "Cerca nel progetto:".to_string(),
+    }
+}
+
+/// Said while the walk is running. A search across a tree is the one thing here that can take a
+/// visible moment, and silence would read as nothing having happened.
+pub fn msg_search_running(lang: Lang, query: &str) -> String {
+    match lang {
+        Lang::En => format!("Searching for \"{query}\"…"),
+        Lang::It => format!("Cerco \"{query}\"…"),
+    }
+}
+
+pub fn msg_search_done(lang: Lang, hits: usize, files: usize, truncated: bool) -> String {
+    let more_en = if truncated { " (stopped at the limit)" } else { "" };
+    let more_it = if truncated { " (fermata al limite)" } else { "" };
+    match lang {
+        Lang::En => format!("{hits} line(s) in {files} file(s){more_en}"),
+        Lang::It => format!("{hits} righe in {files} file{more_it}"),
+    }
+}
+
+pub fn msg_search_none(lang: Lang, query: &str, files: usize) -> String {
+    match lang {
+        Lang::En => format!("\"{query}\" is nowhere in {files} file(s)"),
+        Lang::It => format!("\"{query}\" non c'è in nessuno dei {files} file"),
     }
 }
 
