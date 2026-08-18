@@ -319,19 +319,19 @@ pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) ->
     if let Some(nickname) = registered.iter().find(|r| r.path() == venv).and_then(|r| r.nickname()) {
         return nickname.to_string();
     }
-    let path = std::path::Path::new(venv);
-    if !path.is_absolute() {
-        return venv.to_string();
-    }
-    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-        return venv.to_string();
-    };
-    if matches!(name.as_str(), ".venv" | "venv" | "env" | ".env") {
-        if let Some(parent) = path.parent().and_then(|p| p.file_name()) {
-            return format!("{}/{}", parent.to_string_lossy(), name);
+    // Cut by hand on both separators rather than through `Path`, which answers for the platform
+    // it was compiled for: `is_absolute` is false on Windows for `/opt/venvs/ml-3.12` — no drive
+    // letter — so a venv registered on a Mac and read on a PC showed as its whole path, and a
+    // settings.toml does get copied between machines. `run_program_name` below cuts both too.
+    let mut parts = venv.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).filter(|p| !p.is_empty());
+    // No separator at all: an auto-discovered venv, whose folder name is already the label.
+    let Some(name) = parts.next() else { return venv.to_string() };
+    if matches!(name, ".venv" | "venv" | "env" | ".env") {
+        if let Some(parent) = parts.next() {
+            return format!("{parent}/{name}");
         }
     }
-    name
+    name.to_string()
 }
 
 /// The program a run command starts with, as the toolbar should name it: the first word,
@@ -2928,6 +2928,11 @@ mod tests {
         // directories remain distinguishable in the toolbar.
         assert_eq!(venv_display_name("/work/project-a/.venv", &[]), "project-a/.venv");
         assert_eq!(venv_display_name("/work/project-a/.venv/", &[]), "project-a/.venv");
+        // The other platform's separator is cut too: a settings.toml gets copied between
+        // machines, and `is_absolute` used to answer "no" to a POSIX path on Windows and leave
+        // the whole thing in the toolbar.
+        assert_eq!(venv_display_name(r"C:\venvs\ml-3.12", &[]), "ml-3.12");
+        assert_eq!(venv_display_name(r"C:\work\project-a\.venv", &[]), "project-a/.venv");
     }
 
     #[test]

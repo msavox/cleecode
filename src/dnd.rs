@@ -12,15 +12,72 @@ pub fn parse_dropped_paths(text: &str) -> Vec<PathBuf> {
         if line.is_empty() {
             continue;
         }
-        let tokens = shell_words::split(line).unwrap_or_else(|_| vec![line.to_string()]);
-        for token in tokens {
+        let before = paths.len();
+        for token in drop_tokens(line) {
             let path = PathBuf::from(&token);
             if path.exists() {
                 paths.push(path);
             }
         }
+        // Nothing in the line was a file, so try it whole. A path with spaces that arrived
+        // unquoted — pasted from an address bar rather than dragged — is one file, not four
+        // words, and only asking the disk can tell the two apart.
+        if paths.len() == before {
+            let whole = PathBuf::from(unquote(line));
+            if whole.exists() {
+                paths.push(whole);
+            }
+        }
     }
     paths
+}
+
+/// Splits a dropped line into candidate paths, the way the platform's own file manager writes
+/// them.
+///
+/// Not `shell_words` on Windows: it is a POSIX splitter, where a backslash escapes the character
+/// after it — so `C:\Users\me\notes.txt` came back as `C:Usersmenotes.txt`, which exists nowhere
+/// and made every drop on Windows silently do nothing. There, quoting is double quotes and a
+/// backslash is an ordinary character.
+fn drop_tokens(line: &str) -> Vec<String> {
+    if cfg!(windows) {
+        quoted_tokens(line)
+    } else {
+        shell_words::split(line).unwrap_or_else(|_| vec![line.to_string()])
+    }
+}
+
+/// Whitespace-separated, with double quotes holding a name with spaces together and nothing
+/// else given any meaning.
+fn quoted_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Strips one pair of matching quotes from around a whole line.
+fn unquote(line: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = line.strip_prefix(quote).and_then(|l| l.strip_suffix(quote)) {
+            return inner;
+        }
+    }
+    line
 }
 
 /// Whether a paste looks like a file drop whose files are somewhere else.
@@ -34,16 +91,35 @@ pub fn looks_like_dropped_paths(text: &str) -> bool {
     if lines.is_empty() || lines.len() > 32 {
         return false;
     }
+    // Read each line both ways rather than the platform's way. What is being described here is
+    // the machine the files are on, and over ssh that is not this one: a line from Windows needs
+    // the splitter that leaves backslashes alone, while a Mac path with an escaped space needs
+    // the one that does not. Either reading being all paths is enough to call it a drop.
     lines.iter().all(|line| {
-        let tokens = shell_words::split(line).unwrap_or_else(|_| vec![line.to_string()]);
-        !tokens.is_empty()
-            && tokens.iter().all(|t| {
-                // A path, not a sentence: rooted, and with a name at the end of it.
-                (t.starts_with('/') || t.starts_with("~/") || t.starts_with("file://"))
-                    && !t.ends_with('.')
-                    && t.len() > 2
-            })
+        let posix = shell_words::split(line).unwrap_or_else(|_| vec![line.to_string()]);
+        all_rooted_paths(&posix) || all_rooted_paths(&quoted_tokens(line))
     })
+}
+
+/// Whether every token is a path rather than a word: rooted, and with a name at the end of it.
+fn all_rooted_paths(tokens: &[String]) -> bool {
+    !tokens.is_empty()
+        && tokens.iter().all(|t| {
+            (t.starts_with('/') || t.starts_with("~/") || t.starts_with("file://") || is_drive_path(t))
+                && !t.ends_with('.')
+                && t.len() > 2
+        })
+}
+
+/// What a rooted path looks like when it comes from Windows: a drive letter, a colon, a
+/// separator. Recognised whatever platform this is running on — the drop is being described by
+/// the machine the files are on, which over ssh is not this one.
+fn is_drive_path(text: &str) -> bool {
+    let mut chars = text.chars();
+    let drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    let colon = chars.next() == Some(':');
+    let separator = matches!(chars.next(), Some('\\') | Some('/'));
+    drive && colon && separator
 }
 
 /// Whether this process is itself running over ssh, which is what turns "those files are not
@@ -187,6 +263,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A Windows path is mostly backslashes, and a POSIX splitter eats every one of them as an
+    /// escape: `C:\Users\me\notes.txt` came back as `C:Usersmenotes.txt`, so a drop on Windows
+    /// found nothing and did nothing. Both splitters are tested from either platform, since the
+    /// one that is wrong here is the one that runs there.
+    #[test]
+    fn a_windows_path_survives_being_split() {
+        assert_eq!(quoted_tokens(r"C:\Users\me\notes.txt"), vec![r"C:\Users\me\notes.txt"]);
+        // Double quotes hold a name with spaces together; nothing else means anything.
+        assert_eq!(
+            quoted_tokens(r#""C:\My Documents\a b.txt" C:\tmp\c.txt"#),
+            vec![r"C:\My Documents\a b.txt", r"C:\tmp\c.txt"]
+        );
+        assert!(quoted_tokens("   ").is_empty());
+        // What the POSIX splitter does to the same line, and why it is not used there.
+        assert_eq!(shell_words::split(r"C:\Users\me\notes.txt").unwrap(), vec!["C:Usersmenotes.txt"]);
+    }
+
+    /// A path with spaces that arrived unquoted is one file, not several words. Only the disk
+    /// can say, which is why this is a fallback rather than the rule.
+    #[test]
+    fn an_unquoted_path_with_spaces_is_still_one_file() {
+        let dir = std::env::temp_dir().join(format!("clee_dnd_spaces_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("two words.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        assert_eq!(parse_dropped_paths(&format!("{}\n", file.display())), vec![file.clone()]);
+        // Quoted, it is found by the ordinary path through the splitter.
+        assert_eq!(parse_dropped_paths(&format!("\"{}\"\n", file.display())), vec![file]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn recognises_every_octave_launcher_variant() {
         // macOS execs octave-gui even for a terminal session; Windows ships octave-cli.exe.
@@ -227,11 +335,17 @@ mod tests {
         assert!(looks_like_dropped_paths("/a/one.txt\n/a/two.txt"));
         assert!(looks_like_dropped_paths("~/Desktop/thing.md"));
 
+        // A drop described by a Windows machine, which is what arrives over ssh from one.
+        assert!(looks_like_dropped_paths(r"C:\Users\someone\Desktop\photo.png"));
+        assert!(looks_like_dropped_paths(r#""C:\Users\someone\my papers\report.pdf""#));
+
         // Prose, a bare word, a relative path and an empty paste are all not drops.
         assert!(!looks_like_dropped_paths("the files are in /tmp, have a look"));
+        assert!(!looks_like_dropped_paths("C: is the system drive"));
         assert!(!looks_like_dropped_paths("hello"));
         assert!(!looks_like_dropped_paths("src/main.rs"));
         assert!(!looks_like_dropped_paths(""));
         assert!(!looks_like_dropped_paths("   "));
     }
 }
+
