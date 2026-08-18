@@ -5,6 +5,7 @@ mod editor;
 mod file_tree;
 mod find;
 mod font_install;
+mod git;
 mod git_status;
 mod highlight;
 mod i18n;
@@ -439,6 +440,7 @@ fn run(
             app.poll_terminal_exits();
             app.poll_git_status();
             app.poll_search();
+            app.poll_git_panel();
         }));
         if let Err(text) = polled {
             app.status_message = i18n::msg_internal_error(app.settings.lang, &text);

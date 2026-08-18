@@ -113,6 +113,7 @@ pub enum Key {
     ItemFind,
     ItemGotoLine,
     ItemSearchProject,
+    ItemGitPanel,
     ItemNewFile,
     ItemNewFolder,
     ItemRename,
@@ -396,6 +397,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemGotoLine) => "Vai alla riga...",
         (Lang::En, ItemSearchProject) => "Search in project...",
         (Lang::It, ItemSearchProject) => "Cerca nel progetto...",
+        (Lang::En, ItemGitPanel) => "Git panel",
+        (Lang::It, ItemGitPanel) => "Pannello Git",
 
         (Lang::En, ItemNewFile) => "New file...",
         (Lang::It, ItemNewFile) => "Nuovo file...",
@@ -522,6 +525,43 @@ pub fn msg_find_flags(lang: Lang, case_sensitive: bool, regex: bool) -> String {
             segno(case_sensitive),
             segno(regex)
         ),
+    }
+}
+
+pub fn msg_git_panel_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Git — Esc closes · Tab/←→ switch · ↑↓ scroll · R refresh",
+        Lang::It => "Git — Esc chiude · Tab/←→ cambia · ↑↓ scorre · R aggiorna",
+    }
+}
+
+pub fn msg_git_tab(lang: Lang, tab: crate::app::GitTab) -> &'static str {
+    use crate::app::GitTab::*;
+    match (lang, tab) {
+        (Lang::En, Diff) => "Changes",
+        (Lang::It, Diff) => "Modifiche",
+        (Lang::En, Log) => "History",
+        (Lang::It, Log) => "Cronologia",
+        (Lang::En, Branches) => "Branches",
+        (Lang::It, Branches) => "Branch",
+    }
+}
+
+pub fn msg_git_loading(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking git…",
+        Lang::It => "Chiedo a git…",
+    }
+}
+
+/// An empty diff is an answer, and which file it is an answer about matters: "nothing changed"
+/// means something different for one file than for the whole tree.
+pub fn msg_git_no_changes(lang: Lang, file: Option<&str>) -> String {
+    match (lang, file) {
+        (Lang::En, Some(f)) => format!("No changes in {f} since the last commit"),
+        (Lang::It, Some(f)) => format!("Nessuna modifica in {f} dall'ultimo commit"),
+        (Lang::En, None) => "Nothing changed since the last commit".to_string(),
+        (Lang::It, None) => "Niente di modificato dall'ultimo commit".to_string(),
     }
 }
 

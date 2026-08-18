@@ -678,6 +678,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_search {
         draw_search_modal(f, app, f.area());
     }
+    if app.git_panel.is_some() {
+        draw_git_panel(f, app, f.area());
+    }
     if app.show_new_entry {
         draw_new_entry_modal(f, app, f.area());
     }
@@ -1019,6 +1022,151 @@ fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
         i18n::msg_goto_prompt(lang, pages),
         &app.goto_input,
     );
+}
+
+/// Where the git panel sits: nearly the whole window, since a diff is wide and a line that wraps
+/// is a line that has to be read twice. Shared with the click handling so "outside the panel"
+/// means the same thing to both.
+pub fn git_panel_rect(full: Rect) -> Rect {
+    // Floors for the same reason the manual has them: on a window too small to hold the panel,
+    // a box asked for zero rows is a box with nothing in it, and `centered_rect` clamps what it
+    // is given to what there is.
+    let width = full.width.saturating_sub(8).min(120).max(24);
+    let height = full.height.saturating_sub(4).max(8);
+    centered_rect(width, height, full)
+}
+
+/// The read-only git panel: a diff, a log and a branch list, one tab at a time.
+///
+/// A modal reader rather than a docked frame. The frames are the editor, the tree and the
+/// shells — the three things you work *in* — and this is something you look at and dismiss, so
+/// it costs no layout and takes nothing away from them while it is closed.
+fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
+    use crate::app::GitTab;
+    let Some(panel) = app.git_panel.as_ref() else { return };
+    let lang = app.settings.lang;
+    let rect = git_panel_rect(full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::msg_git_panel_title(lang)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height < 3 {
+        return;
+    }
+
+    // Tabs on their own row, the current one lit. Which tab you are on is the one thing that
+    // must never be in doubt, since all three are lists of lines in the same box.
+    let mut tabs: Vec<Span> = Vec::new();
+    for tab in GitTab::ALL {
+        let on = tab == panel.tab;
+        let style = if on {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        tabs.push(Span::styled(format!(" {} ", i18n::msg_git_tab(lang, tab)), style));
+        tabs.push(Span::raw(" "));
+    }
+    let header = Rect { height: 1, ..inner };
+    f.render_widget(Paragraph::new(Line::from(tabs)), header);
+
+    let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+    let rows = body.height as usize;
+
+    let Some(snap) = panel.snap.as_ref() else {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(i18n::msg_git_loading(lang), Style::default().fg(Color::DarkGray)))),
+            body,
+        );
+        return;
+    };
+    if let Some(error) = &snap.error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))),
+            body,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = match panel.tab {
+        GitTab::Diff => {
+            if snap.diff.is_empty() {
+                let of = snap.diff_of.as_ref().map(|p| p.display().to_string());
+                vec![Line::from(Span::styled(
+                    i18n::msg_git_no_changes(lang, of.as_deref()),
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                snap.diff.iter().skip(panel.scroll).take(rows).map(|l| Line::from(diff_span(l))).collect()
+            }
+        }
+        GitTab::Log => snap
+            .log
+            .iter()
+            .skip(panel.scroll)
+            .take(rows)
+            .map(|c| {
+                Line::from(vec![
+                    Span::styled(format!("{:<9}", c.hash), Style::default().fg(Color::Yellow)),
+                    Span::raw(c.subject.clone()),
+                    Span::styled(format!("  — {}, {}", c.author, c.when), Style::default().fg(Color::DarkGray)),
+                ])
+            })
+            .collect(),
+        GitTab::Branches => snap
+            .branches
+            .iter()
+            .skip(panel.scroll)
+            .take(rows)
+            .map(|b| {
+                let mut spans = vec![
+                    Span::styled(
+                        if b.current { "● " } else { "  " },
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::styled(
+                        b.name.clone(),
+                        if b.current {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                ];
+                if let Some(upstream) = &b.upstream {
+                    spans.push(Span::styled(format!("  → {upstream}"), Style::default().fg(Color::DarkGray)));
+                }
+                if let Some(track) = &b.track {
+                    spans.push(Span::styled(format!(" {track}"), Style::default().fg(Color::Yellow)));
+                }
+                Line::from(spans)
+            })
+            .collect(),
+    };
+    f.render_widget(Paragraph::new(lines), body);
+}
+
+/// One line of a diff, coloured the way every diff has been coloured since diffs were coloured.
+/// `+++`/`---` are file headers rather than added and removed lines, and are checked first — the
+/// prefix test alone would paint a header green.
+fn diff_span(line: &str) -> Span<'_> {
+    let style = if line.starts_with("+++") || line.starts_with("---") {
+        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with("@@") {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with("diff ") || line.starts_with("index ") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    Span::styled(line, style)
 }
 
 /// What to look for across the project. Its own box rather than the shared input modal, because
