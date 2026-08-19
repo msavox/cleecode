@@ -1,4 +1,5 @@
 mod app;
+mod app_install;
 mod clipboard;
 mod dnd;
 mod editor;
@@ -114,6 +115,11 @@ OPTIONS:
                           each shell running the command it was given. With no NAME,
                           lists the ones you have.
     --install-font        Install the bundled Nerd Font, so the file tree icons render.
+    --install-app         macOS: put a CleeCode launcher in /Applications, so it can live
+                          in the Dock and be the app that opens a file or a folder.
+    --resume              Start in the project last worked in, wherever this was run from.
+                          What the Dock launcher uses; a bare `clee` still uses the
+                          directory you are standing in.
     -h, --help            Print this help.
     -V, --version         Print the version.
 
@@ -147,6 +153,11 @@ fn main() -> Result<()> {
         font_install::install();
         return Ok(());
     }
+    if args.iter().any(|a| a == "--install-app") {
+        app_install::install();
+        return Ok(());
+    }
+    let resume = args.iter().any(|a| a == "--resume");
     let mut open_workspace: Option<String> = None;
     // `-edit` is accepted alongside the usual spellings: it is what the request asked for, and
     // refusing a flag over a missing dash helps nobody.
@@ -225,7 +236,7 @@ fn main() -> Result<()> {
     let _ = stdout().flush();
     // Even a panic the loop couldn't shield must not skip the teardown below: leaving the
     // terminal in raw mode on the alternate screen hands the user an unusable shell.
-    let result = shielded(|| run(&mut terminal, open_workspace, edit_file));
+    let result = shielded(|| run(&mut terminal, open_workspace, edit_file, resume));
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.
@@ -248,10 +259,17 @@ fn run(
     terminal: &mut BufferedTerminal,
     open_workspace: Option<String>,
     edit_file: Option<std::path::PathBuf>,
+    resume: bool,
 ) -> Result<()> {
     let size = terminal.size()?;
     let cwd = std::env::current_dir()?;
-    let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
+    // Only a real path counts. Without the filter `clee --resume` would take its own flag
+    // for a file name and try to open it — the other flags never get this far, but this one
+    // is passed through to here.
+    let arg = std::env::args()
+        .nth(1)
+        .filter(|a| !a.starts_with('-'))
+        .map(std::path::PathBuf::from);
     let arg_is_dir = arg.as_ref().map(|p| p.is_dir()).unwrap_or(false);
 
     // Resume the last workspace (project folder + open tabs) when launched with no
@@ -287,6 +305,11 @@ fn run(
         }
         Some(p) if p.is_dir() => p.clone(),
         Some(_) => cwd.clone(),
+        // Started from the Dock, where there is no directory you were standing in: the last
+        // project is the only sensible answer, and it makes the restore below match.
+        None if resume => {
+            saved.last_root.clone().filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
+        }
         // Where you are. A shell command that ignores the directory it was typed in is a
         // surprise every time it happens in a folder that is not the one you left — and the
         // session you *did* leave is still restored, below, whenever you come back to it.
