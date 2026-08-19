@@ -1,3 +1,26 @@
+## What's new in 0.6.2
+
+Tools that are installed, found; a background that stays readable.
+
+**PDF and Markdown previews work when CleeCode is started from the Dock.** An app launched from
+a launcher inherits macOS's own environment, not a shell's — no Homebrew, no `/Library/TeX/texbin`,
+nothing `/etc/paths.d` contributes, because all of that reaches the `PATH` through a shell's
+startup files. Every outside tool the preview uses then looked uninstalled, so a PDF that opened
+perfectly from a terminal said there was no rasteriser on the machine. `pdftoppm`, `gs`, `pdfinfo`
+and `pandoc` are now looked for where they are actually installed, the same way the TeX engine
+already was, and the message when there really is none says what to install.
+
+**A solid background, one button away.** At the right-hand end of the menu bar, next to the
+workspace badge: it fills in the background CleeCode was letting the terminal show through. A
+translucent terminal with a bright window behind it leaves the text barely readable, and this is
+the way out without going to change the terminal's own settings. *View ▸ Solid background* is the
+same switch, and the choice is remembered. It is painted over the finished frame, so dialogs —
+which clear the cells they cover — stay opaque too.
+
+Also: the menu bar is measured in screen columns rather than characters. The turtle in the corner
+is two columns wide and one character long, which put everything to the right of it, and every
+click mapped onto a menu title, one column out.
+
 ## What's new in 0.6.1
 
 A Dock icon, for free.

@@ -39,6 +39,7 @@ pub enum MenuAction {
     RunFile,
     ToggleSplitView,
     ToggleHiddenFiles,
+    ToggleOpaqueBackground,
     Undo,
     Redo,
     ToggleComment,
@@ -110,6 +111,7 @@ impl MenuAction {
         MenuAction::RunFile,
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
+        MenuAction::ToggleOpaqueBackground,
         MenuAction::Undo,
         MenuAction::Redo,
         MenuAction::ToggleComment,
@@ -229,6 +231,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // menus would be mouse-only there.
                 item(Key::ItemOpenMenuBar, MenuAction::OpenMenuBar, Some("Ctrl+Shift+B")),
                 group(Key::ItemToggleHiddenFiles, MenuAction::ToggleHiddenFiles, Some("H")),
+                // Also a button on the menu bar itself, since the reason to reach for it is
+                // that the screen has become hard to read — which is a bad moment to be asked
+                // to find a menu in it.
+                item(Key::ItemOpaqueBackground, MenuAction::ToggleOpaqueBackground, None),
                 group(Key::ItemFocusFileTree, MenuAction::FocusFileTree, Some("Ctrl+Alt+←")),
                 item(Key::ItemFocusEditor, MenuAction::FocusEditor, Some("Ctrl+Tab")),
                 item(Key::ItemFocusTerminal, MenuAction::FocusTerminal, Some("Ctrl+Alt+↓")),

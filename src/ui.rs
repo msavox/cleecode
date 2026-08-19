@@ -454,16 +454,66 @@ fn centered_rect(width: u16, height: u16, full: Rect) -> Rect {
 
 const MENU_LOGO: &str = " 🐢 ";
 
+/// How many columns a piece of the menu bar takes on screen, which is not how many `char`s it
+/// is made of: the turtle in the logo is one character and two columns wide. Everything on this
+/// row is placed by counting from one end or the other, so measuring in characters put the
+/// right-hand end of the bar — and every click mapped onto it — a column out.
+fn columns(text: &str) -> u16 {
+    Span::raw(text).width() as u16
+}
+
 pub fn menu_title_ranges(menu: &MenuBar, lang: Lang) -> Vec<(u16, u16)> {
     let mut ranges = Vec::new();
-    let mut x = MENU_LOGO.chars().count() as u16;
+    let mut x = columns(MENU_LOGO);
     for def in &menu.defs {
         let label = format!(" {} ", i18n::t(lang, def.title_key));
-        let w = label.chars().count() as u16;
+        let w = columns(&label);
         ranges.push((x, x + w));
         x += w;
     }
     ranges
+}
+
+/// The menu bar's background button, as it is drawn: a half-filled circle while the background
+/// is the terminal's, a full one while it is ours — the same way opacity is drawn everywhere
+/// else. Three columns, because it is a switch and not a label; what it does is in the View menu
+/// next to it, and in the manual.
+///
+/// Deliberately not the turtle, which sits at the other end of this row already meaning
+/// something else, and which is two columns of emoji whose width not every terminal agrees on.
+const BACKGROUND_BUTTON: [&str; 2] = [" ◐ ", " ● "];
+
+/// The badge naming the open workspace, right-aligned on the menu bar. Empty when none is open.
+/// Built here rather than in the drawing code because the button beside it has to know how wide
+/// it is, and a click has to land where the eye says it should.
+fn workspace_badge(app: &App) -> String {
+    app.active_workspace
+        .as_deref()
+        .map(|name| format!(" {} {} ", i18n::t(app.settings.lang, Key::WorkspaceBadge), name))
+        .unwrap_or_default()
+}
+
+/// Where the background button sits on a bar `width` columns wide: hard against the workspace
+/// badge, or against the right edge when there is no badge.
+///
+/// Empty when the bar is too narrow to hold it clear of the menu titles. A button drawn over a
+/// title would be a button that cannot be seen and a title that cannot be clicked, and returning
+/// nothing here removes both at once — the View menu entry still does the job.
+pub fn menu_bar_button_range(app: &App, width: u16) -> std::ops::Range<u16> {
+    let badge = columns(&workspace_badge(app));
+    let titles = menu_title_ranges(&app.menu, app.settings.lang)
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or(0);
+    button_range(width, titles, badge)
+}
+
+/// The arithmetic of the above, away from the app it reads those three numbers out of.
+fn button_range(width: u16, titles_end: u16, badge: u16) -> std::ops::Range<u16> {
+    let button = columns(BACKGROUND_BUTTON[0]);
+    let end = width.saturating_sub(badge);
+    let start = end.saturating_sub(button);
+    if start < titles_end || end - start < button { start..start } else { start..end }
 }
 
 pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
@@ -616,7 +666,20 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// One frame, and then the background under it if the terminal's own is not to be trusted.
+///
+/// Split in two so that the painting cannot be skipped: the drawing below returns early for the
+/// splash screen, and an unreadable splash is exactly as unreadable as an unreadable editor.
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let opaque = app.settings.opaque_background;
+    draw_frame(f, app);
+    // Last of all, once every widget has had its say about which cells it colours.
+    if opaque {
+        paint_background(f.buffer_mut());
+    }
+}
+
+fn draw_frame(f: &mut Frame, app: &mut App) {
     // Remembered for the key path, which opens pop-ups without being handed the layout.
     app.last_full = f.area();
     if app.show_splash {
@@ -713,6 +776,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// The background CleeCode paints when it is not willing to trust the terminal's.
+///
+/// An explicit colour rather than a darker "default": a translucent terminal is translucent
+/// exactly where the default background shows, so asking for that again would change nothing.
+/// This is the near-black the rest of the chrome is drawn against, so switching it on looks like
+/// the editor filling in its own surface rather than a sheet laid over it.
+const OPAQUE_BACKGROUND: Color = Color::Rgb(24, 24, 24);
+
+/// Fills in every cell that would otherwise show the terminal through it.
+///
+/// Done as a pass over the finished frame rather than by painting a sheet underneath it, because
+/// a sheet does not survive the frame: modals `Clear` the cells they cover, which resets them to
+/// the terminal's background again, and each of those would become a translucent hole in the one
+/// place — a dialog over a bright window — where the text most needs to be readable. Every cell
+/// still saying "the terminal's own colour" at the end of the frame is one nothing else claimed.
+///
+/// Cells a picture is drawn over are left alone by the backend anyway (they are marked skipped),
+/// so the graphics protocols are unaffected.
+fn paint_background(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in buffer.content.iter_mut() {
+        if cell.bg == Color::Reset {
+            cell.bg = OPAQUE_BACKGROUND;
+        }
+    }
+}
+
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     // Hidden bar collapses to a zero-height row; nothing to paint (menus still reachable
     // via Ctrl+Shift+B, whose dropdown anchors to the top independently of this row).
@@ -721,11 +810,11 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     let lang = app.settings.lang;
     let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
-    let mut used = MENU_LOGO.chars().count() as u16;
+    let mut used = columns(MENU_LOGO);
     for (i, def) in app.menu.defs.iter().enumerate() {
         let title = i18n::t(lang, def.title_key);
         let label = format!(" {} ", title);
-        used += label.chars().count() as u16;
+        used += columns(&label);
         let is_open = app.menu.active && app.menu.menu_index == i;
         let mut style = if is_open {
             Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -753,14 +842,29 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     // you were in — the name only appeared in the status line for a moment when it loaded, and
     // was gone by the time you wondered. Titles are drawn from the left and this from the right,
     // with the padding between them, so a long name eats blank space and never the menus.
-    let workspace = app
-        .active_workspace
-        .as_deref()
-        .map(|name| format!(" {} {} ", i18n::t(lang, Key::WorkspaceBadge), name))
-        .unwrap_or_default();
-    let pad = area.width.saturating_sub(used).saturating_sub(workspace.chars().count() as u16);
+    let workspace = workspace_badge(app);
+    // The background button goes just inside it, and is the first thing to be given up when the
+    // window is too narrow for all three.
+    let button = menu_bar_button_range(app, area.width);
+    let button_width = button.end - button.start;
+    let pad = area
+        .width
+        .saturating_sub(used)
+        .saturating_sub(columns(&workspace))
+        .saturating_sub(button_width);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad as usize), Style::default().bg(Color::Black)));
+    }
+    if button_width > 0 {
+        let on = app.settings.opaque_background;
+        // Lit like the open menu title when it is on, so "something has been switched on here"
+        // reads the same way everywhere on this row.
+        let style = if on {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray).bg(Color::Black)
+        };
+        spans.push(Span::styled(BACKGROUND_BUTTON[usize::from(on)], style));
     }
     if !workspace.is_empty() {
         spans.push(Span::styled(workspace, Style::default().fg(Color::Black).bg(Color::Green)));
@@ -2930,6 +3034,56 @@ mod tests {
         }
     }
 
+    /// The turtle in the logo is one `char` and two columns. Everything on the menu bar is
+    /// placed by counting from one end or the other, so measuring it in characters put the
+    /// right-hand end of the bar a column left of where it was drawn — and the click ranges
+    /// with it, which is why this is measured and not counted.
+    #[test]
+    fn the_menu_bar_is_measured_in_columns_not_characters() {
+        assert_eq!(columns(MENU_LOGO), 4);
+        assert!(MENU_LOGO.chars().count() < columns(MENU_LOGO) as usize, "the logo is wide");
+        // The button's two faces have to be the same width, or it would shift the badge beside
+        // it every time it was pressed.
+        assert_eq!(columns(BACKGROUND_BUTTON[0]), columns(BACKGROUND_BUTTON[1]));
+        assert_eq!(columns(BACKGROUND_BUTTON[0]), 3);
+    }
+
+    /// The button has to be where the click looks for it, which is the same arithmetic run
+    /// twice — once to draw it and once to hit-test it. Both go through `button_range`, so this
+    /// is where the two agree.
+    #[test]
+    fn the_background_button_sits_beside_the_workspace_badge() {
+        // No badge: hard against the right edge, three columns wide.
+        assert_eq!(button_range(80, 40, 0), 77..80);
+        // With one: just inside it, never under it.
+        assert_eq!(button_range(80, 40, 12), 65..68);
+
+        // Too narrow to clear the menu titles: no button rather than one drawn over a title,
+        // which would take a menu away to make room for a switch.
+        assert!(button_range(44, 40, 12).is_empty());
+        assert!(button_range(3, 40, 0).is_empty());
+        // Nothing at all to draw on, and no arithmetic that wraps round.
+        assert!(button_range(0, 0, 0).is_empty());
+        assert!(button_range(2, 0, 0).is_empty());
+    }
+
+    /// The point of doing this to the finished frame: whatever a widget left showing the
+    /// terminal through it gets filled in, and whatever a widget coloured is left alone.
+    #[test]
+    fn the_background_is_painted_only_where_nothing_else_claimed_it() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer[(0, 0)].set_bg(Color::Reset); // as a `Clear`ed modal leaves it
+        buffer[(1, 0)].set_bg(Color::Cyan); // a selected menu title
+        buffer[(2, 0)].set_bg(Color::Rgb(30, 30, 30)); // the status line
+        paint_background(&mut buffer);
+        assert_eq!(buffer[(0, 0)].bg, OPAQUE_BACKGROUND);
+        assert_eq!(buffer[(1, 0)].bg, Color::Cyan);
+        assert_eq!(buffer[(2, 0)].bg, Color::Rgb(30, 30, 30));
+        // And the colour it fills with must be one a translucent terminal cannot see through:
+        // asking for the default background again would paint nothing at all.
+        assert!(matches!(OPAQUE_BACKGROUND, Color::Rgb(..)));
+    }
+
     #[test]
     fn terminal_panes_split_by_weight() {
         let area = Rect { x: 0, y: 0, width: 100, height: 10 };
@@ -3394,3 +3548,5 @@ mod tests {
         assert_eq!(fit("venv: some/very/long/name", 10), "venv: som\u{2026}");
     }
 }
+
+
