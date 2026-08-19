@@ -57,6 +57,10 @@ brew install chafa          # a picture inside a terminal pane
 Without a graphics-capable terminal (see the top of this file), pictures fall back to coloured
 half-blocks and Markdown to styled terminal text — less to look at, nothing missing.
 
+They are looked for where they are installed, not only on the `PATH`: an editor opened from the
+Dock inherits macOS's own environment rather than a shell's, and Homebrew and `/Library/TeX/texbin`
+are not in it.
+
 ### From source
 
 Needs a [Rust toolchain](https://rustup.rs) 1.85+ (edition 2024). On Linux the clipboard also
@@ -249,7 +253,8 @@ There is also a `man clee`.
 A file tree with per-type Nerd Font icons and git status dots, live refresh, create/rename/delete
 and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
 Three layout presets, a resizable everything, and a settings panel that applies changes live.
-English and Italian throughout, including the manual.
+English and Italian throughout, including the manual. The `◐` at the right-hand end of the menu
+bar fills in the background, for a translucent terminal with something bright behind it.
 
 ![Layout and Run menus](docs/screenshots/menu.png)
 

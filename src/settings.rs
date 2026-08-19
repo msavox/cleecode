@@ -83,6 +83,12 @@ pub struct Settings {
     // Auto-close brackets/quotes and expand pairs on Enter. Hand-editable; on by default.
     #[serde(default = "default_true")]
     pub auto_pairs: bool,
+    // Whether the editor paints its own background instead of letting the terminal's show
+    // through. Off by default, because a terminal's background is the user's choice and taking
+    // it over uninvited is rude — but a translucent one with a bright window behind it turns
+    // the text unreadable, and then this is the only way back.
+    #[serde(default)]
+    pub opaque_background: bool,
     // Workspace resume: which project folder and which of its files were open, so
     // launching cleecode with no arguments picks up where the last session left off.
     #[serde(default)]
@@ -228,6 +234,7 @@ impl Default for Settings {
             preview_markdown_text: false,
             terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
+            opaque_background: false,
             last_root: None,
             last_open_files: Vec::new(),
             last_active_file: None,

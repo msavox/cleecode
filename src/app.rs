@@ -2971,6 +2971,16 @@ impl App {
         };
     }
 
+    /// Takes the background over, or hands it back. Written out at once rather than at exit:
+    /// this is reached for when the screen has become unreadable, and having to do it again
+    /// after every session would be its own small misery.
+    fn toggle_opaque_background(&mut self) {
+        self.settings.opaque_background = !self.settings.opaque_background;
+        self.settings.save();
+        self.status_message =
+            i18n::msg_opaque_background(self.settings.lang, self.settings.opaque_background);
+    }
+
     fn toggle_hidden_files(&mut self) {
         // The setting is the single source of truth; the tree follows it. Flipping both
         // independently let them drift apart.
@@ -4408,6 +4418,7 @@ impl App {
                 self.status_message = i18n::msg_column_selection(lang, on);
             }
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
+            MenuAction::ToggleOpaqueBackground => self.toggle_opaque_background(),
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::NewTerminalTab => self.new_terminal_tab(),
@@ -5648,7 +5659,7 @@ impl App {
                 // A hidden menu bar collapses to a zero-height row still at y == 0, so guard
                 // on its height or a click on the top editor row would open a phantom menu.
                 if areas.menu_bar.height > 0 && row == areas.menu_bar.y {
-                    self.mouse_menu_bar_click(col);
+                    self.mouse_menu_bar_click(col, areas.menu_bar.width);
                     return;
                 }
                 // Terminal title-bar controls (window ✕, tab ✕, tab switch) live on the top
@@ -6137,7 +6148,7 @@ impl App {
         }
     }
 
-    fn mouse_menu_bar_click(&mut self, col: u16) {
+    fn mouse_menu_bar_click(&mut self, col: u16, width: u16) {
         let ranges = ui::menu_title_ranges(&self.menu, self.settings.lang);
         // Anything left of the first menu title is the logo.
         if ranges.first().is_some_and(|(first, _)| col < *first) {
@@ -6150,6 +6161,12 @@ impl App {
                 self.menu.open();
                 return;
             }
+        }
+        // The background button, over at the other end. Tested after the titles, which own their
+        // columns outright; the range is empty when the bar is too narrow to show it.
+        let button = ui::menu_bar_button_range(self, width);
+        if !button.is_empty() && button.contains(&col) {
+            self.toggle_opaque_background();
         }
     }
 
@@ -6183,7 +6200,9 @@ impl App {
         // While a menu is open, row 0 always holds the title bar — the real one, or the
         // overlay shown when the bar is otherwise hidden — so a click there switches menus.
         if row == 0 {
-            self.mouse_menu_bar_click(col);
+            // The overlay bar drawn while a menu is open spans the window, so that is the width
+            // its buttons are placed against.
+            self.mouse_menu_bar_click(col, full.width);
             return;
         }
         self.menu.close();

@@ -77,6 +77,7 @@ pub enum Key {
     VenvBrowseItem,
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
+    ItemOpaqueBackground,
     ToolbarRun,
     ToolbarRefresh,
     ToolbarVenvNone,
@@ -282,6 +283,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleHiddenFiles) => "Hidden files",
         (Lang::It, ItemToggleHiddenFiles) => "File nascosti",
+
+        (Lang::En, ItemOpaqueBackground) => "Solid background",
+        (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
 
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",
@@ -856,6 +860,18 @@ pub fn msg_column_selection(lang: Lang, on: bool) -> String {
         (Lang::En, false) => "Column selection off".to_string(),
         (Lang::It, true) => "Selezione verticale attiva — Shift+frecce disegnano il rettangolo".to_string(),
         (Lang::It, false) => "Selezione verticale disattivata".to_string(),
+    }
+}
+
+/// Said when the background is taken over, and when it is handed back. Worth a line: the change
+/// is a whole screen repainting, and it should be obvious that it was a setting rather than a
+/// glitch — and obvious that the same button undoes it.
+pub fn msg_opaque_background(lang: Lang, on: bool) -> String {
+    match (lang, on) {
+        (Lang::En, true) => "Solid background on — the terminal no longer shows through".to_string(),
+        (Lang::En, false) => "Solid background off — the terminal's own background is back".to_string(),
+        (Lang::It, true) => "Sfondo pieno attivo — il terminale non traspare più".to_string(),
+        (Lang::It, false) => "Sfondo pieno disattivato — torna lo sfondo del terminale".to_string(),
     }
 }
 
