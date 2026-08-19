@@ -1,7 +1,7 @@
 .\" Man page for CleeCode. Rendered with: man docs/clee.1
 .\" Kept in roff by hand rather than generated: it is short, and a generator would be one more
 .\" thing to keep in step with the key bindings.
-.TH CLEE 1 "August 2026" "CleeCode 0.6.0" "User Commands"
+.TH CLEE 1 "August 2026" "CleeCode 0.6.1" "User Commands"
 .SH NAME
 clee \- terminal IDE with a file tree, embedded terminals and syntax highlighting
 .SH SYNOPSIS
@@ -16,6 +16,8 @@ clee \- terminal IDE with a file tree, embedded terminals and syntax highlightin
 .br
 .B clee
 .RB [ \-\-install\-font ]
+.RB [ \-\-install\-app ]
+.RB [ \-\-resume ]
 .RB [ \-h ]
 .RB [ \-V ]
 .SH DESCRIPTION
@@ -48,6 +50,28 @@ it lists the workspaces you have and exits.
 .B \-\-install\-font
 Install the bundled CleeCodeMono Nerd Font for the current user, so the file tree's icons render.
 Restart the terminal afterwards.
+.TP
+.B \-\-install\-app
+macOS only. Build a
+.B CleeCode.app
+launcher in
+.IR /Applications ,
+or in
+.I ~/Applications
+when the first is not writable, so CleeCode can sit in the Dock and be chosen as the application
+that opens a file or a folder. The bundle is built locally rather than downloaded, which is what
+keeps it free of Gatekeeper's quarantine; it needs
+.BR ghostty (1)
+to host the editor, and has the path to
+.B clee
+compiled into it, so run this again after moving the binary. Uninstall by dragging the app to the
+Bin.
+.TP
+.B \-\-resume
+Start in the project last worked in, whatever directory the command was run from. This is what
+the Dock launcher uses, because an icon has no current directory; a bare
+.B clee
+still opens where you are standing.
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary and exit.

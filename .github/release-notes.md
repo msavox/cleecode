@@ -1,3 +1,33 @@
+## What's new in 0.6.1
+
+A Dock icon, for free.
+
+**`clee --install-app` puts CleeCode in /Applications (macOS).** Clicking it comes back to the
+project you were last in. Drop a file or a folder on it — or pick CleeCode under *Open with* in
+Finder's Get Info, then *Change All…* — and it opens that instead, with its folder as the project
+root. To keep it in the Dock, open it once and choose *Options ▸ Keep in Dock*; to uninstall,
+drag the app to the Bin.
+
+The bundle is built on your machine rather than downloaded, and that is the whole reason this
+costs nothing. A `.app` fetched from the internet arrives quarantined and needs an Apple
+Developer signature — the yearly fee — or the user has to unblock it by hand through a dialog
+that claims the app is damaged. One written locally by a program you just ran carries no
+quarantine and simply opens. It is a command rather than something a normal launch does for the
+same reason `--install-font` is: putting an icon in your Applications folder is a decision.
+
+It needs [Ghostty](https://ghostty.org) to host the editor, and asks the Ghostty already running
+for a new window instead of starting a second one — which is automation, so macOS asks permission
+the first time. Refusing costs only that: it falls back to opening a separate instance and still
+works. The path to `clee` is compiled into the launcher, so run the command again after moving or
+reinstalling the binary.
+
+Linux is not covered yet; the equivalent is a `.desktop` file, and the command says so rather
+than pretending.
+
+**`--resume` starts in the last project, wherever it was run from.** This is what the launcher
+uses, because an icon has no current directory — inheriting whatever folder Finder happened to be
+in is not an answer. A bare `clee` is unchanged and still opens where you are standing.
+
 ## What's new in 0.6.0
 
 Finding things, and seeing what changed.
