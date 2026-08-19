@@ -86,7 +86,7 @@ cargo build --release
 ./target/release/clee -w work      # open the saved workspace called "work"
 ./target/release/clee -w           # list the saved workspaces
 ./target/release/clee -e notes.md  # just that file, everything else hidden
-./target/release/clee --help       # usage, --version, --install-font
+./target/release/clee --help       # usage, --version, --install-font, --install-app
 ```
 
 An argument skips the startup splash; the splash only shows on a bare `clee` or with `-w`,
@@ -105,6 +105,30 @@ It copies the font into your per-user font directory (`~/Library/Fonts`,
 `~/.local/share/fonts`, or `%LOCALAPPDATA%\Microsoft\Windows\Fonts`), points Ghostty at it if
 present on macOS/Linux, and registers it on Windows. Restart your terminal afterwards — or
 just point your terminal at a Nerd Font you already have.
+
+### In the Dock (macOS)
+
+CleeCode is a terminal application, but it can have an icon like any other editor:
+
+```bash
+clee --install-app
+```
+
+That builds `CleeCode.app` in `/Applications` (or `~/Applications`, if the first is not
+writable) and registers it. Clicking it opens the project you were last in; dropping a file
+or a folder on it — or picking CleeCode under *Open with* in Finder's Get Info — opens that,
+with its folder as the project root. To keep it in the Dock, open it once and choose
+*Options ▸ Keep in Dock*; to uninstall, drag the app to the Bin.
+
+The launcher needs [Ghostty](https://ghostty.org) (`brew install --cask ghostty`) to host
+the editor, and asks for a new window in the Ghostty already running rather than starting a
+second one — which is automation, so macOS asks for permission the first time. Refusing it
+costs only that: the launcher falls back to opening a separate Ghostty instance.
+
+The bundle is built on your machine rather than downloaded, which is what keeps it free of
+Gatekeeper warnings: nothing arrives quarantined, so nothing needs an Apple Developer
+signature to open. It has the path to `clee` compiled into it, so re-run the command after
+moving or reinstalling the binary.
 
 ## What it does
 
