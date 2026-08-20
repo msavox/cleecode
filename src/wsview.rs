@@ -64,6 +64,12 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
 /// The table, as coloured lines. Pure, so what it decides at a given width is testable without
 /// a terminal to look at.
 pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> {
+    // A pane with no width can show nothing, and everything below assumes there is room for at
+    // least one character — the text clipper answers "…" when asked for zero, which is one column
+    // more than there is.
+    if cols == 0 || rows == 0 {
+        return Vec::new();
+    }
     let dim = "\x1b[90m";
     let off = "\x1b[0m";
     let head = "\x1b[1m";
@@ -102,7 +108,82 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
         lines.push(layout.row(var));
     }
     lines.extend(history(snapshot, cols, rows, lines.len(), dim, off, head));
+    let lines = fit_to_pane(lines, cols, rows, dim, off);
+    lines.iter().map(|line| cut_to(line, cols)).collect()
+}
+
+/// Never hand back more lines than the pane has rows, and say what was left out.
+///
+/// The window writes what it is given, line by line, so a table longer than the pane used to
+/// scroll it: the title and the header went off the top, and the next tick's cursor-home wrote
+/// the new table over a buffer that had already moved. A session with more variables than the
+/// pane is tall is completely ordinary, so this was not an edge case.
+///
+/// Cutting silently would be its own bug — a panel that shows nine of your twelve variables and
+/// looks complete is worse than one that shows eight and says so. The last line says how many
+/// are not shown, which is also the sentence that tells you to make the pane taller.
+fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &str) -> Vec<String> {
+    let rows = rows as usize;
+    if lines.len() <= rows {
+        return lines;
+    }
+    if rows == 0 {
+        return Vec::new();
+    }
+    let hidden = lines.len() - rows + 1;        // +1: the note takes a row of its own
+    lines.truncate(rows);
+    if let Some(last) = lines.last_mut() {
+        // The advice is worth a line only if the line has room for it. Cut mid-word — "make
+        // this pa" — it reads like the bug it is there to prevent, so the count goes alone.
+        let full = format!("… {hidden} more — make this pane taller");
+        let note = if full.chars().count() <= cols as usize {
+            full
+        } else {
+            format!("… {hidden} more")
+        };
+        *last = format!("{dim}{note}{off}");
+    }
     lines
+}
+
+/// Cut a coloured line to the pane's width, counting only what is visible.
+///
+/// The table already drops whole columns rather than squeezing them, but at the narrow end it
+/// still writes a header wider than the pane — measured at one column: eleven characters. A line
+/// too wide does not simply get cut off, it *wraps*, and one wrapped row pushes everything below
+/// it down and out. So this is the guarantee, made once for every line rather than trusted to
+/// each piece that builds one.
+///
+/// Escape sequences pass through without counting, and the reset is put back on the end: cutting
+/// a line in the middle of "\x1b[90m" would leave the rest of the pane painted by an escape that
+/// never finished.
+fn cut_to(line: &str, cols: u16) -> String {
+    let mut out = String::new();
+    let mut seen = 0usize;
+    let mut chars = line.chars().peekable();
+    let mut coloured = false;
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            for c in chars.by_ref() {
+                out.push(c);
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            coloured = true;
+            continue;
+        }
+        if seen == cols as usize {
+            break;
+        }
+        out.push(c);
+        seen += 1;
+    }
+    if coloured && !out.ends_with("\x1b[0m") {
+        out.push_str("\x1b[0m");
+    }
+    out
 }
 
 /// Where the session is stopped, and how it got there.
@@ -316,6 +397,62 @@ fn clip(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Every size a terminal can be, including the ones it should not.
+    ///
+    /// This is where CleeCode has actually crashed before — a terminal opened at zero height, a
+    /// split editor in a very narrow window — and the workspace view is the newest thing drawing
+    /// into a pane whose size it does not choose. A user dragging a seam passes through every
+    /// width on the way, one frame each.
+    #[test]
+    fn no_size_a_pane_can_be_brings_it_down() {
+        let snapshot = sample();
+        for cols in 0u16..=200 {
+            for rows in [0u16, 1, 2, 3, 4, 5, 9, 40, 200] {
+                let lines = render(Some(&snapshot), cols, rows);
+                assert!(lines.len() <= rows as usize, "{cols}x{rows} drew more rows than it has");
+                for line in plain(&lines) {
+                    assert!(
+                        line.chars().count() <= cols as usize,
+                        "{cols}x{rows} drew a line of {} columns: {line:?}",
+                        line.chars().count()
+                    );
+                }
+            }
+        }
+        // And with nothing to show, which is what the first second of every session looks like.
+        for cols in 0u16..=200 {
+            let _ = render(None, cols, 24);
+        }
+    }
+
+    /// The snapshot is written by somebody else's interpreter, so it is input, not data.
+    ///
+    /// A half-written file is the ordinary case rather than the hostile one: the writer renames
+    /// its temporary file into place, but an older prototype did not, and a user can point
+    /// CLEECODE_OCTAVE_WS at anything. None of it may do worse than show no workspace.
+    #[test]
+    fn a_snapshot_that_is_not_one_is_refused_rather_than_believed() {
+        let whole = r#"{"v":1,"seq":12,"lang":"octave","cwd":"/proj","vars":[
+            {"name":"A","class":"double","size":[6,6],"bytes":288,"min":1,"max":36,"mean":18.5},
+            {"name":"testo","class":"char","size":[1,10],"bytes":10}],
+            "history":["A = magic(6)","testo = 'ciao'"],
+            "debug":{"stopped":true,"name":"calcola","file":"/proj/calcola.m","line":3,
+                     "stack":[{"name":"calcola","line":3}]}}"#;
+        assert!(Snapshot::parse(whole).is_some(), "the whole thing has to parse first");
+        for cut in 0..whole.len() {
+            if let Some(s) = Snapshot::parse(&whole[..cut]) {
+                let _ = render(Some(&s), 80, 24);          // truncated but parsed: still drawable
+            }
+        }
+        for junk in ["", " ", "{", "[]", "null", "{\"v\":1}", "\u{0}\u{1}\u{2}",
+                     "{\"vars\":[{\"name\":\"a\",\"size\":[-1,-1]}]}",
+                     "{\"vars\":[{\"name\":\"a\",\"size\":[99999999999,2]}]}"] {
+            if let Some(s) = Snapshot::parse(junk) {
+                let _ = render(Some(&s), 80, 24);
+            }
+        }
+    }
+
     use super::*;
     use crate::wsnap::Var;
 
