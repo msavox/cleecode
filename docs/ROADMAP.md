@@ -646,10 +646,39 @@ scritto come riavere il preset. Il rifiuto del salvataggio ora nomina il built-i
 di dire sempre `DEFAULT_NAME`, che era vero con uno solo ed è diventato una bugia con tre. E
 `clee -w` elenca i built-in marcando quelli ombreggiati.
 
-*Non incluso di proposito:* la scheda `workspace` che §7 dell'handoff propone, un visualizzatore
-che segue lo snapshot JSON. Il lato Rust non imposta ancora `CLEECODE_OCTAVE_WS`, quindi sarebbe
-un pannello che segue un file che non compare mai — un preset con un riquadro morto dentro. Va
-col passo che aggancia gli hook.
+**Passo 3 fatto**: il **workspace dal vivo**, ed è una **finestra** e non una scheda — scelta
+dell'utente, e ha ragione: una scheda è un posto dove vai, una finestra è una cosa che guardi di
+sfuggita. Esegui una cella e alzi lo sguardo, che è il motivo per cui i desktop di Octave e
+MATLAB lo tengono agganciato.
+
+*Il visualizzatore è CleeCode stesso*, `clee --watch-workspace <dir>`, avviato dal preset in
+quella finestra. Niente da installare, nessuno script esterno, e la tabella la disegniamo noi.
+Non usa schermo alternato né modalità raw: Ctrl+C lo chiude come qualsiasi programma, il
+pannello si ridimensiona senza che debba saperne niente, e se muore non ha sequestrato il
+terminale. È un programma che stampa una tabella.
+
+*L'hook si installa senza toccare la home dell'utente*, ed è meglio di quanto proponeva §5
+dell'handoff. Non serve il blocco in `~/.octaverc`: il comando di avvio del preset è
+`octave --no-gui --persist --path "$CLEECODE_OCTAVE_LIB" --eval cleecode_boot`, e le variabili
+d'ambiente sono già lì. Verificato in un PTY: lo snapshot compare all'avvio, `seq` sale a ogni
+comando, e la trascrizione dell'utente resta **pulita** — nemmeno una riga in più. Il `.octaverc`
+resta la strada per chi digita `octave` da sé, e quando servirà sarà un comando esplicito come
+`--install-app`, non una cosa che un preset fa di nascosto. Python non ha nemmeno quel problema:
+`PYTHONSTARTUP` è una variabile d'ambiente e basta.
+
+*I `.m` e i `.py` viaggiano dentro il binario* (`src/assets.rs`, `include_str!`) e vengono
+scritti nella cartella temporanea all'occorrenza. Un binario installato da Homebrew non ha il
+repository accanto, quindi un percorso che si risolve in sviluppo e non dopo sarebbe una
+funzionalità che funziona solo per chi l'ha compilata.
+
+*Una terza correzione all'handoff:* `HANDOFF-SHARED.md` diceva "entrambi i linguaggi emettono già
+lo stesso JSON con un campo `lang`". Octave non lo emetteva — il campo c'era solo nel prototipo
+Python. Aggiunto, così la vista sa di chi sta parlando invece di chiamarlo genericamente
+"workspace".
+
+*Provato contro un Octave vero*, `scripts/drive_workspace.py`: 11 controlli, dalla finestra che
+c'è prima che qualcosa sia girato fino alla `magic(4)` riassunta, al NaN segnalato e alla
+statistica che per un char è un trattino e non uno zero. E che l'**altra** cella non compare.
 
 *Provato aprendo i preset davvero*, `scripts/drive_presets.py`: 14 controlli, entrambi i
 linguaggi, in finestra larga e stretta — l'interprete è al prompt senza che nessuno abbia

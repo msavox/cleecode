@@ -103,6 +103,10 @@ pub struct Shape {
     /// would open a prompt without the packages the project was set up for, which is the one
     /// thing that preset exists to avoid.
     pub python: String,
+    /// The command that opens the workspace view, or `None` where CleeCode cannot name its own
+    /// executable — in which case the preset is the prompt and the shell, and nothing pretends
+    /// otherwise.
+    pub workspace_view: Option<String>,
 }
 
 /// Below this the frames go one above the other rather than side by side.
@@ -117,7 +121,16 @@ const SIDE_BY_SIDE_COLS: u16 = 150;
 pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
     let name = built_in_named(name)?;
     Some(match name {
-        "octave" => session_workspace(name, shape, "octave --no-gui", "octave"),
+        // `--persist` because `--eval` otherwise runs and exits; `--path` so the interpreter can
+        // find the boot file, which installs the hook only if CleeCode asked for one. `octave`
+        // and not `octave-cli`: plotting needs the qt toolkit, and the cli build here has only
+        // fltk, which wants an X display that is not installed on a Mac.
+        "octave" => session_workspace(
+            name,
+            shape,
+            "octave --no-gui --persist --path \"$CLEECODE_OCTAVE_LIB\" --eval cleecode_boot",
+            "octave",
+        ),
         "pylab" => session_workspace(name, shape, &shape.python, "python"),
         // The layout one keeps no terminals of its own: the point is the shape of the window,
         // not a set of shells, and `apply_workspace` keeps the ones already running when the
@@ -157,8 +170,35 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
 /// wraps into nonsense in a narrow pane — and you read it while writing the next line, not after.
 /// The sidebar stays, narrower: this kind of work is usually a handful of scripts, so the tree is
 /// for finding them rather than for living in.
+///
+/// **The workspace view is a second window, not a third tab**, and that is the whole difference
+/// between watching your variables and asking about them. A tab is somewhere you go; a window is
+/// something you glance at. You run a cell and look up — which is what the Octave and MATLAB
+/// desktops dock it for.
 fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Workspace {
     let wide = shape.cols >= SIDE_BY_SIDE_COLS;
+    let mut terminals = vec![WorkspaceTerminal {
+        // Two thirds to the prompt, one to the workspace: the prompt is where the work happens
+        // and the view is read a line at a time.
+        weight: default_weight() * 2,
+        active: 0,
+        tabs: vec![
+            WorkspaceTab { name: Some(tab.to_string()), startup_command: Some(start.to_string()) },
+            // A plain shell, for the things a prompt is bad at: git, ls, pip. Unnamed and
+            // unstarted, so it costs a shell and no screen.
+            WorkspaceTab { name: Some("shell".to_string()), startup_command: None },
+        ],
+    }];
+    if let Some(view) = &shape.workspace_view {
+        terminals.push(WorkspaceTerminal {
+            weight: default_weight(),
+            active: 0,
+            tabs: vec![WorkspaceTab {
+                name: Some("workspace".to_string()),
+                startup_command: Some(view.clone()),
+            }],
+        });
+    }
     Workspace {
         name: name.to_string(),
         root: shape.root.clone(),
@@ -178,19 +218,7 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
             split_view: false,
             split_pct: 50,
         },
-        terminals: vec![WorkspaceTerminal {
-            weight: default_weight(),
-            active: 0,
-            tabs: vec![
-                WorkspaceTab {
-                    name: Some(tab.to_string()),
-                    startup_command: Some(start.to_string()),
-                },
-                // A plain shell, for the things a prompt is bad at: git, ls, pip. Unnamed and
-                // unstarted, so it costs a shell and no screen.
-                WorkspaceTab { name: Some("shell".to_string()), startup_command: None },
-            ],
-        }],
+        terminals,
     }
 }
 
@@ -406,7 +434,12 @@ mod tests {
     }
 
     fn shape(cols: u16) -> Shape {
-        Shape { root: PathBuf::from("/somewhere"), cols, python: "python3".to_string() }
+        Shape {
+            root: PathBuf::from("/somewhere"),
+            cols,
+            python: "python3".to_string(),
+            workspace_view: Some("clee --watch-workspace /tmp/snaps".to_string()),
+        }
     }
 
     /// A built-in workspace is always offered and can never be removed, which only holds if it
@@ -451,13 +484,41 @@ mod tests {
     fn a_language_preset_opens_a_prompt_and_a_shell_in_one_window() {
         for (name, expected) in [("octave", "octave --no-gui"), ("pylab", "python3")] {
             let ws = built_in(name, &shape(200)).unwrap();
-            assert_eq!(ws.terminals.len(), 1, "{name}: one window");
             let tabs = &ws.terminals[0].tabs;
-            assert_eq!(tabs.len(), 2, "{name}: the interpreter and a shell");
-            assert_eq!(tabs[0].startup_command.as_deref(), Some(expected));
+            assert_eq!(tabs.len(), 2, "{name}: the interpreter and a shell share a window");
+            let start = tabs[0].startup_command.as_deref().unwrap();
+            assert!(start.starts_with(expected), "{name}: starts {expected}, got {start}");
             assert_eq!(ws.terminals[0].active, 0, "{name}: the prompt is what you are looking at");
             assert_eq!(tabs[1].startup_command, None, "{name}: the shell starts nothing");
         }
+    }
+
+    /// A window, not a third tab, and that is the whole difference between watching your
+    /// variables and asking about them: a tab is somewhere you go, a window is something you
+    /// glance at.
+    #[test]
+    fn the_workspace_view_is_a_window_of_its_own() {
+        let ws = built_in("octave", &shape(200)).unwrap();
+        assert_eq!(ws.terminals.len(), 2, "the prompt's window and the workspace's");
+        let view = &ws.terminals[1];
+        assert_eq!(view.tabs.len(), 1, "nothing shares it");
+        assert_eq!(view.tabs[0].name.as_deref(), Some("workspace"));
+        assert!(view.tabs[0].startup_command.as_deref().unwrap().contains("--watch-workspace"));
+        assert!(
+            ws.terminals[0].weight > view.weight,
+            "the prompt gets the larger share: it is where the work happens"
+        );
+    }
+
+    /// Where CleeCode cannot name its own executable there is no viewer to start, and the preset
+    /// is the prompt and the shell — rather than a window running a command that is not there.
+    #[test]
+    fn without_a_viewer_the_preset_is_still_a_preset() {
+        let mut shape = shape(200);
+        shape.workspace_view = None;
+        let ws = built_in("pylab", &shape).unwrap();
+        assert_eq!(ws.terminals.len(), 1);
+        assert_eq!(ws.terminals[0].tabs.len(), 2);
     }
 
     /// A selected virtualenv has to reach the preset, or `pylab` opens a prompt without the
@@ -508,7 +569,7 @@ mod tests {
 
         // With no file of that name, the built-in answers and nothing is shadowed.
         let (found, shadowed) = resolve_in(&dir, "pylab", &shape(200));
-        assert_eq!(found.unwrap().terminals.len(), 1);
+        assert_eq!(found.unwrap().terminals.len(), 2, "the preset, prompt and workspace both");
         assert_eq!(shadowed, None);
 
         // A name that is neither is neither.

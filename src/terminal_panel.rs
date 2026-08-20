@@ -21,6 +21,14 @@ const STARTUP_MAX: Duration = Duration::from_secs(12);
 /// would suggest otherwise.
 static SCROLLBACK_LEN: AtomicUsize = AtomicUsize::new(DEFAULT_SCROLLBACK);
 
+/// A number for each pane CleeCode starts, so their workspace snapshots do not overwrite one
+/// another. Only ever compared and never interpreted, so wrapping would be harmless and reaching
+/// the wrap is not possible in a session.
+fn next_pane_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Matches kitty's default. Worth being deliberate about: vt100 stores whole rows of 32-byte
 /// cells at the pane's full width, so the cost is rows x columns x 32 bytes per shell — 16 MB
 /// for 2000 lines across a wide 250-column pane, and every tab pays it separately.
@@ -363,6 +371,19 @@ impl TerminalPanel {
         // Marks the shell as running inside CleeCode, so a user's rc can skip heavy startup
         // work (e.g. `fastfetch`) here — `if not set -q CLEECODE; fastfetch; end` in fish.
         cmd.env("CLEECODE", "1");
+        // Where an interpreter started in this pane should publish its workspace, and where to
+        // find the code that does it. Set on every shell, for both languages: a shell that
+        // starts neither carries a few unread names, which costs nothing, and the alternative is
+        // guessing at spawn time what the user is about to type. Nothing is written to their
+        // home directory — the hook lives entirely in the environment.
+        for (key, value) in crate::wsnap::shell_env(
+            &crate::wsnap::snapshot_dir(),
+            next_pane_id(),
+            &crate::assets::octave_lib(),
+            &crate::assets::python_lib(),
+        ) {
+            cmd.env(key, value);
+        }
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 

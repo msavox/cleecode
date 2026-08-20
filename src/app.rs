@@ -1455,6 +1455,17 @@ impl App {
             root: self.root.clone(),
             cols: if self.last_full.width > 0 { self.last_full.width } else { self.startup_cols },
             python: self.apply_venv("python3"),
+            // `current_exe` rather than the word "clee": the preset must open *this* CleeCode's
+            // viewer, not whichever one is on the PATH — which during development is usually an
+            // older one installed by Homebrew.
+            workspace_view: std::env::current_exe().ok().map(|exe| {
+                format!(
+                    "{} --watch-workspace {}",
+                    crate::session::Language::Octave.quote(&exe.to_string_lossy()),
+                    crate::session::Language::Octave
+                        .quote(&crate::wsnap::snapshot_dir().to_string_lossy())
+                )
+            }),
         }
     }
 
