@@ -60,8 +60,20 @@ class Session:
 
     # ---- reading the screen ----------------------------------------------------------
 
+    # What a real terminal answers when asked what it can do. Without these CleeCode waits for
+    # each query to time out before drawing its first frame — and, more importantly, it only
+    # enables the disambiguating key protocol when the terminal says it has one. Every
+    # application shortcut in CleeCode is a Ctrl+Shift chord, and those cannot be encoded at all
+    # in what terminals have sent since VT100, so without this reply not one of them is reachable
+    # and a driver can only ever test the keys that were already unambiguous.
+    REPLIES = [
+        (b"\x1b[?u", b"\x1b[?1u"),        # kitty keyboard protocol: yes, flag 1
+        (b"\x1b[c", b"\x1b[?62;c"),       # primary device attributes: a VT220
+        (b"\x1b[5n", b"\x1b[0n"),         # status report: fine, thanks
+    ]
+
     def drain(self):
-        """Feed everything waiting on the pty into the screen."""
+        """Feed everything waiting on the pty into the screen, answering its questions."""
         while True:
             try:
                 data = os.read(self.fd, 1 << 16)
@@ -69,7 +81,20 @@ class Session:
                 return
             if not data:
                 return
+            for query, answer in self.REPLIES:
+                if query in data:
+                    try:
+                        os.write(self.fd, answer)
+                    except OSError:
+                        pass
             self.stream.feed(data)
+
+    def chord(self, letter):
+        """Ctrl+Shift+<letter>, in the encoding that can carry it.
+
+        `CSI unicode ; modifiers u`, where the modifier field is 1 plus the bits: shift 1,
+        alt 2, ctrl 4. So Ctrl+Shift is 1+1+4 = 6."""
+        return "\x1b[%d;6u" % ord(letter.lower())
 
     def wait(self, predicate, timeout=10.0, settle=0.25):
         """Read until `predicate(self)` holds, then a moment longer so the frame finishes."""

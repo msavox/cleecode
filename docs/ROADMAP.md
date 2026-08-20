@@ -575,18 +575,58 @@ prototipo, plausibile, e non cambia la forma della cosa.
 riga 11 dice `clee -w octavelab`, riga 77 dice `clee -w octave` e la sezione Naming argomenta
 contro `octavelab`. Vale la seconda.
 
-*Ordine di costruzione proposto* (dall'handoff, e mi convince): eseguire selezione e celle `%%`
-dall'editor per prima, perché è quella che trasforma la cosa da visualizzatore in IDE; poi
+**Passo 1 fatto** il 2026-08-20: **eseguire selezione e celle `%%`**, `Ctrl+Shift+X`. Il seam
+c'è dal primo commit come chiedeva l'handoff — `src/session.rs`, un `Language` con due
+adattatori: quali nomi di programma sono quell'interprete, cosa gli si dice per eseguire un
+file, come si cita un percorso per il suo prompt, che estensione vuole il file di appoggio. La
+parte Octave era già cablata in `dnd.rs` per il pulsante Run (passare un `.m` all'Octave già
+aperto invece di avviarne un secondo): è la stessa domanda, quindi è migrata lì e ha messo una
+seconda risposta.
+
+Il marcatore di cella è **uno solo per entrambi**: `%%`, con davanti il carattere di commento
+del linguaggio — `%% titolo` in Octave, `# %%` in Python. Sono le due cose che quei mondi già
+scrivono, quindi nessuno deve imparare una convenzione di CleeCode per usare la funzionalità. Un
+file senza marcatori è una cella sola, che è la lettura onesta di "esegui questa cella" in uno
+script che nessuno ha diviso.
+
+Passa da un file temporaneo, mai incollando al prompt: l'handoff aveva ragione, un blocco
+indentato incollato fa rispondere `IndentationError` a Python, e a un prompt Octave viene
+riecheggiato riga per riga nella trascrizione dell'utente.
+
+*Una riga tirata di proposito:* il **pulsante Run non cambia** comportamento per Python. La
+macchina sotto adesso conosce entrambi i linguaggi, ma un prompt Octave è quasi sempre *il*
+posto dove si sta lavorando, mentre un REPL Python aperto in un terminale di lato mentre editi
+un'applicazione web non è dove `manage.py` deve girare. Mandare un file intero in una sessione
+viva è un cambio di comportamento, e appartiene alla funzionalità che lo chiede — eseguire una
+selezione — non a un pulsante che significava già altro.
+
+*Scorciatoia:* `Ctrl+Shift+X`, eXecute. **Non** Shift+Invio, che è quello che usano tutti i
+notebook e che un terminale non sa consegnare: la codifica non ha spazio per lo Shift dal VT100,
+quindi funzionerebbe in due emulatori e non farebbe niente in silenzio in tutti gli altri.
+
+*Provato contro interpreti veri*, non contro stub, perché il punto è che la **sessione** si
+tiene quello che la cella ha fatto e uno stub proverebbe solo che una stringa è arrivata a un
+prompt. `scripts/drive_cells.py` avvia un Octave vero e un Python vero dentro i terminali di
+CleeCode, esegue una cella in ciascuno e poi chiede *alla sessione* la variabile: 12 controlli,
+compreso che l'**altra** cella non è girata — altrimenti "esegui cella" è un Run travestito.
+
+Per farlo l'imbracatura ha dovuto imparare a **rispondere alle domande del terminale**. Tutte le
+scorciatoie dell'applicazione sono chord Ctrl+Shift, che esistono solo se CleeCode abilita il
+protocollo kitty, e lo abilita solo se il terminale risponde a `CSI ? u`. Ora `pty_drive.py`
+risponde a quella e alle altre due, il che rende provabile ogni scorciatoia dell'app — e come
+effetto collaterale il primo fotogramma arriva in **1 secondo invece di 15**, perché non si
+aspettano più i timeout.
+
+*Ordine di costruzione* (dall'handoff, e mi convince), il resto ancora da fare: poi
 traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla
 sessione viva (si innesta come terza sorgente in `complete.rs`, esattamente come l'LSP della
 0.8), export delle figure. Il debugger è un livello a sé, sugli stessi canali.
 
-*Aperto:* dove vivono i `.m` e i `.py` (`assets/octave/`, `assets/python/`), e i tre documenti
-di handoff vanno portati in `docs/` insieme al codice — il loro valore è il ragionamento dietro
-scelte che da fuori sembrano arbitrarie, ed è quello che un lettore futuro "sistemerebbe"
-rompendole. `test/pty_strict.py` è l'unico test della rilevazione delle modifiche e serve una
-casa anche a lui. Finché la copia in `~/cleecode-octave-ws/` esiste fuori dal repo ci sono due
-copie divergenti della stessa cosa, e fra un mese nessuna delle due sembrerà quella buona.
+*Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i
+`.py` in `assets/python/`, le imbracature in `scripts/ide/`, e i tre documenti in
+`docs/ide-mode*.md` — quelli valgono quanto il codice, perché sono il ragionamento dietro scelte
+che da fuori sembrano arbitrarie ed è esattamente quello che un lettore futuro "sistemerebbe"
+rompendole.
 
 **Dopo:** azioni Git che scrivono (stage, commit), altri server LSP. Le azioni che scrivono
 stanno in fondo di proposito: leggere ha rischio zero, scrivere no, e il commit si fa già nel

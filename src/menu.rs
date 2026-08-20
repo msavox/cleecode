@@ -37,6 +37,7 @@ pub enum MenuAction {
     ToggleTerminalSide,
     ToggleResizeMode,
     RunFile,
+    RunSelection,
     ToggleSplitView,
     ToggleHiddenFiles,
     ToggleOpaqueBackground,
@@ -109,6 +110,7 @@ impl MenuAction {
         MenuAction::ToggleTerminalSide,
         MenuAction::ToggleResizeMode,
         MenuAction::RunFile,
+        MenuAction::RunSelection,
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
         MenuAction::ToggleOpaqueBackground,
@@ -255,6 +257,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuRun,
             items: vec![
                 item(Key::ItemRunFile, MenuAction::RunFile, Some("Ctrl+Shift+R")),
+                item(Key::ItemRunSelection, MenuAction::RunSelection, Some("Ctrl+Shift+X")),
                 group(Key::ItemRunTarget, MenuAction::RunTarget, None),
             ],
         },

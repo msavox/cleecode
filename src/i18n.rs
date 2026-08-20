@@ -71,6 +71,7 @@ pub enum Key {
     ResizeModeHint,
     MenuRun,
     ItemRunFile,
+    ItemRunSelection,
     ItemRunTarget,
     RunMenuTitle,
     VenvRegisterItem,
@@ -268,6 +269,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemRunFile) => "Run current file",
         (Lang::It, ItemRunFile) => "Esegui file corrente",
+        (Lang::En, ItemRunSelection) => "Run selection or cell",
+        (Lang::It, ItemRunSelection) => "Esegui selezione o cella",
 
         (Lang::En, ItemRunTarget) => "How this file runs...",
         (Lang::It, ItemRunTarget) => "Come si esegue questo file...",
@@ -656,6 +659,56 @@ pub fn msg_replace_all_count(lang: Lang, count: usize) -> String {
         Lang::En => format!("   ({count} in all)"),
         Lang::It => format!("   ({count} in tutto)"),
     }
+}
+
+/// What went to which prompt. Says the *count* rather than echoing the code: the code is already
+/// on screen in the editor it came from, and the number is the thing you cannot see — it is how
+/// you notice you sent one line when you meant a cell.
+pub fn msg_run_piece(
+    lang: Lang,
+    what: crate::session::Piece,
+    language: &str,
+    lines: usize,
+    terminal: usize,
+) -> String {
+    let selection = what == crate::session::Piece::Selection;
+    match (lang, selection) {
+        (Lang::En, true) => format!("Selection ({lines} lines) → {language}, terminal {}", terminal + 1),
+        (Lang::En, false) => format!("Cell ({lines} lines) → {language}, terminal {}", terminal + 1),
+        (Lang::It, true) => format!("Selezione ({lines} righe) → {language}, terminale {}", terminal + 1),
+        (Lang::It, false) => format!("Cella ({lines} righe) → {language}, terminale {}", terminal + 1),
+    }
+}
+
+pub fn msg_run_piece_unsaved(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Save the file first — an interpreter is pointed at a file, not at a buffer",
+        Lang::It => "Salva prima il file — a un interprete si indica un file, non un buffer",
+    }
+    .to_string()
+}
+
+pub fn msg_run_piece_no_language(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!("No live session for .{ext} — this works in Octave and Python"),
+        Lang::It => format!("Nessuna sessione viva per .{ext} — funziona con Octave e Python"),
+    }
+}
+
+pub fn msg_run_piece_empty(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Nothing to run there",
+        Lang::It => "Non c'è niente da eseguire lì",
+    }
+    .to_string()
+}
+
+pub fn msg_run_piece_no_scratch(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Could not write the piece to a temporary file",
+        Lang::It => "Non sono riuscito a scrivere il pezzo in un file temporaneo",
+    }
+    .to_string()
 }
 
 /// Said once, when a server a file would have used turns out not to be installed. Worded as a
