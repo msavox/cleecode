@@ -743,9 +743,24 @@ prendendo il primo posto dove quello che precede somiglia a un percorso — che 
 tiene insieme `C:\src\main.rs:12:5`, perché dividere alla lettera di unità lascia `C`, che non
 somiglia a niente.
 
+**Passo 7 fatto**: il **completamento dalla sessione viva**, innestato sul seam `Source` messo
+nella 0.7 apposta per questo — una variante in più, non un secondo popup. In un file il cui
+linguaggio ha una sessione aperta, i nomi che quella sessione tiene sono offerti in verde, a
+distanza zero: una variabile che esiste nell'interprete è vicina quanto una parola può essere, e
+più di una scritta quaranta righe più su.
+
+*Il punto è quello che nessun'altra sorgente può dare:* una variabile creata al prompt non sta in
+nessun file, quindi niente che legga i buffer potrebbe suggerirla per quanto a lungo la sessione
+la tenga. Provato esattamente così — `calibrazione_lunga` creata solo al prompt e poi completata
+in un file dove non compare.
+
+*Quello che ancora non fa:* i nomi delle funzioni della sessione. `completion_matches` di Octave
+li darebbe, ma va valutato nell'interprete, e valutare qualcosa per ogni prefisso digitato vuol
+dire un canale di richiesta e risposta che oggi non c'è — lo snapshot va in una direzione sola.
+Le funzioni dei file aperti le dà già la sorgente delle parole del buffer.
+
 *Ordine di costruzione* (dall'handoff), il resto ancora da fare: ispettore di variabili come tab,
-pannello history, completamento dalla sessione viva (si innesta come terza sorgente in
-`complete.rs`, esattamente come l'LSP della 0.8), export delle figure. Il debugger è un livello a
+pannello history, export delle figure. Il debugger è un livello a
 sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i

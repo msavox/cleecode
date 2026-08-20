@@ -101,6 +101,37 @@ def main():
         report.check("a statistic that makes no sense shows as a dash, not a zero",
                      "-" in rows.get("s", "") and " 0 " not in rows.get("s", ""),
                      session, note=repr(rows.get("s")))
+        # The third completion source: a name that exists in the interpreter and in no file.
+        # Nothing that reads the buffers could offer it, however long the session has held it.
+        session.send("\x10")                                   # Ctrl+P, the palette
+        session.wait(lambda s: "matches" in s.text(), 6)
+        session.send("focus term")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: True, 1.0)
+        made = session.press("calibrazione_lunga = 42;\r",
+                             lambda s: "calibrazione_lunga" in s.text(), 20)
+        report.check("a variable can be made at the prompt", made, session)
+
+        for _ in range(4):                                     # back to the editor
+            session.send("\x0f")
+            if session.wait(lambda s: "matches" in s.text(), 2):
+                session.send("script")
+                session.wait(lambda s: True, 0.5)
+                session.send("\r")
+                break
+            session.press("\x1b[9;5u", lambda s: True, 0.4)    # Ctrl+Tab
+        session.wait(lambda s: "magic" in s.text(), 8)
+        session.press("\x1b[B" * 6, lambda s: True, 1)
+        session.press("\x1b[F", lambda s: True, 0.5)           # End
+        session.press("\r", lambda s: True, 0.5)
+        offered = session.press("cali", lambda s: s.popup_open(), 8)
+        report.check("the editor offers a name that lives only in the session", offered, session,
+                     note=str(session.popup_words()))
+        report.check("and it is the one the prompt made",
+                     session.popup_words() == ["calibrazione_lunga"], session)
+        session.press("\x1b", lambda s: not s.popup_open(), 4)
+
         Report.show("final screen", session)
     finally:
         session.close()
