@@ -6052,6 +6052,16 @@ impl App {
         }
     }
 
+    /// The names the live session is holding, from the snapshot it publishes. Empty when there
+    /// is no session, which is most of the time and costs nothing.
+    fn session_names(&self) -> Vec<String> {
+        self.figures
+            .as_ref()
+            .and_then(|w| w.snapshot.as_ref())
+            .map(|s| s.vars.iter().map(|v| v.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Builds the candidate list and puts the popup up.
     ///
     /// The index is a snapshot, scanned once here and only filtered afterwards. An index kept up
@@ -6068,6 +6078,13 @@ impl App {
         let mut index = crate::complete::Index::new();
         index.add_buffer(&ed.rope, Some(ed.cursor_line));
         index.add_keywords(ed.path.as_deref());
+        // What the interpreter is holding right now, for a file in a language it speaks. This is
+        // the third source the seam was built for in 0.7, and it offers what no buffer can: a
+        // name made at the prompt exists nowhere in the file.
+        let speaks = ed.path.as_deref().and_then(crate::session::Language::of_path).is_some();
+        if speaks {
+            index.add_session(&self.session_names());
+        }
         // The other tabs count too: a name you are about to write is more often in the file you
         // were just in than nowhere at all. A preview holds no text, so it holds no words.
         for (i, other) in self.editors.iter().enumerate() {

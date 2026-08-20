@@ -45,6 +45,12 @@ pub enum Source {
     /// A keyword of the file's language. Always offered last — they are short, and typing one
     /// is quicker than walking a list to it.
     Keyword,
+    /// A name that exists in the interpreter *right now*: a variable the session is holding.
+    ///
+    /// The third source the seam was built for, and the one no amount of reading the file can
+    /// supply — something defined at the prompt is in no buffer at all. It is offered as though
+    /// it were on the cursor's own line, because that is how present it is.
+    Session,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +100,20 @@ impl Index {
         }
     }
 
+    /// Adds the names an interpreter is holding right now.
+    ///
+    /// Distance zero: a variable that exists in the session is as near as a word can be, and
+    /// nearer than one written forty lines up. A name that is both is one entry — the index is
+    /// keyed by the text — and stays whichever the first one said, which is the buffer's, so it
+    /// keeps the buffer's distance. That is the right answer either way: it is in both places.
+    pub fn add_session(&mut self, names: &[String]) {
+        for name in names {
+            if name.chars().count() >= MIN_WORD {
+                self.add(name, Source::Session, 0);
+            }
+        }
+    }
+
     /// Adds the keywords of the language `path` is written in. Nothing at all for a file whose
     /// extension we do not know, which is correct: guessing keywords would put words in the list
     /// that cannot appear in the file.
@@ -110,7 +130,9 @@ impl Index {
                 existing.distance = existing.distance.min(distance);
                 // A word that is also a keyword stays a keyword: the ranking rule about keywords
                 // is about how quickly they are typed, and that does not change because the file
-                // happens to contain one.
+                // happens to contain one. A word that is also live in the session keeps whatever
+                // it was — it is in both places, and where it is drawn from matters less than
+                // that it is offered.
                 if source == Source::Keyword {
                     existing.source = Source::Keyword;
                 }
@@ -470,6 +492,20 @@ mod tests {
             cand("render_line", Source::Buffer, 0, 1),
         ];
         assert_eq!(ranked("render", &cands), vec!["render_line", "Renderer", "do_render"]);
+    }
+
+    /// The point of a third source: a variable made at the prompt is in no buffer, so nothing
+    /// that reads the file can offer it, however long you have been using it.
+    #[test]
+    fn a_name_that_exists_only_in_the_session_is_offered() {
+        let mut index = Index::new();
+        index.add_buffer(&Rope::from_str("plot(measurements)\n"), Some(0));
+        index.add_session(&["measurements_raw".to_string(), "calibration".to_string()]);
+        let cands = index.into_candidates();
+        assert_eq!(ranked("cal", &cands), vec!["calibration"]);
+        // And it is as near as a word can be: nearer than one written far up the file.
+        let live = cands.iter().find(|c| c.text == "calibration").unwrap();
+        assert_eq!((live.source, live.distance), (Source::Session, 0));
     }
 
     #[test]

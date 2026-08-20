@@ -1753,6 +1753,10 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
                 // The same blue the highlighter gives a keyword, so the list says where the
                 // candidate came from without spending a column on saying it.
                 Style::default().fg(Color::Blue)
+            } else if cand.source == crate::complete::Source::Session {
+                // Green for something that exists in the interpreter right now, which is worth
+                // telling apart: it means the name is real rather than merely written somewhere.
+                Style::default().fg(Color::Green)
             } else {
                 Style::default().fg(Color::Gray)
             };
