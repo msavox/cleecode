@@ -13,8 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 4] = [
+const OCTAVE: [(&str, &str); 5] = [
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
+    ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
     ("cleecode_ws.m", include_str!("../assets/octave/cleecode_ws.m")),
     ("cleecode_ws_tick.m", include_str!("../assets/octave/cleecode_ws_tick.m")),
     ("wsinfo.m", include_str!("../assets/octave/wsinfo.m")),
@@ -76,6 +77,14 @@ mod tests {
         // Not empty, and recognisably the thing it claims to be.
         let tick = OCTAVE.iter().find(|(n, _)| *n == "cleecode_ws_tick.m").unwrap().1;
         assert!(tick.contains("jsonencode"), "the Octave hook writes the snapshot");
+        // Every function the hook calls has to travel with it: one missing name and the whole
+        // tick lands in its own catch, silently, and the panel simply never fills in.
+        for called in ["cleecode_figs", "cleecode_ws_tick"] {
+            assert!(
+                OCTAVE.iter().any(|(name, _)| *name == format!("{called}.m")),
+                "{called} is called by the hook but does not travel with it"
+            );
+        }
         let startup = PYTHON.iter().find(|(n, _)| *n == "pythonstartup.py").unwrap().1;
         assert!(startup.contains("cleecode_pyws"), "the startup file installs the hook");
     }

@@ -686,6 +686,31 @@ digitato niente, la shell è accanto nella stessa finestra, e le cornici si spos
 finestra si stringe. Un preset è una promessa su cosa compare quando scrivi il suo nome, e
 l'unico modo di verificarla è scriverlo.
 
+**Passo 4 fatto**: le **figure come tab**. Una finestra Qt viva non si può spostare dentro un
+terminale, quindi alla sessione viene detto di non aprirne (`defaultfigurevisible` a off) e
+consegna un'immagine: l'hook stampa su PNG a fine comando e `preview.rs` la disegna, che già
+sapeva fare. Ridisegna e la tab cambia; una seconda figura è una seconda tab; e non toglie mai la
+tastiera a quello che stavi scrivendo — apre a fianco, dividendo l'editor se c'è spazio.
+
+*Misurato contro Octave vero, e i numeri dell'handoff reggono con una differenza:* la correzione
+di `paperposition` dà **800x600 esatti**, la ristampa dopo `xlim` costa **37 ms** e una `surf`
+3-D 93 ms. La prima stampa è 341 ms qui, non 813 — la macchina o la versione.
+
+*Una cosa che l'handoff lasciava aperta è risolta.* §6 diceva "non ancora fatto: nella sonda le
+figure sono ristampate a ogni tick, riusare il trigger del confine di comando". Fatto — la
+stampa sta dentro `write_snapshot`, che gira solo quando la fingerprint cambia — **e c'è di
+meglio**: Octave marca una figura `__modified__` quando qualcosa in lei si muove, e lo si può
+azzerare. Quindi si ristampa solo la figura toccata. Con due figure aperte e un comando che non
+ne tocca nessuna il costo passa da 130 ms a **1 ms**, che è la differenza fra un prompt che
+risponde e uno che esita.
+
+Il sidecar geometrico (`pos`, `xlim`, `ylim`, `xscale`, `is3d`, `view`) viene già emesso e già
+letto in `wsnap::Figure`, anche se **niente lo usa ancora**: serve alla navigazione, ed è emesso
+adesso perché il contratto non debba cambiare per acquisirlo. La navigazione — zoom e pan
+rimandati *dentro* l'interprete come `xlim`/`ylim` invece di ingrandire i pixel, così le etichette
+degli assi si riscrivono — è il prossimo passo, e i 37 ms misurati dicono che regge anche col
+mouse.
+
 *Ordine di costruzione* (dall'handoff, e mi convince), il resto ancora da fare: poi
 traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla
 sessione viva (si innesta come terza sorgente in `complete.rs`, esattamente come l'LSP della

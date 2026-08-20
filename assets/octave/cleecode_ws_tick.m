@@ -47,13 +47,16 @@ function cleecode_ws_tick (out)
     fp = now_fp;
     seq++;
 
-    write_snapshot (out, seq, now, w);
+    ## Figures are printed here rather than on every tick, because here *is* the command
+    ## boundary: the fingerprint above only differs when something ran.
+    figs = cleecode_figs (getenv ("CLEECODE_OCTAVE_FIGS"));
+    write_snapshot (out, seq, now, w, figs);
   catch
     ## Deliberately silent.
   end_try_catch
 endfunction
 
-function write_snapshot (out, seq, now, w)
+function write_snapshot (out, seq, now, w, figs)
   ## Elements above which min/max/mean are skipped rather than paid for ten
   ## times a second. A 2000x2000 matrix is 4e6 elements; scanning it at every
   ## prompt would be visible.
@@ -118,6 +121,7 @@ function write_snapshot (out, seq, now, w)
   doc.pid = getpid ();
   doc.cwd = pwd ();
   doc.vars = vars;
+  doc.figures = figs;
 
   ## Write beside the target and rename, so a reader never sees half a file.
   tmp = sprintf ("%s.%d.tmp", out, getpid ());
