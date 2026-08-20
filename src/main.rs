@@ -12,6 +12,7 @@ mod git;
 mod git_status;
 mod highlight;
 mod i18n;
+mod locate;
 mod lsp;
 mod manual;
 mod menu;

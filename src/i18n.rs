@@ -682,6 +682,24 @@ pub fn msg_run_piece(
 
 /// Said after a plot is asked to move. Names the move rather than echoing the command: the
 /// command is Octave's business, and what the user did was press an arrow.
+/// Said after a double-click in a terminal took you somewhere. Names the file and the line,
+/// because the row that was clicked has usually scrolled by the time you look back at it.
+pub fn msg_jumped_to(lang: Lang, name: &str, line: usize) -> String {
+    match lang {
+        Lang::En => format!("{name}, line {line}"),
+        Lang::It => format!("{name}, riga {line}"),
+    }
+}
+
+/// Said when the output named a file that is not in this project. Better than a double-click
+/// that quietly does nothing, and better than opening a file of that name from somewhere else.
+pub fn msg_jump_not_found(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("\"{path}\" is not in this project"),
+        Lang::It => format!("\"{path}\" non è in questo progetto"),
+    }
+}
+
 pub fn msg_figure_nav(lang: Lang, nav: crate::session::Nav, is3d: bool) -> String {
     use crate::session::Nav;
     let en = match (nav, is3d) {
