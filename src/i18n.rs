@@ -732,6 +732,29 @@ pub fn msg_figure_exported(lang: Lang, name: &str) -> String {
     }
 }
 
+/// Said when there is nothing to inspect. Not an error: an editor with no interpreter running
+/// is the ordinary case, and the sentence says what would make it possible.
+pub fn msg_inspect_waiting(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking the session…",
+        Lang::It => "Sto chiedendo alla sessione…",
+    }
+}
+
+pub fn msg_inspect_hint(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "arrows page · Home to the corner · R ask again · Esc close",
+        Lang::It => "frecce sfogliano · Home all'angolo · R richiede · Esc chiude",
+    }
+}
+
+pub fn msg_inspect_no_session(lang: Lang) -> String {
+    match lang {
+        Lang::En => "No live session — start Octave or Python in a terminal first".to_string(),
+        Lang::It => "Nessuna sessione viva — avvia prima Octave o Python in un terminale".to_string(),
+    }
+}
+
 pub fn msg_figure_no_session(lang: Lang, language: &str) -> String {
     match lang {
         Lang::En => format!("The {language} session that drew this is gone — the picture stays"),

@@ -9,6 +9,8 @@ pub enum PickAction {
     VenvDir(PathBuf),
     /// A saved workspace, by name: opened, or deleted, depending on the picker's kind.
     Workspace(String),
+    /// A variable in a live session, to look inside.
+    Inspect(String),
     /// A line found by the project search: the file to open and where in it to land. The column
     /// travels with the line so the cursor arrives on the word rather than beside it.
     FileLine(PathBuf, usize, usize),
@@ -38,6 +40,8 @@ pub enum PickerKind {
     /// typed here narrows it further — which is how a search that found too much is salvaged
     /// without running it again.
     SearchResults,
+    /// The names a live interpreter is holding, to pick one to look inside.
+    Variables,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds

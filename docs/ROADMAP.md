@@ -781,7 +781,30 @@ decideva la cadenza dell'hook), quindi vuole la strada di `_pyrepl` o quella di 
 qui perché è esattamente il tipo di differenza fra i due linguaggi che l'handoff dice di non
 appiattire.
 
-*Ordine di costruzione* (dall'handoff), resta: ispettore di variabili come tab. Il debugger è un livello a
+**Passo 10 fatto**: l'**ispettore di variabili**, `Ctrl+Shift+I`. Offre i nomi che la sessione
+tiene e apre quello scelto: i valori, uno schermo alla volta, con righe e colonne numerate.
+
+*Il giro di andata e ritorno che l'handoff descrive, ma senza toccare il prompt.* Lo snapshot
+dice cosa una variabile *è*; non può dire cosa *contiene*, perché una matrice 2000x2000 sono
+quattro milioni di numeri che nessuno vuole su disco dieci volte al secondo. Quindi lo schermo si
+chiede — e la prima versione lo chiedeva **digitando al prompt**, che è esattamente ciò che il
+principio numero uno di questo progetto dice di non fare.
+
+*E il bug l'ha detto prima ancora del principio.* Scritture **identiche byte per byte** allo
+stesso terminale venivano eseguite la seconda volta e ignorate la prima, con qualsiasi attesa in
+mezzo e da qualsiasi percorso di codice — verificato registrando i byte davvero scritti sul pty.
+Invece di continuare a inseguirlo ho cambiato canale: CleeCode scrive un file di *richiesta*,
+l'hook che gira già a ogni momento di inattività la legge e risponde. Niente prompt, niente riga
+nella trascrizione dell'utente, e niente da azzeccare con un line editor. Al primo colpo, sempre.
+
+*Quello che ancora non fa:* modificare le celle. La direzione di scrittura è una riga —
+`a(3,4) = 7;` — ma è una riga che **cambia i dati dell'utente**, e vuole una modalità di
+inserimento con un cursore nella griglia. Le operazioni che leggono hanno rischio zero, quelle
+che scrivono no: è la stessa riga tracciata nella 0.6 per il pannello Git, e vale ancora.
+
+**Con questo l'ordine di costruzione dell'handoff è finito.** Restava il debugger, che l'handoff
+stesso mette come livello a sé — breakpoint nel gutter, stack navigabile, il workspace del frame
+nel pannello — sugli stessi canali che adesso ci sono tutti. Il debugger è un livello a
 sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i

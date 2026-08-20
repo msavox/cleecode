@@ -142,6 +142,58 @@ pub fn ordered(vars: &[Var]) -> Vec<&Var> {
     out
 }
 
+/// A rectangle of one variable's values, asked for and answered through a file.
+///
+/// The snapshot says what a variable *is*; this says what it *contains*. They are separate
+/// because a 2000x2000 matrix is four million numbers and nobody wants those written to disk ten
+/// times a second on the chance that somebody looks.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Slice {
+    pub name: String,
+    /// Why there is nothing to show: undefined now, or a kind of value with no grid in it.
+    #[serde(default)]
+    pub error: String,
+    /// The whole variable's shape, not the rectangle's — it is what the paging is against.
+    #[serde(default)]
+    pub rows: usize,
+    #[serde(default)]
+    pub cols: usize,
+    /// One-based corner of the rectangle that was actually sent, which may not be the one asked
+    /// for: the interpreter clamps, because the variable can have been reassigned since the last
+    /// snapshot said how big it was.
+    #[serde(default)]
+    pub r0: usize,
+    #[serde(default)]
+    pub c0: usize,
+    /// Numbers, or lines of text. Which one is said by `text` — a char array read as a grid of
+    /// character codes is what it looks like and not what it means.
+    #[serde(default)]
+    pub text: bool,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+impl Slice {
+    pub fn parse(text: &str) -> Option<Slice> {
+        serde_json::from_str(text).ok()
+    }
+
+    /// The numbers, row by row. Empty for a text variable or an error.
+    pub fn grid(&self) -> Vec<Vec<f64>> {
+        let Some(rows) = self.data.as_array() else { return Vec::new() };
+        rows.iter()
+            .filter_map(|row| row.as_array())
+            .map(|row| row.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect())
+            .collect()
+    }
+
+    /// The lines, for a text variable.
+    pub fn lines(&self) -> Vec<String> {
+        let Some(rows) = self.data.as_array() else { return Vec::new() };
+        rows.iter().filter_map(|v| v.as_str()).map(str::to_string).collect()
+    }
+}
+
 /// A snapshot file being watched, and what was last read from it.
 pub struct Watch {
     pub path: PathBuf,
@@ -174,6 +226,37 @@ impl Watch {
             }
             // A half-written file should be impossible — the producers write to a temp file and
             // rename — but a corrupt one must not throw away the last good reading.
+            None => false,
+        }
+    }
+}
+
+/// A file watched for one variable's values, in the same way and for the same reasons.
+pub struct SliceWatch {
+    pub path: PathBuf,
+    seen: Option<std::time::SystemTime>,
+    pub slice: Option<Slice>,
+}
+
+impl SliceWatch {
+    pub fn new(path: PathBuf) -> SliceWatch {
+        SliceWatch { path, seen: None, slice: None }
+    }
+
+    pub fn poll(&mut self) -> bool {
+        let Ok(modified) = std::fs::metadata(&self.path).and_then(|m| m.modified()) else {
+            return false;
+        };
+        if self.seen == Some(modified) {
+            return false;
+        }
+        self.seen = Some(modified);
+        let Ok(text) = std::fs::read_to_string(&self.path) else { return false };
+        match Slice::parse(&text) {
+            Some(slice) => {
+                self.slice = Some(slice);
+                true
+            }
             None => false,
         }
     }
@@ -225,6 +308,18 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
     vec![
         ("CLEECODE_OCTAVE_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_FIGS".to_string(), figures.to_string_lossy().into_owned()),
+        (
+            "CLEECODE_OCTAVE_SLICE".to_string(),
+            dir.join(format!("slice-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
+        // Where CleeCode leaves the question. Asking through a file rather than by typing at
+        // the prompt keeps the user's transcript theirs — the rule this whole design started
+        // from — and means the answer does not depend on catching a line editor at the right
+        // moment.
+        (
+            "CLEECODE_OCTAVE_SLICE_REQ".to_string(),
+            dir.join(format!("slicereq-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
         ("CLEECODE_PY_FIGS".to_string(), figures.to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_LIB".to_string(), lib_octave.to_string_lossy().into_owned()),
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
@@ -302,6 +397,37 @@ mod tests {
     fn a_session_that_never_plotted_has_no_figures_rather_than_failing_to_parse() {
         let snap = Snapshot::parse(SAMPLE).unwrap();
         assert!(snap.figures.is_empty());
+    }
+
+    /// Quoted from what the helper actually wrote, against a real Octave.
+    #[test]
+    fn a_slice_of_a_matrix_arrives_as_numbers() {
+        let text = r#"{"name":"A","error":"","rows":6,"cols":6,"r0":1,"c0":1,
+                       "data":[[35,1,6,26],[3,32,7,21],[31,9,2,22]],"text":false}"#;
+        let slice = Slice::parse(text).unwrap();
+        assert_eq!((slice.rows, slice.cols, slice.r0), (6, 6, 1));
+        assert_eq!(slice.grid()[0], vec![35.0, 1.0, 6.0, 26.0]);
+        assert!(slice.lines().is_empty());
+    }
+
+    #[test]
+    fn a_char_array_arrives_as_text_rather_than_as_character_codes() {
+        let text = r#"{"name":"s","rows":1,"cols":9,"data":["due righe"],"text":true}"#;
+        let slice = Slice::parse(text).unwrap();
+        assert!(slice.text);
+        assert_eq!(slice.lines(), vec!["due righe"]);
+        assert!(slice.grid().is_empty());
+    }
+
+    /// A variable that has been cleared, or one there is no grid for, comes back saying so
+    /// rather than coming back empty and leaving the panel to invent a reason.
+    #[test]
+    fn something_with_no_grid_says_why() {
+        let gone = Slice::parse(r#"{"name":"x","error":"'x' undefined","rows":0,"cols":0}"#).unwrap();
+        assert!(gone.error.contains("undefined"));
+        assert!(gone.grid().is_empty());
+        let cell = Slice::parse(r#"{"name":"c","error":"c is a cell"}"#).unwrap();
+        assert!(cell.error.contains("cell"));
     }
 
     #[test]

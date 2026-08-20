@@ -471,6 +471,18 @@ impl TerminalPanel {
     /// queued as raw typing, so a carriage return is swallowed and two lines land as one —
     /// `clearclaude`. Waiting for the prompt is the only reliable answer, so the command sits
     /// here until `flush_pending`.
+    /// Types one line at this shell's prompt, now.
+    ///
+    /// Onto an empty line, always: whatever the line editor was holding is cleared first. That
+    /// is not a precaution, it is the fix for a bug this file already carries a note about —
+    /// a command written onto a line that was not empty arrives glued to what was there, and
+    /// `clear` plus `claude` once became `clearclaude`. Anything CleeCode types at a prompt goes
+    /// through here for that reason.
+    pub fn type_line(&mut self, command: &str) {
+        let bytes = typed_line(command);
+        self.write_input(&bytes);
+    }
+
     pub fn run_command(&mut self, command: &str) {
         self.pending_command = Some(command.to_string());
     }
