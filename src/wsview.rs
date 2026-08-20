@@ -24,13 +24,13 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 pub fn watch(dir: &Path) -> std::io::Result<()> {
     let mut current: Option<Watch> = None;
     let mut shown: Option<(std::path::PathBuf, u64)> = None;
-    let mut last_cols = 0u16;
+    let mut last_size = (0u16, 0u16);
     loop {
-        let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80);
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         // A resized pane has to redraw even when nothing new arrived, or the table stays cut to
         // the width it had when it was written.
-        let resized = cols != last_cols;
-        last_cols = cols;
+        let resized = (cols, rows) != last_size;
+        last_size = (cols, rows);
 
         // Whichever session last ran something. Following it rather than being wired to one
         // pane is what lets a single window serve two prompts.
@@ -52,7 +52,7 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
             // Home and clear-to-end rather than a full clear: the pane does not flash, and what
             // was there is overwritten row by row as the new table is written over it.
             write!(out, "\x1b[H\x1b[J")?;
-            for line in render(snapshot, cols) {
+            for line in render(snapshot, cols, rows) {
                 writeln!(out, "{line}\r")?;
             }
             out.flush()?;
@@ -63,7 +63,7 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
 
 /// The table, as coloured lines. Pure, so what it decides at a given width is testable without
 /// a terminal to look at.
-pub fn render(snapshot: Option<&Snapshot>, cols: u16) -> Vec<String> {
+pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> {
     let dim = "\x1b[90m";
     let off = "\x1b[0m";
     let head = "\x1b[1m";
@@ -100,7 +100,34 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16) -> Vec<String> {
     for var in ordered(&snapshot.vars) {
         lines.push(layout.row(var));
     }
+    lines.extend(history(snapshot, cols, rows, lines.len(), dim, off, head));
     lines
+}
+
+/// The last few commands, under the variables, in whatever rows are left.
+///
+/// Free to produce — the Octave hook already reads the history to decide whether anything
+/// happened — and it goes here rather than in a window of its own because it answers the
+/// question the variables raise: *what did I do to get this*. Dropped entirely when the pane is
+/// short, since a table of variables cut in half to make room for it would be a poor trade.
+fn history(
+    snapshot: &Snapshot,
+    cols: u16,
+    rows: u16,
+    used: usize,
+    dim: &str,
+    off: &str,
+    head: &str,
+) -> Vec<String> {
+    let room = (rows as usize).saturating_sub(used + 3);
+    if snapshot.history.is_empty() || room < 2 {
+        return Vec::new();
+    }
+    let mut out = vec![String::new(), format!("{head}Recent{off}")];
+    for command in snapshot.history.iter().rev().take(room).collect::<Vec<_>>().into_iter().rev() {
+        out.push(format!("{dim}{}{off}", clip(command, cols as usize)));
+    }
+    out
 }
 
 fn title(snapshot: &Snapshot, cols: u16, dim: &str, off: &str) -> String {
@@ -299,7 +326,7 @@ mod tests {
 
     #[test]
     fn with_no_session_it_says_so_rather_than_showing_an_empty_table() {
-        let lines = plain(&render(None, 80));
+        let lines = plain(&render(None, 80, 24));
         assert!(lines[0].contains("Waiting"), "{lines:?}");
         // And says the thing that is least obvious about it: nothing is typed at the prompt.
         assert!(lines.iter().any(|l| l.contains("Nothing is typed")), "{lines:?}");
@@ -308,14 +335,14 @@ mod tests {
     #[test]
     fn an_empty_workspace_is_not_the_same_as_no_session() {
         let snap = Snapshot { lang: "octave".to_string(), ..Snapshot::default() };
-        let lines = plain(&render(Some(&snap), 80));
+        let lines = plain(&render(Some(&snap), 80, 24));
         assert!(lines[0].contains("octave"), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("empty")), "{lines:?}");
     }
 
     #[test]
     fn the_table_lists_the_variables_by_name() {
-        let lines = plain(&render(Some(&sample()), 100));
+        let lines = plain(&render(Some(&sample()), 100, 24));
         assert!(lines[0].contains("octave") && lines[0].contains("2 variables"), "{lines:?}");
         let rows: Vec<&String> = lines.iter().filter(|l| l.starts_with("alpha") || l.starts_with("gamma")).collect();
         assert_eq!(rows.len(), 2);
@@ -327,20 +354,20 @@ mod tests {
     /// dropped rather than squeezed — three readable ones beat six unreadable ones.
     #[test]
     fn narrow_panes_drop_columns_instead_of_squeezing_them() {
-        let wide = plain(&render(Some(&sample()), 120));
+        let wide = plain(&render(Some(&sample()), 120, 24));
         assert!(wide[2].contains("Min") && wide[2].contains("Value"), "{:?}", wide[2]);
 
-        let middling = plain(&render(Some(&sample()), 46));
+        let middling = plain(&render(Some(&sample()), 46, 24));
         assert!(middling[2].contains("Class"), "{:?}", middling[2]);
         assert!(!middling[2].contains("Min"), "the statistics go first: {:?}", middling[2]);
 
-        let narrow = plain(&render(Some(&sample()), 16));
+        let narrow = plain(&render(Some(&sample()), 16, 24));
         assert!(narrow[2].contains("Name") && narrow[2].contains("Size"), "{:?}", narrow[2]);
         assert!(!narrow[2].contains("Class"), "{:?}", narrow[2]);
 
         // Whatever survives at a given width still survives at every wider one: columns come
         // back in the order they went, never in a different one.
-        let header = |cols| plain(&render(Some(&sample()), cols))[2].clone();
+        let header = |cols| plain(&render(Some(&sample()), cols, 24))[2].clone();
         for (narrower, wider) in [(16u16, 46u16), (46, 60), (60, 120)] {
             for column in ["Name", "Size", "Class", "Min", "Value"] {
                 if header(narrower).contains(column) {
@@ -358,7 +385,7 @@ mod tests {
         snap.vars.push(var("a_really_long_variable_name_here", "containers.Map", &[1000, 2000], 16_000_000));
         snap.vars[2].preview = "a very long preview that would run off the end of any pane".to_string();
         for cols in [20u16, 30, 46, 60, 100, 200] {
-            for line in plain(&render(Some(&snap), cols)) {
+            for line in plain(&render(Some(&snap), cols, 24)) {
                 assert!(
                     line.chars().count() <= cols as usize,
                     "{} chars at {cols} columns: {line:?}",
@@ -366,6 +393,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Free to produce and worth showing: the variables say what you have, and this says what
+    /// you did to get it.
+    #[test]
+    fn recent_commands_go_under_the_variables_when_there_is_room() {
+        let mut snap = sample();
+        snap.history = vec!["a = 1;".into(), "b = magic(4);".into()];
+        let tall = plain(&render(Some(&snap), 80, 24));
+        assert!(tall.iter().any(|l| l == "Recent"), "{tall:?}");
+        // Newest last, the way a transcript reads.
+        let first = tall.iter().position(|l| l.contains("a = 1;")).unwrap();
+        let then = tall.iter().position(|l| l.contains("magic")).unwrap();
+        assert!(first < then, "{tall:?}");
+
+        // A short pane keeps the variables whole rather than halving them to make room.
+        let short = plain(&render(Some(&snap), 80, 8));
+        assert!(!short.iter().any(|l| l == "Recent"), "{short:?}");
+        assert!(short.iter().any(|l| l.starts_with("alpha")), "the table survives: {short:?}");
+    }
+
+    #[test]
+    fn a_session_with_no_history_shows_no_heading_for_it() {
+        let tall = plain(&render(Some(&sample()), 80, 24));
+        assert!(!tall.iter().any(|l| l == "Recent"), "{tall:?}");
     }
 
     #[test]
@@ -381,7 +433,7 @@ mod tests {
     fn nans_are_reported_where_they_can_be_seen() {
         let mut snap = sample();
         snap.vars[0].nans = 3;
-        let lines = plain(&render(Some(&snap), 120));
+        let lines = plain(&render(Some(&snap), 120, 24));
         assert!(lines.iter().any(|l| l.starts_with("gamma") && l.contains("3 NaN")), "{lines:?}");
     }
 

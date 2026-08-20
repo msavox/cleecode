@@ -1712,6 +1712,12 @@ impl App {
             // Not `f`, which fits a page: there is no page here, and "back to how it was drawn"
             // is the thing a plot actually wants.
             KeyCode::Char('r') | KeyCode::Char('0') => Nav::Reset,
+            // Out of the editor and into a document. Handled here rather than as a nav, because
+            // it is the one figure key that produces something rather than changing something.
+            KeyCode::Char('e') => {
+                self.export_figure(&figure, language);
+                return true;
+            }
             _ => return false,
         };
         let command = language.nav_command(nav, figure.fig, is3d, view);
@@ -1723,6 +1729,22 @@ impl App {
             None => i18n::msg_figure_no_session(lang, language.label()),
         };
         true
+    }
+
+    /// Writes a figure out as a PDF beside the project, and says where it went.
+    ///
+    /// Asked of the session rather than converted from the PNG on screen: the interpreter still
+    /// has the figure, so it can draw it at any size, and a PDF made from a bitmap would be a
+    /// bitmap in a wrapper.
+    fn export_figure(&mut self, figure: &crate::wsnap::Figure, language: crate::session::Language) {
+        let lang = self.settings.lang;
+        let file = self.root.join(format!("fig{}.pdf", figure.fig));
+        let command = language.export_command(figure.fig, &file.to_string_lossy());
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.status_message = match self.send_to_session(language, &command) {
+            Some(_) => i18n::msg_figure_exported(lang, &name),
+            None => i18n::msg_figure_no_session(lang, language.label()),
+        };
     }
 
     /// Adds a figure as a preview tab in the pane that is not being typed in, without taking the
