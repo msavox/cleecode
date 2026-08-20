@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod app_install;
 mod clipboard;
 mod complete;
@@ -22,6 +23,8 @@ mod settings;
 mod terminal_panel;
 mod ui;
 mod workspace;
+mod wsnap;
+mod wsview;
 
 use anyhow::Result;
 use app::App;
@@ -158,6 +161,25 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--install-app") {
         app_install::install();
+        return Ok(());
+    }
+    // The workspace viewer, which CleeCode's own presets start in a terminal window. Not
+    // documented as something to type: it is the other end of `clee -w octave`, and it needs a
+    // directory only CleeCode knows. Handled here, before the editor is built, because it is a
+    // different program that happens to live in the same binary — no alternate screen, no raw
+    // mode, no editor.
+    if let Some(i) = args.iter().position(|a| a == "--watch-workspace") {
+        let dir = match args.get(i + 1) {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => wsnap::snapshot_dir(),
+        };
+        // Ends with Ctrl+C like any other program printing to a terminal, and a broken pipe —
+        // the pane closed — is an ending rather than an error.
+        if let Err(e) = wsview::watch(&dir)
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("clee --watch-workspace: {e}");
+        }
         return Ok(());
     }
     let resume = args.iter().any(|a| a == "--resume");

@@ -108,6 +108,11 @@ function write_snapshot (out, seq, now, w)
   ## Built field by field: struct() would read the cell array as a request for
   ## a struct array of that shape.
   doc.v = 1;
+  ## Which interpreter wrote this. The reader is one piece of code for both languages and the
+  ## field is how it knows whose workspace it is looking at; without it the view can only call
+  ## it "workspace". (The shared handoff claimed both sides already emitted this. Octave did
+  ## not.)
+  doc.lang = "octave";
   doc.seq = seq;
   doc.time = now;
   doc.pid = getpid ();
