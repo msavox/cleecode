@@ -759,8 +759,29 @@ li darebbe, ma va valutato nell'interprete, e valutare qualcosa per ogni prefiss
 dire un canale di richiesta e risposta che oggi non c'è — lo snapshot va in una direzione sola.
 Le funzioni dei file aperti le dà già la sorgente delle parole del buffer.
 
-*Ordine di costruzione* (dall'handoff), il resto ancora da fare: ispettore di variabili come tab,
-pannello history, export delle figure. Il debugger è un livello a
+**Passi 8 e 9 fatti**: **export delle figure** (`e` su una tab-figura scrive un PDF nella cartella
+del progetto) e **history** sotto le variabili nella finestra workspace.
+
+L'export lo chiede alla sessione, non converte il PNG a schermo: l'interprete ha ancora la
+figura e la può disegnare a qualsiasi dimensione, mentre un PDF fatto da una bitmap è una bitmap
+in una busta. PDF perché un grafico esce dall'editor per entrare in un documento, e lì lo vuole
+vettoriale; il PNG per chi vuole i pixel è già su disco.
+
+La history era "quasi gratis" come diceva l'handoff — l'hook Octave legge già `history()` per il
+rilevamento delle modifiche — **ma sarebbe stata inutile senza una cosa in più**: conterrebbe
+anche i comandi che CleeCode inietta, e un elenco di comandi recenti pieno di
+`figure(1); zoom(2);` è l'elenco di quello che ha fatto CleeCode, che nessuno ha chiesto di
+vedere. Adesso ogni comando che CleeCode digita finisce con un commento che lo marca. Due lavori
+con una riga: nella trascrizione dice *chi* ha scritto quella riga, e nella history è ciò che
+permette di escluderla. Marcato con un commento e non con una convenzione sulla forma, così chi
+scrive `figure(2)` di suo non viene mai scambiato per noi.
+
+Python non ha ancora la history: sotto PyREPL `readline` restituisce 0 (misurato quando si
+decideva la cadenza dell'hook), quindi vuole la strada di `_pyrepl` o quella di IPython. Detto
+qui perché è esattamente il tipo di differenza fra i due linguaggi che l'handoff dice di non
+appiattire.
+
+*Ordine di costruzione* (dall'handoff), resta: ispettore di variabili come tab. Il debugger è un livello a
 sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i

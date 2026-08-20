@@ -723,6 +723,15 @@ pub fn msg_figure_nav(lang: Lang, nav: crate::session::Nav, is3d: bool) -> Strin
     }
 }
 
+/// Says the name rather than the whole path: the file lands beside the project, which is where
+/// you were going to look for it anyway.
+pub fn msg_figure_exported(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Written to {name}, in the project folder"),
+        Lang::It => format!("Scritto in {name}, nella cartella del progetto"),
+    }
+}
+
 pub fn msg_figure_no_session(lang: Lang, language: &str) -> String {
     match lang {
         Lang::En => format!("The {language} session that drew this is gone — the picture stays"),

@@ -75,6 +75,10 @@ pub struct Snapshot {
     /// that has never plotted, and from the Octave prototype before figures were wired up.
     #[serde(default)]
     pub figures: Vec<Figure>,
+    /// The last few commands the user typed, newest last, with CleeCode's own injections
+    /// already left out by the producer — it is the side that knows which were its.
+    #[serde(default)]
+    pub history: Vec<String>,
 }
 
 /// One figure, printed and described.

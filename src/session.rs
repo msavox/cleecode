@@ -63,11 +63,11 @@ impl Language {
     /// A temp file has neither problem, and it is one line at the prompt whatever it contains.
     pub fn run_file(self, path: &str) -> String {
         match self {
-            Language::Octave => format!("run({})", self.quote(path)),
+            Language::Octave => format!("run({}){}", self.quote(path), self.marker()),
             // `exec` rather than `runpy` or an import: it runs in the prompt's own namespace, so
             // what the snippet defines is there afterwards — which is the entire point of
             // sending it to a live session instead of starting a new one.
-            Language::Python => format!("exec(open({}).read())", self.quote(path)),
+            Language::Python => format!("exec(open({}).read()){}", self.quote(path), self.marker()),
         }
     }
 
@@ -81,6 +81,22 @@ impl Language {
             Language::Python => {
                 format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
             }
+        }
+    }
+
+    /// The comment CleeCode leaves on the end of a command it typed itself.
+    ///
+    /// Two jobs, and both matter. In the transcript it says who did this — a line the user did
+    /// not type appearing at their prompt should say so. And in the history it is what tells the
+    /// panel to leave it out: a list of recent commands full of `figure(1); zoom(2);` is a list
+    /// of what CleeCode did, which nobody asked to see.
+    ///
+    /// A comment rather than a convention about shape, so a user typing `figure(2)` themselves
+    /// is never mistaken for us.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Language::Octave => "  %cleecode",
+            Language::Python => "  # cleecode",
         }
     }
 
@@ -146,7 +162,7 @@ impl Language {
                     (Nav::Up, true) => format!("view({}, {});", view.0, (view.1 + 15.0).min(90.0)),
                     (Nav::Down, true) => format!("view({}, {});", view.0, (view.1 - 15.0).max(-90.0)),
                 };
-                format!("{select}{body}")
+                format!("{select}{body}{}", self.marker())
             }
             Language::Python => {
                 let select = format!(
@@ -169,8 +185,32 @@ impl Language {
                 // The names are underscore-prefixed for the same reason the startup file's are:
                 // they land in the user's own namespace and would otherwise show up as variables
                 // in their workspace panel.
-                format!("{select}{body}; _f.canvas.draw_idle()")
+                format!("{select}{body}; _f.canvas.draw_idle(){}", self.marker())
             }
+        }
+    }
+}
+
+impl Language {
+    /// What to say at the prompt to write figure `number` out as a file.
+    ///
+    /// PDF, because a plot leaves an editor to go into a document, and there it wants to be
+    /// vector: a PNG of a plot is the right size exactly once. The PNG the tab is showing is
+    /// already on disk for anyone who wants pixels.
+    pub fn export_command(self, number: i64, path: &str) -> String {
+        match self {
+            Language::Octave => {
+                format!(
+                    "figure({number}); print(figure({number}), '-dpdf', {});{}",
+                    self.quote(path),
+                    self.marker()
+                )
+            }
+            Language::Python => format!(
+                "import matplotlib.pyplot as _plt; _plt.figure({number}).savefig({}){}",
+                self.quote(path),
+                self.marker()
+            ),
         }
     }
 }
@@ -256,11 +296,21 @@ mod tests {
 
     #[test]
     fn each_language_is_told_to_run_a_file_in_its_own_words() {
-        assert_eq!(Language::Octave.run_file("/tmp/cell.m"), "run('/tmp/cell.m')");
-        assert_eq!(
-            Language::Python.run_file("/tmp/cell.py"),
-            "exec(open(\"/tmp/cell.py\").read())"
-        );
+        assert!(Language::Octave.run_file("/tmp/cell.m").starts_with("run('/tmp/cell.m')"));
+        assert!(Language::Python
+            .run_file("/tmp/cell.py")
+            .starts_with("exec(open(\"/tmp/cell.py\").read())"));
+        // Everything CleeCode types carries its mark, so the transcript says who did it and the
+        // history panel can leave it out.
+        for language in [Language::Octave, Language::Python] {
+            for command in [
+                language.run_file("/tmp/x"),
+                language.nav_command(Nav::In, 1, false, (0.0, 90.0)),
+                language.export_command(1, "/tmp/x.pdf"),
+            ] {
+                assert!(command.ends_with(language.marker()), "unmarked: {command}");
+            }
+        }
     }
 
     /// A path with a quote in it is rare and a path with a backslash is not, and either one
@@ -278,8 +328,8 @@ mod tests {
     #[test]
     fn moving_around_a_figure_is_said_in_the_language_of_the_session() {
         let octave = Language::Octave;
-        assert_eq!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)), "figure(1); zoom(2);");
-        assert_eq!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)), "figure(3); zoom(0.5);");
+        assert!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)).starts_with("figure(1); zoom(2);"));
+        assert!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)).starts_with("figure(3); zoom(0.5);"));
         assert!(octave.nav_command(Nav::Right, 1, false, (0.0, 90.0)).contains("xlim(xl + 0.25"));
         assert!(octave.nav_command(Nav::Down, 1, false, (0.0, 90.0)).contains("ylim(yl - 0.25"));
         // Every figure is named before it is acted on, or the command lands on whichever one
@@ -294,12 +344,12 @@ mod tests {
     #[test]
     fn arrows_rotate_a_surface_instead_of_panning_it() {
         let octave = Language::Octave;
-        assert_eq!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)), "figure(2); view(60, 30);");
-        assert_eq!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)), "figure(2); view(30, 30);");
+        assert!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)).starts_with("figure(2); view(60, 30);"));
+        assert!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)).starts_with("figure(2); view(30, 30);"));
         // Elevation stops at the poles rather than turning the surface inside out.
         assert!(octave.nav_command(Nav::Up, 2, true, (45.0, 85.0)).contains("view(45, 90)"));
         assert!(octave.nav_command(Nav::Down, 2, true, (45.0, -85.0)).contains("view(45, -90)"));
-        assert_eq!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)), "figure(2); view(-37.5, 30);");
+        assert!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)).starts_with("figure(2); view(-37.5, 30);"));
     }
 
     #[test]
@@ -314,6 +364,17 @@ mod tests {
         }
         assert!(!zoom.contains(" plt") && !zoom.contains("= f "), "{zoom}");
         assert!(python.nav_command(Nav::Right, 1, true, (45.0, 30.0)).contains("view_init(30, 60)"));
+    }
+
+    #[test]
+    fn a_figure_leaves_as_a_vector_file() {
+        assert!(Language::Octave
+            .export_command(1, "/proj/fig1.pdf")
+            .starts_with("figure(1); print(figure(1), '-dpdf', '/proj/fig1.pdf');"));
+        let python = Language::Python.export_command(2, "/proj/fig2.pdf");
+        assert!(python.contains("figure(2).savefig(\"/proj/fig2.pdf\")"), "{python}");
+        // A path with a quote in it still parses at the prompt it is going to.
+        assert!(Language::Octave.export_command(1, "/it's/fig.pdf").contains("'/it''s/fig.pdf'"));
     }
 
     #[test]

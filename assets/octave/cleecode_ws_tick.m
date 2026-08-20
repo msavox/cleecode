@@ -50,13 +50,37 @@ function cleecode_ws_tick (out)
     ## Figures are printed here rather than on every tick, because here *is* the command
     ## boundary: the fingerprint above only differs when something ran.
     figs = cleecode_figs (getenv ("CLEECODE_OCTAVE_FIGS"));
-    write_snapshot (out, seq, now, w, figs);
+    write_snapshot (out, seq, now, w, figs, recent (h));
   catch
     ## Deliberately silent.
   end_try_catch
 endfunction
 
-function write_snapshot (out, seq, now, w, figs)
+function out = recent (h)
+  ## The last few things the user typed, newest last, with CleeCode's own injections left
+  ## out. Everything this program types at the prompt ends in a marker comment for exactly
+  ## this: a list of recent commands full of `figure(1); zoom(2);` is a list of what
+  ## CleeCode did, which nobody asked to see. Matched on the comment rather than on the
+  ## shape of the command, so somebody typing `figure(2)` themselves is never mistaken
+  ## for us.
+  out = {};
+  if (isempty (h))
+    return;
+  endif
+  for k = numel (h):-1:1
+    line = strtrim (h{k});
+    if (isempty (line) || ! isempty (strfind (line, "%cleecode")))
+      continue;
+    endif
+    out{end+1} = line;
+    if (numel (out) >= 12)
+      break;
+    endif
+  endfor
+  out = fliplr (out);          # newest last, the way a transcript reads
+endfunction
+
+function write_snapshot (out, seq, now, w, figs, history)
   ## Elements above which min/max/mean are skipped rather than paid for ten
   ## times a second. A 2000x2000 matrix is 4e6 elements; scanning it at every
   ## prompt would be visible.
@@ -122,6 +146,7 @@ function write_snapshot (out, seq, now, w, figs)
   doc.cwd = pwd ();
   doc.vars = vars;
   doc.figures = figs;
+  doc.history = history;
 
   ## Write beside the target and rename, so a reader never sees half a file.
   tmp = sprintf ("%s.%d.tmp", out, getpid ());
