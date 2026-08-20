@@ -753,6 +753,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.git_panel.is_some() {
         draw_git_panel(f, app, f.area());
     }
+    if app.inspector.is_some() {
+        draw_inspector(f, app, f.area());
+    }
     if app.show_new_entry {
         draw_new_entry_modal(f, app, f.area());
     }
@@ -1191,6 +1194,76 @@ pub fn git_tab_at(lang: i18n::Lang, header: Rect, col: u16) -> Option<crate::app
         let x = header.x + slot.x;
         (col >= x && col < x + slot.width && x + slot.width <= header.right()).then_some(slot.tab)
     })
+}
+
+/// One variable, a screenful at a time.
+///
+/// Read-only, and the numbers came from the session rather than from anything CleeCode worked
+/// out: what is on screen is what the interpreter says it holds, at the moment it was asked.
+fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
+    let Some(inspector) = app.inspector.as_ref() else { return };
+    let lang = app.settings.lang;
+    let rect = git_panel_rect(full);
+    f.render_widget(Clear, rect);
+    let slice = inspector.watch.slice.as_ref().filter(|s| s.name == inspector.name);
+    let title = match slice {
+        Some(s) if s.rows > 0 => format!(
+            " {}  {}x{}  ({},{}) ",
+            inspector.name, s.rows, s.cols, s.r0.max(1), s.c0.max(1)
+        ),
+        _ => format!(" {} ", inspector.name),
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.height < 2 {
+        return;
+    }
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = Vec::new();
+    match slice {
+        None => lines.push(Line::from(Span::styled(i18n::msg_inspect_waiting(lang), dim))),
+        Some(slice) if !slice.error.is_empty() => {
+            lines.push(Line::from(Span::styled(slice.error.clone(), Style::default().fg(Color::Red))));
+        }
+        Some(slice) if slice.text => {
+            for line in slice.lines() {
+                lines.push(Line::from(Span::raw(line)));
+            }
+        }
+        Some(slice) => {
+            let grid = slice.grid();
+            let width = inner.width as usize;
+            // The row number takes the left edge, so a screenful of a big matrix still says
+            // which part of it you are looking at.
+            let gutter = format!("{}", slice.r0 + grid.len()).len().max(3) + 1;
+            let cell = 11usize;
+            let per_row = ((width.saturating_sub(gutter)) / cell).max(1);
+            let mut header = format!("{:>w$}", "", w = gutter);
+            for c in 0..per_row.min(slice.cols.saturating_sub(slice.c0.saturating_sub(1))) {
+                header.push_str(&format!("{:>cell$}", slice.c0.max(1) + c, cell = cell));
+            }
+            lines.push(Line::from(Span::styled(header, dim)));
+            for (r, row) in grid.iter().enumerate() {
+                let mut text = format!("{:>w$}", slice.r0.max(1) + r, w = gutter);
+                for value in row.iter().take(per_row) {
+                    text.push_str(&format!("{:>cell$}", crate::wsview::cell_number(*value), cell = cell));
+                }
+                lines.push(Line::from(Span::raw(text)));
+            }
+        }
+    }
+    let body = Rect { height: inner.height.saturating_sub(1), ..inner };
+    f.render_widget(Paragraph::new(lines), body);
+    let hint = Rect { y: inner.y + inner.height - 1, height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(i18n::msg_inspect_hint(lang), dim))),
+        hint,
+    );
 }
 
 fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {

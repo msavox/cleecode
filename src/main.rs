@@ -504,6 +504,7 @@ fn run(
             app.poll_git_panel();
             app.poll_lsp();
             app.poll_figures();
+            app.poll_inspector();
         }));
         if let Err(text) = polled {
             app.status_message = i18n::msg_internal_error(app.settings.lang, &text);

@@ -362,6 +362,9 @@ pub struct App {
     /// reads the same file for variables. Two readers of one file, which is why the producers
     /// write by rename — neither can ever see half of one.
     figures: Option<crate::wsnap::Watch>,
+    /// The variable inspector, when it is open: which name, where in it we are looking, and the
+    /// file the session writes its answer to.
+    pub inspector: Option<Inspector>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -953,6 +956,23 @@ pub struct LayoutPreset {
 /// editor: two panes of thirty columns each are two panes nobody can read.
 const SPLIT_FOR_FIGURES_COLS: u16 = 120;
 
+/// One variable, being looked at a screenful at a time.
+///
+/// The values are not in the snapshot — a large matrix is millions of numbers — so each
+/// screenful is asked for and answered through a file. Paging types a new question at the
+/// prompt; the answer arrives the way everything else from a session does.
+pub struct Inspector {
+    pub name: String,
+    /// Zero-based corner of what is being looked at. The interpreter clamps it, and what comes
+    /// back says where it actually landed.
+    pub row: usize,
+    pub col: usize,
+    pub watch: crate::wsnap::SliceWatch,
+    /// Set while an answer is expected, so the panel can say it is waiting rather than showing
+    /// the previous variable's numbers under the new one's name.
+    pub asked: bool,
+}
+
 pub const PRESET_CLASSIC: LayoutPreset = LayoutPreset {
     show_sidebar: true,
     show_terminal: true,
@@ -1079,6 +1099,25 @@ fn is_ctrl_shift(key: KeyEvent, letter: char) -> bool {
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&letter))
 }
 
+/// How much of a variable is asked for at a time. A screenful and a little, so paging by a
+/// screen never leaves a gap, and small enough that the question is cheap to answer.
+const INSPECT_ROWS: usize = 40;
+const INSPECT_COLS: usize = 24;
+
+/// The slice file that belongs beside a pane's snapshot: `ws-3.json` and `slice-3.json` are the
+/// same session's two channels.
+fn request_path_beside(slice: &Path) -> PathBuf {
+    let name = slice.file_name().and_then(|n| n.to_str()).unwrap_or("slice-0.json");
+    let suffix = name.strip_prefix("slice-").unwrap_or("0.json");
+    slice.with_file_name(format!("slicereq-{suffix}"))
+}
+
+fn slice_path_beside(snapshot: &Path) -> PathBuf {
+    let name = snapshot.file_name().and_then(|n| n.to_str()).unwrap_or("ws-0.json");
+    let suffix = name.strip_prefix("ws-").unwrap_or("0.json");
+    snapshot.with_file_name(format!("slice-{suffix}"))
+}
+
 fn cell_at(inner: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
     if inner.width == 0 || inner.height == 0 {
         return None;
@@ -1174,6 +1213,7 @@ impl App {
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
             figures: None,
+            inspector: None,
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -1584,6 +1624,128 @@ impl App {
             self.search_tx.clone(),
             self.search_pending.clone(),
         );
+    }
+
+    // ---- Looking inside a variable ----------------------------------------------------------
+
+    /// Offers the session's variables, and opens the one picked.
+    ///
+    /// A picker rather than a key on the workspace window, because that window is a separate
+    /// program with no keyboard of its own — and because the names are already known here.
+    fn open_inspector_picker(&mut self) {
+        let lang = self.settings.lang;
+        let names = self.session_names();
+        if names.is_empty() {
+            self.status_message = i18n::msg_inspect_no_session(lang);
+            return;
+        }
+        let items = names
+            .into_iter()
+            .map(|name| crate::picker::PickItem {
+                label: name.clone(),
+                shortcut: None,
+                action: crate::picker::PickAction::Inspect(name),
+            })
+            .collect();
+        self.picker = Some(crate::picker::Picker::new(
+            "Variables",
+            crate::picker::PickerKind::Variables,
+            items,
+        ));
+    }
+
+    /// Opens the inspector on `name` and asks the session for the first screenful.
+    pub fn inspect(&mut self, name: String) {
+        let path = self
+            .figures
+            .as_ref()
+            .map(|w| slice_path_beside(&w.path))
+            .unwrap_or_else(|| crate::wsnap::snapshot_dir().join("slice-0.json"));
+        self.inspector = Some(Inspector {
+            name,
+            row: 0,
+            col: 0,
+            watch: crate::wsnap::SliceWatch::new(path),
+            asked: false,
+        });
+        self.ask_for_slice();
+    }
+
+    /// Leaves the question where the session's own hook will find it.
+    ///
+    /// Written to a file rather than typed at the prompt, and that is not a detail. Typing there
+    /// puts a line in the user's transcript that they did not write, fights whatever they are
+    /// half-way through, and only works if the line editor happens to be listening — which, for
+    /// this particular command, it reliably was not: byte-identical writes to the same terminal
+    /// were acted on the second time and ignored the first. The hook already runs at every idle
+    /// moment and already reads and writes files. Asking it is quieter and cannot miss.
+    fn ask_for_slice(&mut self) {
+        let Some(inspector) = self.inspector.as_ref() else { return };
+        let request = serde_json::json!({
+            "name": inspector.name,
+            "r0": inspector.row + 1,
+            "r1": inspector.row + INSPECT_ROWS,
+            "c0": inspector.col + 1,
+            "c1": inspector.col + INSPECT_COLS,
+        });
+        let path = request_path_beside(&inspector.watch.path);
+        // Written beside and renamed, like everything else on this channel, so the reader on the
+        // other side never sees half a question.
+        let temp = path.with_extension("tmp");
+        let written = std::fs::write(&temp, request.to_string()).and_then(|_| std::fs::rename(&temp, &path));
+        if written.is_err() {
+            self.status_message = i18n::msg_inspect_no_session(self.settings.lang);
+            return;
+        }
+        if let Some(inspector) = self.inspector.as_mut() {
+            inspector.asked = true;
+        }
+    }
+
+    pub fn poll_inspector(&mut self) {
+        if let Some(inspector) = self.inspector.as_mut()
+            && inspector.watch.poll()
+        {
+            inspector.asked = false;
+        }
+    }
+
+    fn handle_inspector_key(&mut self, key: KeyEvent) {
+        let Some(inspector) = self.inspector.as_ref() else { return };
+        let (rows, cols) = inspector
+            .watch
+            .slice
+            .as_ref()
+            .map(|s| (s.rows, s.cols))
+            .unwrap_or((0, 0));
+        let (mut row, mut col) = (inspector.row, inspector.col);
+        match key.code {
+            KeyCode::Esc => {
+                self.inspector = None;
+                return;
+            }
+            _ if is_ctrl_shift(key, 'i') => {
+                self.inspector = None;
+                return;
+            }
+            KeyCode::Down => row = (row + INSPECT_ROWS).min(rows.saturating_sub(1)),
+            KeyCode::Up => row = row.saturating_sub(INSPECT_ROWS),
+            KeyCode::Right => col = (col + INSPECT_COLS).min(cols.saturating_sub(1)),
+            KeyCode::Left => col = col.saturating_sub(INSPECT_COLS),
+            KeyCode::Home => {
+                row = 0;
+                col = 0;
+            }
+            // Asking again is the only action a read-only panel needs: the answer went stale the
+            // moment the session ran anything.
+            KeyCode::Char('r') | KeyCode::Char('R') => {}
+            _ => return,
+        }
+        if let Some(inspector) = self.inspector.as_mut() {
+            inspector.row = row;
+            inspector.col = col;
+        }
+        self.ask_for_slice();
     }
 
     // ---- Going where the output points -----------------------------------------------------
@@ -3121,6 +3283,7 @@ impl App {
         let mut venv_dir = None;
         let mut workspace = None;
         let mut file_line = None;
+        let mut inspect = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
@@ -3130,7 +3293,13 @@ impl App {
                 crate::picker::PickAction::FileLine(p, line, col) => {
                     file_line = Some((p.clone(), *line, *col))
                 }
+                crate::picker::PickAction::Inspect(name) => inspect = Some(name.clone()),
             }
+        }
+        if let Some(name) = inspect {
+            self.picker = None;
+            self.inspect(name);
+            return;
         }
         if let Some((path, line, col)) = file_line {
             self.picker = None;
@@ -4169,8 +4338,7 @@ impl App {
             self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
         let idx = dnd::shell_running(language, &pids)?;
         if let Some(term) = self.window_tab_mut(idx) {
-            term.write_input(command.as_bytes());
-            term.write_input(b"\r");
+            term.type_line(command);
         }
         self.settings.show_terminal = true;
         Some(idx)
@@ -4230,8 +4398,7 @@ impl App {
             if let Some(idx) = dnd::shell_running(octave, &pids) {
                 let command = octave.run_file(&path.to_string_lossy());
                 if let Some(term) = self.window_tab_mut(idx) {
-                    term.write_input(command.as_bytes());
-                    term.write_input(b"\r");
+                    term.type_line(&command);
                 }
                 self.status_message = i18n::msg_run_started(lang, idx, &command);
                 return;
@@ -4257,8 +4424,7 @@ impl App {
             .unwrap_or(self.active_terminal.min(self.terminals.len().saturating_sub(1)));
 
         if let Some(term) = self.window_tab_mut(idx) {
-            term.write_input(command.as_bytes());
-            term.write_input(b"\r");
+            term.type_line(&command);
         }
         self.status_message = i18n::msg_run_started(lang, idx, &command);
     }
@@ -4696,6 +4862,10 @@ impl App {
             self.handle_git_panel_key(key);
             return;
         }
+        if self.inspector.is_some() {
+            self.handle_inspector_key(key);
+            return;
+        }
         if self.manual.is_some() {
             self.handle_manual_key(key);
             return;
@@ -4777,6 +4947,11 @@ impl App {
             // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
             KeyCode::Char('x') | KeyCode::Char('X') if ctrl && shift => {
                 self.run_selection();
+                return;
+            }
+            // Inspect: what a variable actually contains, a screenful at a time.
+            KeyCode::Char('i') | KeyCode::Char('I') if ctrl && shift => {
+                self.open_inspector_picker();
                 return;
             }
             KeyCode::Char('n') | KeyCode::Char('N') if ctrl && shift => {

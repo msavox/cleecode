@@ -16,6 +16,12 @@ function cleecode_ws_tick (out)
   try
     if (isempty (seq)) seq = 0; fp = ""; last_call = 0; endif
 
+    ## Answered before anything else, and whether or not the workspace moved: it is a
+    ## question CleeCode asked, and the answer is wanted now rather than at the next
+    ## command. Nothing is typed at the user's prompt to ask it — that was the first rule
+    ## this design set itself, and reading a request file keeps it.
+    cleecode_answer_slice ();
+
     now = time ();
     gap = now - last_call;
     last_call = now;
@@ -53,6 +59,32 @@ function cleecode_ws_tick (out)
     write_snapshot (out, seq, now, w, figs, recent (h));
   catch
     ## Deliberately silent.
+  end_try_catch
+endfunction
+
+function cleecode_answer_slice ()
+  ## Reads the request CleeCode leaves beside the snapshot and answers it, at most once
+  ## per change. Both files are written by rename, so neither side ever sees half of one.
+  persistent seen
+
+  req = getenv ("CLEECODE_OCTAVE_SLICE_REQ");
+  if (isempty (req) || exist (req, "file") != 2)
+    return;
+  endif
+  info = dir (req);
+  if (isempty (info))
+    return;
+  endif
+  stamp = info(1).datenum;
+  if (! isempty (seen) && seen == stamp)
+    return;
+  endif
+  seen = stamp;
+  try
+    ask = jsondecode (fileread (req));
+    cleecode_slice (ask.name, ask.r0, ask.r1, ask.c0, ask.c1);
+  catch
+    ## A half-written or unreadable request is not worth taking the panel down for.
   end_try_catch
 endfunction
 

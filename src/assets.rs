@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 5] = [
+const OCTAVE: [(&str, &str); 6] = [
+    ("cleecode_slice.m", include_str!("../assets/octave/cleecode_slice.m")),
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
     ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
     ("cleecode_ws.m", include_str!("../assets/octave/cleecode_ws.m")),

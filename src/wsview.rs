@@ -243,6 +243,21 @@ impl Layout {
     }
 }
 
+/// One number in a grid: whole numbers plain, the rest to four places, and a NaN said as NaN
+/// rather than shown as a blank that reads like a missing cell.
+pub fn cell_number(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Inf".to_string() } else { "-Inf".to_string() };
+    }
+    if value == value.trunc() && value.abs() < 1e15 {
+        return format!("{}", value as i64);
+    }
+    format!("{value:.4}")
+}
+
 /// A number as a person reads it, or a dash where the interpreter said there is none — a char
 /// array has no minimum, and neither has an array too large to have been scanned.
 fn num(value: Option<f64>) -> String {
