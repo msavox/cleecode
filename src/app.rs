@@ -365,6 +365,12 @@ pub struct App {
     /// The variable inspector, when it is open: which name, where in it we are looking, and the
     /// file the session writes its answer to.
     pub inspector: Option<Inspector>,
+    /// Which lines have a breakpoint, by file. Kept here rather than on the editor because they
+    /// belong to the session, not to the buffer: closing a tab does not clear them.
+    pub breakpoints: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    /// Where the session was last seen stopped, so the editor can stop marking the line once it
+    /// runs on.
+    pub stopped_at: Option<(PathBuf, usize)>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -1106,6 +1112,12 @@ const INSPECT_COLS: usize = 24;
 
 /// The slice file that belongs beside a pane's snapshot: `ws-3.json` and `slice-3.json` are the
 /// same session's two channels.
+fn break_path_beside(snapshot: &Path) -> PathBuf {
+    let name = snapshot.file_name().and_then(|n| n.to_str()).unwrap_or("ws-0.json");
+    let suffix = name.strip_prefix("ws-").unwrap_or("0.json");
+    snapshot.with_file_name(format!("break-{suffix}"))
+}
+
 fn request_path_beside(slice: &Path) -> PathBuf {
     let name = slice.file_name().and_then(|n| n.to_str()).unwrap_or("slice-0.json");
     let suffix = name.strip_prefix("slice-").unwrap_or("0.json");
@@ -1214,6 +1226,8 @@ impl App {
             lsp_paths: std::collections::HashMap::new(),
             figures: None,
             inspector: None,
+            breakpoints: std::collections::HashMap::new(),
+            stopped_at: None,
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -1626,6 +1640,101 @@ impl App {
         );
     }
 
+    // ---- Breakpoints, and being stopped -----------------------------------------------------
+
+    /// Puts a breakpoint on the cursor's line, or takes it off.
+    ///
+    /// Written to a file for the session's hook to apply, never typed at the prompt: `dbstop`
+    /// works through `evalin` from inside the hook — measured — so setting a breakpoint leaves
+    /// no line in the transcript that the user did not write.
+    fn toggle_breakpoint(&mut self) {
+        let lang = self.settings.lang;
+        let editor = self.editor();
+        let Some(path) = editor.path.clone() else {
+            self.status_message = i18n::msg_break_unsaved(lang);
+            return;
+        };
+        if crate::session::Language::of_path(&path).is_none() {
+            self.status_message = i18n::msg_break_no_language(lang, &file_ext(&path));
+            return;
+        }
+        let line = editor.cursor_line + 1;
+        let lines = self.breakpoints.entry(path.clone()).or_default();
+        let on = if lines.remove(&line) {
+            false
+        } else {
+            lines.insert(line);
+            true
+        };
+        if lines.is_empty() {
+            self.breakpoints.remove(&path);
+        }
+        self.publish_breakpoints();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.status_message = i18n::msg_breakpoint(lang, on, &name, line);
+    }
+
+    /// Leaves the whole set where the hook will find it. The whole set rather than a change,
+    /// because the hook clears and re-applies: a session that missed one message would otherwise
+    /// disagree with the editor about where the breakpoints are, silently and forever.
+    fn publish_breakpoints(&mut self) {
+        let Some(watch) = self.figures.as_ref() else { return };
+        let path = break_path_beside(&watch.path);
+        // By function name, which is what `dbstop` takes and what a `.m` file is known by.
+        let wanted: Vec<serde_json::Value> = self
+            .breakpoints
+            .iter()
+            .flat_map(|(file, lines)| {
+                let name = file
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                lines.iter().map(move |line| serde_json::json!({"name": name, "line": line}))
+            })
+            .collect();
+        let temp = path.with_extension("tmp");
+        let _ = std::fs::write(&temp, serde_json::Value::Array(wanted).to_string())
+            .and_then(|_| std::fs::rename(&temp, &path));
+    }
+
+    /// Follows the session into the file it stopped in.
+    ///
+    /// Called when a snapshot says the stop moved. Opens the file if it is not already open and
+    /// puts the cursor on the line — the same thing a double-clicked traceback does, and for the
+    /// same reason: the place to be is where the program is.
+    fn follow_stop(&mut self, debug: &crate::wsnap::Debug) {
+        let lang = self.settings.lang;
+        if !debug.stopped {
+            if self.stopped_at.take().is_some() {
+                self.status_message = i18n::msg_debug_running(lang);
+            }
+            return;
+        }
+        let path = PathBuf::from(&debug.file);
+        let path = if path.exists() { path } else { self.root.join(&debug.file) };
+        let here = (path.clone(), debug.line);
+        if self.stopped_at.as_ref() == Some(&here) {
+            return;
+        }
+        self.stopped_at = Some(here);
+        if path.exists() {
+            // Shown, not focused. You are at the prompt with `dbstep` half typed when this
+            // fires, and taking the keyboard to point at a line would put the next word you
+            // type into the file you are debugging. Everything about where the keyboard was is
+            // put back — the same rule a figure follows when it opens.
+            let was = (self.focus, self.editor_pane_focus);
+            self.open_file_at(path, debug.line.saturating_sub(1), 0);
+            self.focus = was.0;
+            self.editor_pane_focus = was.1;
+        }
+        self.status_message = i18n::msg_debug_stopped(lang, &debug.name, debug.line);
+    }
+
+    /// The breakpoints on a file, for the renderer.
+    pub fn breakpoints_in(&self, path: Option<&Path>) -> Option<&std::collections::BTreeSet<usize>> {
+        self.breakpoints.get(path?)
+    }
+
     // ---- Looking inside a variable ----------------------------------------------------------
 
     /// Offers the session's variables, and opens the one picked.
@@ -1815,11 +1924,14 @@ impl App {
         if !watch.poll() {
             return;
         }
-        let figures: Vec<PathBuf> = watch
+        let (debug, figures): (crate::wsnap::Debug, Vec<PathBuf>) = watch
             .snapshot
             .as_ref()
-            .map(|s| s.figures.iter().map(|f| PathBuf::from(&f.path)).collect())
+            .map(|s| {
+                (s.debug.clone(), s.figures.iter().map(|f| PathBuf::from(&f.path)).collect())
+            })
             .unwrap_or_default();
+        self.follow_stop(&debug);
         for path in figures {
             match self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
                 // Already a tab: the picture on disk is new, and nothing about a decoded image
@@ -4947,6 +5059,11 @@ impl App {
             // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
             KeyCode::Char('x') | KeyCode::Char('X') if ctrl && shift => {
                 self.run_selection();
+                return;
+            }
+            // Put a breakpoint on this line, or take it off.
+            KeyCode::Char('p') | KeyCode::Char('P') if ctrl && shift => {
+                self.toggle_breakpoint();
                 return;
             }
             // Inspect: what a variable actually contains, a screenful at a time.

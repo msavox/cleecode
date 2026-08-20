@@ -79,6 +79,42 @@ pub struct Snapshot {
     /// already left out by the producer — it is the side that knows which were its.
     #[serde(default)]
     pub history: Vec<String>,
+    /// Where the session is stopped, if it is. Absent from a session that has never been
+    /// debugged, and from the prototype before the debugger was wired up.
+    #[serde(default)]
+    pub debug: Debug,
+}
+
+/// A session sitting at a breakpoint.
+///
+/// Reported by the same idle hook that reports everything else — it keeps firing at the `debug>`
+/// prompt, which is what makes being stopped something CleeCode can see rather than something
+/// the user has to say. While stopped, `vars` above is the *frame's* workspace and not the base
+/// one, which is the difference between watching a program run and looking at what it left.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Debug {
+    #[serde(default)]
+    pub stopped: bool,
+    /// The function stopped in, its file, and the line — all from `dbstack`, with CleeCode's own
+    /// frames removed.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub stack: Vec<Frame>,
+}
+
+/// One frame under the one we are stopped in. The producer sends its file too; nothing reads
+/// it, because the file that matters is the one being stopped *in* and that is on `Debug`.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Frame {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub line: usize,
 }
 
 /// One figure, printed and described.
@@ -316,6 +352,13 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         // the prompt keeps the user's transcript theirs — the rule this whole design started
         // from — and means the answer does not depend on catching a line editor at the right
         // moment.
+        // Where CleeCode leaves the breakpoints it wants. Applied by the hook through
+        // `evalin`, which was measured to work — so a breakpoint set in the editor never
+        // appears in the user's transcript.
+        (
+            "CLEECODE_OCTAVE_BREAK".to_string(),
+            dir.join(format!("break-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
         (
             "CLEECODE_OCTAVE_SLICE_REQ".to_string(),
             dir.join(format!("slicereq-{pane_id}.json")).to_string_lossy().into_owned(),
@@ -397,6 +440,28 @@ mod tests {
     fn a_session_that_never_plotted_has_no_figures_rather_than_failing_to_parse() {
         let snap = Snapshot::parse(SAMPLE).unwrap();
         assert!(snap.figures.is_empty());
+    }
+
+    /// Quoted from what the hook actually wrote while stopped at a breakpoint.
+    #[test]
+    fn a_stopped_session_says_where_it_is() {
+        let text = r#"{"v":1,"seq":9,"lang":"octave","vars":[{"name":"a","class":"double"}],
+          "debug":{"stopped":true,"name":"calcola","file":"/proj/calcola.m","line":3,
+                   "stack":[{"name":"calcola","file":"/proj/calcola.m","line":3}]}}"#;
+        let snap = Snapshot::parse(text).unwrap();
+        assert!(snap.debug.stopped);
+        assert_eq!((snap.debug.name.as_str(), snap.debug.line), ("calcola", 3));
+        assert_eq!(snap.debug.stack.len(), 1);
+        // While stopped the variables are the frame's own, which is what makes the panel worth
+        // looking at during a debug session rather than after it.
+        assert_eq!(snap.vars[0].name, "a");
+    }
+
+    #[test]
+    fn a_session_that_is_not_stopped_says_so_by_default() {
+        let snap = Snapshot::parse(SAMPLE).unwrap();
+        assert!(!snap.debug.stopped);
+        assert!(snap.debug.stack.is_empty());
     }
 
     /// Quoted from what the helper actually wrote, against a real Octave.

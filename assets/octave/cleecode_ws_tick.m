@@ -21,6 +21,7 @@ function cleecode_ws_tick (out)
     ## command. Nothing is typed at the user's prompt to ask it — that was the first rule
     ## this design set itself, and reading a request file keeps it.
     cleecode_answer_slice ();
+    dbg = cleecode_dbg ();
 
     now = time ();
     gap = now - last_call;
@@ -37,13 +38,34 @@ function cleecode_ws_tick (out)
     ##  · the whos metadata differ — covers changes made by anything other than
     ##    a typed command, a script's last line included.
     h = evalin ("base", "history ()");
-    w = evalin ("base", "whos");
+    ## Stopped in the debugger, the variables that matter are the *frame's*, not the base
+    ## workspace's — that is the whole difference between watching a program run and
+    ## looking at what is left after it. Measured: `evalin("caller", ...)` from in here
+    ## reaches the stopped frame, while `evalin("base", ...)` does not.
+    scope = "base";
+    if (dbg.stopped)
+      scope = "caller";
+    endif
+    w = evalin (scope, "whos");
+    ## The values come from the *same* scope as the names, which sounds obvious and was
+    ## not: reading names from the stopped frame and values from the base workspace makes
+    ## every read fail with "undefined", and the tick's own catch then swallows the whole
+    ## snapshot. The only symptom was a panel that stopped updating.
+    vals = cell (1, numel (w));
+    for k = 1:numel (w)
+      try
+        vals{k} = evalin (scope, w(k).name);
+      catch
+        vals{k} = [];
+      end_try_catch
+    endfor
     last_cmd = ""; if (! isempty (h)) last_cmd = h{end}; endif
     ## One vectorised sprintf per field, letting the cs-list of the struct
     ## array expand into it. Growing a string in a loop instead costs O(n^2)
     ## and reached 7 ms per tick at 200 variables — 7% of a core, spent
     ## forever, just sitting at the prompt.
-    now_fp = sprintf ("%d\n%s\n%s\n%s\n%s\n%s", numel (h), last_cmd, ...
+    now_fp = sprintf ("%d\n%s\n%d:%s:%d\n%s\n%s\n%s\n%s", numel (h), last_cmd, ...
+                      dbg.stopped, dbg.name, dbg.line, ...
                       sprintf ("%s,", w.name), sprintf ("%d,", w.bytes), ...
                       sprintf ("%s,", w.class), sprintf ("%dx", w.size));
 
@@ -56,9 +78,21 @@ function cleecode_ws_tick (out)
     ## Figures are printed here rather than on every tick, because here *is* the command
     ## boundary: the fingerprint above only differs when something ran.
     figs = cleecode_figs (getenv ("CLEECODE_OCTAVE_FIGS"));
-    write_snapshot (out, seq, now, w, figs, recent (h));
-  catch
-    ## Deliberately silent.
+    write_snapshot (out, seq, now, w, vals, figs, recent (h), dbg);
+  catch err
+    ## Silent by default: a panel that fails to draw must never take the session with it.
+    ##
+    ## But silent has a price, and it was paid twice while this was being written — once
+    ## for a function that was not shipped with the binary, once for names read from one
+    ## scope and values from another. Both times the only symptom was a panel that never
+    ## filled in, with nothing anywhere saying why. Set CLEECODE_DBG_LOG to a path and the
+    ## reason lands there.
+    dbglog = getenv ("CLEECODE_DBG_LOG");
+    if (! isempty (dbglog))
+      fid = fopen (dbglog, "a");
+      fprintf (fid, "tick fallito: %s\n", err.message);
+      fclose (fid);
+    endif
   end_try_catch
 endfunction
 
@@ -112,7 +146,7 @@ function out = recent (h)
   out = fliplr (out);          # newest last, the way a transcript reads
 endfunction
 
-function write_snapshot (out, seq, now, w, figs, history)
+function write_snapshot (out, seq, now, w, vals, figs, history, dbg)
   ## Elements above which min/max/mean are skipped rather than paid for ten
   ## times a second. A 2000x2000 matrix is 4e6 elements; scanning it at every
   ## prompt would be visible.
@@ -130,7 +164,7 @@ function write_snapshot (out, seq, now, w, figs, history)
                 "bytes", w(k).bytes, "attr", attrs (w(k)), ...
                 "min", NaN, "max", NaN, "mean", NaN, "nans", 0, "preview", "");
 
-    val = evalin ("base", w(k).name);
+    val = vals{k};
 
     if (isnumeric (val) || islogical (val))
       if (isempty (val))
@@ -179,6 +213,7 @@ function write_snapshot (out, seq, now, w, figs, history)
   doc.vars = vars;
   doc.figures = figs;
   doc.history = history;
+  doc.debug = dbg;
 
   ## Write beside the target and rename, so a reader never sees half a file.
   tmp = sprintf ("%s.%d.tmp", out, getpid ());
