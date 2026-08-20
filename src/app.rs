@@ -376,6 +376,9 @@ pub struct App {
     /// the root changes, since it belongs to the folder rather than to the session.
     pub project_settings: settings::ProjectSettings,
     last_tree_click: Option<(usize, Instant)>,
+    /// Which terminal row was last clicked, and when, so the second click on the same one can
+    /// mean "take me there".
+    last_terminal_click: Option<(usize, u16, Instant)>,
     pub git_status: std::collections::HashMap<PathBuf, crate::git_status::FileStatus>,
     git_status_tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
     git_status_rx: Receiver<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
@@ -1181,6 +1184,7 @@ impl App {
             available_venvs,
             project_settings,
             last_tree_click: None,
+            last_terminal_click: None,
             git_status: std::collections::HashMap::new(),
             git_status_tx,
             git_status_rx,
@@ -1580,6 +1584,49 @@ impl App {
             self.search_tx.clone(),
             self.search_pending.clone(),
         );
+    }
+
+    // ---- Going where the output points -----------------------------------------------------
+
+    /// Whether this click is the second one on the same terminal row, quickly enough to be a
+    /// double-click. Tracked here rather than asked of the terminal, which has no idea it is
+    /// being clicked twice.
+    fn second_click_on(&mut self, pane: usize, row: u16) -> bool {
+        let now = Instant::now();
+        let again = self
+            .last_terminal_click
+            .map(|(was_pane, was_row, when)| {
+                was_pane == pane && was_row == row && now.duration_since(when) < DOUBLE_CLICK_THRESHOLD
+            })
+            .unwrap_or(false);
+        self.last_terminal_click = Some((pane, row, now));
+        again
+    }
+
+    /// Opens whatever file a terminal row is pointing at. `true` when it found one.
+    ///
+    /// Works on anything that prints `path:line:column`, which is every compiler, linter and
+    /// grep — not only on the tracebacks it was written for.
+    fn open_location_at(&mut self, pane: usize, row: u16) -> bool {
+        let Some(text) = self.window_tab_mut(pane).and_then(|t| t.row_text(row)) else {
+            return false;
+        };
+        let lang = self.settings.lang;
+        let Some(location) = crate::locate::find(&text) else { return false };
+        match crate::locate::resolve(&location, &self.root) {
+            Some(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.open_file_at(path, location.line.saturating_sub(1), location.column.saturating_sub(1));
+                self.status_message = i18n::msg_jumped_to(lang, &name, location.line);
+                true
+            }
+            // It named something, and the something is not here. Saying so beats a double-click
+            // that silently does nothing, and beats opening a file of that name from elsewhere.
+            None => {
+                self.status_message = i18n::msg_jump_not_found(lang, &location.path);
+                true
+            }
+        }
     }
 
     // ---- Figures from a live session ------------------------------------------------------
@@ -6409,6 +6456,12 @@ impl App {
                             // can't be used while it runs.
                             let content = ui::terminal_content_rect(*rect);
                             if let Some(cell) = cell_at(content, col, row) {
+                                // A second click on the same row is asking to *go* there: a
+                                // traceback names a file and a line, and retyping it into the
+                                // editor is work a double-click can do for you.
+                                if self.second_click_on(i, cell.0) && self.open_location_at(i, cell.0) {
+                                    return;
+                                }
                                 if let Some(term) = self.window_tab_mut(i) {
                                     term.begin_selection(cell);
                                 }

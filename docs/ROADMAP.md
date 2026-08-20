@@ -724,10 +724,29 @@ Le forme Python ci sono e sono nella stessa `Language`, quindi quando matplotlib
 non c'è una seconda implementazione da scrivere. Ancora non provate contro un interprete vero:
 è l'unica parte di questo passo che non ho misurato.
 
-*Ordine di costruzione* (dall'handoff, e mi convince), il resto ancora da fare: poi
-traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla
-sessione viva (si innesta come terza sorgente in `complete.rs`, esattamente come l'LSP della
-0.8), export delle figure. Il debugger è un livello a sé, sugli stessi canali.
+**Passo 6 fatto**: **traceback cliccabili**, `src/locate.rs`. Doppio click su una riga di output
+di un terminale che nomina un file e una riga e si apre lì, col cursore su quella riga.
+
+*Non è solo per i traceback*, ed è la cosa migliore che ha: qualunque cosa stampi
+`percorso:riga` funziona — cargo, gcc, eslint, pytest, `grep -n`. È nata per gli interpreti e
+serve a tutto il resto dell'editor.
+
+*Ogni formato è preso da output reale, non dalla memoria*, e i test lo citano: Python dice
+`File "…", line 2`; Octave dice `boom at line 3 column 3` nominando la *funzione* quando ce l'ha
+e il file quando non ce l'ha — quindi un nome nudo è una pista e non una posizione, ed è marcato
+come tale prima di cercare `boom.m` nel progetto.
+
+*Il bug trovato guidando, non leggendo:* `grep -n` stampa `file:riga:**testo**`, non
+`file:riga:colonna`. Il riconoscitore voleva un numero anche nel terzo campo, e un doppio click
+su un risultato di grep non portava da nessuna parte. Adesso i due punti si dividono da sinistra
+prendendo il primo posto dove quello che precede somiglia a un percorso — che è anche ciò che
+tiene insieme `C:\src\main.rs:12:5`, perché dividere alla lettera di unità lascia `C`, che non
+somiglia a niente.
+
+*Ordine di costruzione* (dall'handoff), il resto ancora da fare: ispettore di variabili come tab,
+pannello history, completamento dalla sessione viva (si innesta come terza sorgente in
+`complete.rs`, esattamente come l'LSP della 0.8), export delle figure. Il debugger è un livello a
+sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i
 `.py` in `assets/python/`, le imbracature in `scripts/ide/`, e i tre documenti in

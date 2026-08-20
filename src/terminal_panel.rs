@@ -565,6 +565,28 @@ impl TerminalPanel {
         }))
     }
 
+    /// The text of one row as it is on screen, trailing blanks trimmed.
+    ///
+    /// What a double-click reads before deciding whether the line names a file. Taken from the
+    /// screen rather than from the raw output, so a wrapped line reads the way it looks and the
+    /// escape sequences that coloured it are already gone.
+    pub fn row_text(&self, row: u16) -> Option<String> {
+        let parser = self.parser.lock().ok()?;
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        if row >= rows {
+            return None;
+        }
+        let mut text = String::new();
+        for col in 0..cols {
+            match screen.cell(row, col) {
+                Some(cell) => text.push_str(cell.contents()),
+                None => text.push(' '),
+            }
+        }
+        Some(text.trim_end().to_string())
+    }
+
     /// How many lines of this shell's output have scrolled off and are still held.
     pub fn scrollback_lines(&self) -> usize {
         held_lines(&mut lock_poisoned(&self.parser))
