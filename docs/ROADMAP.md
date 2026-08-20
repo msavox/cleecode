@@ -617,6 +617,46 @@ risponde a quella e alle altre due, il che rende provabile ogni scorciatoia dell
 effetto collaterale il primo fotogramma arriva in **1 secondo invece di 15**, perché non si
 aspettano più i timeout.
 
+**Passo 2 fatto**: i **preset**, `clee -w octave` e `clee -w pylab`, con il nome asimmetrico
+deciso dall'handoff e per il motivo che ci dà — *Python* è ambiguo, un layout Django e uno
+numerico non hanno niente in comune, mentre `octave` è già lo strumento di calcolo con i grafici
+e un `octavelab` non disambiguerebbe niente.
+
+**Una finestra terminale, due schede** — l'interprete e una shell semplice per git e pip. Una
+seconda *finestra* toglierebbe schermo all'editor per sempre per tenerci una cosa che si usa un
+minuto alla volta; una scheda è a un tasto e non costa niente. La scheda 1 è l'interprete, che è
+dove atterra `Ctrl+Shift+X` e quindi è quello che devi avere davanti. `pylab` avvia il python del
+venv attivo, se ce n'è uno: altrimenti aprirebbe un prompt senza i pacchetti del progetto, che è
+l'unica cosa che quel preset esiste per evitare.
+
+**Il layout si adatta alla finestra.** Sopra le 150 colonne il prompt va *accanto* all'editor,
+che è dove lo mettono i desktop di Octave e MATLAB e per lo stesso motivo: l'output numerico è
+largo e una riga di matrice in un pannello stretto va a capo diventando illeggibile. Sotto, va
+sotto — non è un compromesso, è la risposta giusta, perché così entrambe le cornici hanno tutta
+la larghezza. Un layout giusto a 200 colonne e inutilizzabile a 80 non è il layout migliore, è il
+layout migliore per chi l'ha scritto.
+
+**Corretto il bug dei nomi built-in**, come diceva l'handoff: nel codice, non aggirandolo con
+nomi scomodi. Prima `is_default(n)` rispondeva *prima* che il disco fosse consultato, quindi un
+workspace salvato con quel nome smetteva di aprirsi in silenzio. Adesso `workspace::resolve`
+guarda prima il file e **il file vince**: salvare sotto un nome built-in è rifiutato, quindi un
+file che collide può solo essere più vecchio del preset che ha preso il nome — ed è
+insostituibile, dove il built-in è documentato e riproducibile. L'utente se lo sente dire, con
+scritto come riavere il preset. Il rifiuto del salvataggio ora nomina il built-in giusto invece
+di dire sempre `DEFAULT_NAME`, che era vero con uno solo ed è diventato una bugia con tre. E
+`clee -w` elenca i built-in marcando quelli ombreggiati.
+
+*Non incluso di proposito:* la scheda `workspace` che §7 dell'handoff propone, un visualizzatore
+che segue lo snapshot JSON. Il lato Rust non imposta ancora `CLEECODE_OCTAVE_WS`, quindi sarebbe
+un pannello che segue un file che non compare mai — un preset con un riquadro morto dentro. Va
+col passo che aggancia gli hook.
+
+*Provato aprendo i preset davvero*, `scripts/drive_presets.py`: 14 controlli, entrambi i
+linguaggi, in finestra larga e stretta — l'interprete è al prompt senza che nessuno abbia
+digitato niente, la shell è accanto nella stessa finestra, e le cornici si spostano quando la
+finestra si stringe. Un preset è una promessa su cosa compare quando scrivi il suo nome, e
+l'unico modo di verificarla è scriverlo.
+
 *Ordine di costruzione* (dall'handoff, e mi convince), il resto ancora da fare: poi
 traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla
 sessione viva (si innesta come terza sorgente in `complete.rs`, esattamente come l'LSP della

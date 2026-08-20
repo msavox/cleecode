@@ -332,6 +332,10 @@ pub struct App {
     /// The word-completion popup, when it is up. The one overlay in this list that does not take
     /// the keyboard: it claims five keys and lets every other one through to the editor.
     pub completion: Option<crate::complete::Popup>,
+    /// The terminal's width when CleeCode started. Stands in for the window width before the
+    /// first frame has been drawn, which is when a workspace named on the command line is
+    /// applied — and a preset that shaped itself for a zero-width window would be no preset.
+    startup_cols: u16,
     /// Where the cursor was drawn last frame, so the popup can hang under it. Written by the
     /// renderer, which is the only thing that knows where a buffer line landed on screen.
     pub completion_anchor: (u16, u16),
@@ -469,7 +473,7 @@ pub fn effective_venv<'a>(active: Option<&'a str>, available: &[String]) -> Opti
 /// and is never written to disk, so carrying it along costs nothing and keeps the badge honest.
 pub fn workspace_after_root_change(active: Option<&str>) -> Option<String> {
     match active {
-        Some(name) if crate::workspace::is_default(name) => Some(name.to_string()),
+        Some(name) if crate::workspace::is_built_in(name) => Some(name.to_string()),
         _ => None,
     }
 }
@@ -1151,6 +1155,7 @@ impl App {
             picker: None,
             completion: None,
             completion_anchor: (0, 0),
+            startup_cols: term_cols,
             lsp: None,
             lsp_error: None,
             diagnostics: std::collections::HashMap::new(),
@@ -1437,6 +1442,20 @@ impl App {
             }
             let _ = tx.send(i18n::msg_scp_result(lang, ok, failed, &target));
         });
+    }
+
+    /// What a built-in workspace needs to know about this machine: where the project is, how
+    /// wide the window is, and which Python a selected virtualenv means.
+    ///
+    /// `last_full` is the window as it was drawn last frame and is zero before the first one,
+    /// which is exactly when a workspace named on the command line is applied — so the terminal's
+    /// own size stands in until there is a frame to measure.
+    pub fn workspace_shape(&self) -> crate::workspace::Shape {
+        crate::workspace::Shape {
+            root: self.root.clone(),
+            cols: if self.last_full.width > 0 { self.last_full.width } else { self.startup_cols },
+            python: self.apply_venv("python3"),
+        }
     }
 
     /// Which editor the keyboard (and anything else routed through `editor()`/
@@ -2909,13 +2928,15 @@ impl App {
                 self.delete_workspace(&name);
             } else {
                 self.picker = None;
-                let found = if crate::workspace::is_default(&name) {
-                    Some(crate::workspace::default_workspace(self.root.clone()))
-                } else {
-                    crate::workspace::load(&name)
-                };
+                let (found, shadowed) = crate::workspace::resolve(&name, &self.workspace_shape());
                 match found {
-                    Some(ws) => self.apply_workspace(ws),
+                    Some(ws) => {
+                        self.apply_workspace(ws);
+                        if let Some(built_in) = shadowed {
+                            self.status_message =
+                                i18n::msg_workspace_shadows(self.settings.lang, built_in);
+                        }
+                    }
                     None => self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string(),
                 }
             }
@@ -3397,7 +3418,7 @@ impl App {
         }
         // Refused here rather than deep in the writer, so the message is the user's language and
         // names what to do instead.
-        if crate::workspace::is_default(&name) {
+        if crate::workspace::is_built_in(&name) {
             self.cancel_save_workspace();
             self.status_message = i18n::msg_workspace_readonly(lang, &name);
             return;
@@ -3588,7 +3609,18 @@ impl App {
         // Deleting offers only the files; the built-in has nothing on disk to remove, so it is
         // simply not among the things you can pick there.
         if !delete {
-            saved.insert(0, crate::workspace::default_workspace(self.root.clone()));
+            // The built-ins go on top, in the order they are declared, and only where they are
+            // not already a file of the user's own — otherwise the same name would be offered
+            // twice with two different meanings.
+            let shape = self.workspace_shape();
+            for name in crate::workspace::BUILT_INS.iter().rev() {
+                if saved.iter().any(|w| crate::workspace::slug(&w.name) == crate::workspace::slug(name)) {
+                    continue;
+                }
+                if let Some(ws) = crate::workspace::built_in(name, &shape) {
+                    saved.insert(0, ws);
+                }
+            }
         }
         if saved.is_empty() {
             self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string();
@@ -6727,9 +6759,15 @@ mod tests {
     fn changing_folder_leaves_a_saved_workspace_but_not_the_built_in_one() {
         assert_eq!(workspace_after_root_change(Some("Marunja")), None);
         assert_eq!(workspace_after_root_change(None), None);
-        // The built-in layout is not a file and belongs to no project, so it travels.
-        let built_in = crate::workspace::DEFAULT_NAME;
-        assert_eq!(workspace_after_root_change(Some(built_in)), Some(built_in.to_string()));
+        // A built-in is not a file and belongs to no project, so it travels — all of them,
+        // not just the layout one: `clee -w octave` in one folder is the same preset in the next.
+        for built_in in crate::workspace::BUILT_INS {
+            assert_eq!(
+                workspace_after_root_change(Some(built_in)),
+                Some(built_in.to_string()),
+                "{built_in} should survive a change of folder"
+            );
+        }
         // Matched by slug, like everywhere else the built-in is recognised.
         assert_eq!(workspace_after_root_change(Some("default  LAYOUT")), Some("default  LAYOUT".to_string()));
         // Someone's own workspace called "default" is an ordinary one and is left behind.
