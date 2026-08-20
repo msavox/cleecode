@@ -1,9 +1,21 @@
-"""Backend matplotlib minimo: plt.show() consegna i PNG a CleeCode invece di aprire finestre."""
-import os
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas  # noqa: F401
-from matplotlib.backend_bases import _Backend, FigureManagerBase
+"""A matplotlib backend that draws into the session instead of opening a window.
 
-OUT = os.environ.get("CLEECODE_PY_FIGS", ".")
+matplotlib's default backend on a desktop puts up a window of its own, which is the thing the
+figure panel exists to avoid — and worse, `plt.show()` on a blocking backend does not return
+until the window is closed, so a session that plots stops answering until the user notices.
+
+This is Agg with the window taken off. Figures are rendered in memory and the workspace hook
+writes them out at the next prompt, the same way it writes everything else. So `show()` has
+nothing left to do: it returns immediately, and the figure is already on its way.
+
+It deliberately prints nothing. The first version of this said "[cleecode] figure 1 -> ..." on
+every show, which put a line the user did not write into the user's own transcript — the one
+thing this design does not do anywhere else.
+"""
+
+from matplotlib.backend_bases import _Backend, FigureManagerBase
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas  # noqa: F401
+
 
 @_Backend.export
 class _CleeCodeBackend(_Backend):
@@ -12,10 +24,5 @@ class _CleeCodeBackend(_Backend):
 
     @staticmethod
     def show(*args, **kwargs):
-        import matplotlib.pyplot as plt
-        os.makedirs(OUT, exist_ok=True)
-        for num in plt.get_fignums():
-            fig = plt.figure(num)
-            path = os.path.join(OUT, f"shown{num}.png")
-            fig.savefig(path, dpi=fig.dpi)
-            print(f"[cleecode] figura {num} -> {path}")
+        """Hand over without blocking and without drawing anything of its own."""
+        return

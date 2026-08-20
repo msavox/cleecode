@@ -755,18 +755,22 @@ pub fn msg_break_unsaved(lang: Lang) -> String {
 
 pub fn msg_break_no_language(lang: Lang, ext: &str) -> String {
     match lang {
-        Lang::En => format!("No debugger for .{ext} — this works in Octave"),
-        Lang::It => format!("Nessun debugger per .{ext} — funziona con Octave"),
+        Lang::En => format!("No debugger for .{ext} — this works in Octave and Python"),
+        Lang::It => format!("Nessun debugger per .{ext} — funziona con Octave e Python"),
     }
 }
 
 /// Says where, and what to type next. The stepping commands are the one part of this the
-/// editor does not drive — `dbstep` from inside the hook returns without an error and without
-/// moving, measured — so the sentence points at the prompt where they do work.
-pub fn msg_debug_stopped(lang: Lang, name: &str, line: usize) -> String {
+/// editor does not drive — `dbstep` from inside Octave's hook returns without an error and
+/// without moving, measured, and Python's stepping belongs to pdb's own prompt — so the
+/// sentence points at the prompt where they do work.
+///
+/// Which words it points at depends on the language, because they are different words and a
+/// message telling a Python user to type `dbstep` is worse than no message.
+pub fn msg_debug_stopped(lang: Lang, name: &str, line: usize, steps: &str) -> String {
     match lang {
-        Lang::En => format!("Stopped in {name}, line {line} — dbstep / dbcont at the prompt"),
-        Lang::It => format!("Fermo in {name}, riga {line} — dbstep / dbcont al prompt"),
+        Lang::En => format!("Stopped in {name}, line {line} — {steps} at the prompt"),
+        Lang::It => format!("Fermo in {name}, riga {line} — {steps} al prompt"),
     }
 }
 

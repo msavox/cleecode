@@ -89,6 +89,21 @@ mod tests {
         }
         let startup = PYTHON.iter().find(|(n, _)| *n == "pythonstartup.py").unwrap().1;
         assert!(startup.contains("cleecode_pyws"), "the startup file installs the hook");
+
+        // The same check for Python, and for the same reason. Everything in that module runs
+        // inside a `try` that must not break the user's REPL, so a name that failed to travel
+        // has exactly one symptom: a panel that quietly stops changing.
+        let hook = PYTHON.iter().find(|(n, _)| *n == "cleecode_pyws.py").unwrap().1;
+        for called in ["_answer_slice", "_breakpoints", "_arm", "_history", "_debug_state",
+                       "_frame_vars", "_figures", "_snapshot", "_log"] {
+            assert!(
+                hook.contains(&format!("def {called}(")),
+                "{called} is called by the Python hook but is not defined in it"
+            );
+        }
+        assert!(hook.contains("_pyrepl"), "history comes from PyREPL's reader, not readline");
+        let backend = PYTHON.iter().find(|(n, _)| *n == "cleecode_mpl.py").unwrap().1;
+        assert!(!backend.contains("print("), "the backend writes nothing to the transcript");
     }
 
     #[test]

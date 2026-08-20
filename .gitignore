@@ -21,3 +21,7 @@ assets/python/*.png
 assets/python/pyfigs/
 assets/**/*.tmp
 assets/python/pyenv/
+
+# The Python and Octave hooks write here when CLEECODE_DBG_LOG is set, which is the one way
+# to find out why a tick failed silently. One of these was committed by accident once.
+dbg*.log
