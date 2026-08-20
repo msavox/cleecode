@@ -880,7 +880,7 @@ sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i
 `.py` in `assets/python/`, le imbracature in `scripts/ide/`, e i tre documenti in
-`docs/ide-mode*.md` — quelli valgono quanto il codice, perché sono il ragionamento dietro scelte
+`docs/design/ide-mode*.md` — quelli valgono quanto il codice, perché sono il ragionamento dietro scelte
 che da fuori sembrano arbitrarie ed è esattamente quello che un lettore futuro "sistemerebbe"
 rompendole.
 

@@ -176,6 +176,32 @@ asking for Fn, and typing anything jumps back to the live output. How much is ke
 2000 lines by default; a shell reads it when it starts, so a change reaches the next shell
 opened rather than the ones already running. A full\-screen program (vim, less) keeps the wheel
 for itself, having no history of its own to walk.
+.SS Octave and Python
+.TP
+.B Ctrl+Shift+X
+Send the selection, or the cell the cursor is in, to an interpreter already running in one of the
+terminals. A cell runs from one \fB%%\fR line to the next \(em written \fB%%\fR in Octave and
+\fB# %%\fR in Python. Nothing is pasted at the prompt: it goes through a temporary file, because
+a pasted indented block makes Python answer IndentationError.
+.TP
+.B Ctrl+Shift+I
+Look inside a variable the session holds: its values a screenful at a time, rows and columns
+numbered. Arrows page, Home returns to the corner, R asks again, Esc closes. It shows and does
+not edit.
+.TP
+.B Ctrl+Shift+P
+Put a breakpoint on the cursor's line, or take it off. When the session reaches one it stops, the
+editor marks the line, and the workspace window shows the frame's own variables rather than the
+session's. Stepping is typed at the prompt where the session is waiting \(em
+.B dbstep
+and
+.B dbcont
+in Octave,
+.B n
+and
+.B c
+at Python's (Pdb) \(em and the status line says which. Nothing is typed at your prompt to set a
+breakpoint or to read anything back.
 .SS File tree
 .RB \(bu " n" " / " N
 new file or folder \(bu
@@ -286,6 +312,35 @@ goes under
 mapping a program name to an absolute path. Octave on Windows is found automatically in Program
 Files, and a .m file is handed to an Octave prompt that is already open rather than starting a
 second interpreter.
+.SH NUMERIC SESSIONS
+.B clee \-w octave
+and
+.B clee \-w pylab
+open the interpreter already running, with a second terminal window beside it showing what the
+session holds: every variable with its size, class and range, filling in by itself whenever a
+command finishes. Nothing is typed at your prompt to ask \(em the session reports its own state
+from an idle hook \(em so the transcript stays a record of what you did and a busy interpreter is
+never interrupted.
+.PP
+A plot opens as a tab beside the script that drew it, and no window opens anywhere: a live figure
+window cannot be moved into a terminal, so the session is told to open none and hands over a
+picture. On a figure tab
+.BR + / \-
+and the arrows move the plot by asking the session to draw it again rather than by magnifying
+pixels \(em magnified pixels leave the axis labels describing a range that is no longer on screen.
+.B r
+restores the whole plot and
+.B e
+writes it out.
+.PP
+Nothing is installed and nothing is written to your home directory: the interpreter is handed the
+code and a path to write to through its environment. Python figures need matplotlib installed in
+the same python the terminal runs.
+.PP
+Setting
+.B CLEECODE_DBG_LOG
+to a path makes both hooks record why they failed. Everything they do runs inside a guard that
+must not break the REPL, so a mistake there has one symptom: a panel that quietly stops changing.
 .SH FILES
 .TP
 .I ~/.config/cleecode/settings.toml

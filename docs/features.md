@@ -1,0 +1,229 @@
+# What CleeCode does
+
+The tour. Every key here is also in the built-in manual (`Ctrl+Shift+M`), which ships inside
+the binary and so cannot fall out of step with it; this page is the version you can read
+before installing anything.
+
+Two more pages go deeper where a paragraph is not enough:
+
+  · [The numeric side](numeric.md) — Octave and Python as an IDE
+  · [How the interpreter side was built](design/ide-mode.md) — the measurements behind it
+
+
+![CleeCode main view](screenshots/main.png)
+
+*The demo and most stills are replayed from [`docs/demo.tape`](demo.tape) and
+[`docs/shots.tape`](shots.tape), so they are re-made after a UI change rather than left to
+go stale. The preview shots below are taken by hand: they need a terminal that can draw
+pictures, and the recorder has none.*
+
+### Editing
+
+[syntect](https://github.com/trishume/syntect) highlighting over
+[two-face](https://github.com/CosmicHorrorDev/two-face)'s grammars — 200-odd languages, the
+ones written this decade included — line numbers, multi-file tabs,
+undo with coalescing, find and replace, go-to-line, code folding, auto-indent and auto-closing
+brackets. Selection works with the mouse or the keyboard, goes to the system clipboard, and can
+be **rectangular** — `Alt`+drag for a column selection over ragged text.
+
+`Ctrl+L` splits the editor into two independent editors sharing one pool of buffers: each half
+has its own tabs, no file is in both strips at once, and closing the last tab of a half closes
+the split rather than leaving it empty. Files changed underneath you are reloaded when they are
+not dirty, and a binary or non-UTF-8 file opens
+read-only rather than being corrupted on save. Scrollbars appear inside the frame while the view
+moves or the pointer rests on them, and they are working controls: drag the thumb, click the
+groove to jump, click the end arrows to step a line.
+
+Pictures, PDFs and Markdown open as themselves. A `.png` gets a tab that draws it — real pixels
+on a terminal with a graphics protocol (kitty, iTerm2, sixel), coloured half-blocks elsewhere —
+instead of the blank read-only buffer a binary file used to give. A PDF opens as pages, turned
+with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
+Run, and the page beside it is the one you just typeset.
+
+Every preview carries a navigation bar along its bottom edge: the page arrows, `go` to jump to a
+page by number, `-` and `+` for zoom, and `fit` or `wide` to size the page to the pane or to its
+width. Each control is labelled with its own key, so the bar is also the reminder of how to work
+without the mouse — though the wheel zooms as well, and the scrollbars drag. Documents get one
+control pictures do not, `dark`, which inverts the page for reading at night: inverting a
+photograph is not a reading aid, it is just a wrong photograph. The setting is remembered
+between sessions.
+
+![A picture in a tab, and the same picture through chafa in a terminal](screenshots/preview-image.jpg)
+
+*The same file twice: real pixels in the tab, and `chafa` putting it into a terminal pane with
+the Run button beside it.*
+
+Markdown gets a live preview beside the source — one file, two tabs, one copy of the text, so
+the two can never disagree about what it says. Where `pandoc` is installed it is a real
+document, pictures the text refers to included; elsewhere it falls back to styled terminal text.
+CleeCode draws all of it itself, so it works over `ssh` too.
+
+![A LaTeX source and its typeset PDF side by side](screenshots/preview-pdf.png)
+
+*Edit the `.tex`, press Run, and the page beside it is the one you just typeset. On a preview
+tab the button says Refresh instead, because there the file is generated and can come out
+different.*
+
+![Markdown source and its rendered document](screenshots/preview-md.png)
+
+*Two tabs onto one file. The glyph in the strip tells them apart, and typing in the source moves
+the document beside it without a save.*
+
+Two letters into a word, a short list drops under the cursor: the words already written in the
+open files, and the language's keywords. It is not a box you have to answer — `↑↓` walk the list,
+`Tab` or `Enter` take a word, `Esc` dismisses, and every other key goes on typing while the list
+narrows. The nearest words come first and keywords last, because a keyword is quicker to type
+than a list is to walk. Where an interpreter is open, the names *that session* is holding are
+offered too, in green: a variable you made at the prompt exists in no file, so nothing that reads
+one could suggest it.
+
+Where a language server is installed, what it finds is underlined where it is — red for an error,
+yellow for a warning — the line number takes the same colour, and the message for the line you
+are on sits at the right of the status bar. It speaks LSP over stdio directly rather than through
+a framework, and is told about an edit once you stop typing rather than on every key. Rust is
+wired up so far, through rust-analyzer. A server that is not installed is not an error to report:
+nothing is underlined and everything else carries on.
+
+For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
+layout and session untouched.
+
+![Split editor view](screenshots/split.png)
+
+### Terminals that are real
+
+Each terminal window is a tiled pane holding one or more tabbed shells, on proper ptys — `ssh`,
+`vim`, `claude` all work. Panes can be renamed, given a startup command, resized by dragging the
+seam, and they collapse when their shell exits.
+
+The keys respect that: a focused terminal keeps every `Ctrl` chord for the program running in it.
+`Ctrl+J` is Enter to a shell, `Ctrl+E` is end-of-line, and the editor does not steal either.
+
+Each shell keeps its scrolled-off output. The wheel walks back through it, typing returns to the
+live end, and output arriving while you read back does not drag the page away. The same
+scrollbar the editor has shows where in the history you are.
+
+`▶ Run` runs the current file in an idle terminal. The button beside it says what Run will use
+on *this* file and changes it: the venv selector on a `.py` file, and on any file type the run
+command for its extension — `{file}`, `{dir}`, `{name}` and `{stem}` to build it, so a `.tex`
+file can typeset and open its own PDF, and `chafa` will put a `.png` in a terminal pane beside
+its output. A command can be shared by every project or kept in the project's own `.cleecode.toml`,
+which wins and is meant to be committed with it. Interpreters off `PATH` go under
+`[interpreter_paths]`.
+
+### Workspaces
+
+Save a whole set-up under a name: project root, open files, frame sizes, and the terminal windows
+with their tab names and startup commands. Reopening one brings the shells back already running
+`claude`, `octave`, `npm run dev`. Open it from the Workspace menu or straight from the shell
+with `clee -w NAME`; the name it is running under sits in the corner of the menu bar.
+
+Each is one hand-editable TOML file under `~/.config/cleecode/workspaces/`, so they travel
+between machines. A built-in **Default layout** is always there and cannot be deleted or
+overwritten. A bare `clee` never reopens a named workspace — that stays a deliberate act — but it
+does restore the project, its open files and the layout you left.
+
+### Finding your way
+
+Nothing needs to be memorised. `Ctrl+P` fuzzy-searches every action in the app and shows the key
+that would have done it; `Ctrl+O` does the same for files, and a query starting `/`, `~`, `./` or
+`../` turns it into a filesystem browser.
+
+![Command palette](screenshots/palette.png)
+
+There is a full menu bar behind `Ctrl+Shift+B`, context menus on right-click, and a manual that
+travels with the binary — `Ctrl+Shift+M`, English or Italian, with diagrams.
+
+![Built-in manual](screenshots/manual.png)
+
+There is also a `man clee`.
+
+### The frame around it
+
+A file tree with per-type Nerd Font icons and git status dots, live refresh, create/rename/delete
+and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
+Three layout presets, a resizable everything, and a settings panel that applies changes live.
+English and Italian throughout, including the manual. The `◐` at the right-hand end of the menu
+bar fills in the background, for a translucent terminal with something bright behind it.
+
+![Layout and Run menus](screenshots/menu.png)
+
+### Octave and Python, as an IDE
+
+`clee -w octave` or `clee -w pylab` starts the interpreter you already have — in a terminal you
+can type into — and puts a second window beside it showing what that session holds: every
+variable with its size, class and range, filling in by itself whenever a command finishes.
+
+![The workspace window filling in from a cell](screenshots/workspace.png)
+
+Nothing CleeCode wants to know is typed at your prompt. Your transcript stays a record of what
+*you* did, and a busy interpreter is never interrupted mid-computation to answer a question about
+itself. `Ctrl+Shift+X` sends a cell to the running session, plots arrive as tabs beside the script
+that drew them, `Ctrl+Shift+I` looks inside a variable, and `Ctrl+Shift+P` sets a breakpoint —
+where the panel shows the *frame's* variables rather than the session's.
+
+![Stopped at a breakpoint](screenshots/debug.png)
+
+Everything works in both languages and almost none of it works the same way underneath.
+**[The full walkthrough is its own page](numeric.md)**, including what is different between the
+two and what is not built yet.
+
+### It does not close on you
+
+CleeCode hosts long-running shells, so a crash costing you an `ssh` session or a build would be
+the worst thing it could do. An internal failure is contained and reported in the status line
+rather than ending the process: a broken terminal costs you that terminal, at most. Details go to
+`~/.config/cleecode/panic.log`.
+
+## Key bindings
+
+
+| Key | Action |
+|---|---|
+| `Ctrl+Alt+←` `↑` `↓` `→` | Go to the frame that lies in that direction — sidebar, either half of a split editor, or a tiled terminal, whichever is there. `Ctrl+Alt` rather than plain `Ctrl` because macOS keeps `Ctrl`+arrow for Mission Control and Spaces |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Or cycle the frames, the way `Cmd+Tab` cycles windows |
+| `Ctrl+Shift+←` / `→` | Previous / next tab *inside* the focused frame |
+| `Ctrl+Shift+↑` / `↓` | Previous / next terminal window, whatever the layout |
+| `Ctrl+Shift+M` | The built-in manual |
+| `Ctrl+Shift+B` | Open the menu bar (then arrows and Enter) |
+| `Ctrl+Shift+O` | Settings |
+| `Ctrl+Shift+G` / right-click | Context menu for the focused frame |
+| `Ctrl+Shift+R` | Run the current file |
+| `Ctrl+Shift+T` / `Ctrl+Shift+K` | New terminal tab / close this shell |
+| `Ctrl+Shift+N` | New terminal window |
+| `Ctrl+Shift+U` | Resize mode (arrows grow the focused frame, `Shift`+arrow shrinks) |
+| `Ctrl+Shift+F` | Fold/unfold the block under the cursor |
+| `Ctrl+L` | Toggle split editor (`Ctrl+Alt+←`/`→` moves between the panes) |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save / save all (an unnamed buffer asks for a name; Save As is in the File menu) |
+| `Ctrl+Shift+W` | Save the current workspace (open and delete are in the View menu) |
+| `Ctrl+Shift+E` | Name the focused terminal and give it a startup command |
+| `Ctrl+E` / `Ctrl+J` | Toggle sidebar / terminal panel |
+| `Ctrl+B` | Show/hide the menu bar |
+| `Ctrl+W` / `Ctrl+D` | Close current tab (prompts if unsaved) |
+| `Ctrl+Q` | Quit (prompts if any file is unsaved) |
+| `Ctrl+C/X/V/A` | Copy / cut / paste / select all (in the editor) |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
+| `Alt+Left` / `Alt+Right` | Move by word (`Ctrl`+arrow too, where the OS allows it) |
+| `Ctrl+Backspace` / `Ctrl+Delete` | Delete the word before / after the cursor |
+| `Ctrl+P` / `Ctrl+O` | Command palette / quick open (both fuzzy) |
+| `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
+| `Ctrl+U` / `Ctrl+N` | Inside Find: case sensitivity / read the query as a regex |
+| `Ctrl+Shift+H` | Search the project; results are a list, `Enter` opens one at its line |
+| `Ctrl+Shift+D` | Git panel: changes, history, branches — read-only, straight from `git` |
+| `Ctrl+K` | Toggle line comment |
+| `Alt+Up` / `Alt+Down` | Move the current line up / down |
+| `Alt+Shift+Down` | Duplicate the current line |
+| `Tab` / `Shift+Tab` | Indent / outdent |
+| `Alt`+drag | Column selection (also in the Edit menu, then `Shift`+arrows) |
+
+
+In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
+opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `e` renames,
+`Delete` removes with confirmation, `H` toggles hidden files.
+
+There are deliberately **no function keys and no `PageUp`/`PageDown`** — on a laptop both need
+`Fn` — and **no `Alt`+letter chords**, because macOS only sends Option as Meta on US keyboard
+layouts, so on any other one they never arrived at all. `Ctrl+Shift` is the application's layer,
+and it is safe inside a terminal for a structural reason: no terminal can encode `Ctrl+Shift` for
+the program running in a pane, so nothing there is listening for it.
+
+The same list, with more detail, is in the built-in manual (`Ctrl+Shift+M`) and in `man clee`.
