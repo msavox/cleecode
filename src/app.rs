@@ -3839,6 +3839,98 @@ impl App {
         }
     }
 
+    // ---- Running a piece of the file ------------------------------------------------------
+
+    /// Sends the selection — or the `%%` cell the cursor is in — to a live interpreter.
+    ///
+    /// This is the thing that separates an editor with a terminal in it from somewhere you
+    /// actually work: the session keeps its variables, so a script is built up a piece at a time
+    /// with the data already loaded, instead of being re-run from the top after every change.
+    pub fn run_selection(&mut self) {
+        let lang = self.settings.lang;
+        let (path, text, selection, cursor_line) = {
+            let editor = self.editor();
+            (editor.path.clone(), editor.rope.to_string(), editor.selection_range(), editor.cursor_line)
+        };
+        let Some(path) = path else {
+            self.status_message = i18n::msg_run_piece_unsaved(lang);
+            return;
+        };
+        let Some(language) = crate::session::Language::of_path(&path) else {
+            self.status_message = i18n::msg_run_piece_no_language(lang, &file_ext(&path));
+            return;
+        };
+
+        // A selection is an explicit answer to "which piece"; the cell is what to do when nobody
+        // said. Whole lines either way — a fragment of one is not a statement, and sending half
+        // an expression to a prompt produces a syntax error about code the user never wrote.
+        let lines: Vec<&str> = text.lines().collect();
+        let (from, to, what) = match selection {
+            Some(((start_line, _), (end_line, _))) => {
+                (start_line, (end_line + 1).min(lines.len()), crate::session::Piece::Selection)
+            }
+            None => {
+                let (from, to) = crate::session::cell_at(&lines, cursor_line);
+                (from, to, crate::session::Piece::Cell)
+            }
+        };
+        let piece = lines[from.min(lines.len())..to.min(lines.len())].join("\n");
+        if piece.trim().is_empty() {
+            self.status_message = i18n::msg_run_piece_empty(lang);
+            return;
+        }
+
+        let Some(scratch) = self.write_scratch(language, &piece) else {
+            self.status_message = i18n::msg_run_piece_no_scratch(lang);
+            return;
+        };
+        let command = language.run_file(&scratch.to_string_lossy());
+
+        // The interpreter that is already open, or none. Only the on-screen tab of each window
+        // counts: running something in a hidden tab would be invisible.
+        let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+        match dnd::shell_running(language, &pids) {
+            Some(idx) => {
+                if let Some(term) = self.window_tab_mut(idx) {
+                    term.write_input(command.as_bytes());
+                    term.write_input(b"\r");
+                }
+                self.settings.show_terminal = true;
+                self.status_message =
+                    i18n::msg_run_piece(lang, what, language.label(), to - from, idx);
+            }
+            // Nothing to send it to. Running the scratch file the ordinary way starts an
+            // interpreter, which is the same answer the Run button gives and leaves a session
+            // open for the next piece — so pressing it twice does what it looks like it should.
+            None => {
+                self.settings.show_terminal = true;
+                self.run_path(&scratch);
+            }
+        }
+    }
+
+    /// Writes a piece of a buffer where an interpreter can be pointed at it.
+    ///
+    /// One file per buffer rather than one per run, so a session's history stays readable —
+    /// `run('/tmp/…/plot.m')` twice means the same file was run twice, which is what happened.
+    /// The extension matters: Octave refuses to `run` anything that is not `.m`.
+    fn write_scratch(&self, language: crate::session::Language, piece: &str) -> Option<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("cleecode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let stem = self
+            .editor()
+            .path
+            .as_deref()
+            .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+            .unwrap_or("piece");
+        // The name is the user's, sanitised: it shows up in their transcript and in any
+        // traceback, and `cell_3f9a.m` tells them nothing about which file it came from.
+        let stem: String = stem.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+        let file = dir.join(format!("{stem}.{}", language.scratch_extension()));
+        std::fs::write(&file, format!("{}\n", piece.trim_end())).ok()?;
+        Some(file)
+    }
+
     fn run_path(&mut self, path: &std::path::Path) {
         let lang = self.settings.lang;
         let path = path.to_path_buf();
@@ -3855,13 +3947,21 @@ impl App {
         // would lose the session's variables, and (with --persist) would leave two sets of
         // plot windows around. Typing the shell command at an Octave prompt is also just a
         // syntax error, which is what used to happen.
+        //
+        // Only Octave, deliberately, even though the machinery underneath now knows about
+        // Python too. An Octave prompt is nearly always *the* place the work is happening; a
+        // Python REPL open in a side terminal while you edit a web application is not where
+        // `manage.py` should run. Sending a whole file into a live Python session is a change
+        // of behaviour, so it belongs to the feature that asks for it — running a selection —
+        // rather than arriving unannounced under a button that already meant something else.
         let program = template.split_once(' ').map(|(p, _)| p).unwrap_or(&template);
-        if dnd::is_octave_program(program) {
+        let octave = crate::session::Language::Octave;
+        if octave.is_interpreter(program) {
             // Only the on-screen tab of each window is a candidate: running a script in a hidden
             // tab would be invisible and confusing.
             let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
-            if let Some(idx) = dnd::shell_running_octave(&pids) {
-                let command = format!("run({})", dnd::octave_quote(&path.to_string_lossy()));
+            if let Some(idx) = dnd::shell_running(octave, &pids) {
+                let command = octave.run_file(&path.to_string_lossy());
                 if let Some(term) = self.window_tab_mut(idx) {
                     term.write_input(command.as_bytes());
                     term.write_input(b"\r");
@@ -4403,6 +4503,15 @@ impl App {
                 self.run_active_file();
                 return;
             }
+            // eXecute this much of it. R runs the file, X runs the piece — next to each other in
+            // meaning, and X is one of the letters still free. Not Shift+Enter, which is what
+            // every notebook uses and what a terminal cannot deliver: the encoding has had no
+            // room for the Shift since VT100, so it would work in two emulators and silently do
+            // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
+            KeyCode::Char('x') | KeyCode::Char('X') if ctrl && shift => {
+                self.run_selection();
+                return;
+            }
             KeyCode::Char('n') | KeyCode::Char('N') if ctrl && shift => {
                 self.new_terminal();
                 return;
@@ -4686,6 +4795,7 @@ impl App {
             MenuAction::ToggleTerminalSide => self.settings.terminal_on_right = !self.settings.terminal_on_right,
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
+            MenuAction::RunSelection => self.run_selection(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
             MenuAction::ToggleHiddenFiles => self.toggle_hidden_files(),
             MenuAction::Undo => self.editor_undo(),

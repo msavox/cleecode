@@ -17,6 +17,7 @@ mod menu;
 mod picker;
 mod preview;
 mod search;
+mod session;
 mod settings;
 mod terminal_panel;
 mod ui;
