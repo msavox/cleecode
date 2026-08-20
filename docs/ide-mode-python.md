@@ -43,16 +43,35 @@ genuinely open whether the trick survived.
 > harness: `scripts/ide/python_ws_test.py` sets `TERM="dumb"`, which makes CPython fall back
 > to the basic REPL, so the "both REPLs" check only ever exercised one of them.
 >
-> This does not sink the mechanism, but it does sink "no polling, no idle cost, no change
-> detection needed" as written, and with it the claim that Python needs none of Octave's
-> apparatus. `assets/python/cleecode_pyws.py` calls `_snapshot()` from `__str__` with no guard,
-> and `_snapshot()` calls `_figures()`, which calls `fig.savefig()` — so under the REPL a user
-> actually gets, one open figure means the PNG is rewritten about twenty times per command.
+> This does not sink the mechanism, but it did sink "no polling, no idle cost, no change
+> detection needed" as written. `assets/python/cleecode_pyws.py` called `_snapshot()` from
+> `__str__` with no guard, and `_snapshot()` calls `_figures()`, which calls `fig.savefig()` —
+> so under the REPL a user actually gets, one open figure meant the PNG being rewritten about
+> twenty times per command.
 >
-> Decide the fix before building on this: a guard inside `__str__` (which is change detection
-> again, the very thing this document says Python is free of), IPython's `post_run_cell` —
-> already recommended below under Caveats and more official either way — or an audit hook on
-> `exec`. See `ROADMAP.md`, release 0.9.
+> **Settled on 2026-08-20, and the headline above survives after all — it just needed a second
+> mechanism.** The prompt is the wrong signal on its own, but it is the right *moment*: it is
+> drawn after the statement completes. What was missing is something that says a statement ran
+> at all, and an audit hook on `exec` says exactly that, once, if it looks at the code object's
+> filename — the REPL compiles each thing you type as `<python-input-7>`, or `<stdin>` in the
+> basic REPL. So the hook marks and the prompt collects.
+>
+> Measured on one session: 65 restringifications become 5 snapshots for 5 statements, each
+> seeing the namespace as its statement left it, and sixteen keystrokes that were never run
+> produce none. `scripts/ide/python_cadence_test.py` is the regression test, and it refuses to
+> run under the basic REPL on purpose.
+>
+> Both simpler answers were measured and are dead under PyREPL.
+> `readline.get_current_history_length()` — the direct analogue of the `numel(history())` trick
+> the Octave side leans on — returns 0, because PyREPL keeps its own history. And an audit hook
+> that does not check the filename sees 52 execs for 4 statements. Installing the hook costs
+> nothing measurable: numeric work, pure loops and two thousand `open`+`write` come out
+> identical to three decimals with it and without.
+>
+> So the comparison with Octave still holds, and by a wider margin than it looked: Octave polls
+> at 10 Hz and needs a fingerprint to tell whether anything moved, while Python gets an exact
+> per-statement callback for nothing. It simply takes two mechanisms to build, one for *which*
+> statement and one for *when it finished* — which is also why neither alone was enough.
 
 **This removes the hardest part of the Octave design.** Octave's hook polls at ~10 Hz, so
 it needs change detection — the `history()` counter, the `whos` fingerprint, and the

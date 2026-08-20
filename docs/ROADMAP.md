@@ -528,15 +528,39 @@ Corretti:
   *sempre* — sono una **ventina di chiamate per statement**: PyREPL stringifica il prompt più
   volte per ridisegno, e non cambia niente se il testo arriva tutto insieme o digitato.
 
-  Quindi il titolo "niente polling, non serve l'apparato di rilevamento delle modifiche di
-  Octave, costo a riposo esattamente zero" **non regge come scritto**: uno `_snapshot()` messo
-  dentro `__str__` girerebbe venti volte per comando. Il meccanismo resta utilizzabile, ma
-  serve o un guardiano dentro `__str__` (ed è di nuovo rilevamento delle modifiche, cioè la
-  cosa che l'handoff dice giustamente di non appiattire fra i due linguaggi), o un aggancio
-  diverso: `post_run_cell` di IPython, che l'handoff già cita come più solido, o un audit hook
-  su `exec`. Va deciso **prima** di costruirci sopra, perché è una delle tre cose che l'handoff
-  stesso indica come da non pareggiare fra Octave e Python — solo che la differenza va nel
-  verso opposto a quello scritto.
+  Quindi il titolo "niente polling, costo a riposo esattamente zero" non reggeva **come
+  scritto**: uno `_snapshot()` dentro `__str__` girava venti volte per comando, e siccome
+  `_snapshot()` chiama `_figures()`, che chiama `savefig()`, con una figura aperta voleva dire
+  riscrivere il PNG venti volte per comando.
+
+  **Deciso e risolto il 2026-08-20** — e il titolo alla fine regge, gli mancava un secondo
+  meccanismo. Il prompt è il segnale sbagliato da solo ma è il *momento* giusto, perché viene
+  disegnato dopo che lo statement è finito. Mancava qualcosa che dicesse che uno statement è
+  girato, e un **audit hook su `exec`** lo dice esattamente una volta *se guarda il nome del
+  file* del code object: il REPL compila ogni cosa che scrivi come `<python-input-7>`, o
+  `<stdin>` in quello basico. Quindi l'hook marca e il prompt raccoglie.
+
+  Misurato su una sessione: 65 ristringificazioni diventano **5 snapshot per 5 statement**,
+  ognuno che vede il namespace come lo statement l'ha lasciato, e 16 tasti mai eseguiti non ne
+  producono nessuno. `scripts/ide/python_cadence_test.py` è la prova di non regressione, e si
+  rifiuta apposta di girare sul REPL basico.
+
+  Le due risposte più semplici sono morte sotto PyREPL, misurate e non supposte:
+  `readline.get_current_history_length()` — l'analogo diretto del trucco `numel(history())` su
+  cui si regge il lato Octave — restituisce **0**, perché PyREPL tiene una history sua; e un
+  audit hook che non guarda il nome del file vede **52 exec per 4 statement**. Tenere l'hook
+  installato non costa niente di misurabile: lavoro numerico, cicli puri e duemila `open`+`write`
+  vengono identici a tre decimali con e senza.
+
+  Il confronto con Octave regge quindi ancora, e con più margine di quanto sembrasse: Octave
+  campiona a 10 Hz e ha bisogno di una fingerprint per sapere se qualcosa si è mosso, Python ha
+  una callback esatta per statement e gratis. Solo che per costruirla servono due meccanismi,
+  uno per *quale* statement e uno per *quando è finito* — ed è anche il motivo per cui nessuno
+  dei due da solo bastava.
+
+  Resta aperto un solo ramo: **IPython non usa `sys.ps1`**, quindi vuole il suo
+  `ip.events.register("post_run_cell", ...)`. L'handoff lo diceva già ed è più ufficiale di
+  entrambe le metà di questo; va rilevato quale REPL sta girando invece di indovinare.
 - **Il numero di `paperposition` non è una costante, ed è il foglio a esserlo.** Il meccanismo è
   confermato — una figura `position [0 0 800 600]` non stampa un PNG 800x600 — ma qui viene
   **739x554** con `-r100`, mentre l'handoff riporta 709x532 con `-r96`. I due numeri concordano:
