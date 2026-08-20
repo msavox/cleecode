@@ -24,8 +24,15 @@ pub struct Location {
 }
 
 /// The file and line a line of output is pointing at, if it is pointing at one.
+///
+/// The line and column that come back are one-based, whatever the output said. A tool that
+/// prints `file.rs:0` — and some do, for a whole-file message — would otherwise hand a zero to
+/// a field documented as one-based, and every caller would have to know not to believe it.
 pub fn find(text: &str) -> Option<Location> {
-    python(text).or_else(|| octave(text)).or_else(|| generic(text))
+    let mut at = python(text).or_else(|| octave(text)).or_else(|| generic(text))?;
+    at.line = at.line.max(1);
+    at.column = at.column.max(1);
+    Some(at)
 }
 
 /// `  File "/abs/path/boom.py", line 2, in boom`
@@ -165,6 +172,44 @@ fn shallow_find(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever is on the line under the pointer, including things that are not a location.
+    ///
+    /// This reads terminal output, which is to say arbitrary text: a log line, a paste, half a
+    /// binary file, somebody's stack trace in another alphabet. A double-click may not open the
+    /// wrong file and may certainly not bring the editor down, and "no location here" is the
+    /// answer for almost every line ever printed.
+    #[test]
+    fn a_line_that_is_not_a_location_is_not_read_as_one() {
+        let very_long = "a".repeat(10_000);
+        let odd = [
+            "", " ", ":", "::", ":::::", "1:2:3", ":1:", "a:", ":a",
+            "-9223372036854775808:1", "99999999999999999999:1:1",
+            "file.rs:99999999999999999999", "file.rs:-3", "file.rs:0",
+            "C:\\", "C:\\src", "/", "//", "\u{0}\u{1}", "日本語:12:3",
+            "\u{1f422}.m:1:1", very_long.as_str(),
+            "http://example.com:8080/x", "warning: unused variable at 12:5",
+            "        ", "\t\t:\t", "--:--:--", "[2026-08-20 17:21:42] ok",
+        ];
+        for line in odd {
+            if let Some(found) = find(line) {
+                assert!(!found.path.is_empty(), "{line:?} gave an empty path");
+                assert!(found.line >= 1, "{line:?} gave line {}", found.line);
+            }
+        }
+    }
+
+    /// A timestamp is the line every log prints, and it is three numbers separated by colons.
+    #[test]
+    fn a_clock_is_not_a_file() {
+        for line in ["17:21:42", "[17:21:42] starting", "elapsed 00:03:19"] {
+            let found = find(line);
+            assert!(
+                found.as_ref().is_none_or(|f| f.path.contains('.') || f.path.contains('/')),
+                "{line:?} was read as {found:?}"
+            );
+        }
+    }
 
     fn at(text: &str) -> Option<(String, usize, usize, bool)> {
         find(text).map(|l| (l.path, l.line, l.column, l.bare_name))
