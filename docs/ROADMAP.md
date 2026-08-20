@@ -828,7 +828,54 @@ quella che a mano è scomoda.
   proprio mentre stavi per scrivere `dbstep` al prompt. Adesso mostra senza prendere, come fa
   una figura che si apre.
 
-**Con questo l'ordine di costruzione dell'handoff è finito**, debugger compreso. Il debugger è un livello a
+**Con questo l'ordine di costruzione dell'handoff è finito**, debugger compreso.
+
+---
+
+**Passo 12 fatto**: **Python in pari con Octave**. Erano quattro le cose che mancavano —
+history, ispettore, debugger, figure — e adesso ci sono tutte, guidate dallo stesso driver che
+guida Octave (`scripts/drive_python.py`, gli stessi controlli in una passata sola).
+
+Il senso del seam si vede qui: il lato Rust ha cambiato *quattro variabili d'ambiente e un
+campo JSON*. Tutto il resto è stato lavoro dentro `cleecode_pyws.py`, perché i due interpreti
+rispondono alle stesse tre domande scritte negli stessi tre file.
+
+*Ogni pezzo ha voluto una strada sua, e nessuna somigliava a quella di Octave:*
+
+| cosa | Octave | Python |
+|---|---|---|
+| history | `history()` | `readline` ne riporta **zero** — misurato; sta nel reader di PyREPL, 105 voci |
+| variabili del frame | `evalin("caller", …)` | `frame.f_locals`, dallo stesso frame in cui pdb si è fermato |
+| breakpoint | `dbstop` dentro l'hook | `pdb`, con il tracing acceso per la durata **di una sola istruzione** |
+| stepping | `dbstep` al prompt | `n` e `c` al `(Pdb)` — e la riga di stato adesso dice quale delle due |
+| figure | ristampa se `__modified__` | risalva se `fig.stale` — la stessa idea con l'attrezzo di matplotlib |
+
+Il tracing acceso per una sola istruzione è la scelta che conta. Il prompt di Python **non è
+fermo**: PyREPL ridisegna la riga a ogni tasto premuto, quindi una `settrace` lasciata accesa lì
+pagherebbe una chiamata per riga di codice per ogni *carattere digitato*, e non prenderebbe
+niente. L'audit hook scatta una volta sola, subito prima dell'istruzione dell'utente, che è
+l'unica finestra in cui un breakpoint può essere raggiunto. Il prompt poi la rispegne.
+
+*Tre bug, e due erano miei modi di perdere tempo:*
+- **bdb senza `botframe` si ferma dappertutto.** `set_continue()` vuol dire "corri fino a un
+  breakpoint" solo se `botframe` è impostato; senza, la prima riga che vede è quella di PyREPL e
+  si ferma lì. Impostarlo dà anche la velocità: una chiamata dentro un file senza breakpoint non
+  viene più tracciata riga per riga.
+- **`/var` contro `/private/var`.** CleeCode scrive il path risolto, Python importa quello con il
+  link; `bdb` li confronta dopo `abspath`, che i link non li segue. Stesso file, due nomi, e la
+  sessione passava oltre il breakpoint **senza un errore da nessuna parte**. Risolto una volta
+  sola sovrascrivendo `canonic`, che è il punto da cui passano entrambi i lati del confronto.
+- **Due volte ho inseguito un bug in un binario vecchio.** Prima il `include_str!` non
+  ricostruito, poi — peggio — i driver che usano `target/debug` mentre io ricostruivo solo
+  `--release`. Il codice era giusto da un pezzo. Da qui in avanti: prima di credere a un FAIL,
+  controllare *quale* binario ha appena girato.
+
+E `CLEECODE_DBG_LOG` adesso c'è anche per Python, per lo stesso motivo per cui c'è per Octave.
+
+*Quello che resta dichiarato, non nascosto:* l'ispettore mostra e non modifica, e le figure
+vogliono matplotlib installato **nello stesso python del terminale** — su questa macchina
+`brew install python-matplotlib` l'ha messo per il python3.14 di brew, mentre `python3` è pyenv
+3.13 e non lo vede. Il driver lo dichiara come SKIP invece di far finta di aver controllato. Il debugger è un livello a
 sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i

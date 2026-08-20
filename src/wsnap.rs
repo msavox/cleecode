@@ -363,7 +363,26 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
             "CLEECODE_OCTAVE_SLICE_REQ".to_string(),
             dir.join(format!("slicereq-{pane_id}.json")).to_string_lossy().into_owned(),
         ),
+        // Python reads the same three files, because they hold the same three questions. One
+        // set of names per language rather than one shared set: a shell can start either
+        // interpreter, and a variable named for the wrong one is a variable nobody explains.
         ("CLEECODE_PY_FIGS".to_string(), figures.to_string_lossy().into_owned()),
+        (
+            "CLEECODE_PY_SLICE".to_string(),
+            dir.join(format!("slice-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
+        (
+            "CLEECODE_PY_SLICE_REQ".to_string(),
+            dir.join(format!("slicereq-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
+        (
+            "CLEECODE_PY_BREAK".to_string(),
+            dir.join(format!("break-{pane_id}.json")).to_string_lossy().into_owned(),
+        ),
+        // Draw without opening a window of its own. matplotlib's default backend on a Mac puts
+        // up a separate GUI window, which is the thing this whole panel exists to avoid; the
+        // capture backend keeps the figure in the session and hands CleeCode the PNG.
+        ("MPLBACKEND".to_string(), "module://cleecode_mpl".to_string()),
         ("CLEECODE_OCTAVE_LIB".to_string(), lib_octave.to_string_lossy().into_owned()),
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),

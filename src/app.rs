@@ -1680,7 +1680,8 @@ impl App {
     fn publish_breakpoints(&mut self) {
         let Some(watch) = self.figures.as_ref() else { return };
         let path = break_path_beside(&watch.path);
-        // By function name, which is what `dbstop` takes and what a `.m` file is known by.
+        // By function name, which is what `dbstop` takes and what a `.m` file is known by, and
+        // by path, which is what pdb takes. Each language reads the field it can use.
         let wanted: Vec<serde_json::Value> = self
             .breakpoints
             .iter()
@@ -1689,7 +1690,10 @@ impl App {
                     .file_stem()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                lines.iter().map(move |line| serde_json::json!({"name": name, "line": line}))
+                let full = file.to_string_lossy().into_owned();
+                lines.iter().map(move |line| {
+                    serde_json::json!({"name": name, "path": full, "line": line})
+                })
             })
             .collect();
         let temp = path.with_extension("tmp");
@@ -1727,7 +1731,15 @@ impl App {
             self.focus = was.0;
             self.editor_pane_focus = was.1;
         }
-        self.status_message = i18n::msg_debug_stopped(lang, &debug.name, debug.line);
+        // Named by the snapshot's own `lang`, the same field the workspace window is titled
+        // from — so the words offered are the ones that work at the prompt in front of you.
+        let python = self
+            .figures
+            .as_ref()
+            .and_then(|watch| watch.snapshot.as_ref())
+            .is_some_and(|snapshot| snapshot.lang == "python");
+        let steps = if python { "n / c" } else { "dbstep / dbcont" };
+        self.status_message = i18n::msg_debug_stopped(lang, &debug.name, debug.line, steps);
     }
 
     /// The breakpoints on a file, for the renderer.
