@@ -8,6 +8,9 @@ docs/.shots-scratch.gif
 # but they are 24 MB of machine-specific paths and belong to nobody else's checkout.
 examples/.venv*
 
+# Python's own leavings from the harnesses in scripts/.
+__pycache__/
+
 # What the IDE-mode probes leave behind when run: workspace snapshots, rendered figures
 # and the temp file the atomic write goes through. They are run from the directory holding
 # the library files (scripts/ide/README.md), so the litter lands in assets/.

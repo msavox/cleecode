@@ -33,12 +33,14 @@ dirs = "6.0.0"
 # error the overlay can show instead of freezing the editor.
 fancy-regex = "0.16.2"
 image = "0.25.10"
+lsp-types = "0.97.0"
 portable-pty = "0.9.0"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["simd", "html"] }
 ratatui = "0.30.2"
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults"] }
 ropey = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 shell-words = "1.1.1"
 # The highlighting engine, with its own grammars turned off: two-face supplies bat's set
 # instead — syntect's defaults plus TypeScript, TOML, Kotlin, Swift, Zig, Dockerfile, Vue and

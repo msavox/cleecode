@@ -439,11 +439,49 @@ ciclo di input.
    driver deve aspettare una *condizione*, non un tempo fisso. E `▶` da solo non basta a trovare
    il popup: c'è anche nel pulsante `▶ Run` della barra.
 
-**0.8 — LSP**
-Client JSON-RPC scritto a mano su stdio, `lsp-types` per i tipi, **un solo server**
-(rust-analyzer) e **solo diagnostici**: sono non-modali e non possono corrompere un buffer — se
-il server muore si perdono delle sottolineature. Poi rust-analyzer diventa una sorgente in più
-per il popup della 0.7. `didChange` **ritardato**, agganciato al `revision` di `Editor`.
+**0.8 — LSP** ← *fatta, non ancora rilasciata*
+
+Client JSON-RPC scritto a mano su stdio in `src/lsp.rs`, `lsp-types` per i tipi, **un solo
+server** (rust-analyzer) e **solo diagnostici**, come deciso. Niente `tower-lsp`, niente `tokio`:
+il client usa lo schema che c'era già — thread, `mpsc`, `poll_lsp` nel ciclo a 30 fps accanto
+agli altri poll. `didChange` ritardato di 400 ms sul `revision` di `Editor`, e manda il file
+intero: la sincronizzazione incrementale vorrebbe una seconda descrizione di cos'è una modifica,
+tenuta in pari con la rope a mano, e il risparmio non la paga visto che parte solo a pausa fatta.
+
+**Due crate nuove: `serde_json` e `lsp-types`** (cinque in tutto col loro seguito, tutte Rust
+puro). Coerente con il rifiuto di `git2`, che era per la dipendenza C e per hook e firma saltati,
+non per il numero. Su `lsp-types` la valutazione è stata rifatta coi numeri: costa 3 crate, e
+`fluent-uri` sembrava ripagarla da sola — poi si scopre che **`lsp_types::Uri` è solo un parser,
+`FromStr` e basta, senza `from_file_path`**. La codifica percorso→`file://` è comunque a mano,
+qui con i test che merita: spazi, accenti e lettera di unità Windows. `lsp-types` resta per le
+struct del protocollo, perché l'handshake con rust-analyzer è pignolo.
+
+**Cosa si vede:** sottolineatura colorata dove il server indica, numero di riga dello stesso
+colore, e il messaggio della riga del cursore a destra nella barra di stato — accanto al
+messaggio di stato, non al suo posto. Impostazione `diagnostics` per spegnere tutto.
+
+**Verificato senza rust-analyzer**, che qui non è installato (e non c'è rustup). Tre livelli:
+funzioni pure per framing, URI e conversione delle posizioni; il thread lettore guidato da una
+trascrizione finta in memoria; e `Client` contro un **processo vero**, `scripts/lsp_stub.py`, che
+riecheggia l'URI ricevuto invece di inventarne uno — uno stub con l'URI in conserva passerebbe
+anche con la codifica rotta. Poi `scripts/drive_lsp.py` mette lo stub sul PATH col nome che
+CleeCode cerca e guida l'editor vero: pyte tiene colore e attributi per cella, quindi
+"sottolineato" e "rosso" si controllano davvero. Nove controlli.
+
+**Il bug che solo l'end-to-end poteva trovare.** Tutti i test unitari usavano percorsi assoluti.
+Un progetto aperto come `.` tiene le tab su `./src/main.rs`, e `uri_for` ci metteva davanti uno
+slash producendo `file:///./src/main.rs`: un URI che si compila, parte, torna indietro dal server
+e non nomina niente a nessuno dei due capi. Niente sottolineature e niente che dicesse perché.
+Ora un percorso relativo **non ha URI** e lo dice, e l'app risolve il percorso una volta sola
+(`canonicalize`, perché il server scioglie i symlink e su macOS `/tmp` torna indietro come
+`/private/tmp`) tenendo la corrispondenza fra il percorso risolto e quello della tab.
+
+Un dettaglio che vale per il prossimo che scrive codice Windows qui: la radice di un percorso si
+chiede al *testo*, non a `Path::is_absolute()`, che risponde per la piattaforma su cui è
+compilato — `C:\src` risulta relativo a una build Unix, e chi scrive quel codice non può provarlo.
+
+Poi rust-analyzer diventa una sorgente in più per il popup della 0.7, innestandosi sul `Source`
+che è lì apposta dalla 0.7.
 
 **0.9 — Modalità IDE per Octave e Python**
 

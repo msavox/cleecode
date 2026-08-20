@@ -100,6 +100,7 @@ pub enum Key {
     SettingShowWhitespace,
     SettingAutoIndent,
     SettingCompletion,
+    SettingDiagnostics,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -356,6 +357,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingAutoIndent) => "Indentazione automatica",
         (Lang::En, SettingCompletion) => "Word completion",
         (Lang::It, SettingCompletion) => "Completamento parole",
+        (Lang::En, SettingDiagnostics) => "Language server diagnostics",
+        (Lang::It, SettingDiagnostics) => "Diagnostici del language server",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
@@ -653,6 +656,31 @@ pub fn msg_replace_all_count(lang: Lang, count: usize) -> String {
         Lang::En => format!("   ({count} in all)"),
         Lang::It => format!("   ({count} in tutto)"),
     }
+}
+
+/// Said once, when a server a file would have used turns out not to be installed. Worded as a
+/// fact about the machine rather than as an error, because it is not one: the editor works
+/// exactly as it did before, minus the underlines.
+pub fn msg_lsp_missing(lang: Lang, program: &str) -> String {
+    match lang {
+        Lang::En => format!("{program} is not installed — editing without diagnostics"),
+        Lang::It => format!("{program} non è installato — si modifica senza diagnostici"),
+    }
+}
+
+pub fn msg_lsp_ready(lang: Lang, program: &str) -> String {
+    match lang {
+        Lang::En => format!("{program} is answering"),
+        Lang::It => format!("{program} risponde"),
+    }
+}
+
+pub fn msg_lsp_stopped(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The language server stopped — the underlines are gone, the file is not",
+        Lang::It => "Il language server si è fermato — via le sottolineature, non il file",
+    }
+    .to_string()
 }
 
 pub fn msg_replaced_all(lang: Lang, count: usize) -> String {

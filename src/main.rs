@@ -11,6 +11,7 @@ mod git;
 mod git_status;
 mod highlight;
 mod i18n;
+mod lsp;
 mod manual;
 mod menu;
 mod picker;
@@ -465,6 +466,7 @@ fn run(
             app.poll_git_status();
             app.poll_search();
             app.poll_git_panel();
+            app.poll_lsp();
         }));
         if let Err(text) = polled {
             app.status_message = i18n::msg_internal_error(app.settings.lang, &text);
