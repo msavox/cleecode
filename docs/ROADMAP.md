@@ -445,6 +445,87 @@ Client JSON-RPC scritto a mano su stdio, `lsp-types` per i tipi, **un solo serve
 il server muore si perdono delle sottolineature. Poi rust-analyzer diventa una sorgente in più
 per il popup della 0.7. `didChange` **ritardato**, agganciato al `revision` di `Editor`.
 
+**0.9 — Modalità IDE per Octave e Python**
+
+Proposta arrivata il 2026-08-20 da una sessione parallela, con prototipi funzionanti e tre
+documenti di handoff in `~/cleecode-octave-ws/` (fuori dal repo, non sotto git). Pannello del
+workspace dal vivo, figure come tab di anteprima navigabili, preset `clee -w octave` e
+`clee -w pylab`. **Non ancora portata nel repo**: qui c'è la valutazione, non il lavoro.
+
+*L'inquadratura da preservare* — ed è la parte più preziosa dell'handoff: **una funzionalità
+con due backend, non due lavori**. Ogni voce della lista vale per entrambi i linguaggi, e tutta
+la superficie specifica del linguaggio sono quindici one-liner. Costruita come due
+implementazioni parallele "che poi convergono" diventa due mezze funzionalità che non
+convergono mai. Entrambi i prototipi emettono già lo stesso JSON con un campo `lang`.
+
+**Ricontrollato qui, non preso sulla parola.** Quattro conferme e due correzioni.
+
+Confermati:
+- I quattro agganci nel repo sono esatti: `main.rs:286` (`is_default` prima di `load`),
+  `terminal_panel.rs:365` (`cmd.env("CLEECODE", "1")`), `app.rs:668` (`DragTarget`),
+  `preview.rs` che disegna PNG via `ratatui_image`.
+- `add_input_event_hook` misurato in un PTY: **mediana 105 ms** (101–106), **zero** scatti
+  durante un comando bloccante di 2 s, e niente stampato nella trascrizione dell'utente. Il
+  numero dell'handoff è giusto al millisecondo.
+- La trappola di `jsonencode`: una struct array 1x1 serializza a `{...}`, una 2x1 a `[{...}]`.
+  `vars` è un cell array apposta — verificato che il cell array 1x1 dà `[{...}]`.
+- Il bug dei workspace built-in che ombreggiano silenziosamente quelli dell'utente esiste
+  davvero: `is_default(n)` risponde prima che `load(n)` guardi il file, e il messaggio d'errore
+  di `save_in` nomina sempre `DEFAULT_NAME`. Oggi è latente — solo "Default layout" è
+  riservato — e diventa reale nel momento in cui `octave` diventa un nome built-in. Va corretto
+  **insieme** ai preset, non aggirato scegliendo nomi scomodi.
+
+Corretti:
+- **`sys.ps1` come oggetto non scatta una volta per statement nel PyREPL nuovo.**
+  `HANDOFF-PYTHON.md` riga 27 dice "fires once per statement in **both** Python 3.13 REPLs".
+  Misurato qui, stesso PTY, stessa Python 3.13.14, tre statement:
+
+  | REPL | righe intere | carattere per carattere |
+  |---|---|---|
+  | basico (`PYTHON_BASIC_REPL=1`) | 4 | 4 |
+  | PyREPL (predefinito) | **60** | **60** |
+
+  Nel REPL basico l'affermazione regge esattamente (4 = i tre statement più la `print` finale).
+  Nel PyREPL — che è il predefinito in un terminale vero, cioè quello che CleeCode avrà
+  *sempre* — sono una **ventina di chiamate per statement**: PyREPL stringifica il prompt più
+  volte per ridisegno, e non cambia niente se il testo arriva tutto insieme o digitato.
+
+  Quindi il titolo "niente polling, non serve l'apparato di rilevamento delle modifiche di
+  Octave, costo a riposo esattamente zero" **non regge come scritto**: uno `_snapshot()` messo
+  dentro `__str__` girerebbe venti volte per comando. Il meccanismo resta utilizzabile, ma
+  serve o un guardiano dentro `__str__` (ed è di nuovo rilevamento delle modifiche, cioè la
+  cosa che l'handoff dice giustamente di non appiattire fra i due linguaggi), o un aggancio
+  diverso: `post_run_cell` di IPython, che l'handoff già cita come più solido, o un audit hook
+  su `exec`. Va deciso **prima** di costruirci sopra, perché è una delle tre cose che l'handoff
+  stesso indica come da non pareggiare fra Octave e Python — solo che la differenza va nel
+  verso opposto a quello scritto.
+- **Il numero di `paperposition` non è una costante, ed è il foglio a esserlo.** Il meccanismo è
+  confermato — una figura `position [0 0 800 600]` non stampa un PNG 800x600 — ma qui viene
+  **739x554** con `-r100`, mentre l'handoff riporta 709x532 con `-r96`. I due numeri concordano:
+  739/100 = 7,39 e 709/96 = 7,385, cioè lo stesso foglio di ~7,39x5,54 pollici, e i pixel sono
+  pollici per DPI. Quindi la correzione dell'handoff (§6: forzare `paperposition` in pollici) è
+  quella giusta; è solo la coppia di numeri in pixel che non va citata come costante.
+
+Non verificato: la fingerprint O(n²) (7,46 ms/tick a 200 variabili) — è un dettaglio interno al
+prototipo, plausibile, e non cambia la forma della cosa.
+
+*Da sistemare nell'handoff prima di portarlo:* `HANDOFF-SHARED.md` si contraddice sul nome —
+riga 11 dice `clee -w octavelab`, riga 77 dice `clee -w octave` e la sezione Naming argomenta
+contro `octavelab`. Vale la seconda.
+
+*Ordine di costruzione proposto* (dall'handoff, e mi convince): eseguire selezione e celle `%%`
+dall'editor per prima, perché è quella che trasforma la cosa da visualizzatore in IDE; poi
+traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla
+sessione viva (si innesta come terza sorgente in `complete.rs`, esattamente come l'LSP della
+0.8), export delle figure. Il debugger è un livello a sé, sugli stessi canali.
+
+*Aperto:* dove vivono i `.m` e i `.py` (`assets/octave/`, `assets/python/`), e i tre documenti
+di handoff vanno portati in `docs/` insieme al codice — il loro valore è il ragionamento dietro
+scelte che da fuori sembrano arbitrarie, ed è quello che un lettore futuro "sistemerebbe"
+rompendole. `test/pty_strict.py` è l'unico test della rilevazione delle modifiche e serve una
+casa anche a lui. Finché la copia in `~/cleecode-octave-ws/` esiste fuori dal repo ci sono due
+copie divergenti della stessa cosa, e fra un mese nessuna delle due sembrerà quella buona.
+
 **Dopo:** azioni Git che scrivono (stage, commit), altri server LSP. Le azioni che scrivono
 stanno in fondo di proposito: leggere ha rischio zero, scrivere no, e il commit si fa già nel
 terminale accanto — che è il punto del prodotto.
