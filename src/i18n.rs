@@ -1284,6 +1284,16 @@ pub fn msg_workspace_saved(lang: Lang, name: &str, terminals: usize) -> String {
     }
 }
 
+/// Said when a workspace of the user's own has the same name as one CleeCode ships. Theirs is
+/// what opened — a saved workspace cannot be had again and a built-in can — and the sentence
+/// exists so that fact is on screen rather than being a preset that mysteriously does nothing.
+pub fn msg_workspace_shadows(lang: Lang, built_in: &str) -> String {
+    match lang {
+        Lang::En => format!("Opened yours — \"{built_in}\" is also built in; rename yours to reach it"),
+        Lang::It => format!("Aperto il tuo — \"{built_in}\" è anche un preset; rinomina il tuo per averlo"),
+    }
+}
+
 pub fn msg_workspace_loaded(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("Workspace \"{name}\" opened"),

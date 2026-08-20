@@ -186,13 +186,19 @@ fn main() -> Result<()> {
                 let saved = workspace::list();
                 if saved.is_empty() {
                     println!("No saved workspaces of your own yet — save one from the Workspace menu.");
-                    println!("    {:<24} (built in)", workspace::DEFAULT_NAME);
                 } else {
                     println!("Saved workspaces:");
-                    for ws in saved {
+                    for ws in &saved {
                         println!("    {:<24} {}", ws.name, ws.root.display());
                     }
-                    println!("    {:<24} (built in)", workspace::DEFAULT_NAME);
+                }
+                println!("Built in:");
+                for name in workspace::BUILT_INS {
+                    // A name the user has already saved under is theirs, and saying it is built
+                    // in here would be the same silent shadowing this listing exists to expose.
+                    let shadowed = saved.iter().any(|w| workspace::slug(&w.name) == workspace::slug(name));
+                    let note = if shadowed { "(shadowed by yours, above)" } else { "" };
+                    println!("    {name:<24} {note}");
                 }
                 return Ok(());
             }
@@ -282,12 +288,12 @@ fn run(
     // `-w name` is an explicit request, so it beats both the resume and a path argument. Falling
     // back to the resume when the name is unknown would silently open the wrong thing, so a bad
     // name simply opens nothing and says so once the UI is up.
-    let named = open_workspace.as_deref().map(|n| {
-        // The built-in one is not a file, so it is answered here rather than looked up. Its root
-        // is settled below like any other startup: the argument, or the current directory.
-        let found = if workspace::is_default(n) { None } else { workspace::load(n) };
-        (n.to_string(), found)
-    });
+    // Looked up on disk whatever the name is, built-ins included: a file of the user's own wins,
+    // and the built-in answers only when there is no file. A built-in is documented and can be
+    // had again; a workspace somebody saved cannot. Built-ins are not files anyway, so the one
+    // that answers here is put together further down, once the app knows the window it is
+    // opening in — a preset shapes itself around that.
+    let named = open_workspace.as_deref().map(|n| (n.to_string(), workspace::load(n)));
     let resumed = match &named {
         Some((_, found)) => found.clone(),
         // A bare `clee` never reopens a named workspace. Opening one is a decision — `-w`, or
@@ -346,12 +352,18 @@ fn run(
         || match named {
         Some((name, found)) => {
             match found {
-                Some(ws) => app.apply_workspace(ws),
-                None if workspace::is_default(&name) => {
-                    let root = app.root.clone();
-                    app.apply_workspace(workspace::default_workspace(root));
+                Some(ws) => {
+                    app.apply_workspace(ws);
+                    if let Some(built_in) = workspace::built_in_named(&name) {
+                        app.status_message = i18n::msg_workspace_shadows(app.settings.lang, built_in);
+                    }
                 }
-                None => app.status_message = i18n::msg_workspace_unknown(app.settings.lang, &name),
+                None => match workspace::built_in(&name, &app.workspace_shape()) {
+                    Some(ws) => app.apply_workspace(ws),
+                    None => {
+                        app.status_message = i18n::msg_workspace_unknown(app.settings.lang, &name)
+                    }
+                },
             }
             true
         }
@@ -496,7 +508,7 @@ fn run(
     // nudged during the session is still there next time it is opened. The built-in is the
     // exception and is never written: it is the layout you go back to, so it has to stay put.
     if let Some(name) = app.active_workspace.clone() {
-        if !workspace::is_default(&name) {
+        if !workspace::is_built_in(&name) {
             let _ = workspace::save(&app.capture_workspace(name));
         }
     }

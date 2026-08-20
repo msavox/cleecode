@@ -21,6 +21,8 @@ import sys
 import termios
 import time
 
+# The window a driver gets unless it asks for another. Wide enough that CleeCode's own presets
+# choose their side-by-side shape, which is what most checks want to be looking at.
 ROWS, COLS = 30, 110
 
 try:
@@ -32,12 +34,13 @@ except ImportError:
 class Session:
     """A CleeCode running in a pty, with a rendered picture of its screen."""
 
-    def __init__(self, binary, root, env=None):
+    def __init__(self, binary, root, env=None, args=None, cols=COLS, rows=ROWS):
         # Its own config directory, inside the throwaway project. Without this a driver reads the
         # settings of whoever is running it — so a check would depend on whether they happen to
         # have turned the feature off — and CleeCode's resume would reopen their last project
         # instead of the fixture. That is not hypothetical: it produced a run where every check
         # failed against an empty tree, which looks exactly like a broken editor.
+        self.cols, self.rows = cols, rows
         self.config = os.path.join(root, ".config")
         os.makedirs(self.config, exist_ok=True)
         self.pid, self.fd = pty.fork()
@@ -48,13 +51,13 @@ class Session:
             os.environ.update(env or {})
             os.chdir(root)
             try:
-                os.execv(binary, [binary, "."])
+                os.execv(binary, [binary] + list(args or []) + ["."])
             finally:
                 # execv only returns if it failed, and a child falling through here would go on
                 # running the rest of the driver as though it were the driver.
                 os._exit(127)
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-        self.screen = pyte.Screen(COLS, ROWS)
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
         os.set_blocking(self.fd, False)
 
@@ -118,20 +121,40 @@ class Session:
         return self.wait(predicate, timeout)
 
     def lines(self):
-        return [self.screen.display[y].rstrip() for y in range(ROWS)]
+        """The screen as text, rendered from the cell buffer.
+
+        Not pyte's own `display`, for two reasons. It raises on a cell whose character is the
+        empty string — which happens beside a double-width one, and took a 190-column window to
+        show up — and it accounts for wide characters by shifting what follows, so a column index
+        from `display` and one from the buffer would not agree. Rendering both from the buffer
+        means a position found in the text is the position to ask `cells` about."""
+        return [
+            "".join(cell.data or " " for cell in self.cells(y)).rstrip()
+            for y in range(self.rows)
+        ]
 
     def text(self):
         return "\n".join(self.lines())
 
     def cells(self, row):
         """The row as pyte Char objects, which carry colour and attributes as well as text."""
-        return [self.screen.buffer[row][x] for x in range(COLS)]
+        return [self.screen.buffer[row][x] for x in range(self.cols)]
 
     def row_of(self, needle):
         """The first screen row containing `needle`, or None."""
         for y, line in enumerate(self.lines()):
             if needle in line:
                 return y
+        return None
+
+    def column_of(self, needle):
+        """The column `needle` starts at, or None. Which frame something is in is a question
+        about columns as often as about rows: a pane on the right and a pane underneath both
+        have their title near the top."""
+        for line in self.lines():
+            at = line.find(needle)
+            if at >= 0:
+                return at
         return None
 
     # ---- reading particular things off it ---------------------------------------------

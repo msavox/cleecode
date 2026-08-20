@@ -69,27 +69,99 @@ pub struct Workspace {
     pub terminals: Vec<WorkspaceTerminal>,
 }
 
-/// The built-in workspace. It is not a file and never becomes one: picking it puts the frames
-/// back the way CleeCode ships them, in whatever project you are already in. It exists because
-/// the layout is easy to wander away from — a hidden sidebar here, a dragged seam there — and
-/// there was no way back short of editing settings by hand. Being built in is also why it cannot
-/// be deleted: there is nothing on disk to delete.
+/// The layout workspace. It is not a file and never becomes one: picking it puts the frames back
+/// the way CleeCode ships them, in whatever project you are already in. It exists because the
+/// layout is easy to wander away from — a hidden sidebar here, a dragged seam there — and there
+/// was no way back short of editing settings by hand.
 pub const DEFAULT_NAME: &str = "Default layout";
 
-/// Whether `name` is the built-in one. Compared by slug so case and spacing do not matter, but
-/// deliberately *not* a name anyone is likely to have used already — a workspace of your own
-/// called "default" keeps working and keeps its place in the list.
-pub fn is_default(name: &str) -> bool {
-    slug(name) == slug(DEFAULT_NAME)
+/// The workspaces CleeCode ships rather than reads from a file.
+///
+/// Two of them set up a session for a language: a prompt for it already running, a shell beside
+/// it, and the frames arranged the way that kind of work wants them. Being built in is why they
+/// cannot be deleted — there is nothing on disk to delete — and why they travel between projects.
+pub const BUILT_INS: [&str; 3] = [DEFAULT_NAME, "octave", "pylab"];
+
+/// Whether `name` is one of the built-ins. Compared by slug, so case and spacing do not matter.
+pub fn is_built_in(name: &str) -> bool {
+    BUILT_INS.iter().any(|b| slug(b) == slug(name))
 }
 
-/// The built-in workspace, pointed at `root`. No open files and no terminals of its own: the
-/// point is the shape of the window, not a set of shells, and `apply_workspace` keeps the ones
-/// already running when the project has not changed.
-pub fn default_workspace(root: PathBuf) -> Workspace {
+/// The built-in of that name, if any, spelled the way CleeCode spells it — so a message about a
+/// clash can name the built-in rather than echo back what the user typed.
+pub fn built_in_named(name: &str) -> Option<&'static str> {
+    BUILT_INS.iter().copied().find(|b| slug(b) == slug(name))
+}
+
+/// What a built-in needs to know about the machine it is opening on.
+pub struct Shape {
+    pub root: PathBuf,
+    /// The window's width in columns. A layout that is right at 200 columns and unusable at 80
+    /// is not the best layout, it is the best layout for whoever wrote it.
+    pub cols: u16,
+    /// The Python to start, already resolved against any active virtualenv — otherwise `pylab`
+    /// would open a prompt without the packages the project was set up for, which is the one
+    /// thing that preset exists to avoid.
+    pub python: String,
+}
+
+/// Below this the frames go one above the other rather than side by side.
+///
+/// Three columns need the editor to keep enough width for code and the prompt enough for a
+/// matrix row: a sidebar, ~70 for the editor and ~55 for the terminal is about 150. Under that,
+/// stacked is not a compromise — it is simply the right answer, because both frames then have
+/// the whole width.
+const SIDE_BY_SIDE_COLS: u16 = 150;
+
+/// A built-in workspace by name, shaped for the window it is opening in.
+pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
+    let name = built_in_named(name)?;
+    Some(match name {
+        "octave" => session_workspace(name, shape, "octave --no-gui", "octave"),
+        "pylab" => session_workspace(name, shape, &shape.python, "python"),
+        // The layout one keeps no terminals of its own: the point is the shape of the window,
+        // not a set of shells, and `apply_workspace` keeps the ones already running when the
+        // project has not changed.
+        _ => Workspace {
+            name: name.to_string(),
+            root: shape.root.clone(),
+            open_files: Vec::new(),
+            active_file: None,
+            active_venv: None,
+            active_terminal: 0,
+            layout: WorkspaceLayout {
+                show_sidebar: true,
+                show_terminal: true,
+                show_menubar: true,
+                sidebar_width: 30,
+                terminal_pct: 35,
+                terminal_on_right: false,
+                split_view: false,
+                split_pct: 50,
+            },
+            terminals: Vec::new(),
+        },
+    })
+}
+
+/// The shape both language presets share, which is the whole argument for having a seam: they
+/// differ by the command that starts the interpreter and by what the tab is called.
+///
+/// **One terminal window, two tabs.** A second *window* would take screen away from the editor
+/// permanently to hold a shell that is used for a minute at a time; a second tab costs nothing
+/// and is one keystroke away. Tab 1 is the interpreter, because that is where Ctrl+Shift+X
+/// lands and it should be what you are looking at.
+///
+/// **The prompt goes beside the editor when there is room**, which is the arrangement the Octave
+/// and MATLAB desktops settled on and for the same reason: numeric output is wide — a matrix row
+/// wraps into nonsense in a narrow pane — and you read it while writing the next line, not after.
+/// The sidebar stays, narrower: this kind of work is usually a handful of scripts, so the tree is
+/// for finding them rather than for living in.
+fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Workspace {
+    let wide = shape.cols >= SIDE_BY_SIDE_COLS;
     Workspace {
-        name: DEFAULT_NAME.to_string(),
-        root,
+        name: name.to_string(),
+        root: shape.root.clone(),
         open_files: Vec::new(),
         active_file: None,
         active_venv: None,
@@ -98,13 +170,27 @@ pub fn default_workspace(root: PathBuf) -> Workspace {
             show_sidebar: true,
             show_terminal: true,
             show_menubar: true,
-            sidebar_width: 30,
-            terminal_pct: 35,
-            terminal_on_right: false,
+            sidebar_width: if wide { 24 } else { 26 },
+            // Wide: a share of the width. Narrow: a share of the height, and a smaller one,
+            // because a prompt needs fewer rows to be useful than an editor does.
+            terminal_pct: if wide { 42 } else { 38 },
+            terminal_on_right: wide,
             split_view: false,
             split_pct: 50,
         },
-        terminals: Vec::new(),
+        terminals: vec![WorkspaceTerminal {
+            weight: default_weight(),
+            active: 0,
+            tabs: vec![
+                WorkspaceTab {
+                    name: Some(tab.to_string()),
+                    startup_command: Some(start.to_string()),
+                },
+                // A plain shell, for the things a prompt is bad at: git, ls, pip. Unnamed and
+                // unstarted, so it costs a shell and no screen.
+                WorkspaceTab { name: Some("shell".to_string()), startup_command: None },
+            ],
+        }],
     }
 }
 
@@ -135,8 +221,11 @@ fn file_in(dir: &Path, name: &str) -> PathBuf {
 }
 
 pub fn save_in(dir: &Path, ws: &Workspace) -> Result<PathBuf, String> {
-    if is_default(&ws.name) {
-        return Err(format!("\"{DEFAULT_NAME}\" is the built-in workspace and cannot be overwritten"));
+    // Names the built-in that was actually clashed with. It used to name `DEFAULT_NAME`
+    // whichever one you hit, which was true when there was only one and became a lie the moment
+    // there were three — and a refusal that names the wrong thing reads as a bug in the save.
+    if let Some(built_in) = built_in_named(&ws.name) {
+        return Err(format!("\"{built_in}\" is a built-in workspace and cannot be overwritten"));
     }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = toml::to_string_pretty(ws).map_err(|e| e.to_string())?;
@@ -148,6 +237,35 @@ pub fn save_in(dir: &Path, ws: &Workspace) -> Result<PathBuf, String> {
 pub fn load_in(dir: &Path, name: &str) -> Option<Workspace> {
     let text = std::fs::read_to_string(file_in(dir, name)).ok()?;
     toml::from_str(&text).ok()
+}
+
+/// What to open for `name`: a file of the user's own, or a built-in.
+///
+/// The file wins, and that is the point of this function existing.
+///
+/// The old code asked `is_default(name)` *before* it ever looked on disk, so a built-in shadowed
+/// a user's own workspace of that name silently — theirs simply stopped opening, with nothing
+/// said. Harmless while the only reserved name was "Default layout"; the moment `octave` became
+/// reserved it could hide a file somebody had saved months earlier. Saving under a built-in name
+/// is refused, so a clash can only be one of those older files: irreplaceable, where the built-in
+/// is documented and reproducible. The caller is told, so the shadowing is a sentence on screen
+/// rather than a workspace that quietly stopped existing.
+pub fn resolve_in(dir: &Path, name: &str, shape: &Shape) -> (Option<Workspace>, Option<&'static str>) {
+    match (load_in(dir, name), built_in_named(name)) {
+        (Some(theirs), Some(built_in)) => (Some(theirs), Some(built_in)),
+        (Some(theirs), None) => (Some(theirs), None),
+        (None, Some(_)) => (built_in(name, shape), None),
+        (None, None) => (None, None),
+    }
+}
+
+/// The same, against the real workspace directory. `None` for the directory means there is
+/// nowhere to have saved anything, so a built-in is all there can be.
+pub fn resolve(name: &str, shape: &Shape) -> (Option<Workspace>, Option<&'static str>) {
+    match dir() {
+        Some(dir) => resolve_in(&dir, name, shape),
+        None => (built_in(name, shape), None),
+    }
 }
 
 /// Every readable workspace, by name. Unparsable files are skipped rather than reported: a
@@ -287,23 +405,29 @@ mod tests {
         assert_eq!(all[0].terminals.len(), 1);
     }
 
-    /// The built-in workspace is always offered and can never be removed, which only holds if
-    /// it never becomes a file: saving over its name is refused, and a hand-made file claiming
-    /// it is ignored rather than listed alongside it.
+    fn shape(cols: u16) -> Shape {
+        Shape { root: PathBuf::from("/somewhere"), cols, python: "python3".to_string() }
+    }
+
+    /// A built-in workspace is always offered and can never be removed, which only holds if it
+    /// never becomes a file: saving over one of their names is refused.
     #[test]
-    fn the_built_in_workspace_never_becomes_a_file() {
+    fn the_built_in_workspaces_never_become_files() {
         let dir = temp_dir("builtin");
-        assert!(is_default("Default layout") && is_default("default  LAYOUT"), "matched by slug");
-        // A workspace of your own called "default" is not the built-in and must survive.
-        assert!(!is_default("default") && !is_default("Defaults"));
+        assert!(is_built_in("Default layout") && is_built_in("default  LAYOUT"), "matched by slug");
+        assert!(is_built_in("octave") && is_built_in("Octave") && is_built_in("pylab"));
+        // A workspace of your own called "default" is not one of them and must survive.
+        assert!(!is_built_in("default") && !is_built_in("Defaults") && !is_built_in("octavelab"));
 
         let mut ws = sample(DEFAULT_NAME);
-        assert!(save_in(&dir, &ws).is_err(), "saving over the built-in name is refused");
+        assert!(save_in(&dir, &ws).is_err(), "saving over a built-in name is refused");
+        // And the refusal names the one that was clashed with, not always the first.
+        let clash = save_in(&dir, &sample("pylab")).unwrap_err();
+        assert!(clash.contains("pylab"), "{clash}");
         assert!(list_in(&dir).is_empty());
 
         // Someone's own "default" is a different thing and stays listed.
-        let mine = sample("default");
-        save_in(&dir, &mine).expect("a workspace called default is ordinary");
+        save_in(&dir, &sample("default")).expect("a workspace called default is ordinary");
         assert_eq!(list_in(&dir).len(), 1);
 
         // Any other name still saves normally.
@@ -311,12 +435,85 @@ mod tests {
         assert!(save_in(&dir, &ws).is_ok());
         assert_eq!(list_in(&dir).len(), 2);
 
-        // Its own root is whatever it is given, and it carries no files or shells: picking it
-        // is about the shape of the window, not about replacing what you have open.
-        let built = default_workspace(PathBuf::from("/somewhere"));
+        // The layout one carries no files or shells: picking it is about the shape of the
+        // window, not about replacing what you have open.
+        let built = built_in(DEFAULT_NAME, &shape(200)).unwrap();
         assert_eq!(built.root, PathBuf::from("/somewhere"));
         assert!(built.layout.show_sidebar && built.layout.show_terminal && !built.layout.split_view);
         assert!(built.terminals.is_empty() && built.open_files.is_empty());
+        assert!(built_in("nothing of the sort", &shape(200)).is_none());
+    }
+
+    /// Each language preset is a prompt already running plus a shell beside it, in one window —
+    /// a second *window* would take screen from the editor permanently to hold something used a
+    /// minute at a time.
+    #[test]
+    fn a_language_preset_opens_a_prompt_and_a_shell_in_one_window() {
+        for (name, expected) in [("octave", "octave --no-gui"), ("pylab", "python3")] {
+            let ws = built_in(name, &shape(200)).unwrap();
+            assert_eq!(ws.terminals.len(), 1, "{name}: one window");
+            let tabs = &ws.terminals[0].tabs;
+            assert_eq!(tabs.len(), 2, "{name}: the interpreter and a shell");
+            assert_eq!(tabs[0].startup_command.as_deref(), Some(expected));
+            assert_eq!(ws.terminals[0].active, 0, "{name}: the prompt is what you are looking at");
+            assert_eq!(tabs[1].startup_command, None, "{name}: the shell starts nothing");
+        }
+    }
+
+    /// A selected virtualenv has to reach the preset, or `pylab` opens a prompt without the
+    /// packages the project was set up for — which is the one thing it exists to avoid.
+    #[test]
+    fn pylab_starts_the_python_it_was_given() {
+        let mut shape = shape(200);
+        shape.python = "/proj/.venv/bin/python3".to_string();
+        let ws = built_in("pylab", &shape).unwrap();
+        assert_eq!(
+            ws.terminals[0].tabs[0].startup_command.as_deref(),
+            Some("/proj/.venv/bin/python3")
+        );
+    }
+
+    /// A layout that is right at 200 columns and unusable at 80 is not the best layout, it is
+    /// the best layout for whoever wrote it.
+    #[test]
+    fn a_preset_stacks_the_frames_when_there_is_no_room_beside() {
+        let wide = built_in("octave", &shape(200)).unwrap().layout;
+        assert!(wide.terminal_on_right, "at 200 columns the prompt goes beside the editor");
+
+        let narrow = built_in("octave", &shape(90)).unwrap().layout;
+        assert!(!narrow.terminal_on_right, "at 90 it goes underneath, so both keep the width");
+        assert!(narrow.show_sidebar, "the tree survives either way");
+        assert!(
+            narrow.terminal_pct < wide.terminal_pct,
+            "a prompt needs fewer rows to be useful than an editor does"
+        );
+    }
+
+    /// The bug this closes was silent: a built-in answered before the disk was ever consulted,
+    /// so a workspace somebody had saved under that name simply stopped opening.
+    #[test]
+    fn a_saved_workspace_wins_over_a_built_in_of_the_same_name() {
+        let dir = temp_dir("shadow");
+        // Written straight to the file, since saving under the name is refused — which is how
+        // such a file can only be older than the built-in that now claims the name.
+        let mut mine = sample("octave");
+        mine.root = PathBuf::from("/mine");
+        let text = toml::to_string_pretty(&mine).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("octave.toml"), text).unwrap();
+
+        let (found, shadowed) = resolve_in(&dir, "octave", &shape(200));
+        assert_eq!(found.unwrap().root, PathBuf::from("/mine"), "theirs opens, not the preset");
+        assert_eq!(shadowed, Some("octave"), "and the caller is told, so it can say so");
+
+        // With no file of that name, the built-in answers and nothing is shadowed.
+        let (found, shadowed) = resolve_in(&dir, "pylab", &shape(200));
+        assert_eq!(found.unwrap().terminals.len(), 1);
+        assert_eq!(shadowed, None);
+
+        // A name that is neither is neither.
+        let (found, shadowed) = resolve_in(&dir, "nowhere", &shape(200));
+        assert!(found.is_none() && shadowed.is_none());
     }
 
     #[test]
