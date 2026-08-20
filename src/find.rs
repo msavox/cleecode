@@ -26,6 +26,17 @@ pub fn compile(query: &str, regex: bool, case_sensitive: bool) -> Result<Regex, 
     RegexBuilder::new(&pattern).build().map_err(|e| first_line(&e.to_string(), "invalid pattern"))
 }
 
+/// Shortens `text` to `budget` characters, marking that it was cut. Newlines and tabs become
+/// spaces first: a match can span a line break, and a preview that broke its own row in two
+/// would push the rest of the box down as you typed.
+fn ellipsise(text: &str, budget: usize) -> String {
+    let flat: String = text.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).collect();
+    if flat.chars().count() <= budget {
+        return flat;
+    }
+    flat.chars().take(budget.saturating_sub(1)).collect::<String>() + "…"
+}
+
 /// Engine errors run to several lines with a diagram under the offending character; an overlay
 /// has one line. The first is the sentence that says what is wrong.
 pub fn first_line(message: &str, fallback: &str) -> String {
@@ -140,6 +151,27 @@ impl FindState {
         }
     }
 
+    /// One line showing what the current match turns into, so "replace all" can be read before
+    /// it is run rather than judged after it.
+    ///
+    /// It shows the *current* match, not a made-up example, and it matters most with a pattern:
+    /// `$1` and `${name}` mean nothing until they are resolved against a particular match, so
+    /// until they are resolved there is no way to tell a replacement that works from one that
+    /// quietly writes the dollars out literally.
+    ///
+    /// `None` when there is nothing to preview: no match, or no replacement typed. An empty
+    /// replacement is a deletion and deserves saying so, but only once the user has shown they
+    /// mean to replace at all.
+    pub fn preview(&self, matched: &str, budget: usize) -> Option<String> {
+        if self.replace.is_empty() || self.matches.is_empty() {
+            return None;
+        }
+        let becomes = self.replacement_for(matched);
+        // A match can be a whole line; a preview is one line for two of them.
+        let each = (budget.saturating_sub(3) / 2).max(4);
+        Some(format!("{} → {}", ellipsise(matched, each), ellipsise(&becomes, each)))
+    }
+
     pub fn next(&mut self) {
         if !self.matches.is_empty() {
             self.current = (self.current + 1) % self.matches.len();
@@ -247,6 +279,63 @@ mod tests {
         plain.replace = "$1".to_string();
         plain.recompute("cost", 0);
         assert_eq!(plain.replacement_for("cost"), "$1");
+    }
+
+    /// The whole point of the preview: with a pattern, `$1` is indistinguishable from a literal
+    /// dollar until it is resolved against a real match — and by then the file has been changed.
+    #[test]
+    fn the_preview_resolves_the_groups_before_anything_is_replaced() {
+        let mut f = FindState::new();
+        f.regex = true;
+        f.case_sensitive = true;
+        f.query = r"(\w+)@(\w+)".to_string();
+        f.replace = "$2.$1".to_string();
+        f.recompute("ada@lovelace and alan@turing", 0);
+        assert_eq!(f.preview("ada@lovelace", 60).unwrap(), "ada@lovelace → lovelace.ada");
+
+        // A literal search has no groups, so the preview shows the dollar staying a dollar —
+        // which is exactly the mistake it is there to catch.
+        let mut plain = literal("cost");
+        plain.replace = "$1".to_string();
+        plain.recompute("cost", 0);
+        assert_eq!(plain.preview("cost", 60).unwrap(), "cost → $1");
+    }
+
+    #[test]
+    fn there_is_nothing_to_preview_without_a_match_or_a_replacement() {
+        let mut f = literal("ab");
+        f.recompute("ab ab", 0);
+        assert_eq!(f.preview("ab", 60), None, "no replacement typed yet");
+
+        f.replace = "cd".to_string();
+        assert_eq!(f.preview("ab", 60).as_deref(), Some("ab → cd"));
+
+        // An empty replacement is a deletion, and once a replacement field is in play the
+        // preview says so rather than going quiet.
+        f.replace = " ".to_string();
+        assert_eq!(f.preview("ab", 60).as_deref(), Some("ab →  "));
+
+        let mut nothing = literal("zz");
+        nothing.replace = "y".to_string();
+        nothing.recompute("ab ab", 0);
+        assert_eq!(nothing.preview("zz", 60), None, "nothing matched, nothing to change");
+    }
+
+    /// A match can be a whole line, or span a line break. The preview is one row of a box whose
+    /// height is fixed on purpose, so it has to stay one row whatever it is given.
+    #[test]
+    fn a_long_or_multi_line_match_still_previews_on_one_row() {
+        let mut f = literal("x");
+        f.replace = "y".to_string();
+        f.recompute("x", 0);
+        let long = "a".repeat(200);
+        let preview = f.preview(&long, 40).unwrap();
+        assert!(preview.chars().count() <= 40, "{} chars is too wide", preview.chars().count());
+        assert!(preview.contains('…'), "a cut has to look like one: {preview}");
+
+        let across = f.preview("one\ntwo\tthree", 60).unwrap();
+        assert!(!across.contains('\n') && !across.contains('\t'), "{across} would break the row");
+        assert!(across.starts_with("one two three"));
     }
 
     /// A pattern is typed one character at a time, so it spends most of its life invalid. That

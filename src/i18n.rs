@@ -99,6 +99,7 @@ pub enum Key {
     SettingInsertSpaces,
     SettingShowWhitespace,
     SettingAutoIndent,
+    SettingCompletion,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -353,6 +354,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, SettingAutoIndent) => "Auto-indent",
         (Lang::It, SettingAutoIndent) => "Indentazione automatica",
+        (Lang::En, SettingCompletion) => "Word completion",
+        (Lang::It, SettingCompletion) => "Completamento parole",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
@@ -637,6 +640,18 @@ pub fn msg_new_entry_prompt(lang: Lang, is_dir: bool) -> &'static str {
         (Lang::En, true) => "New folder name:",
         (Lang::It, false) => "Nome nuovo file:",
         (Lang::It, true) => "Nome nuova cartella:",
+    }
+}
+
+/// How many matches Ctrl+A would change, said beside the preview of the first one. Silent at one
+/// match, where the preview already shows the whole of what would happen.
+pub fn msg_replace_all_count(lang: Lang, count: usize) -> String {
+    if count <= 1 {
+        return String::new();
+    }
+    match lang {
+        Lang::En => format!("   ({count} in all)"),
+        Lang::It => format!("   ({count} in tutto)"),
     }
 }
 

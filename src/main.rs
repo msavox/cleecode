@@ -1,6 +1,7 @@
 mod app;
 mod app_install;
 mod clipboard;
+mod complete;
 mod dnd;
 mod editor;
 mod file_tree;

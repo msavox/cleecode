@@ -382,10 +382,62 @@ disegnare, è **una seconda sorgente** che si innesta in un popup già collaudat
 Zero dipendenze nuove a parte fancy-regex, che era già compilata. Nessuna nuova modalità nel
 ciclo di input.
 
-**0.7 — Completamento**
-1. Spezzare `handle_key` (294 righe) e `handle_mouse` (277) per modalità. Il refactor **si
-   ripaga subito**: è il popup a richiederlo, non è debito pagato per virtù.
-2. Popup di completamento sulle parole del buffer, secondo il design già deciso.
+**0.7 — Completamento** ← *fatta, non ancora rilasciata*
+1. ~~Spezzare `handle_key` (294 righe) e `handle_mouse` (277) per modalità.~~ **Non serviva, e la
+   premessa era sbagliata.** Riguardato prima di toccarlo: `handle_key` è già un dispatcher a tre
+   stadi — la fila di modali che delegano ciascuna al proprio `handle_*_key`, i chord globali, e
+   il dispatch sul fuoco — ed è cresciuto di 16 righe in tutta la 0.6, non del doppio. Il popup
+   non si aggancia lì comunque: essendo non-modale non entra nella fila dei modali, entra in
+   `handle_editor_key` (197 righe), che una modalità in più non l'ha ingrossata. Il refactor non
+   si ripagava: si sarebbe pagato per virtù, che è esattamente ciò che la valutazione qui sopra
+   rimprovera al piano di opencode.
+2. ✅ Popup di completamento sulle parole del buffer, `src/complete.rs`. Le decisioni del design
+   sono tutte rispettate: ranking a quattro livelli (prefisso esatto → prefisso ignorando le
+   maiuscole → fuzzy → parole chiave sempre ultime), `fuzzy_score` confinato al terzo livello,
+   indice costruito una volta all'apertura e poi solo filtrato, accettazione in un solo passo di
+   undo, Tab che accetta col popup aperto e indenta altrimenti. Il seam `Source` c'è dall'inizio:
+   nella 0.8 rust-analyzer diventa una terza variante, non un secondo popup.
+
+   **La non-modalità è una funzione pura**, `complete::key_action`, con un test che elenca i
+   cinque tasti presi e verifica che tutto il resto cada nell'editor — inclusi ↑ e Invio *con* un
+   modificatore, che restano dell'editor. Un `App` non è costruibile in un test (due PTY veri più
+   le impostazioni dell'utente da disco), quindi le regole che contano stanno in funzioni pure:
+   `key_action`, `opens_on`, `rank`, `prefix_at`, `completion_rect`. Il disegno è verificato per
+   davvero, renderizzando il popup in un `TestBackend` e rileggendo le parole dal buffer.
+
+   Due cose emerse strada facendo, tenute: una finestra di 4000 righe attorno al cursore quando
+   si costruisce l'indice (è la stessa distanza che il ranking già usa, applicata prima del
+   lavoro invece che dopo), e l'impostazione `completion` per spegnerlo, perché una lista che si
+   apre da sola non è un aiuto per tutti.
+
+   **Corretta una divergenza latente**: `editor_mut()` risolve il buffer con
+   `active_editor_index()`, che ignora il pannello destro se lo split è chiuso, mentre
+   `pane_editor_index()` no. Oggi `close_split` riporta il fuoco a sinistra e le due non
+   divergono mai — ma l'accettazione di una parola prende gli offset da un buffer e li scrive con
+   `editor_mut()`, e appoggiare *quella* scrittura su un invariante mantenuto a mano altrove è il
+   modo di corrompere un file più avanti. Il completamento chiede l'indice come lo chiede
+   `editor_mut()`.
+
+3. ✅ **Chiuse le due code della 0.6.** Le schede del pannello Git si cambiano col click:
+   `ui::git_tab_slots` dice dove sono, e il disegno ci renderizza dentro invece di rifare il
+   calcolo per conto suo — è lo stesso motivo per cui esiste `tab_strip_layout`, e un hit-test
+   che rifà il conto è un hit-test che un giorno non sarà d'accordo con quello che si vede.
+   "Sostituisci tutti" ha l'anteprima: `FindState::preview` mostra l'occorrenza corrente coi
+   gruppi già risolti e quante altre farebbero la stessa fine, perché con un pattern `$1` è
+   indistinguibile da un dollaro letterale finché non lo si risolve — e a quel punto il file è
+   già cambiato.
+
+4. ✅ **Verificato guidando il binario vero**, non solo coi test unitari. Uno script apre `clee`
+   in uno pseudo-terminale, rende l'output con `pyte` e rilegge la griglia di caratteri: il
+   popup si apre a due lettere, offre le parole del buffer *e* le parole chiave di Rust perché
+   il file è `.rs`, si restringe scrivendo, mette per prima la parola più vicina al cursore, si
+   chiude con Esc senza toccare il testo, riappare scrivendo ancora, accetta con Tab e torna
+   indietro in un solo passo di undo. Quindici controlli, tutti verdi.
+
+   Da sapere se lo si rifà: CleeCode interroga il terminale (device attributes, protocolli
+   kitty) e disegna il primo fotogramma solo dopo che quelle domande vanno in timeout, quindi un
+   driver deve aspettare una *condizione*, non un tempo fisso. E `▶` da solo non basta a trovare
+   il popup: c'è anche nel pulsante `▶ Run` della barra.
 
 **0.8 — LSP**
 Client JSON-RPC scritto a mano su stdio, `lsp-types` per i tipi, **un solo server**

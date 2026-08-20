@@ -329,6 +329,12 @@ pub struct App {
     pub find: Option<crate::find::FindState>,
     /// Command palette / file quick-open overlay, when open.
     pub picker: Option<crate::picker::Picker>,
+    /// The word-completion popup, when it is up. The one overlay in this list that does not take
+    /// the keyboard: it claims five keys and lets every other one through to the editor.
+    pub completion: Option<crate::complete::Popup>,
+    /// Where the cursor was drawn last frame, so the popup can hang under it. Written by the
+    /// renderer, which is the only thing that knows where a buffer line landed on screen.
+    pub completion_anchor: (u16, u16),
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -1124,6 +1130,8 @@ impl App {
             unsaved_prompt: None,
             find: None,
             picker: None,
+            completion: None,
+            completion_anchor: (0, 0),
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -1615,6 +1623,24 @@ impl App {
                 self.refresh_git_panel();
             }
             _ => {}
+        }
+    }
+
+    /// A click inside the git panel. Only the tab row does anything: everything below it is text
+    /// to read, and a panel that cannot write has nothing for a click on its body to mean.
+    fn click_git_tab(&mut self, rect: Rect, col: u16, row: u16) {
+        let inner = ui::inner_rect(rect);
+        if row != inner.y {
+            return;
+        }
+        let header = Rect { height: 1, ..inner };
+        let Some(tab) = ui::git_tab_at(self.settings.lang, header, col) else { return };
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        if panel.tab != tab {
+            panel.tab = tab;
+            // Same as switching with the keyboard: each tab is a list of its own length, and
+            // carrying the offset across would land in the middle of a shorter one.
+            panel.scroll = 0;
         }
     }
 
@@ -5220,6 +5246,15 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
+        // The completion popup goes first, and it is the one overlay in this file that does not
+        // swallow the keyboard. Every other one early-returns out of `handle_key` until it is
+        // dismissed; this one claims five keys — two to walk the list, two to accept, one to
+        // dismiss — and lets every other key fall through to the editor below, re-filtering
+        // afterwards against what the edit left behind. A popup you have to close before you can
+        // carry on typing interrupts the typing it was there to help.
+        if self.completion_key(key) {
+            return;
+        }
         // A preview tab has no text to move a cursor through, so the plain arrows are free and
         // mean the only thing they could mean here: the page before and the page after. No
         // chord had to be found for it, which on a keyboard this crowded is worth something.
@@ -5369,6 +5404,132 @@ impl App {
             }
             _ => {}
         }
+        self.follow_completion(key, ctrl);
+    }
+
+    // ---- Word completion ----------------------------------------------------------------
+
+    /// Whether the popup still describes the word under the cursor.
+    ///
+    /// Asked rather than answered: the cursor can move from a tab switch, a click, a
+    /// find-and-replace or a menu action, and clearing the popup from each of those places would
+    /// mean remembering to do it in the next one too. A check that runs before every use cannot
+    /// be forgotten in one place.
+    pub fn completion_live(&self) -> bool {
+        let Some(popup) = self.completion.as_ref() else { return false };
+        if self.focus != Focus::Editor {
+            return false;
+        }
+        // `active_editor_index`, not `pane_editor_index`: this has to name the same buffer that
+        // `editor_mut` will write into when the word is accepted, and the two disagree when the
+        // focus is on the right pane with the split closed. An accept that took its offsets from
+        // one buffer and applied them to another would corrupt a file, so the question is asked
+        // the same way in both places rather than kept in step by hand.
+        let idx = self.active_editor_index();
+        if idx != popup.editor {
+            return false;
+        }
+        let Some(ed) = self.editors.get(idx) else { return false };
+        match crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col) {
+            Some((start, prefix)) => start == popup.start && prefix == popup.prefix,
+            None => false,
+        }
+    }
+
+    /// The five keys the popup claims. `true` when the editor should not also see the key.
+    fn completion_key(&mut self, key: KeyEvent) -> bool {
+        if self.completion.is_some() && !self.completion_live() {
+            self.completion = None;
+        }
+        if self.completion.is_none() {
+            return false;
+        }
+        match crate::complete::key_action(key.code, key.modifiers) {
+            crate::complete::KeyAction::Fall => false,
+            crate::complete::KeyAction::Close => {
+                self.completion = None;
+                true
+            }
+            crate::complete::KeyAction::Up => {
+                if let Some(popup) = self.completion.as_mut() {
+                    popup.move_selection(-1);
+                }
+                true
+            }
+            crate::complete::KeyAction::Down => {
+                if let Some(popup) = self.completion.as_mut() {
+                    popup.move_selection(1);
+                }
+                true
+            }
+            crate::complete::KeyAction::Accept => {
+                self.accept_completion();
+                true
+            }
+        }
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(popup) = self.completion.as_ref() else { return };
+        let Some(text) = popup.selected().map(|c| c.text.clone()) else { return };
+        let start = popup.start;
+        let end = start + popup.prefix.chars().count();
+        self.completion = None;
+        // One undo step: undoing an accepted word puts back what was typed, rather than unpicking
+        // the insertion a character at a time.
+        self.editor_mut().replace_char_range(start, end, &text);
+    }
+
+    /// Called after the editor has seen the key, which is the point: the word to filter against
+    /// is the one now in the buffer, not the one that was there before the edit.
+    fn follow_completion(&mut self, key: KeyEvent, ctrl: bool) {
+        let idx = self.active_editor_index();
+        let Some(ed) = self.editors.get(idx) else { return };
+        let here = crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col);
+        if let Some(popup) = self.completion.as_mut() {
+            let alive = match &here {
+                Some((start, prefix)) if *start == popup.start && idx == popup.editor => {
+                    popup.refilter(prefix)
+                }
+                _ => false,
+            };
+            if !alive {
+                self.completion = None;
+            }
+            return;
+        }
+        if !self.settings.completion {
+            return;
+        }
+        if crate::complete::opens_on(key.code, ctrl, here.as_ref().map(|(_, p)| p.as_str())) {
+            self.open_completion();
+        }
+    }
+
+    /// Builds the candidate list and puts the popup up.
+    ///
+    /// The index is a snapshot, scanned once here and only filtered afterwards. An index kept up
+    /// to date as you type would be worse than a stale one: it would go on offering words that
+    /// have since been deleted, and there is no keystroke at which that is easy to explain.
+    fn open_completion(&mut self) {
+        let idx = self.active_editor_index();
+        let Some(ed) = self.editors.get(idx) else { return };
+        let Some((start, prefix)) =
+            crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col)
+        else {
+            return;
+        };
+        let mut index = crate::complete::Index::new();
+        index.add_buffer(&ed.rope, Some(ed.cursor_line));
+        index.add_keywords(ed.path.as_deref());
+        // The other tabs count too: a name you are about to write is more often in the file you
+        // were just in than nowhere at all. A preview holds no text, so it holds no words.
+        for (i, other) in self.editors.iter().enumerate() {
+            if i != idx && other.preview.is_none() {
+                index.add_buffer(&other.rope, None);
+            }
+        }
+        self.completion = crate::complete::Popup::open(idx, start, prefix, index.into_candidates());
     }
 
     fn move_with_selection(&mut self, shift: bool, mv: impl FnOnce(&mut Editor)) {
@@ -5537,15 +5698,18 @@ impl App {
         // tracked while a menu was open would leave a scrollbar lit under it afterwards.
         self.pointer = Some((col, row));
 
-        // The git panel is a reader too: the wheel moves through it, a click outside puts it
-        // away. Its tabs are on the keyboard — Tab and the arrows, as the title bar says.
+        // The git panel is a reader too: the wheel moves through it, a click on a tab switches
+        // to it, a click outside puts it away.
         if self.git_panel.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_git_panel(-3),
                 MouseEventKind::ScrollDown => self.scroll_git_panel(3),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if !within(ui::git_panel_rect(full), col, row) {
+                    let rect = ui::git_panel_rect(full);
+                    if !within(rect, col, row) {
                         self.git_panel = None;
+                    } else {
+                        self.click_git_tab(rect, col, row);
                     }
                 }
                 _ => {}
