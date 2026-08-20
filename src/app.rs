@@ -1621,6 +1621,63 @@ impl App {
         }
     }
 
+    /// The figure a preview tab is showing, and the session that drew it.
+    ///
+    /// A figure tab is an ordinary picture tab in every way but this: it has an interpreter
+    /// behind it that can be asked to draw it again differently. That is what the keys below
+    /// need to know, and it is the only thing that distinguishes the two.
+    fn figure_for(&self, path: Option<&Path>) -> Option<(crate::wsnap::Figure, crate::session::Language)> {
+        let path = path?.to_string_lossy().into_owned();
+        let snapshot = self.figures.as_ref()?.snapshot.as_ref()?;
+        let language = match snapshot.lang.as_str() {
+            "python" => crate::session::Language::Python,
+            _ => crate::session::Language::Octave,
+        };
+        snapshot.figures.iter().find(|f| f.path == path).cloned().map(|f| (f, language))
+    }
+
+    /// A key pressed on a figure tab. `true` when it was one of the ones that moves the plot.
+    ///
+    /// The move is sent to the interpreter, which redraws and writes a new picture; the tab
+    /// picks that up the way it picks up any change to its file. Nothing is done to the pixels
+    /// on screen — magnifying those would leave the axis labels describing a range that is no
+    /// longer shown, and a plot whose numbers are wrong is worse than one that is small.
+    fn figure_key(&mut self, key: KeyEvent) -> bool {
+        use crate::session::Nav;
+        if !key.modifiers.is_empty() {
+            return false;
+        }
+        let idx = self.active_editor_index();
+        let path = self.editors.get(idx).and_then(|e| e.path.clone());
+        let Some((figure, language)) = self.figure_for(path.as_deref()) else { return false };
+        let axes = figure.axes.first();
+        let is3d = axes.map(|a| a.is3d).unwrap_or(false);
+        let view = axes
+            .map(|a| (a.view.first().copied().unwrap_or(0.0), a.view.get(1).copied().unwrap_or(90.0)))
+            .unwrap_or((0.0, 90.0));
+        let nav = match key.code {
+            KeyCode::Char('+') | KeyCode::Char('=') => Nav::In,
+            KeyCode::Char('-') | KeyCode::Char('_') => Nav::Out,
+            KeyCode::Left => Nav::Left,
+            KeyCode::Right => Nav::Right,
+            KeyCode::Up => Nav::Up,
+            KeyCode::Down => Nav::Down,
+            // Not `f`, which fits a page: there is no page here, and "back to how it was drawn"
+            // is the thing a plot actually wants.
+            KeyCode::Char('r') | KeyCode::Char('0') => Nav::Reset,
+            _ => return false,
+        };
+        let command = language.nav_command(nav, figure.fig, is3d, view);
+        let lang = self.settings.lang;
+        self.status_message = match self.send_to_session(language, &command) {
+            Some(_) => i18n::msg_figure_nav(lang, nav, is3d),
+            // The session that drew it is gone. Saying so beats a key that does nothing, and the
+            // picture is still a picture — it is simply the last one that session made.
+            None => i18n::msg_figure_no_session(lang, language.label()),
+        };
+        true
+    }
+
     /// Adds a figure as a preview tab in the pane that is not being typed in, without taking the
     /// focus. Split view is opened for it when there is room: a plot beside the script that drew
     /// it is the arrangement the whole feature is for.
@@ -4018,14 +4075,8 @@ impl App {
 
         // The interpreter that is already open, or none. Only the on-screen tab of each window
         // counts: running something in a hidden tab would be invisible.
-        let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
-        match dnd::shell_running(language, &pids) {
+        match self.send_to_session(language, &command) {
             Some(idx) => {
-                if let Some(term) = self.window_tab_mut(idx) {
-                    term.write_input(command.as_bytes());
-                    term.write_input(b"\r");
-                }
-                self.settings.show_terminal = true;
                 self.status_message =
                     i18n::msg_run_piece(lang, what, language.label(), to - from, idx);
             }
@@ -4037,6 +4088,23 @@ impl App {
                 self.run_path(&scratch);
             }
         }
+    }
+
+    /// Types one line at the prompt of a live interpreter, and says which terminal took it.
+    ///
+    /// Only the on-screen tab of each window is a candidate: sending something into a hidden tab
+    /// would be invisible, and the whole point of talking to a session that is already open is
+    /// that you can see what it says back.
+    fn send_to_session(&mut self, language: crate::session::Language, command: &str) -> Option<usize> {
+        let pids: Vec<Option<u32>> =
+            self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+        let idx = dnd::shell_running(language, &pids)?;
+        if let Some(term) = self.window_tab_mut(idx) {
+            term.write_input(command.as_bytes());
+            term.write_input(b"\r");
+        }
+        self.settings.show_terminal = true;
+        Some(idx)
     }
 
     /// Writes a piece of a buffer where an interpreter can be pointed at it.
@@ -5686,6 +5754,12 @@ impl App {
         // A preview tab holds no text, so plain keys are free here and mean the one thing they
         // could mean. Every one of them is also a button on the bar, which writes the key beside
         // the label so neither has to be discovered twice.
+        // A figure gets the keys first: on a plot, + and the arrows mean "draw it again, closer"
+        // rather than "magnify what is already drawn", and the difference is whether the axis
+        // labels still describe what is on screen.
+        if self.editor().preview.is_some() && self.figure_key(key) {
+            return;
+        }
         if self.editor().preview.is_some() && key.modifiers.is_empty() {
             let paged = self.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
             let kind = self.editor().preview.as_ref().map(|p| p.kind());

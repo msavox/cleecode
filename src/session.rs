@@ -101,6 +101,80 @@ impl Language {
     }
 }
 
+/// A move around a figure.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Nav {
+    In,
+    Out,
+    Left,
+    Right,
+    Up,
+    Down,
+    Reset,
+}
+
+impl Language {
+    /// What to say at the prompt to move around figure `number`.
+    ///
+    /// The whole point is that this goes *back into the interpreter* rather than being done to
+    /// the picture. Magnifying the pixels would leave the axis labels describing a range that is
+    /// no longer on screen — the plot would say 0 to 100 while showing 25 to 75 — and no amount
+    /// of sharpening fixes a number that is wrong. Re-drawing costs 37ms, measured, so the
+    /// honest answer is also the affordable one.
+    ///
+    /// `view` is the current 3-D angle, which the figure's geometry sidecar already carries;
+    /// rotating means naming the new angle, and there is no relative form to name it with.
+    pub fn nav_command(self, nav: Nav, number: i64, is3d: bool, view: (f64, f64)) -> String {
+        match self {
+            Language::Octave => {
+                let select = format!("figure({number}); ");
+                let body = match (nav, is3d) {
+                    // `zoom(factor)`, not `zoom on`: the mode wants a real window to click in,
+                    // the factor form does not.
+                    (Nav::In, _) => "zoom(2);".to_string(),
+                    (Nav::Out, _) => "zoom(0.5);".to_string(),
+                    (Nav::Reset, false) => "axis auto;".to_string(),
+                    (Nav::Reset, true) => "view(-37.5, 30);".to_string(),
+                    // A quarter of the span, which is far enough to be worth a keystroke and
+                    // near enough that what you were looking at is still on screen.
+                    (Nav::Left, false) => "xl = xlim(); xlim(xl - 0.25 * diff(xl));".to_string(),
+                    (Nav::Right, false) => "xl = xlim(); xlim(xl + 0.25 * diff(xl));".to_string(),
+                    (Nav::Up, false) => "yl = ylim(); ylim(yl + 0.25 * diff(yl));".to_string(),
+                    (Nav::Down, false) => "yl = ylim(); ylim(yl - 0.25 * diff(yl));".to_string(),
+                    (Nav::Left, true) => format!("view({}, {});", view.0 - 15.0, view.1),
+                    (Nav::Right, true) => format!("view({}, {});", view.0 + 15.0, view.1),
+                    (Nav::Up, true) => format!("view({}, {});", view.0, (view.1 + 15.0).min(90.0)),
+                    (Nav::Down, true) => format!("view({}, {});", view.0, (view.1 - 15.0).max(-90.0)),
+                };
+                format!("{select}{body}")
+            }
+            Language::Python => {
+                let select = format!(
+                    "import matplotlib.pyplot as _plt; _f = _plt.figure({number}); _a = _f.axes[0]; "
+                );
+                let body = match (nav, is3d) {
+                    (Nav::In, _) => "_a.set_xlim(*[c + (l - c) / 2 for c in [sum(_a.get_xlim()) / 2] for l in _a.get_xlim()]); _a.set_ylim(*[c + (l - c) / 2 for c in [sum(_a.get_ylim()) / 2] for l in _a.get_ylim()])".to_string(),
+                    (Nav::Out, _) => "_a.set_xlim(*[c + (l - c) * 2 for c in [sum(_a.get_xlim()) / 2] for l in _a.get_xlim()]); _a.set_ylim(*[c + (l - c) * 2 for c in [sum(_a.get_ylim()) / 2] for l in _a.get_ylim()])".to_string(),
+                    (Nav::Reset, false) => "_a.autoscale()".to_string(),
+                    (Nav::Reset, true) => "_a.view_init(30, -60)".to_string(),
+                    (Nav::Left, false) => "_a.set_xlim(*[l - (_a.get_xlim()[1] - _a.get_xlim()[0]) / 4 for l in _a.get_xlim()])".to_string(),
+                    (Nav::Right, false) => "_a.set_xlim(*[l + (_a.get_xlim()[1] - _a.get_xlim()[0]) / 4 for l in _a.get_xlim()])".to_string(),
+                    (Nav::Up, false) => "_a.set_ylim(*[l + (_a.get_ylim()[1] - _a.get_ylim()[0]) / 4 for l in _a.get_ylim()])".to_string(),
+                    (Nav::Down, false) => "_a.set_ylim(*[l - (_a.get_ylim()[1] - _a.get_ylim()[0]) / 4 for l in _a.get_ylim()])".to_string(),
+                    (Nav::Left, true) => format!("_a.view_init({}, {})", view.1, view.0 - 15.0),
+                    (Nav::Right, true) => format!("_a.view_init({}, {})", view.1, view.0 + 15.0),
+                    (Nav::Up, true) => format!("_a.view_init({}, {})", (view.1 + 15.0).min(90.0), view.0),
+                    (Nav::Down, true) => format!("_a.view_init({}, {})", (view.1 - 15.0).max(-90.0), view.0),
+                };
+                // The names are underscore-prefixed for the same reason the startup file's are:
+                // they land in the user's own namespace and would otherwise show up as variables
+                // in their workspace panel.
+                format!("{select}{body}; _f.canvas.draw_idle()")
+            }
+        }
+    }
+}
+
 /// Which piece of the file was sent, so the status line can say which without the caller
 /// spelling out two nearly identical sentences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -196,6 +270,50 @@ mod tests {
         assert_eq!(Language::Octave.quote("/tmp/it's here/a.m"), "'/tmp/it''s here/a.m'");
         assert_eq!(Language::Python.quote(r"C:\tmp\a.py"), r#""C:\\tmp\\a.py""#);
         assert_eq!(Language::Python.quote(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    /// Verified against a live Octave before it was written down: zoom(2) takes [0 100] to
+    /// [25 75], the pan forms move the window by a quarter of its span, and `axis auto` puts it
+    /// back. What is checked here is that the right one is chosen, not that Octave works.
+    #[test]
+    fn moving_around_a_figure_is_said_in_the_language_of_the_session() {
+        let octave = Language::Octave;
+        assert_eq!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)), "figure(1); zoom(2);");
+        assert_eq!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)), "figure(3); zoom(0.5);");
+        assert!(octave.nav_command(Nav::Right, 1, false, (0.0, 90.0)).contains("xlim(xl + 0.25"));
+        assert!(octave.nav_command(Nav::Down, 1, false, (0.0, 90.0)).contains("ylim(yl - 0.25"));
+        // Every figure is named before it is acted on, or the command lands on whichever one
+        // the session last drew.
+        for nav in [Nav::In, Nav::Out, Nav::Left, Nav::Right, Nav::Up, Nav::Down, Nav::Reset] {
+            assert!(octave.nav_command(nav, 7, false, (0.0, 90.0)).starts_with("figure(7);"));
+        }
+    }
+
+    /// On a surface the arrows turn it rather than sliding it, which is what they mean to
+    /// anyone who has used the figure window: there is nothing off the edge to pan towards.
+    #[test]
+    fn arrows_rotate_a_surface_instead_of_panning_it() {
+        let octave = Language::Octave;
+        assert_eq!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)), "figure(2); view(60, 30);");
+        assert_eq!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)), "figure(2); view(30, 30);");
+        // Elevation stops at the poles rather than turning the surface inside out.
+        assert!(octave.nav_command(Nav::Up, 2, true, (45.0, 85.0)).contains("view(45, 90)"));
+        assert!(octave.nav_command(Nav::Down, 2, true, (45.0, -85.0)).contains("view(45, -90)"));
+        assert_eq!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)), "figure(2); view(-37.5, 30);");
+    }
+
+    #[test]
+    fn python_says_the_same_things_its_own_way() {
+        let python = Language::Python;
+        let zoom = python.nav_command(Nav::In, 1, false, (0.0, 0.0));
+        assert!(zoom.contains("plt.figure(1)") && zoom.contains("set_xlim"));
+        // Everything it leaves behind is underscore-prefixed, or it would appear in the user's
+        // own workspace panel as a variable they never made.
+        for name in ["_plt", "_f", "_a"] {
+            assert!(zoom.contains(name), "{zoom}");
+        }
+        assert!(!zoom.contains(" plt") && !zoom.contains("= f "), "{zoom}");
+        assert!(python.nav_command(Nav::Right, 1, true, (45.0, 30.0)).contains("view_init(30, 60)"));
     }
 
     #[test]
