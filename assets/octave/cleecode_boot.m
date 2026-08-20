@@ -10,7 +10,13 @@ function cleecode_boot ()
   ## file on somebody's path is inert rather than surprising.
 
   ws = getenv ("CLEECODE_OCTAVE_WS");
-  if (! isempty (ws))
-    cleecode_ws (ws);
+  if (isempty (ws))
+    return;
   endif
+
+  ## No figure window ever opens. Reparenting a live Qt window into a terminal is not
+  ## possible, so a plot reaches CleeCode as a picture instead — and a window appearing
+  ## behind the terminal, which is what happens without this, is the worst of both.
+  set (0, "defaultfigurevisible", "off");
+  cleecode_ws (ws);
 endfunction

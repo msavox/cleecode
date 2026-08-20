@@ -93,6 +93,11 @@ pub struct Settings {
     // an editor without underlines, which is what CleeCode was until this existed.
     #[serde(default = "default_true")]
     pub diagnostics: bool,
+    // Whether a plot drawn in a live Octave or Python session opens as a tab. On by default:
+    // without it the interpreter opens its own window behind the terminal, which is the worst
+    // of both. Off means plotting behaves the way it does outside CleeCode.
+    #[serde(default = "default_true")]
+    pub diagnostics_figures: bool,
     // Whether the editor paints its own background instead of letting the terminal's show
     // through. Off by default, because a terminal's background is the user's choice and taking
     // it over uninvited is rude — but a translucent one with a bright window behind it turns
@@ -246,6 +251,7 @@ impl Default for Settings {
             auto_pairs: true,
             completion: true,
             diagnostics: true,
+            diagnostics_figures: true,
             opaque_background: false,
             last_root: None,
             last_open_files: Vec::new(),

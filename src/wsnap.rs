@@ -71,6 +71,49 @@ pub struct Snapshot {
     pub lang: String,
     #[serde(default)]
     pub vars: Vec<Var>,
+    /// The figures the session has open, each already printed to a PNG. Absent from a session
+    /// that has never plotted, and from the Octave prototype before figures were wired up.
+    #[serde(default)]
+    pub figures: Vec<Figure>,
+}
+
+/// One figure, printed and described.
+///
+/// The geometry travels with the picture because a pane pixel has to become a data coordinate
+/// without a round trip to the interpreter per mouse move. Nothing reads it yet — navigation is
+/// the next step — but it is emitted now so the contract does not have to change to gain it.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Figure {
+    pub fig: i64,
+    pub path: String,
+    /// The PNG's real size in pixels, forced rather than assumed: a figure asked for 800x600
+    /// does not print to 800x600 unless the paper is set in inches to match.
+    #[serde(default)]
+    pub png: Vec<u32>,
+    #[serde(default)]
+    pub axes: Vec<Axes>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Axes {
+    /// The axes rectangle normalised to the figure, origin **bottom-left** — a terminal counts
+    /// rows from the top, so this needs flipping before it means anything on screen.
+    #[serde(default)]
+    pub pos: Vec<f64>,
+    #[serde(default)]
+    pub xlim: Vec<f64>,
+    #[serde(default)]
+    pub ylim: Vec<f64>,
+    /// `linear` or `log`. With a log axis the mapping goes through log10, and interpolating
+    /// linearly would be quietly wrong rather than visibly broken.
+    #[serde(default)]
+    pub xscale: String,
+    #[serde(default)]
+    pub yscale: String,
+    #[serde(default)]
+    pub is3d: bool,
+    #[serde(default)]
+    pub view: Vec<f64>,
 }
 
 impl Snapshot {
@@ -173,8 +216,12 @@ pub fn newest_in(dir: &Path) -> Option<PathBuf> {
 /// interpreter simply carries two unread variables.
 pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path) -> Vec<(String, String)> {
     let snapshot = snapshot_path(dir, pane_id);
+    let figures = dir.join("figs");
+    let _ = std::fs::create_dir_all(&figures);
     vec![
         ("CLEECODE_OCTAVE_WS".to_string(), snapshot.to_string_lossy().into_owned()),
+        ("CLEECODE_OCTAVE_FIGS".to_string(), figures.to_string_lossy().into_owned()),
+        ("CLEECODE_PY_FIGS".to_string(), figures.to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_LIB".to_string(), lib_octave.to_string_lossy().into_owned()),
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),
@@ -227,6 +274,30 @@ mod tests {
         assert_eq!(snap.lang, "");
         assert_eq!(snap.vars[0].name, "x");
         assert_eq!(snap.vars[0].shape(), "", "no size reported is no size shown");
+    }
+
+    /// The geometry a figure carries is what a later step needs to turn a click into a data
+    /// coordinate. Read now so the contract does not have to change to gain it.
+    #[test]
+    fn a_figure_arrives_with_the_geometry_of_its_axes() {
+        let text = r#"{"v":1,"seq":2,"lang":"octave","vars":[],"figures":[
+          {"fig":1,"path":"/tmp/fig1.png","png":[560,420],
+           "axes":[{"pos":[0.13,0.11,0.775,0.815],"xlim":[20,60],"ylim":[-1,1],
+                    "xscale":"linear","yscale":"linear","is3d":false,"view":[0,90]}]}]}"#;
+        let snap = Snapshot::parse(text).unwrap();
+        assert_eq!(snap.figures.len(), 1);
+        let fig = &snap.figures[0];
+        assert_eq!((fig.fig, fig.path.as_str()), (1, "/tmp/fig1.png"));
+        assert_eq!(fig.png, vec![560, 420]);
+        assert_eq!(fig.axes[0].xlim, vec![20.0, 60.0]);
+        assert!(!fig.axes[0].is3d);
+        assert_eq!(fig.axes[0].xscale, "linear");
+    }
+
+    #[test]
+    fn a_session_that_never_plotted_has_no_figures_rather_than_failing_to_parse() {
+        let snap = Snapshot::parse(SAMPLE).unwrap();
+        assert!(snap.figures.is_empty());
     }
 
     #[test]
@@ -312,6 +383,7 @@ mod tests {
         assert!(names.contains(&"CLEECODE_OCTAVE_WS"));
         assert!(names.contains(&"CLEECODE_OCTAVE_LIB"));
         assert!(names.contains(&"PYTHONSTARTUP"));
+        assert!(names.contains(&"CLEECODE_OCTAVE_FIGS"));
         assert!(names.contains(&"PYTHONPATH"));
         let by = |key: &str| env.iter().find(|(k, _)| k == key).unwrap().1.clone();
         assert_eq!(by("CLEECODE_OCTAVE_WS"), by("CLEECODE_PY_WS"), "one file per pane, not per language");

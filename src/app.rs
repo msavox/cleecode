@@ -358,6 +358,10 @@ pub struct App {
     /// resolved one — so the translation is kept rather than recomputed, and the file is asked
     /// about the disk once instead of sixty times a second.
     lsp_paths: std::collections::HashMap<PathBuf, PathBuf>,
+    /// The snapshot watched for figures. The editor reads it for pictures; the workspace window
+    /// reads the same file for variables. Two readers of one file, which is why the producers
+    /// write by rename — neither can ever see half of one.
+    figures: Option<crate::wsnap::Watch>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -942,6 +946,10 @@ pub struct LayoutPreset {
     pub terminal_on_right: bool,
 }
 
+/// Below this a figure joins the tab strip of the pane it is in rather than splitting the
+/// editor: two panes of thirty columns each are two panes nobody can read.
+const SPLIT_FOR_FIGURES_COLS: u16 = 120;
+
 pub const PRESET_CLASSIC: LayoutPreset = LayoutPreset {
     show_sidebar: true,
     show_terminal: true,
@@ -1162,6 +1170,7 @@ impl App {
             lsp_sent: std::collections::HashMap::new(),
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
+            figures: None,
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -1571,6 +1580,75 @@ impl App {
             self.search_tx.clone(),
             self.search_pending.clone(),
         );
+    }
+
+    // ---- Figures from a live session ------------------------------------------------------
+
+    /// Opens a tab for each figure the session has drawn, and re-reads one whose picture has
+    /// changed underneath it.
+    ///
+    /// A figure arrives as a picture because a live Qt window cannot be reparented into a
+    /// terminal — but a raster hand-off can, and CleeCode already draws PNGs. The interpreter is
+    /// told not to open a window at all, so nothing appears behind the terminal.
+    ///
+    /// The tab is opened but **not focused**: `plot` in the middle of a script should not take
+    /// the keyboard away from what you were writing. It appears in the strip, which is where you
+    /// look for it.
+    pub fn poll_figures(&mut self) {
+        if !self.settings.diagnostics_figures {
+            return;
+        }
+        let Some(path) = crate::wsnap::newest_in(&crate::wsnap::snapshot_dir()) else { return };
+        if self.figures.as_ref().map(|w| w.path != path).unwrap_or(true) {
+            self.figures = Some(crate::wsnap::Watch::new(path));
+        }
+        let Some(watch) = self.figures.as_mut() else { return };
+        if !watch.poll() {
+            return;
+        }
+        let figures: Vec<PathBuf> = watch
+            .snapshot
+            .as_ref()
+            .map(|s| s.figures.iter().map(|f| PathBuf::from(&f.path)).collect())
+            .unwrap_or_default();
+        for path in figures {
+            match self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
+                // Already a tab: the picture on disk is new, and nothing about a decoded image
+                // knows its file moved on.
+                Some(idx) => self.reread_preview(idx, None),
+                None => self.open_figure_tab(path),
+            }
+        }
+    }
+
+    /// Adds a figure as a preview tab in the pane that is not being typed in, without taking the
+    /// focus. Split view is opened for it when there is room: a plot beside the script that drew
+    /// it is the arrangement the whole feature is for.
+    fn open_figure_tab(&mut self, path: PathBuf) {
+        if !path.exists() {
+            return;
+        }
+        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
+            self.toggle_split_view();
+        }
+        if self.split_view {
+            self.editor_pane_focus = match was.1 {
+                EditorPane::Left => EditorPane::Right,
+                EditorPane::Right => EditorPane::Left,
+            };
+        }
+        self.open_preview_tab(path, false);
+        // Everything about where the keyboard was, put back. Opening a tab is the whole of what
+        // a figure is allowed to do to a window somebody is working in.
+        self.focus = was.0;
+        self.editor_pane_focus = was.1;
+        if self.split_view {
+            match was.1 {
+                EditorPane::Left => self.active_editor = was.2,
+                EditorPane::Right => self.active_editor_right = was.3,
+            }
+        }
     }
 
     // ---- Language server -----------------------------------------------------------------
@@ -3723,23 +3801,8 @@ impl App {
                     preview.shown_revision = u64::MAX;
                     preview.state = crate::preview::State::Rendered { lines: Vec::new(), revision: u64::MAX };
                 }
-            } else if let Some(path) = path {
-                let width_px =
-                    self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
-                let (box_px, fit) = self.editors[idx]
-                    .preview
-                    .as_ref()
-                    .map(|p| (p.picture_box(), p.fit))
-                    .unwrap_or(((0, 0), crate::preview::Fit::Page));
-                if let Some(preview) = self.editors[idx].preview.as_mut() {
-                    preview.state = crate::preview::start_loading(
-                    match page {
-                        Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
-                        None => crate::preview::Job::Picture { path: path.clone(), box_px, fit },
-                    },
-                    self.preview_tx.clone(),
-                );
-                }
+            } else if path.is_some() {
+                self.reread_preview(idx, page);
             }
             self.status_message = i18n::msg_preview_refreshed(self.settings.lang);
             return true;
@@ -3751,6 +3814,30 @@ impl App {
         }
         self.open_rendered_preview(path);
         true
+    }
+
+    /// Reads a preview tab's file again, keeping the zoom and fit it is being shown at.
+    ///
+    /// What ▶ Refresh does by hand, and what a figure does by itself when the interpreter draws
+    /// over it: the picture on screen was made from a file that has since changed, and the tab
+    /// has to be told, because nothing about a decoded image knows its source moved on.
+    fn reread_preview(&mut self, idx: usize, page: Option<usize>) {
+        let Some(path) = self.editors[idx].path.clone() else { return };
+        let width_px = self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
+        let (box_px, fit) = self.editors[idx]
+            .preview
+            .as_ref()
+            .map(|p| (p.picture_box(), p.fit))
+            .unwrap_or(((0, 0), crate::preview::Fit::Page));
+        if let Some(preview) = self.editors[idx].preview.as_mut() {
+            preview.state = crate::preview::start_loading(
+                match page {
+                    Some(page) => crate::preview::Job::Page { path, page, width_px },
+                    None => crate::preview::Job::Picture { path, box_px, fit },
+                },
+                self.preview_tx.clone(),
+            );
+        }
     }
 
     /// Opens the rendered view of a markdown buffer in the other half, splitting the editor if
