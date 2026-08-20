@@ -703,6 +703,15 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     draw_status(f, app, areas.status);
     draw_menu_bar(f, app, areas.menu_bar);
 
+    // Above the panes, below every modal. The popup is not modal itself, so anything that does
+    // take the keyboard is entitled to cover it — and covering it is also how it stops being
+    // visible when a box opens over the buffer it belongs to.
+    if let Some(popup) = app.completion.as_ref()
+        && app.completion_live()
+    {
+        draw_completion(f, popup, app.completion_anchor, f.area());
+    }
+
     if app.show_settings {
         draw_settings_modal(f, app, f.area());
     }
@@ -1145,6 +1154,45 @@ pub fn git_panel_rect(full: Rect) -> Rect {
 /// A modal reader rather than a docked frame. The frames are the editor, the tree and the
 /// shells — the three things you work *in* — and this is something you look at and dismiss, so
 /// it costs no layout and takes nothing away from them while it is closed.
+/// One tab of the git panel's header row: which tab it is, what it says, and the cells it takes.
+pub struct GitTabSlot {
+    pub tab: crate::app::GitTab,
+    pub label: String,
+    /// Offset from the left of the panel's inner area, in cells.
+    pub x: u16,
+    pub width: u16,
+}
+
+/// Where the git panel's three tabs sit on their row.
+///
+/// One function, used by the drawing and by the click. This is the same reason
+/// `tab_strip_layout` exists: a hit-test that works the layout out its own way is a hit-test
+/// that will one day disagree with what is on the screen, and nothing says so — the click just
+/// lands on the wrong tab, or on none.
+pub fn git_tab_slots(lang: i18n::Lang) -> Vec<GitTabSlot> {
+    let mut x = 0u16;
+    crate::app::GitTab::ALL
+        .iter()
+        .map(|&tab| {
+            let label = i18n::msg_git_tab(lang, tab).to_string();
+            // A space either side of the label, so the lit tab reads as a block rather than as
+            // coloured text, and one more between tabs.
+            let width = label.chars().count() as u16 + 2;
+            let slot = GitTabSlot { tab, label, x, width };
+            x += width + 1;
+            slot
+        })
+        .collect()
+}
+
+/// The tab a click at `col` lands on, or `None` for the gaps between them.
+pub fn git_tab_at(lang: i18n::Lang, header: Rect, col: u16) -> Option<crate::app::GitTab> {
+    git_tab_slots(lang).into_iter().find_map(|slot| {
+        let x = header.x + slot.x;
+        (col >= x && col < x + slot.width && x + slot.width <= header.right()).then_some(slot.tab)
+    })
+}
+
 fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
     use crate::app::GitTab;
     let Some(panel) = app.git_panel.as_ref() else { return };
@@ -1163,19 +1211,24 @@ fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
 
     // Tabs on their own row, the current one lit. Which tab you are on is the one thing that
     // must never be in doubt, since all three are lists of lines in the same box.
-    let mut tabs: Vec<Span> = Vec::new();
-    for tab in GitTab::ALL {
-        let on = tab == panel.tab;
-        let style = if on {
+    //
+    // Each drawn into the rectangle `git_tab_slots` gives it, rather than laid out again here:
+    // the click asks the same function where the tabs are, and one function cannot disagree
+    // with itself.
+    let header = Rect { height: 1, ..inner };
+    for slot in git_tab_slots(lang) {
+        let x = header.x + slot.x;
+        if x + slot.width > header.right() {
+            break;
+        }
+        let style = if slot.tab == panel.tab {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        tabs.push(Span::styled(format!(" {} ", i18n::msg_git_tab(lang, tab)), style));
-        tabs.push(Span::raw(" "));
+        let area = Rect { x, y: header.y, width: slot.width, height: 1 };
+        f.render_widget(Paragraph::new(Span::styled(format!(" {} ", slot.label), style)), area);
     }
-    let header = Rect { height: 1, ..inner };
-    f.render_widget(Paragraph::new(Line::from(tabs)), header);
 
     let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
     let rows = body.height as usize;
@@ -1639,6 +1692,101 @@ pub fn picker_row_at(p: &crate::picker::Picker, full: Rect, col: u16, row: u16) 
     (index < p.filtered.len()).then_some(index)
 }
 
+/// Where the completion popup goes, given the cell the cursor is in.
+///
+/// Pure, so the awkward cases are settled in tests rather than by squinting at a terminal: the
+/// list hangs under the cursor, flips above it when the bottom of the screen is nearer than the
+/// list is tall, and slides left rather than spilling off the right edge. The text column is
+/// lined up with the first letter of the word being completed, so the candidates read as a
+/// continuation of what was typed rather than as a box that happens to be nearby.
+pub fn completion_rect(anchor: (u16, u16), prefix_len: u16, width: u16, rows: u16, full: Rect) -> Rect {
+    let height = rows + 2;
+    let width = width.min(full.width.max(1));
+    // The border and the two-cell selection marker sit between the box edge and the text.
+    let x = anchor.0.saturating_sub(prefix_len + 3);
+    let x = x.min(full.right().saturating_sub(width)).max(full.x);
+    let below = anchor.1 + 1;
+    let y = if below + height <= full.bottom() {
+        below
+    } else {
+        // Not enough room under the cursor: hang the list above it instead, and if there is no
+        // room there either, take the top of the screen rather than sliding off it.
+        anchor.1.checked_sub(height).unwrap_or(full.y).max(full.y)
+    };
+    Rect { x, y, width, height }
+}
+
+/// Takes the popup and the cursor cell rather than the whole `App`, so a test can render one
+/// into a buffer and read back what it drew — which is the only way to check a list of words
+/// actually reaches the screen without a terminal to look at.
+fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, u16), full: Rect) {
+    let rows: Vec<(&crate::complete::Candidate, bool)> = popup.visible().collect();
+    if rows.is_empty() {
+        return;
+    }
+    let prefix_len = popup.prefix.chars().count();
+    let longest = rows.iter().map(|(c, _)| c.text.chars().count()).max().unwrap_or(0);
+    // Two for the marker column, two for the border, two so a word is not flush against it.
+    let width = (longest + 6).clamp(14, 44) as u16;
+    let rect = completion_rect(anchor, prefix_len as u16, width, rows.len() as u16, full);
+
+    f.render_widget(Clear, rect);
+    let mut block =
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray));
+    // Only when the list is taller than its window: otherwise the count says what is already
+    // plainly on screen, and the border is the wrong place to say anything twice.
+    if popup.len() > rows.len() {
+        block = block
+            .title(format!(" {}/{} ", popup.selected + 1, popup.len()))
+            .title_style(Style::default().fg(Color::DarkGray));
+    }
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let text_width = inner.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(cand, selected)| {
+            let base = if *selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else if cand.source == crate::complete::Source::Keyword {
+                // The same blue the highlighter gives a keyword, so the list says where the
+                // candidate came from without spending a column on saying it.
+                Style::default().fg(Color::Blue)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let mut label = cand.text.clone();
+            if label.chars().count() > text_width {
+                label = label.chars().take(text_width.saturating_sub(1)).collect::<String>() + "…";
+            }
+            // Bold the letters already typed — but only when they really are the opening of the
+            // word. A fuzzy match has them scattered through it, and marking the first few there
+            // would be pointing at the wrong letters.
+            let lit = if label.to_lowercase().starts_with(&popup.prefix.to_lowercase()) {
+                prefix_len.min(label.chars().count())
+            } else {
+                0
+            };
+            let head: String = label.chars().take(lit).collect();
+            let tail: String = label.chars().skip(lit).collect();
+            let pad = inner.width as usize - 2 - label.chars().count();
+            let mut spans = vec![Span::styled(if *selected { "▶ " } else { "  " }, base)];
+            if !head.is_empty() {
+                spans.push(Span::styled(head, base.add_modifier(Modifier::BOLD)));
+            }
+            if !tail.is_empty() {
+                spans.push(Span::styled(tail, base));
+            }
+            if pad > 0 {
+                spans.push(Span::styled(" ".repeat(pad), base));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let Some(p) = app.picker.as_ref() else { return };
     let rect = picker_rect(full);
@@ -1747,6 +1895,23 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
         ]),
         flags,
     ];
+    // What the current match turns into, and how many share its fate. Without this, Ctrl+A is a
+    // key you press to find out what it does — and with a pattern, the difference between a
+    // replacement that quotes a group back and one that writes a literal dollar is invisible
+    // until after the file has been changed.
+    if let Some(m) = fs.current_match() {
+        let matched = app.editor().rope.slice(m.0..m.1).to_string();
+        if let Some(preview) = fs.preview(&matched, inner.width.saturating_sub(24) as usize) {
+            lines.push(Line::from(vec![
+                Span::styled("  ", label),
+                Span::styled(preview, Style::default().fg(Color::Green)),
+                Span::styled(
+                    i18n::msg_replace_all_count(lang, fs.matches.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
     if let Some(detail) = &fs.error {
         lines.push(Line::from(Span::styled(
             i18n::msg_find_pattern_error(lang, detail),
@@ -2417,6 +2582,10 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         let cursor_x = inner.x + gutter + app.editors[idx].cursor_col.saturating_sub(left_col) as u16;
         let cursor_y = inner.y + cursor_row as u16;
         f.set_cursor_position((cursor_x, cursor_y));
+        // Where the completion popup hangs from. Recorded here because this is the only place
+        // that knows which screen cell a buffer position ended up in — folds, scrolling and the
+        // gutter all sit between the two.
+        app.completion_anchor = (cursor_x, cursor_y);
     }
 }
 
@@ -3011,6 +3180,102 @@ mod tests {
 
     /// Five tabs of 10 columns each.
     const W: [u16; 5] = [10, 10, 10, 10, 10];
+
+    /// An 80×24 screen, the size every terminal still agrees on.
+    const SCREEN: Rect = Rect { x: 0, y: 0, width: 80, height: 24 };
+
+    #[test]
+    fn the_completion_list_hangs_under_the_cursor_and_lines_up_with_the_word() {
+        // Cursor at column 20 having typed four letters: the word starts at 16, and the text
+        // column of the box — past the border and the two-cell marker — must land there.
+        let rect = completion_rect((20, 5), 4, 20, 6, SCREEN);
+        assert_eq!(rect.x + 3, 16);
+        assert_eq!(rect.y, 6, "the row under the cursor");
+        assert_eq!(rect.height, 8, "six rows plus the border");
+    }
+
+    /// The tabs used to be reachable only from the keyboard, because the drawing knew where they
+    /// were and nothing else did. This is the check that the two now agree: the click is asked
+    /// where each tab is, and the answer is compared against what was actually painted.
+    #[test]
+    fn a_click_lands_on_the_git_tab_that_was_drawn_there() {
+        use crate::app::GitTab;
+        let lang = i18n::Lang::En;
+        let header = Rect { x: 5, y: 2, width: 60, height: 1 };
+        for slot in git_tab_slots(lang) {
+            let left = header.x + slot.x;
+            let right = left + slot.width - 1;
+            assert_eq!(git_tab_at(lang, header, left), Some(slot.tab), "left edge of {:?}", slot.tab);
+            assert_eq!(git_tab_at(lang, header, right), Some(slot.tab), "right edge of {:?}", slot.tab);
+        }
+        // The single space between two tabs belongs to neither.
+        let first = &git_tab_slots(lang)[0];
+        assert_eq!(git_tab_at(lang, header, header.x + first.width), None);
+        // Nothing to the left of the first tab, and nothing past the last.
+        let last = git_tab_slots(lang).pop().unwrap();
+        assert_eq!(git_tab_at(lang, header, header.x + last.x + last.width), None);
+        assert_eq!(GitTab::ALL.len(), git_tab_slots(lang).len());
+    }
+
+    #[test]
+    fn a_git_tab_clipped_by_a_narrow_panel_cannot_be_clicked() {
+        // Drawing stops at the panel edge, so the hit-test has to stop there too — otherwise the
+        // click works on a tab nobody can see.
+        let lang = i18n::Lang::En;
+        let narrow = Rect { x: 0, y: 0, width: 12, height: 1 };
+        let last = git_tab_slots(lang).pop().unwrap();
+        assert!(last.x + last.width > narrow.width, "the fixture must actually clip a tab");
+        assert_eq!(git_tab_at(lang, narrow, last.x), None);
+    }
+
+    /// Rendered into a buffer and read back, because everything above this only checks where the
+    /// box goes — not that the words ever reach the screen.
+    #[test]
+    fn the_completion_list_draws_the_words_it_was_given() {
+        use crate::complete::{Candidate, Popup, Source};
+        let cands = vec![
+            Candidate { text: "config_path".into(), source: Source::Buffer, distance: 0, freq: 1 },
+            Candidate { text: "const".into(), source: Source::Keyword, distance: 9, freq: 1 },
+        ];
+        let popup = Popup::open(0, 0, "con".into(), cands).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| draw_completion(f, &popup, (10, 2), f.area())).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen: Vec<String> = (0..12)
+            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect();
+        let text = screen.join("\n");
+        assert!(text.contains("config_path"), "the buffer word is missing:\n{text}");
+        assert!(text.contains("const"), "the keyword is missing:\n{text}");
+        // The best match is picked, and the marker says so.
+        assert!(text.contains("▶ config_path"), "nothing is marked as selected:\n{text}");
+        // Under the cursor's row, not over it.
+        assert!(screen[0].trim().is_empty() && screen[1].trim().is_empty());
+        assert!(!screen[3].trim().is_empty());
+    }
+
+    #[test]
+    fn the_completion_list_flips_above_the_cursor_near_the_bottom() {
+        // Row 20 of 24, with an eight-row box: there is no room below, and plenty above.
+        let rect = completion_rect((20, 20), 4, 20, 6, SCREEN);
+        assert_eq!(rect.y, 12);
+        assert_eq!(rect.y + rect.height, 20, "it stops at the cursor's own row");
+    }
+
+    #[test]
+    fn the_completion_list_stays_on_screen_at_either_edge() {
+        // Far right: slid left until it fits, rather than spilling off.
+        let right = completion_rect((78, 5), 2, 30, 4, SCREEN);
+        assert!(right.right() <= SCREEN.right(), "{right:?} runs off the right edge");
+        // Far left: the box would start before column 0, so it starts at 0.
+        let left = completion_rect((1, 5), 1, 20, 4, SCREEN);
+        assert_eq!(left.x, 0);
+        // A cursor on the top row with no room either way: the top of the screen, not off it.
+        let squeezed = completion_rect((10, 0), 2, 20, 20, Rect { x: 0, y: 0, width: 80, height: 8 });
+        assert_eq!(squeezed.y, 0);
+    }
 
     /// A split editor in a window dragged very narrow used to panic — `clamp(1, 0)` — and close
     /// CleeCode. Too narrow to split now yields the single pane the callers already handle.

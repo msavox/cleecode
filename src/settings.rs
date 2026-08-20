@@ -83,6 +83,11 @@ pub struct Settings {
     // Auto-close brackets/quotes and expand pairs on Enter. Hand-editable; on by default.
     #[serde(default = "default_true")]
     pub auto_pairs: bool,
+    // Whether the word-completion popup appears while typing. On by default, and off is a real
+    // answer: a list that opens by itself is the kind of help some people would rather not have,
+    // and a feature that cannot be turned off is one they have to work around instead.
+    #[serde(default = "default_true")]
+    pub completion: bool,
     // Whether the editor paints its own background instead of letting the terminal's show
     // through. Off by default, because a terminal's background is the user's choice and taking
     // it over uninvited is rude — but a translucent one with a bright window behind it turns
@@ -234,6 +239,7 @@ impl Default for Settings {
             preview_markdown_text: false,
             terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
+            completion: true,
             opaque_background: false,
             last_root: None,
             last_open_files: Vec::new(),
@@ -498,6 +504,7 @@ impl Settings {
             SettingRow { label: i18n::t(lang, Key::SettingInsertSpaces), value: b(self.insert_spaces) },
             SettingRow { label: i18n::t(lang, Key::SettingShowWhitespace), value: b(self.show_whitespace) },
             SettingRow { label: i18n::t(lang, Key::SettingAutoIndent), value: b(self.auto_indent) },
+            SettingRow { label: i18n::t(lang, Key::SettingCompletion), value: b(self.completion) },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
         ]
@@ -513,8 +520,9 @@ impl Settings {
             4 => self.insert_spaces = !self.insert_spaces,
             5 => self.show_whitespace = !self.show_whitespace,
             6 => self.auto_indent = !self.auto_indent,
-            7 => self.mouse_enabled = !self.mouse_enabled,
-            8 => self.lang = self.lang.next(),
+            7 => self.completion = !self.completion,
+            8 => self.mouse_enabled = !self.mouse_enabled,
+            9 => self.lang = self.lang.next(),
             _ => {}
         }
     }
