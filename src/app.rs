@@ -11,7 +11,7 @@ use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -335,6 +335,25 @@ pub struct App {
     /// Where the cursor was drawn last frame, so the popup can hang under it. Written by the
     /// renderer, which is the only thing that knows where a buffer line landed on screen.
     pub completion_anchor: (u16, u16),
+    /// The language server, once a file it knows about has been opened. `None` is the ordinary
+    /// state, not a failure: most machines do not have one installed.
+    lsp: Option<crate::lsp::Client>,
+    /// Why there is no server, said once. Kept so the attempt is not repeated at every keystroke
+    /// — spawning a process that is not there, sixty times a second, is its own kind of bug.
+    lsp_error: Option<String>,
+    /// What the server says about each file. Replaced wholesale per file, because that is what
+    /// the protocol sends: a list, not a diff.
+    pub diagnostics: std::collections::HashMap<PathBuf, Vec<crate::lsp::Mark>>,
+    /// The buffer revision last sent for each file, and the revision seen with the moment it
+    /// appeared — together they are "has it changed, and has the typing stopped".
+    lsp_sent: std::collections::HashMap<PathBuf, u64>,
+    lsp_seen: std::collections::HashMap<PathBuf, (u64, Instant)>,
+    /// The absolute path each open file was announced under, and the path the editor holds it
+    /// by. A tab opened from the tree of a project started as `.` is `./src/main.rs`, which has
+    /// no `file:` URI at all, and what comes back from the server is neither of those but the
+    /// resolved one — so the translation is kept rather than recomputed, and the file is asked
+    /// about the disk once instead of sixty times a second.
+    lsp_paths: std::collections::HashMap<PathBuf, PathBuf>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -1132,6 +1151,12 @@ impl App {
             picker: None,
             completion: None,
             completion_anchor: (0, 0),
+            lsp: None,
+            lsp_error: None,
+            diagnostics: std::collections::HashMap::new(),
+            lsp_sent: std::collections::HashMap::new(),
+            lsp_seen: std::collections::HashMap::new(),
+            lsp_paths: std::collections::HashMap::new(),
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -1516,6 +1541,166 @@ impl App {
             self.search_tx.clone(),
             self.search_pending.clone(),
         );
+    }
+
+    // ---- Language server -----------------------------------------------------------------
+
+    /// One call per frame, doing the three things the server needs: exist, be told what is open,
+    /// and be listened to.
+    ///
+    /// Everything here is a *check* rather than a notification from elsewhere in the app. A file
+    /// can be opened from the tree, the quick-open, the command line, a workspace, a search
+    /// result or a drop — six places that would each have to remember to tell the server, and
+    /// the seventh, added later, would not.
+    pub fn poll_lsp(&mut self) {
+        self.lsp_start_if_wanted();
+        self.lsp_take_events();
+        self.lsp_sync_open_files();
+    }
+
+    /// Starts a server the first time a file it knows about is open, and never again.
+    fn lsp_start_if_wanted(&mut self) {
+        if self.lsp.is_some() || self.lsp_error.is_some() || !self.settings.diagnostics {
+            return;
+        }
+        let program = self
+            .editors
+            .iter()
+            .filter(|e| e.preview.is_none())
+            .filter_map(|e| e.path.as_deref())
+            .find_map(crate::lsp::server_for);
+        let Some(program) = program else { return };
+        match crate::lsp::Client::start(program, &self.root) {
+            Ok(client) => self.lsp = Some(client),
+            // Said once, in the status bar, and then remembered rather than retried. Not having
+            // rust-analyzer installed is the normal case, and CleeCode has to be exactly as
+            // useful there as it was before any of this existed.
+            Err(detail) => {
+                self.lsp_error = Some(detail);
+                self.status_message = i18n::msg_lsp_missing(self.settings.lang, program);
+            }
+        }
+    }
+
+    fn lsp_take_events(&mut self) {
+        let lang = self.settings.lang;
+        loop {
+            let Some(client) = self.lsp.as_ref() else { return };
+            let Some(event) = client.try_recv() else { return };
+            match event {
+                crate::lsp::Event::Ready { utf16 } => {
+                    if let Some(client) = self.lsp.as_mut() {
+                        client.confirm_ready(utf16);
+                    }
+                    let name = self.lsp.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                    self.status_message = i18n::msg_lsp_ready(lang, &name);
+                }
+                crate::lsp::Event::Diagnostics { path, raw } => {
+                    // The server answers about the file it was told about, which is the resolved
+                    // path — not the one the tab holds. The translation was recorded when it was
+                    // announced; without it, a diagnostic for a project opened as `.` matches no
+                    // tab and is silently dropped.
+                    let Some(path) = self.lsp_paths.get(&path).cloned() else { continue };
+                    // Converted here because this is where the buffer is. A diagnostic for a file
+                    // that is not open has nothing to be measured against, so it is dropped
+                    // rather than stored against a guess at the text.
+                    let utf16 = self.lsp.as_ref().map(|c| c.utf16()).unwrap_or(true);
+                    let Some(editor) = self.editors.iter().find(|e| e.path.as_deref() == Some(path.as_path()))
+                    else {
+                        self.diagnostics.remove(&path);
+                        continue;
+                    };
+                    let lines: Vec<String> = editor
+                        .rope
+                        .lines()
+                        .map(|l| l.to_string().trim_end_matches('\n').to_string())
+                        .collect();
+                    let marks = crate::lsp::marks_from(&raw, &lines, utf16);
+                    // An empty list is not nothing to do: it is how a fixed error stops being
+                    // drawn, so it replaces the old list rather than being skipped.
+                    self.diagnostics.insert(path, marks);
+                }
+                crate::lsp::Event::Stopped { detail } => {
+                    self.lsp = None;
+                    self.lsp_error = Some(detail);
+                    self.diagnostics.clear();
+                    self.lsp_sent.clear();
+                    self.lsp_seen.clear();
+                    self.status_message = i18n::msg_lsp_stopped(lang);
+                }
+            }
+        }
+    }
+
+    /// Tells the server what is open, what has changed once the typing has stopped, and what has
+    /// gone away.
+    fn lsp_sync_open_files(&mut self) {
+        if self.lsp.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let mut to_send: Vec<(PathBuf, PathBuf, String, u64)> = Vec::new();
+        let mut live: Vec<PathBuf> = Vec::new();
+        let mut resolved: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for editor in self.editors.iter().filter(|e| e.preview.is_none()) {
+            let Some(path) = editor.path.as_deref() else { continue };
+            if crate::lsp::server_for(path).is_none() {
+                continue;
+            }
+            live.push(path.to_path_buf());
+            let revision = editor.revision();
+            // When the revision first differs from what was sent, note the moment; the send
+            // happens once that moment is old enough.
+            let entry = self.lsp_seen.entry(path.to_path_buf()).or_insert((revision, now));
+            if entry.0 != revision {
+                *entry = (revision, now);
+            }
+            let since = now.saturating_duration_since(entry.1);
+            if crate::lsp::should_send(self.lsp_sent.get(path).copied(), revision, since) {
+                // Asked of the disk once per file, when it is first announced, and then
+                // remembered: the server resolves symlinks, so `/tmp/x` comes back as
+                // `/private/tmp/x` on macOS and no amount of lexical tidying would match it.
+                let absolute = match self.lsp_paths.iter().find(|(_, held)| held.as_path() == path) {
+                    Some((absolute, _)) => absolute.clone(),
+                    None => match std::fs::canonicalize(path) {
+                        Ok(absolute) => absolute,
+                        // Not on disk yet — an unsaved buffer with a name. There is nothing for
+                        // the server to look at, so there is nothing to say about it.
+                        Err(_) => continue,
+                    },
+                };
+                resolved.push((absolute.clone(), path.to_path_buf()));
+                to_send.push((absolute, path.to_path_buf(), editor.rope.to_string(), revision));
+            }
+        }
+        let gone: Vec<PathBuf> =
+            self.lsp_sent.keys().filter(|p| !live.contains(p)).cloned().collect();
+
+        for (absolute, held) in resolved {
+            self.lsp_paths.insert(absolute, held);
+        }
+        let Some(client) = self.lsp.as_mut() else { return };
+        for (absolute, held, text, revision) in to_send {
+            client.did_open(&absolute, &text);
+            self.lsp_sent.insert(held, revision);
+        }
+        for path in gone {
+            if let Some((absolute, _)) =
+                self.lsp_paths.iter().find(|(_, held)| held.as_path() == path.as_path())
+            {
+                let absolute = absolute.clone();
+                client.did_close(&absolute);
+                self.lsp_paths.remove(&absolute);
+            }
+            self.lsp_sent.remove(&path);
+            self.lsp_seen.remove(&path);
+            self.diagnostics.remove(&path);
+        }
+    }
+
+    /// The diagnostics for a file, or an empty slice — so the renderer can ask without checking.
+    pub fn marks_for(&self, path: Option<&Path>) -> &[crate::lsp::Mark] {
+        path.and_then(|p| self.diagnostics.get(p)).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Picks up a finished search. The results become an ordinary picker, so the list is

@@ -2091,8 +2091,20 @@ fn apply_whitespace_marks(spans: Vec<(Style, String)>) -> Vec<(Style, String)> {
 }
 
 /// Overlays a background highlight on the [sel_from, sel_to) character range of a line's spans.
-fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usize) -> Vec<(Style, String)> {
-    if sel_from >= sel_to {
+/// Restyles the characters in `[from, to)`, splitting spans wherever the range starts or ends
+/// inside one.
+///
+/// One function for the selection and for a diagnostic's underline. Both are "these columns look
+/// different", and the arithmetic — a range that begins mid-span, on a line whose spans came from
+/// the highlighter and do not line up with anything — is the part worth having once rather than
+/// twice.
+fn restyle_range(
+    spans: Vec<(Style, String)>,
+    from: usize,
+    to: usize,
+    restyle: impl Fn(Style) -> Style,
+) -> Vec<(Style, String)> {
+    if from >= to {
         return spans;
     }
     let mut result = Vec::new();
@@ -2102,25 +2114,60 @@ fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usi
         let span_start = pos;
         let span_end = pos + char_count;
         pos = span_end;
-        if span_end <= sel_from || span_start >= sel_to {
+        if span_end <= from || span_start >= to {
             result.push((style, text));
             continue;
         }
         let chars: Vec<char> = text.chars().collect();
-        let local_from = sel_from.saturating_sub(span_start).min(chars.len());
-        let local_to = sel_to.saturating_sub(span_start).min(chars.len());
+        let local_from = from.saturating_sub(span_start).min(chars.len());
+        let local_to = to.saturating_sub(span_start).min(chars.len());
         if local_from > 0 {
             result.push((style, chars[..local_from].iter().collect()));
         }
         if local_to > local_from {
-            let sel_style = style.bg(Color::Rgb(60, 90, 130));
-            result.push((sel_style, chars[local_from..local_to].iter().collect()));
+            result.push((restyle(style), chars[local_from..local_to].iter().collect()));
         }
         if local_to < chars.len() {
             result.push((style, chars[local_to..].iter().collect()));
         }
     }
     result
+}
+
+fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usize) -> Vec<(Style, String)> {
+    restyle_range(spans, sel_from, sel_to, |style| style.bg(Color::Rgb(60, 90, 130)))
+}
+
+pub fn severity_colour(severity: crate::lsp::Severity) -> Color {
+    match severity {
+        crate::lsp::Severity::Error => Color::Red,
+        crate::lsp::Severity::Warning => Color::Yellow,
+        crate::lsp::Severity::Info => Color::Cyan,
+        crate::lsp::Severity::Hint => Color::DarkGray,
+    }
+}
+
+/// Underlines what the language server marked on this line.
+///
+/// Colour and an underline, never a background: the selection owns the background, and a server
+/// that painted over it would make you lose track of what you had selected while reading about
+/// what is wrong with it. Applied before the selection for the same reason.
+fn underline_marks(
+    spans: Vec<(Style, String)>,
+    marks: &[&crate::lsp::Mark],
+) -> Vec<(Style, String)> {
+    let mut out = spans;
+    // Worst first, so where two overlap the more serious colour is the one applied last and
+    // survives on the shared columns.
+    let mut ordered: Vec<&&crate::lsp::Mark> = marks.iter().collect();
+    ordered.sort_by_key(|m| m.severity);
+    for mark in ordered {
+        let colour = severity_colour(mark.severity);
+        out = restyle_range(out, mark.start, mark.end, move |style| {
+            style.fg(colour).add_modifier(Modifier::UNDERLINED)
+        });
+    }
+    out
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pane: EditorPane) {
@@ -2515,6 +2562,10 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         app.editors[idx].syntax_dirty = false;
     }
 
+    // Taken once, and cloned: the renderer holds the editors mutably while it draws, and the
+    // marks live on the app beside them.
+    let marks: Vec<crate::lsp::Mark> = app.marks_for(app.editors[idx].path.as_deref()).to_vec();
+
     let top_line = app.editors[idx].top_line;
     let left_col = app.editors[idx].left_col;
     let cursor_line = app.editors[idx].cursor_line;
@@ -2523,12 +2574,21 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     let mut lines: Vec<Line> = Vec::new();
     for line_idx in visible_rows.iter().copied() {
         let mut spans: Vec<Span> = Vec::new();
+        let on_line: Vec<&crate::lsp::Mark> = marks.iter().filter(|m| m.line == line_idx).collect();
+        let worst = on_line.iter().map(|m| m.severity).max();
         if gutter > 0 {
             let is_current = line_idx == cursor_line;
-            let num_style = if is_current {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
+            // The number carries the mark rather than a column of its own: a gutter one cell
+            // wider would move every cursor position, every mouse mapping and every viewport
+            // width that is worked out from it, which is a lot of arithmetic to disturb for a
+            // dot. A red line number is not ambiguous.
+            let num_style = match (worst, is_current) {
+                (Some(severity), current) => {
+                    let style = Style::default().fg(severity_colour(severity));
+                    if current { style.add_modifier(Modifier::BOLD) } else { style }
+                }
+                (None, true) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                (None, false) => Style::default().fg(Color::DarkGray),
             };
             let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
             spans.push(Span::styled(num_text, num_style));
@@ -2551,6 +2611,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         } else {
             raw_spans
         };
+        let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(raw_spans, &on_line) };
         // The editor decides the shape — a run of text or a rectangle — so the highlight always
         // matches what a copy would take.
         let raw_spans = match app.editors[idx].selected_columns(line_idx) {
@@ -3151,6 +3212,20 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     }
 }
 
+/// The worst diagnostic on the line the cursor is on, if any.
+///
+/// The worst rather than the first: two servers' worth of hints can sit on a line that also has
+/// the error you are actually looking for, and the error is the one the row is for.
+fn diagnostic_under_cursor(app: &App) -> Option<(String, crate::lsp::Severity)> {
+    let editor = app.editor();
+    let line = editor.cursor_line;
+    app.marks_for(editor.path.as_deref())
+        .iter()
+        .filter(|m| m.line == line)
+        .max_by_key(|m| m.severity)
+        .map(|m| (m.message.clone(), m.severity))
+}
+
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let msg = if app.resize_mode {
         i18n::t(app.settings.lang, Key::ResizeModeHint).to_string()
@@ -3162,8 +3237,30 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::Gray)
     };
-    let paragraph = Paragraph::new(Line::from(Span::raw(msg))).style(style);
+    let paragraph = Paragraph::new(Line::from(Span::raw(msg.clone()))).style(style);
     f.render_widget(paragraph, area);
+
+    // What the server says about the line the cursor is on, right-aligned so it shares the row
+    // with the status message rather than replacing it. Neither wins: a diagnostic is about
+    // where you are and stays as long as you are there, while "Saved" is about what you just
+    // did — hiding either behind the other would be answering a question nobody asked.
+    // The room left after the status message, minus a two-cell gap so the two never touch. Below
+    // about a word's worth there is nothing useful to say, and a truncated diagnostic that says
+    // "cann…" is worse than the squiggle already on screen.
+    let room = (area.width as usize).saturating_sub(msg.chars().count() + 2);
+    if let Some((text, severity)) = diagnostic_under_cursor(app)
+        && !app.resize_mode
+        && room >= 8
+    {
+        let text = match text.chars().count() > room {
+            true => text.chars().take(room - 1).collect::<String>() + "…",
+            false => text,
+        };
+        let width = text.chars().count() as u16;
+        let spot = Rect { x: area.right() - width, y: area.y, width, height: 1 };
+        let style = Style::default().fg(severity_colour(severity));
+        f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), spot);
+    }
 
     // The easter egg walks along the status line, over whatever message is there. It is the one
     // place on screen already given over to things that come and go, so nothing is lost behind

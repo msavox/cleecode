@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the real CleeCode binary in a pseudo-terminal and check what lands on the screen.
+"""Drive the real CleeCode binary in a pseudo-terminal and check the completion popup.
 
     python3 scripts/drive_ui.py [path/to/clee]      # default: target/debug/clee
 
@@ -7,164 +7,22 @@ Why this exists. `cargo test` covers the pure functions — ranking, key routing
 where a box goes — but it cannot build an `App`: constructing one spawns two real PTYs and reads
 the user's own settings from disk, so a test that did it would depend on the machine it ran on.
 That leaves the wiring between those functions untested, and the wiring is where a feature is
-either usable or not. This runs the shipped binary the way a person does, renders its output with
-pyte, and reads the resulting grid of characters back.
+either usable or not. This runs the shipped binary the way a person does.
 
 Needs pyte (`pip install pyte`) and a Unix pty, so macOS and Linux. Not wired into `cargo test`
 or CI: it waits on conditions with timeouts, and a flaky gate is worse than an honest manual one.
 
-Two things to know before adding a check. CleeCode asks the terminal what it can do — device
-attributes, the kitty keyboard and graphics protocols — and draws its first frame only once those
-queries have timed out, because nothing here answers them; so wait on a *condition*, never on the
-clock. And `▶` alone does not find the completion popup: the toolbar's "▶ Run" button carries one
-the whole time, which is why `popup_open` looks for the marker hard against a box border.
+The machinery is in pty_drive.py beside this file, along with the two traps worth knowing about
+before adding a check.
 """
 
-import fcntl
 import os
-import pty
-import re
 import shutil
-import signal
-import struct
 import sys
 import tempfile
-import termios
-import time
 
-ROWS, COLS = 30, 110
-
-try:
-    import pyte
-except ImportError:
-    sys.exit("needs pyte:  pip install pyte")
-
-
-class Session:
-    """A CleeCode running in a pty, with a rendered picture of its screen."""
-
-    def __init__(self, binary, root):
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            os.environ["TERM"] = "xterm-256color"
-            os.environ["SHELL"] = "/bin/sh"
-            os.chdir(root)
-            try:
-                os.execv(binary, [binary, "."])
-            finally:
-                # execv only returns if it failed, and a child falling through here would go on
-                # running the rest of this script as though it were the driver.
-                os._exit(127)
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-        self.screen = pyte.Screen(COLS, ROWS)
-        self.stream = pyte.ByteStream(self.screen)
-        os.set_blocking(self.fd, False)
-
-    # ---- reading the screen ----------------------------------------------------------
-
-    def drain(self):
-        """Feed everything waiting on the pty into the screen."""
-        while True:
-            try:
-                data = os.read(self.fd, 1 << 16)
-            except (BlockingIOError, OSError):
-                return
-            if not data:
-                return
-            self.stream.feed(data)
-
-    def wait(self, predicate, timeout=10.0, settle=0.25):
-        """Read until `predicate(self)` holds, then a moment longer so the frame finishes."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            self.drain()
-            if predicate(self):
-                quiet = time.time() + settle
-                while time.time() < quiet:
-                    self.drain()
-                    time.sleep(0.02)
-                return True
-            time.sleep(0.03)
-        return False
-
-    def send(self, keys):
-        os.write(self.fd, keys.encode() if isinstance(keys, str) else keys)
-
-    def press(self, keys, predicate, timeout=6.0):
-        self.send(keys)
-        return self.wait(predicate, timeout)
-
-    def lines(self):
-        return [self.screen.display[y].rstrip() for y in range(ROWS)]
-
-    def text(self):
-        return "\n".join(self.lines())
-
-    # ---- reading particular things off it ---------------------------------------------
-
-    def buffer_line(self, n):
-        """The text of buffer line `n`, taken from the editor pane past its gutter."""
-        found = re.search(r"│\s*%d ([^│]*)" % n, self.text())
-        return found.group(1).rstrip() if found else None
-
-    def popup_open(self):
-        return re.search(r"│▶ [A-Za-z_]", self.text()) is not None
-
-    def popup_words(self):
-        """The candidates the completion popup is offering, best first."""
-        return [
-            word
-            for line in self.lines()
-            for _, word in re.findall(r"│(▶ | {2})([A-Za-z_][A-Za-z_0-9]*) *│", line)
-        ]
-
-    def close(self):
-        """Take the session down without ever blocking.
-
-        The pty child is a session leader, so the signal goes to the whole group — CleeCode's
-        own shells are in it, and they hold the slave open. Reaping is then polled rather than
-        waited on: a harness that can hang is worse than no harness, and there is nothing left
-        worth waiting for once the signal is sent.
-        """
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
-        for kill in (lambda: os.killpg(os.getpgid(self.pid), signal.SIGKILL),
-                     lambda: os.kill(self.pid, signal.SIGKILL)):
-            try:
-                kill()
-                break
-            except OSError:
-                continue
-        deadline = time.time() + 3
-        while time.time() < deadline:
-            try:
-                if os.waitpid(self.pid, os.WNOHANG)[0]:
-                    return
-            except OSError:
-                return
-            time.sleep(0.05)
-
-
-class Report:
-    def __init__(self):
-        self.failed = []
-
-    def check(self, name, ok, session=None, note=""):
-        print(("  PASS  " if ok else "  FAIL  ") + name + (f"   {note}" if note else ""))
-        if not ok:
-            self.failed.append(name)
-            if session is not None:
-                self.show("screen at failure: " + name, session)
-
-    @staticmethod
-    def show(label, session):
-        print(f"\n===== {label} =====")
-        for y, line in enumerate(session.lines()):
-            if line:
-                print(f"{y:2} |{line}")
-
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pty_drive import Report, Session, binary_from_argv  # noqa: E402
 
 SAMPLE = """fn configure_pipeline() {
     let config_path = 1;
@@ -215,10 +73,7 @@ def completion(session, report):
 
 
 def main():
-    binary = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "target/debug/clee")
-    if not os.access(binary, os.X_OK):
-        sys.exit(f"no runnable binary at {binary} — cargo build first")
-
+    binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
     with open(os.path.join(root, "sample.rs"), "w") as handle:
         handle.write(SAMPLE)
@@ -248,12 +103,7 @@ def main():
         session.close()
         shutil.rmtree(root, ignore_errors=True)
 
-    print()
-    if report.failed:
-        print("FAILED: " + ", ".join(report.failed))
-        return 1
-    print("ALL CHECKS PASSED")
-    return 0
+    return report.finish()
 
 
 if __name__ == "__main__":
