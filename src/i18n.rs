@@ -680,6 +680,38 @@ pub fn msg_run_piece(
     }
 }
 
+/// Said after a plot is asked to move. Names the move rather than echoing the command: the
+/// command is Octave's business, and what the user did was press an arrow.
+pub fn msg_figure_nav(lang: Lang, nav: crate::session::Nav, is3d: bool) -> String {
+    use crate::session::Nav;
+    let en = match (nav, is3d) {
+        (Nav::In, _) => "Zooming in",
+        (Nav::Out, _) => "Zooming out",
+        (Nav::Reset, _) => "Back to the whole plot",
+        (_, true) => "Turning it",
+        (_, false) => "Panning",
+    };
+    let it = match (nav, is3d) {
+        (Nav::In, _) => "Ingrandisco",
+        (Nav::Out, _) => "Allargo",
+        (Nav::Reset, _) => "Torno al grafico intero",
+        (_, true) => "Lo giro",
+        (_, false) => "Sposto",
+    };
+    // Redrawn by the session, so the numbers on the axes are redrawn with it.
+    match lang {
+        Lang::En => format!("{en} — the session is redrawing it"),
+        Lang::It => format!("{it} — la sessione lo sta ridisegnando"),
+    }
+}
+
+pub fn msg_figure_no_session(lang: Lang, language: &str) -> String {
+    match lang {
+        Lang::En => format!("The {language} session that drew this is gone — the picture stays"),
+        Lang::It => format!("La sessione {language} che l'ha disegnato non c'è più — resta l'immagine"),
+    }
+}
+
 pub fn msg_run_piece_unsaved(lang: Lang) -> String {
     match lang {
         Lang::En => "Save the file first — an interpreter is pointed at a file, not at a buffer",

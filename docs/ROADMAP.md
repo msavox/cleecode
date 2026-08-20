@@ -704,12 +704,25 @@ azzerare. Quindi si ristampa solo la figura toccata. Con due figure aperte e un 
 ne tocca nessuna il costo passa da 130 ms a **1 ms**, che è la differenza fra un prompt che
 risponde e uno che esita.
 
-Il sidecar geometrico (`pos`, `xlim`, `ylim`, `xscale`, `is3d`, `view`) viene già emesso e già
-letto in `wsnap::Figure`, anche se **niente lo usa ancora**: serve alla navigazione, ed è emesso
-adesso perché il contratto non debba cambiare per acquisirlo. La navigazione — zoom e pan
-rimandati *dentro* l'interprete come `xlim`/`ylim` invece di ingrandire i pixel, così le etichette
-degli assi si riscrivono — è il prossimo passo, e i 37 ms misurati dicono che regge anche col
-mouse.
+**Passo 5 fatto**: la **navigazione**, e va *dentro* l'interprete. Su una tab-figura `+`/`-`
+avvicinano e allargano, le frecce spostano — o girano, se è una superficie — e `r` rimette il
+grafico intero. Nessuno di questi tocca i pixel: viene mandato un comando al prompt, la sessione
+ridisegna, e la tab raccoglie il PNG nuovo come raccoglie qualsiasi cambiamento al suo file.
+
+*Perché non lo zoom raster:* ingrandire i pixel lascia le etichette degli assi a descrivere un
+intervallo che non è più sullo schermo — il grafico dice da 0 a 100 mentre mostra da 25 a 75 — e
+nessuna nitidezza sistema un numero sbagliato. Con la ridisegnatura a 37 ms la risposta onesta è
+anche quella veloce.
+
+*Comandi verificati contro Octave vero prima di scriverli:* `zoom(2)` porta `[0 100]` a `[25 75]`,
+il pan sposta di un quarto della finestra, `axis auto` reimposta, e `view(az+15, el)` gira una
+superficie. Il sidecar geometrico — emesso al passo 4 senza che niente lo usasse — adesso serve
+davvero: `is3d` decide se una freccia sposta o gira, e `view` dà l'angolo da cui partire, perché
+non esiste una forma relativa per nominarlo.
+
+Le forme Python ci sono e sono nella stessa `Language`, quindi quando matplotlib verrà agganciato
+non c'è una seconda implementazione da scrivere. Ancora non provate contro un interprete vero:
+è l'unica parte di questo passo che non ho misurato.
 
 *Ordine di costruzione* (dall'handoff, e mi convince), il resto ancora da fare: poi
 traceback cliccabili, ispettore di variabili come tab, pannello history, completamento dalla

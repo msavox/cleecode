@@ -98,6 +98,29 @@ def main():
         report.check("a second figure is a second tab",
                      session.wait(lambda s: "fig2" in s.text(), 40), session)
 
+        # Navigation. The keys go back into the interpreter rather than magnifying the pixels,
+        # so what proves it worked is the command turning up at the prompt — and the picture
+        # changing afterwards, which it can only do because the session drew it again.
+        # Ctrl+Alt+Right moves between the two halves of a split editor. Ctrl+Tab would not:
+        # that cycles the three *frames* — tree, editor, terminals — and the figure is in the
+        # other half of the one we are already in.
+        session.press("\x1b[1;7C", lambda s: True, 0.8)
+        before = picture_rows(session)
+        zoomed = session.press("+", lambda s: "zoom(2)" in s.text(), 10)
+        report.check("+ on a figure asks the session to redraw it closer", zoomed, session,
+                     note="figure(1); zoom(2); appears at the prompt")
+        report.check("the status row says what is happening and why",
+                     "ridisegnando" in session.lines()[-1] or "redrawing" in session.lines()[-1],
+                     session, note=repr(session.lines()[-1][:70]))
+        report.check("and the picture is drawn again rather than magnified",
+                     session.wait(lambda s: picture_rows(s) > 0, 15), session,
+                     note=f"{before} rows before, {picture_rows(session)} after")
+        report.check("an arrow pans it",
+                     session.press("\x1b[C", lambda s: "xlim(xl + 0.25" in s.text(), 10),
+                     session, note="the window moves, the axes are relabelled with it")
+        report.check("r puts the whole plot back",
+                     session.press("r", lambda s: "axis auto" in s.text(), 10), session)
+
         Report.show("final screen", session)
     finally:
         session.close()
