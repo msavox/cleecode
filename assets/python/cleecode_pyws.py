@@ -1,23 +1,37 @@
 """Workspace snapshots and figure captures for CleeCode, from a plain Python REPL.
 
-Python has no equivalent of Octave's add_input_event_hook. It has something better:
-the REPL calls str(sys.ps1) every time it is about to draw the prompt, so an object
-with a __str__ fires — after assignments too, which sys.displayhook does not.
+Python has no equivalent of Octave's add_input_event_hook, and it takes two mechanisms to
+build one. Between them they give what Octave cannot: an exact callback per statement,
+with no polling and no idle cost at all.
+
+  · An audit hook on `exec` says *which* statement. It carries the code object, and the
+    REPL compiles each thing you type under a name of its own — `<python-input-7>`, or
+    `<stdin>` in the basic REPL. But it is raised before the statement runs, so it is a
+    counter, not a moment.
+
+  · `str(sys.ps1)` says *when the statement finished*, because the prompt is drawn after
+    it. But the REPL draws the prompt far more often than that: measured on 2026-08-20,
+    four statements restringify it 65 times under PyREPL, and typing twelve characters
+    without pressing Enter accounts for 23 more.
+
+So the hook marks and the prompt collects. Measured together in one session: 65
+restringifications become 5 snapshots for 5 statements, each seeing the namespace as the
+statement left it, and typing produces none at all.
+
+Both obvious alternatives are dead under PyREPL — the REPL a user actually gets — and
+were measured rather than assumed. `readline.get_current_history_length()`, the direct
+analogue of the `numel(history())` trick the Octave side leans on, returns 0, because
+PyREPL keeps its own history. And an audit hook that does not look at the filename sees
+52 execs for 4 statements, since the REPL execs plenty of its own code. Installing the
+hook costs nothing measurable: numeric work, pure loops, and two thousand open+write are
+identical to three decimals with it and without.
 
 Installed from PYTHONSTARTUP, which is CleeCode's env-var-gated hook, the same role
 ~/.octaverc plays for Octave.
 
-NOT YET FIT TO SHIP, and the reason is one line of this file. __str__ calls _snapshot()
-with no guard, on the belief that the prompt is drawn once per statement. That holds in
-the basic REPL and not in PyREPL, which is the one a user actually gets: measured on
-2026-08-20, three statements draw the prompt 4 times under PYTHON_BASIC_REPL=1 and 60
-times under PyREPL. Since _snapshot() calls _figures(), which calls fig.savefig(), an
-open figure means the PNG is rewritten about twenty times per command.
-
-Before wiring this into CleeCode, pick a trigger that fires once per statement for real:
-a guard in __str__ comparing against the last snapshot, IPython's post_run_cell (needed
-anyway — IPython does not use sys.ps1 at all), or an audit hook on exec. See
-docs/ide-mode-python.md and ROADMAP.md, release 0.9.
+One path still missing: IPython does not use sys.ps1 at all, so it needs
+ip.events.register("post_run_cell", ...) — more official than either half of this.
+Detect which REPL is running rather than guessing.
 """
 
 import json
@@ -30,8 +44,10 @@ _PREVIEW = 60                # characters of repr kept
 
 
 class _Prompt:
-    """Stands in for sys.ps1. Whatever happens in __str__, it must still return a
-    prompt: an exception here would leave the user staring at a broken REPL."""
+    """Stands in for sys.ps1, and collects a snapshot when one is owed.
+
+    Whatever happens in here, it must still return a prompt: an exception would leave the
+    user staring at a broken REPL, which is a high price for a panel that failed to draw."""
 
     def __init__(self, text, state):
         self._text = text
@@ -39,10 +55,31 @@ class _Prompt:
 
     def __str__(self):
         try:
-            _snapshot(self._state)
+            if self._state["pending"]:
+                self._state["pending"] = False
+                _snapshot(self._state)
         except Exception:
             pass
         return self._text
+
+
+def _statement_watcher(state):
+    """An audit hook that notes when one of the user's own statements is about to run.
+
+    The filename is the whole test. Without it this fires on the REPL's own machinery too
+    — 52 times for 4 statements — and with it, exactly once each."""
+
+    def hook(event, args):
+        if event != "exec":
+            return
+        try:
+            name = args[0].co_filename
+        except Exception:
+            return
+        if name.startswith("<python-input") or name == "<stdin>":
+            state["pending"] = True
+
+    return hook
 
 
 def _user_vars():
@@ -165,5 +202,8 @@ def install(out=None, figdir=None):
         return
     figdir = figdir or os.environ.get("CLEECODE_PY_FIGS") or os.path.dirname(out)
     os.makedirs(figdir, exist_ok=True)
-    state = {"out": out, "figdir": figdir, "seq": 0}
+    # `pending` starts true so the panel has something in it before the first command: an
+    # empty workspace is a fact about the session, not a failure to report one.
+    state = {"out": out, "figdir": figdir, "seq": 0, "pending": True}
+    sys.addaudithook(_statement_watcher(state))
     sys.ps1 = _Prompt(getattr(sys, "ps1", ">>> "), state)
