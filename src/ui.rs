@@ -2642,6 +2642,16 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     // Taken once, and cloned: the renderer holds the editors mutably while it draws, and the
     // marks live on the app beside them.
     let marks: Vec<crate::lsp::Mark> = app.marks_for(app.editors[idx].path.as_deref()).to_vec();
+    let breaks: Vec<usize> = app
+        .breakpoints_in(app.editors[idx].path.as_deref())
+        .map(|lines| lines.iter().copied().collect())
+        .unwrap_or_default();
+    // The line the session is stopped on, if it is stopped in this file.
+    let stopped = app
+        .stopped_at
+        .as_ref()
+        .filter(|(path, _)| Some(path.as_path()) == app.editors[idx].path.as_deref())
+        .map(|(_, line)| line.saturating_sub(1));
 
     let top_line = app.editors[idx].top_line;
     let left_col = app.editors[idx].left_col;
@@ -2659,13 +2669,23 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             // wider would move every cursor position, every mouse mapping and every viewport
             // width that is worked out from it, which is a lot of arithmetic to disturb for a
             // dot. A red line number is not ambiguous.
-            let num_style = match (worst, is_current) {
+            // A breakpoint takes the gutter before anything else does. It is the one mark in
+            // there the user put on purpose, and a warning colouring over it would read as the
+            // breakpoint having gone away.
+            let at_break = breaks.contains(&(line_idx + 1));
+            let num_style = if at_break {
+                Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)
+            } else if stopped == Some(line_idx) {
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                match (worst, is_current) {
                 (Some(severity), current) => {
                     let style = Style::default().fg(severity_colour(severity));
                     if current { style.add_modifier(Modifier::BOLD) } else { style }
                 }
                 (None, true) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 (None, false) => Style::default().fg(Color::DarkGray),
+                }
             };
             let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
             spans.push(Span::styled(num_text, num_style));
@@ -2689,6 +2709,12 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             raw_spans
         };
         let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(raw_spans, &on_line) };
+        // The whole stopped line, marked: where the program *is* is worth more than a colour on
+        // one word, and it is what you look for when you glance back at the editor.
+        let raw_spans = match stopped == Some(line_idx) {
+            true => restyle_range(raw_spans, 0, usize::MAX, |style| style.bg(Color::Rgb(70, 60, 0))),
+            false => raw_spans,
+        };
         // The editor decides the shape — a run of text or a rectangle — so the highlight always
         // matches what a copy would take.
         let raw_spans = match app.editors[idx].selected_columns(line_idx) {

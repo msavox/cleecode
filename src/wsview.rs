@@ -95,6 +95,7 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
 
     let layout = Layout::for_width(cols, &snapshot.vars);
     let mut lines = vec![title(snapshot, cols, dim, off), String::new()];
+    lines.extend(stack(snapshot, cols, off));
     lines.push(format!("{head}{}{off}", layout.header()));
     lines.push(format!("{dim}{}{off}", "─".repeat((cols as usize).min(layout.width()))));
     for var in ordered(&snapshot.vars) {
@@ -102,6 +103,32 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
     }
     lines.extend(history(snapshot, cols, rows, lines.len(), dim, off, head));
     lines
+}
+
+/// Where the session is stopped, and how it got there.
+///
+/// Above the variables rather than below, because while stopped the variables *are* the frame's
+/// — the two are one thing, and reading them in the wrong order would mean reading the frame's
+/// locals as though they were the workspace.
+fn stack(snapshot: &Snapshot, cols: u16, off: &str) -> Vec<String> {
+    if !snapshot.debug.stopped {
+        return Vec::new();
+    }
+    let mark = "\x1b[33m";      // the same yellow the editor marks the stopped line with
+    let mut out = vec![format!(
+        "{mark}stopped in {} at line {}{off}",
+        snapshot.debug.name, snapshot.debug.line
+    )];
+    // The frames under it, oldest last, so the shape reads the way a backtrace does.
+    for frame in snapshot.debug.stack.iter().skip(1) {
+        out.push(format!(
+            "\x1b[90m  called from {} at line {}{off}",
+            clip(&frame.name, cols as usize / 2),
+            frame.line
+        ));
+    }
+    out.push(String::new());
+    out
 }
 
 /// The last few commands, under the variables, in whatever rows are left.
@@ -412,6 +439,34 @@ mod tests {
 
     /// Free to produce and worth showing: the variables say what you have, and this says what
     /// you did to get it.
+    /// While stopped the variables are the frame's own, so where we are stopped has to be read
+    /// before them — otherwise a frame's locals read as though they were the workspace.
+    #[test]
+    fn being_stopped_is_said_above_the_variables() {
+        let mut snap = sample();
+        snap.debug = crate::wsnap::Debug {
+            stopped: true,
+            name: "calcola".into(),
+            file: "/proj/calcola.m".into(),
+            line: 3,
+            stack: vec![
+                crate::wsnap::Frame { name: "calcola".into(), line: 3 },
+                crate::wsnap::Frame { name: "principale".into(), line: 12 },
+            ],
+        };
+        let lines = plain(&render(Some(&snap), 90, 24));
+        let stopped = lines.iter().position(|l| l.contains("stopped in calcola at line 3")).unwrap();
+        let table = lines.iter().position(|l| l.starts_with("Name")).unwrap();
+        assert!(stopped < table, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("called from principale at line 12")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_session_that_is_running_says_nothing_about_frames() {
+        let lines = plain(&render(Some(&sample()), 90, 24));
+        assert!(!lines.iter().any(|l| l.contains("stopped in")), "{lines:?}");
+    }
+
     #[test]
     fn recent_commands_go_under_the_variables_when_there_is_room() {
         let mut snap = sample();

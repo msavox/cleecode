@@ -802,9 +802,33 @@ nella trascrizione dell'utente, e niente da azzeccare con un line editor. Al pri
 inserimento con un cursore nella griglia. Le operazioni che leggono hanno rischio zero, quelle
 che scrivono no: è la stessa riga tracciata nella 0.6 per il pannello Git, e vale ancora.
 
-**Con questo l'ordine di costruzione dell'handoff è finito.** Restava il debugger, che l'handoff
-stesso mette come livello a sé — breakpoint nel gutter, stack navigabile, il workspace del frame
-nel pannello — sugli stessi canali che adesso ci sono tutti. Il debugger è un livello a
+**Passo 11 fatto**: il **debugger** — breakpoint nel gutter, dove sei fermo, e il workspace del
+frame nel pannello. `Ctrl+Shift+P` mette o toglie un breakpoint sulla riga del cursore.
+
+*Quattro misure prese prima di scrivere una riga di codice, e sono loro a dettare la forma:*
+
+| domanda | risposta misurata |
+|---|---|
+| l'hook continua a scattare al prompt `debug>`? | **sì** — quindi essere fermi è una cosa che CleeCode *vede*, non che l'utente deve dire |
+| `dbstop` funziona da dentro l'hook? | **sì**, via `evalin` — quindi mettere un breakpoint non lascia una riga nella trascrizione |
+| l'hook può vedere le variabili del frame fermo? | **sì**, con `evalin("caller", ...)`; `evalin("base", ...)` dà quelle di fuori |
+| `dbstep` funziona da dentro l'hook? | **no** — non dà errore e non si muove |
+
+Quindi lo stepping resta una cosa che si scrive al prompt di debug, e il manuale lo dice invece
+di offrire un tasto che non farebbe niente in silenzio. La metà che funziona da qui — mettere i
+breakpoint, seguire dove sei, mostrare cosa c'è in quel frame — è quella che vale, perché è
+quella che a mano è scomoda.
+
+*Due bug trovati guidandolo:*
+- **I nomi venivano dal frame e i valori dalla base**, quindi ogni lettura falliva con
+  "undefined" e il `try/catch` del tick si mangiava l'intero snapshot. Sintomo unico: un pannello
+  che smetteva di aggiornarsi. È la seconda volta che quel catch silenzioso costa un'ora, quindi
+  adesso `CLEECODE_DBG_LOG` fa scrivere il motivo da qualche parte.
+- **Quando la sessione si fermava, CleeCode si prendeva la tastiera** per mostrare la riga —
+  proprio mentre stavi per scrivere `dbstep` al prompt. Adesso mostra senza prendere, come fa
+  una figura che si apre.
+
+**Con questo l'ordine di costruzione dell'handoff è finito**, debugger compreso. Il debugger è un livello a
 sé, sugli stessi canali.
 
 *Il materiale è nel repo* e la copia fuori è stata cancellata: i `.m` in `assets/octave/`, i

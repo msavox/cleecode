@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 6] = [
+const OCTAVE: [(&str, &str); 7] = [
+    ("cleecode_dbg.m", include_str!("../assets/octave/cleecode_dbg.m")),
     ("cleecode_slice.m", include_str!("../assets/octave/cleecode_slice.m")),
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
     ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
@@ -80,7 +81,7 @@ mod tests {
         assert!(tick.contains("jsonencode"), "the Octave hook writes the snapshot");
         // Every function the hook calls has to travel with it: one missing name and the whole
         // tick lands in its own catch, silently, and the panel simply never fills in.
-        for called in ["cleecode_figs", "cleecode_ws_tick"] {
+        for called in ["cleecode_figs", "cleecode_ws_tick", "cleecode_dbg", "cleecode_slice"] {
             assert!(
                 OCTAVE.iter().any(|(name, _)| *name == format!("{called}.m")),
                 "{called} is called by the hook but does not travel with it"

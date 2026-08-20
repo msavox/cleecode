@@ -734,6 +734,50 @@ pub fn msg_figure_exported(lang: Lang, name: &str) -> String {
 
 /// Said when there is nothing to inspect. Not an error: an editor with no interpreter running
 /// is the ordinary case, and the sentence says what would make it possible.
+/// Set or cleared, and where. Says the line because the cursor may have moved on by the time
+/// you look, and a breakpoint you cannot find is one you will trip over later.
+pub fn msg_breakpoint(lang: Lang, on: bool, name: &str, line: usize) -> String {
+    match (lang, on) {
+        (Lang::En, true) => format!("Breakpoint at {name}:{line}"),
+        (Lang::En, false) => format!("Breakpoint cleared at {name}:{line}"),
+        (Lang::It, true) => format!("Breakpoint a {name}:{line}"),
+        (Lang::It, false) => format!("Breakpoint tolto a {name}:{line}"),
+    }
+}
+
+pub fn msg_break_unsaved(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Save the file first — a breakpoint is set in a file, not in a buffer",
+        Lang::It => "Salva prima il file — un breakpoint sta in un file, non in un buffer",
+    }
+    .to_string()
+}
+
+pub fn msg_break_no_language(lang: Lang, ext: &str) -> String {
+    match lang {
+        Lang::En => format!("No debugger for .{ext} — this works in Octave"),
+        Lang::It => format!("Nessun debugger per .{ext} — funziona con Octave"),
+    }
+}
+
+/// Says where, and what to type next. The stepping commands are the one part of this the
+/// editor does not drive — `dbstep` from inside the hook returns without an error and without
+/// moving, measured — so the sentence points at the prompt where they do work.
+pub fn msg_debug_stopped(lang: Lang, name: &str, line: usize) -> String {
+    match lang {
+        Lang::En => format!("Stopped in {name}, line {line} — dbstep / dbcont at the prompt"),
+        Lang::It => format!("Fermo in {name}, riga {line} — dbstep / dbcont al prompt"),
+    }
+}
+
+pub fn msg_debug_running(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Running again",
+        Lang::It => "Riparte",
+    }
+    .to_string()
+}
+
 pub fn msg_inspect_waiting(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Asking the session…",
