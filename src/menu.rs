@@ -38,6 +38,8 @@ pub enum MenuAction {
     ToggleResizeMode,
     RunFile,
     RunSelection,
+    ToggleBreakpoint,
+    InspectVariable,
     ToggleSplitView,
     ToggleHiddenFiles,
     ToggleOpaqueBackground,
@@ -111,6 +113,8 @@ impl MenuAction {
         MenuAction::ToggleResizeMode,
         MenuAction::RunFile,
         MenuAction::RunSelection,
+        MenuAction::ToggleBreakpoint,
+        MenuAction::InspectVariable,
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
         MenuAction::ToggleOpaqueBackground,
@@ -258,6 +262,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemRunFile, MenuAction::RunFile, Some("Ctrl+Shift+R")),
                 item(Key::ItemRunSelection, MenuAction::RunSelection, Some("Ctrl+Shift+X")),
+                // Both belong to a running session rather than to a file, which is why they sit
+                // below the separator: they were reachable only from the keyboard before, and a
+                // feature nobody can find is a feature nobody has.
+                group(Key::ItemToggleBreakpoint, MenuAction::ToggleBreakpoint, Some("Ctrl+Shift+P")),
+                item(Key::ItemInspectVariable, MenuAction::InspectVariable, Some("Ctrl+Shift+I")),
                 group(Key::ItemRunTarget, MenuAction::RunTarget, None),
             ],
         },

@@ -1,3 +1,68 @@
+## What's new in 0.9.0
+
+An IDE for Octave and Python, a language server, and completion — three releases in one.
+
+### The numeric side
+
+**A workspace window that fills in by itself.** Start `clee -w octave` or `clee -w pylab` and
+there is a second terminal window beside your session showing what it holds: every variable, its
+shape, its class, its range, and enough of its value to recognise. It is a *window*, not a tab,
+so it stays in sight while you work. Nothing is typed at your prompt to produce it — the session
+reports its own state from an idle hook, and your transcript stays a record of what you did.
+
+**Run a piece of a file.** `Ctrl+Shift+X` sends the selection, or the cell the cursor is in, to
+the interpreter that is already open — a cell being everything between `%%` markers in Octave or
+`# %%` in Python, which is what both worlds already write. It goes through a scratch file rather
+than a paste, because a pasted indented block makes Python answer `IndentationError`.
+
+**Plots open as tabs beside the script that drew them**, resize with the pane by asking the
+session to draw them again at the new size, and can be written out to PNG, PDF or SVG with a
+command you can read. Octave figures are only re-printed when the figure says it changed;
+matplotlib's are only re-rendered when it says they are stale.
+
+**Look inside a variable** with `Ctrl+Shift+I`: pick one and a screenful of values arrives —
+paged, so a 2000×2000 matrix does not have to be written to disk on the chance somebody looks. It
+shows and does not yet edit.
+
+**A debugger.** `Ctrl+Shift+P` puts a breakpoint on the cursor's line. When the session reaches
+one it stops, the editor opens that file and marks the line, and the workspace window shows the
+*frame's* variables rather than the ones outside it — which is the whole difference between
+watching a program run and looking at what it left behind. Stepping is typed at the prompt where
+the session is waiting (`dbstep`/`dbcont` in Octave, `n`/`c` at Python's `(Pdb)`), and the status
+line says which. Setting a breakpoint leaves no line in your transcript.
+
+**Double-click an error and land on it.** A traceback, a `grep` hit, a compiler message: the file
+opens at the line with the cursor on the column, for Python's `File "…", line N`, Octave's
+`name at line N column M`, and the ordinary `path:line:col`.
+
+All of it works in both languages, and almost none of it works the same way underneath — Octave's
+history comes from `history()` while Python's readline reports none at all and its own reader has
+to be asked; Octave's breakpoints go through `dbstop` from inside the hook while Python's go
+through pdb with tracing switched on for the length of exactly one statement, so that typing at
+the prompt costs nothing.
+
+Python figures need matplotlib installed in the same python your terminal runs.
+
+### A language server
+
+**`Ctrl+Shift+E` asks whichever language server is installed what is wrong**, and the answers are
+underlined where they are, listed in a panel, and counted in the status line. It speaks LSP over
+stdio directly rather than through a framework. A server that is not installed is not an error to
+report: nothing is underlined and everything else carries on.
+
+### Completion
+
+**The words already in your buffers are offered as you type**, ranked exact-prefix first, then
+case-insensitively, then fuzzily, with language keywords last. It claims exactly five keys and
+gives them back the moment the popup closes, so it never interrupts the writing. When an
+interpreter is open it also offers the names *that session* is holding — a variable you made at
+the prompt and that exists in no file.
+
+### Also
+
+The editor is now driven in a real terminal by a test harness that reads back what lands on the
+screen, which is how every claim above was checked rather than argued about.
+
 ## What's new in 0.6.2
 
 Tools that are installed, found; a background that stays readable.
