@@ -72,6 +72,8 @@ pub enum Key {
     MenuRun,
     ItemRunFile,
     ItemRunSelection,
+    ItemToggleBreakpoint,
+    ItemInspectVariable,
     ItemRunTarget,
     RunMenuTitle,
     VenvRegisterItem,
@@ -271,6 +273,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemRunFile) => "Esegui file corrente",
         (Lang::En, ItemRunSelection) => "Run selection or cell",
         (Lang::It, ItemRunSelection) => "Esegui selezione o cella",
+        (Lang::En, ItemToggleBreakpoint) => "Breakpoint on this line",
+        (Lang::It, ItemToggleBreakpoint) => "Breakpoint su questa riga",
+        (Lang::En, ItemInspectVariable) => "Look inside a variable...",
+        (Lang::It, ItemInspectVariable) => "Guarda dentro una variabile...",
 
         (Lang::En, ItemRunTarget) => "How this file runs...",
         (Lang::It, ItemRunTarget) => "Come si esegue questo file...",
@@ -751,6 +757,19 @@ pub fn msg_break_unsaved(lang: Lang) -> String {
         Lang::It => "Salva prima il file — un breakpoint sta in un file, non in un buffer",
     }
     .to_string()
+}
+
+/// The key hint a menu shows, in the words printed on the reader's keyboard.
+///
+/// Nearly every shortcut here is Ctrl and a letter, which is the same key everywhere. The
+/// odd one out is the delete key: an Italian keyboard has `Canc` written on it and no `Del`
+/// anywhere, and this project already bends its bindings around that layout — telling
+/// somebody to press a key their keyboard does not have is the same mistake in smaller type.
+pub fn shortcut_label(lang: Lang, shortcut: &str) -> &str {
+    match (lang, shortcut) {
+        (Lang::It, "Del") => "Canc",
+        _ => shortcut,
+    }
 }
 
 pub fn msg_break_no_language(lang: Lang, ext: &str) -> String {

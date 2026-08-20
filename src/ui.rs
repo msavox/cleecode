@@ -521,7 +521,12 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
-    let shortcut_width = items.iter().filter_map(|i| i.shortcut).map(|s| s.chars().count()).max().unwrap_or(0);
+    let shortcut_width = items
+        .iter()
+        .filter_map(|i| i.shortcut)
+        .map(|s| i18n::shortcut_label(lang, s).chars().count())
+        .max()
+        .unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
     let width = ((1 + label_width + gap + shortcut_width + 1) as u16).max(18);
     let separators = items.iter().filter(|i| i.new_group).count() as u16;
@@ -539,7 +544,12 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
 pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, full: Rect) -> Rect {
     let items = &menu.items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
-    let shortcut_width = items.iter().filter_map(|i| i.shortcut).map(|s| s.chars().count()).max().unwrap_or(0);
+    let shortcut_width = items
+        .iter()
+        .filter_map(|i| i.shortcut)
+        .map(|s| i18n::shortcut_label(lang, s).chars().count())
+        .max()
+        .unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
     let width = ((1 + label_width + gap + shortcut_width + 1) as u16).max(18).min(full.width.max(1));
     let separators = items.iter().filter(|i| i.new_group).count() as u16;
@@ -905,7 +915,7 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
             selected_row = items.len();
         }
         let label = i18n::t(lang, i.label_key);
-        let line = match i.shortcut {
+        let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
                 let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
@@ -948,7 +958,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
             selected_row = items.len();
         }
         let label = i18n::t(lang, i.label_key);
-        let line = match i.shortcut {
+        let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
                 let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);

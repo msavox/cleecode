@@ -3246,7 +3246,7 @@ impl App {
             .into_iter()
             .map(|(group_key, it)| crate::picker::PickItem {
                 label: format!("{}: {}", i18n::t(lang, group_key), i18n::t(lang, it.label_key)),
-                shortcut: it.shortcut.map(|s| s.to_string()),
+                shortcut: it.shortcut.map(|s| i18n::shortcut_label(lang, s).to_string()),
                 action: crate::picker::PickAction::Command(it.action),
             })
             .collect();
@@ -5367,6 +5367,8 @@ impl App {
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::RunSelection => self.run_selection(),
+            MenuAction::ToggleBreakpoint => self.toggle_breakpoint(),
+            MenuAction::InspectVariable => self.open_inspector_picker(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
             MenuAction::ToggleHiddenFiles => self.toggle_hidden_files(),
             MenuAction::Undo => self.editor_undo(),
