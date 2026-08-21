@@ -39,6 +39,7 @@ pub enum MenuAction {
     RunFile,
     RunSelection,
     ToggleBreakpoint,
+    ShowWorkspacePanel,
     InspectVariable,
     ToggleSplitView,
     ToggleHiddenFiles,
@@ -114,6 +115,7 @@ impl MenuAction {
         MenuAction::RunFile,
         MenuAction::RunSelection,
         MenuAction::ToggleBreakpoint,
+        MenuAction::ShowWorkspacePanel,
         MenuAction::InspectVariable,
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
@@ -288,6 +290,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuWorkspace,
             items: vec![
                 item(Key::ItemOpenWorkspace, MenuAction::OpenWorkspace, None),
+                // Opening the variables panel belongs here rather than to the two presets that
+                // used to be the only way to get one: any layout can want it, and a window
+                // nothing can open is a window most people never see.
+                group(Key::ItemShowWorkspacePanel, MenuAction::ShowWorkspacePanel, None),
                 item(Key::ItemSaveWorkspace, MenuAction::SaveWorkspace, Some("Ctrl+Shift+W")),
                 group(Key::ItemDeleteWorkspace, MenuAction::DeleteWorkspace, None),
             ],
