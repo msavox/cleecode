@@ -52,7 +52,20 @@ impl Language {
         // `python3.13` is a python, and so is `python3.13t`. A version on the end is not part of
         // the name anywhere the name is written down, so it comes off before asking again.
         let bare = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == 't');
-        !bare.is_empty() && self.programs().contains(&bare)
+        if !bare.is_empty() && self.programs().contains(&bare) {
+            return true;
+        }
+        // Octave writes its version with a dash in front: `octave-cli-11.3.0`. That is not a
+        // spelling anyone types — it is what `/usr/bin/octave` execs on a build without Qt,
+        // which is every headless Linux server — and it is the name the process table then
+        // shows. Unrecognised, the Run button decided no Octave was open and typed the shell
+        // command `octave --persist file.m` at the live Octave prompt, where it is only
+        // `error: 'octave' undefined`.
+        //
+        // Truncation is handled by the same line: Linux caps a process name at 15 characters,
+        // so the name actually read is `octave-cli-11.3`, and the version comes off either way.
+        let dashed = bare.strip_suffix('-').unwrap_or_default();
+        !dashed.is_empty() && self.programs().contains(&dashed)
     }
 
     /// What to type at this language's prompt to run a file.
@@ -288,8 +301,16 @@ mod tests {
         // A version on the end is still the same program.
         assert!(Language::Python.is_interpreter("python3.13"));
         assert!(Language::Python.is_interpreter("python3.14t"), "free-threaded builds too");
+        // The name a headless Linux Octave actually runs under: `/usr/bin/octave` execs the
+        // versioned cli binary when the build has no Qt, and the process table shows it cut to
+        // fifteen characters. Both spellings are the same interpreter.
+        assert!(Language::Octave.is_interpreter("octave-cli-11.3.0"));
+        assert!(Language::Octave.is_interpreter("octave-cli-11.3"), "Linux cuts a name at 15");
+        assert!(Language::Octave.is_interpreter("/usr/bin/octave-11.3.0"));
         // And they do not answer for each other.
         assert!(!Language::Octave.is_interpreter("python3"));
+        // A dash and a word after it is a different program, not a version.
+        assert!(!Language::Octave.is_interpreter("octave-cli-wrapper"));
         assert!(!Language::Python.is_interpreter("octave"));
         assert!(!Language::Python.is_interpreter("pythonista"));
     }

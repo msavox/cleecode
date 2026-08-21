@@ -362,6 +362,12 @@ pub struct App {
     /// reads the same file for variables. Two readers of one file, which is why the producers
     /// write by rename — neither can ever see half of one.
     figures: Option<crate::wsnap::Watch>,
+    /// When each figure's picture was last written, so a snapshot can be read for *what changed*
+    /// rather than for what exists. Keyed by the PNG's path, which is what identifies a figure
+    /// everywhere else here. Kept on the app and not on the watch above: which snapshot file is
+    /// the newest changes as panes take turns ticking, and a figure does not stop being the one
+    /// already on screen because a different session wrote last.
+    figure_drawn: std::collections::HashMap<PathBuf, std::time::SystemTime>,
     /// The variable inspector, when it is open: which name, where in it we are looking, and the
     /// file the session writes its answer to.
     pub inspector: Option<Inspector>,
@@ -1146,6 +1152,7 @@ impl App {
         // for the whole session.
         let settings = Settings::load();
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
+        crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
         let t1 = TerminalWindow::new(term_rows, half_cols, &root)?;
         let t2 = TerminalWindow::new(term_rows, half_cols, &root)?;
@@ -1225,6 +1232,7 @@ impl App {
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
             figures: None,
+            figure_drawn: std::collections::HashMap::new(),
             inspector: None,
             breakpoints: std::collections::HashMap::new(),
             stopped_at: None,
@@ -1925,7 +1933,7 @@ impl App {
     /// the keyboard away from what you were writing. It appears in the strip, which is where you
     /// look for it.
     pub fn poll_figures(&mut self) {
-        if !self.settings.diagnostics_figures {
+        if !self.settings.plots_in_tabs {
             return;
         }
         let Some(path) = crate::wsnap::newest_in(&crate::wsnap::snapshot_dir()) else { return };
@@ -1945,6 +1953,19 @@ impl App {
             .unwrap_or_default();
         self.follow_stop(&debug);
         for path in figures {
+            // A snapshot lists every figure the session is holding, not the one that just moved.
+            // Followed literally that reopens all of them on every tick: plot into figure 3 and
+            // figure 1's tab — closed a minute ago, because you were done with it — comes back
+            // with it. Closing a tab is an instruction, and a session that still happens to hold
+            // the figure is not a reason to overrule it.
+            //
+            // The picture's own timestamp is what says which figure was redrawn. It is on disk
+            // already, it costs a stat, and it needs nothing added to the snapshot contract —
+            // whose `figures` list means "these exist", which is a different question.
+            let Ok(drawn) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
+            if !redrawn(&mut self.figure_drawn, &path, drawn) {
+                continue;
+            }
             match self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
                 // Already a tab: the picture on disk is new, and nothing about a decoded image
                 // knows its file moved on.
@@ -3721,6 +3742,29 @@ impl App {
             i18n::msg_opaque_background(self.settings.lang, self.settings.opaque_background);
     }
 
+    /// Plots as tabs, or plots in the interpreter's own windows.
+    ///
+    /// The shells already running keep the setting they were started with: their interpreter
+    /// read it once, at startup, and a figure window cannot be talked back into a picture. So
+    /// the message says *next session* rather than letting the user wonder why the plot they
+    /// just drew ignored the menu.
+    fn toggle_plots_in_tabs(&mut self) {
+        // Nothing to choose between on a machine with no screen: the interpreter's own window
+        // has nowhere to open, so the setting is left alone and the reason is said out loud.
+        if !crate::wsnap::can_open_a_window() {
+            self.status_message = i18n::msg_plots_in_tabs(self.settings.lang, true, false);
+            return;
+        }
+        self.settings.plots_in_tabs = !self.settings.plots_in_tabs;
+        crate::wsnap::set_plots_in_tabs(self.settings.plots_in_tabs);
+        self.settings.save();
+        self.status_message = i18n::msg_plots_in_tabs(
+            self.settings.lang,
+            self.settings.plots_in_tabs,
+            crate::wsnap::can_open_a_window(),
+        );
+    }
+
     fn toggle_hidden_files(&mut self) {
         // The setting is the single source of truth; the tree follows it. Flipping both
         // independently let them drift apart.
@@ -5352,6 +5396,7 @@ impl App {
             }
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             MenuAction::ToggleOpaqueBackground => self.toggle_opaque_background(),
+            MenuAction::TogglePlotsInTabs => self.toggle_plots_in_tabs(),
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::NewTerminalTab => self.new_terminal_tab(),
@@ -7331,6 +7376,23 @@ impl App {
 
 }
 
+/// Whether a figure's picture is one CleeCode has not put on screen yet — a figure it has never
+/// seen, or one the session has drawn again since — recording the time either way.
+///
+/// Split out of the poll so the rule can be tested on its own: everything else in that loop
+/// needs a running interpreter and a pty behind it, and this is the part that was wrong.
+fn redrawn(
+    seen: &mut std::collections::HashMap<PathBuf, std::time::SystemTime>,
+    path: &Path,
+    drawn: std::time::SystemTime,
+) -> bool {
+    if seen.get(path) == Some(&drawn) {
+        return false;
+    }
+    seen.insert(path.to_path_buf(), drawn);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7340,6 +7402,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A snapshot says which figures a session *holds*, and every tick lists all of them. Read
+    /// as "show these", plotting into figure 3 reopened figure 1's tab as well — the one closed
+    /// a minute ago because that plot was finished with.
+    #[test]
+    fn a_figure_is_shown_when_it_is_drawn_and_not_because_it_still_exists() {
+        use std::time::{Duration, SystemTime};
+        let mut seen = std::collections::HashMap::new();
+        let one = PathBuf::from("/figs/fig1.png");
+        let three = PathBuf::from("/figs/fig3.png");
+        let (drawn, later) = (SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+
+        assert!(redrawn(&mut seen, &one, drawn), "a figure never seen before is shown");
+        assert!(!redrawn(&mut seen, &one, drawn), "and not again on the next tick");
+        assert!(!redrawn(&mut seen, &one, drawn));
+        // Plotting into another figure says nothing about this one.
+        assert!(redrawn(&mut seen, &three, drawn));
+        assert!(!redrawn(&mut seen, &one, drawn));
+        // Drawing into it again does, which is what makes a closed tab come back when it
+        // should: because the plot changed, not because the session still has it.
+        assert!(redrawn(&mut seen, &one, later));
+        assert!(!redrawn(&mut seen, &one, later));
     }
 
     fn make_venv(root: &std::path::Path, name: &str) -> PathBuf {

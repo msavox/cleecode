@@ -14,6 +14,21 @@ function cleecode_boot ()
     return;
   endif
 
+  ## Where this session's plots go, decided by CleeCode and passed in rather than asked
+  ## about here: it knows whether there is a screen to open a window on, and this does not.
+  ##
+  ## "windows" leaves Octave exactly as it is outside CleeCode — its own toolkit, its own
+  ## figure windows, nothing captured. The workspace panel still fills in: variables are not
+  ## plots, and nobody choosing where their figures appear asked to stop seeing those.
+  if (strcmp (getenv ("CLEECODE_PLOTS"), "windows"))
+    ## The tick prints figures to the directory this names; empty, cleecode_figs returns at
+    ## its first line. Cleared here rather than left unset by CleeCode so that one variable
+    ## holds the decision and this file is the only place that acts on it.
+    setenv ("CLEECODE_OCTAVE_FIGS", "");
+    cleecode_ws (ws);
+    return;
+  endif
+
   ## No figure window ever opens. Reparenting a live Qt window into a terminal is not
   ## possible, so a plot reaches CleeCode as a picture instead — and a window appearing
   ## behind the terminal, which is what happens without this, is the worst of both.
@@ -43,6 +58,17 @@ function cleecode_toolkit ()
     ## ismac is asked because a Mac has no DISPLAY and does not need one.
     headless = ! ismac () && isempty (getenv ("DISPLAY")) && isempty (getenv ("WAYLAND_DISPLAY"));
     if (any (strcmp (have, "gnuplot")) && (headless || ! any (strcmp (have, "qt"))))
+      ## Octave answers this choice with nine lines about gnuplot being discouraged and the
+      ## qt toolkit being recommended instead. It prints them when the toolkit is first
+      ## *used*, not when it is chosen — so on a machine whose only toolkit is gnuplot they
+      ## do not arrive at startup where a banner belongs, they arrive in the middle of the
+      ## user's own output, at their first plot.
+      ##
+      ## Turned off for the session rather than around the call below, which is where that
+      ## lands it. The advice is about a choice CleeCode made on the user's behalf, and what
+      ## it recommends — use qt — is not available on a machine with no display. This one
+      ## identifier and nothing else: the session's other warnings are the user's.
+      warning ("off", "Octave:gnuplot-graphics");
       graphics_toolkit ("gnuplot");
     endif
   catch

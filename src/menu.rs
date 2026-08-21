@@ -44,6 +44,7 @@ pub enum MenuAction {
     ToggleSplitView,
     ToggleHiddenFiles,
     ToggleOpaqueBackground,
+    TogglePlotsInTabs,
     Undo,
     Redo,
     ToggleComment,
@@ -120,6 +121,7 @@ impl MenuAction {
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
         MenuAction::ToggleOpaqueBackground,
+        MenuAction::TogglePlotsInTabs,
         MenuAction::Undo,
         MenuAction::Redo,
         MenuAction::ToggleComment,
@@ -269,6 +271,9 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // feature nobody can find is a feature nobody has.
                 group(Key::ItemToggleBreakpoint, MenuAction::ToggleBreakpoint, Some("Ctrl+Shift+P")),
                 item(Key::ItemInspectVariable, MenuAction::InspectVariable, Some("Ctrl+Shift+I")),
+                // Where the next session's plots go. Here rather than in View because it is not
+                // about how CleeCode looks: it changes what the interpreter is told to do.
+                item(Key::ItemPlotsInTabs, MenuAction::TogglePlotsInTabs, None),
                 group(Key::ItemRunTarget, MenuAction::RunTarget, None),
             ],
         },
