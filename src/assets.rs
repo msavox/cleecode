@@ -141,6 +141,12 @@ mod tests {
     /// a language server that is not installed.
     #[test]
     fn nowhere_to_write_is_an_empty_path_rather_than_a_failure() {
-        assert_eq!(write_all(Path::new("/proc/nonexistent/cleecode"), &OCTAVE), PathBuf::new());
+        // Under a regular *file*, which no platform will let a directory be created inside.
+        // The old spelling was /proc/nonexistent — a path Windows is perfectly willing to
+        // create, relative to whatever drive it is on, so the test failed there for years.
+        let blocker = std::env::temp_dir().join(format!("cleecode-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "not a directory").unwrap();
+        assert_eq!(write_all(&blocker.join("octave"), &OCTAVE), PathBuf::new());
+        let _ = std::fs::remove_file(&blocker);
     }
 }
