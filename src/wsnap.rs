@@ -592,11 +592,14 @@ mod tests {
 
     /// Some filesystems have a coarse enough mtime that two writes in the same test land on the
     /// same timestamp, which would make the watch skip the second one.
+    /// Opened for writing, not read-only: Windows needs a handle with write access to change a
+    /// file's times, so the read-only version left every mtime identical and made "which of
+    /// these is newest" a coin toss there.
     fn filetime_bump(path: &Path) {
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
-        let _ = std::fs::File::open(path).and_then(|f| f.set_times(
-            std::fs::FileTimes::new().set_modified(later),
-        ));
+        let _ = std::fs::OpenOptions::new().write(true).open(path).and_then(|f| {
+            f.set_times(std::fs::FileTimes::new().set_modified(later))
+        });
     }
 
     #[test]

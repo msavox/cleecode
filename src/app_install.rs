@@ -68,6 +68,14 @@ mod macos {
             return;
         }
 
+        if !terminal_installed() {
+            eprintln!(
+                "{TERMINAL} is not installed, and the launcher is a script that asks it for a \n\
+                 window — so it cannot even be compiled without it. Install {TERMINAL} from \n\
+                 https://ghostty.org and run this again."
+            );
+            return;
+        }
         let script = std::env::temp_dir().join(format!("cleecode-launcher-{}.applescript", std::process::id()));
         if let Err(e) = std::fs::write(&script, applescript(&clee)) {
             eprintln!("Could not write the launcher script: {e}");
@@ -340,6 +348,23 @@ end openNewInstance
                               LaunchServices.framework/Support/lsregister";
 
     /// Runs a command, turning "it ran and failed" into an error like "it would not run".
+    /// Whether the terminal the launcher talks to is on this machine at all.
+    ///
+    /// Asked before compiling, because AppleScript resolves an application's terminology at
+    /// *compile* time. With Ghostty absent, `set surface to new surface configuration` is not a
+    /// command but three unknown identifiers, and osacompile answers "Expected end of line but
+    /// found identifier. (-2741)" — a sentence that tells the reader nothing about the fact that
+    /// they need to install a terminal.
+    ///
+    /// Launch Services rather than a path, so a Ghostty installed anywhere counts.
+    fn terminal_installed() -> bool {
+        Command::new("/usr/bin/osascript")
+            .args(["-e", &format!("id of application \"{TERMINAL}\"")])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
     fn run(program: &str, args: &[&std::ffi::OsStr]) -> std::io::Result<()> {
         let out = Command::new(program).args(args).output()?;
         if out.status.success() {
@@ -367,6 +392,15 @@ end openNewInstance
         /// away — nothing is installed, and /Applications is not touched.
         #[test]
         fn the_generated_script_is_valid_applescript() {
+            // Only where the terminal is installed. AppleScript resolves an application's
+            // terminology at compile time, so without Ghostty this checks nothing and fails
+            // for a reason that has nothing to do with the script — which is what it did on CI
+            // for long enough that the supported platform's own test run was permanently red,
+            // and so worth nothing.
+            if !terminal_installed() {
+                eprintln!("SKIP: {TERMINAL} is not installed, so its terminology cannot resolve");
+                return;
+            }
             let dir = std::env::temp_dir().join(format!("cleecode-applescript-test-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             let src = dir.join("launcher.applescript");

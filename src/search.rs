@@ -223,8 +223,11 @@ mod tests {
         assert!(hit.text.ends_with('…'));
 
         // The project root repeats on every row, so it is not on any of them.
+        // Built rather than spelled: a label carries the platform's own separator, and
+        // "src/min.js" is not what Windows writes.
         let label = label(hit, &dir);
-        assert!(label.starts_with("src/min.js:1  "), "got {label}");
+        let want = format!("{}:1  ", Path::new("src").join("min.js").display());
+        assert!(label.starts_with(&want), "got {label}, wanted it to start {want}");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
