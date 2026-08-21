@@ -313,8 +313,13 @@ pub fn snapshot_dir() -> PathBuf {
 /// Where one pane's snapshot lives. One file per pane, so two prompts describe two sessions
 /// instead of overwriting each other's answer.
 pub fn snapshot_path(dir: &Path, pane_id: u64) -> PathBuf {
-    dir.join(format!("ws-{pane_id}.json"))
+    dir.join(format!("{SNAPSHOT_PREFIX}{pane_id}.json"))
 }
+
+/// What a snapshot file is called, as opposed to the request and answer files that share its
+/// directory. Named once because `newest_in` has to tell them apart, and telling them apart by
+/// eye is what went wrong.
+const SNAPSHOT_PREFIX: &str = "ws-";
 
 /// The most recently written snapshot in `dir`.
 ///
@@ -327,6 +332,19 @@ pub fn newest_in(dir: &Path) -> Option<PathBuf> {
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e != "json").unwrap_or(true) {
+            continue;
+        }
+        // Snapshots only. The directory holds four kinds of JSON — the snapshot, the
+        // inspector's question and its answer, and the breakpoints — and "the newest .json"
+        // picked whichever was written last. So setting a breakpoint or opening the inspector
+        // made a request file the newest thing there, the panel read it as a snapshot, found it
+        // was not one, and went blank until the next tick wrote the real file. That is the
+        // "sometimes it shows my variables, sometimes nothing" this looked like from outside.
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(SNAPSHOT_PREFIX))
+        {
             continue;
         }
         let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
@@ -606,6 +624,22 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
         filetime_bump(&dir.join("notes.txt"));
         assert_eq!(newest_in(&dir), Some(dir.join("ws-1.json")));
+
+        // Nor is the other JSON that shares this directory, which is the whole point. Setting a
+        // breakpoint writes break-N.json and opening the inspector writes slicereq-N.json and
+        // slice-N.json; each is newer than the snapshot the moment it lands. Read as a snapshot
+        // — which is what "the newest .json" caused — the panel finds no variables and blanks,
+        // until the next tick writes the real file and it comes back. From outside that looks
+        // like a panel that works sometimes.
+        for name in ["break-1.json", "slice-1.json", "slicereq-1.json"] {
+            std::fs::write(dir.join(name), "[]").unwrap();
+            filetime_bump(&dir.join(name));
+            assert_eq!(
+                newest_in(&dir),
+                Some(dir.join("ws-1.json")),
+                "{name} is a question, not a workspace"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
