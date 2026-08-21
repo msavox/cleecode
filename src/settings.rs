@@ -93,11 +93,18 @@ pub struct Settings {
     // an editor without underlines, which is what CleeCode was until this existed.
     #[serde(default = "default_true")]
     pub diagnostics: bool,
-    // Whether a plot drawn in a live Octave or Python session opens as a tab. On by default:
-    // without it the interpreter opens its own window behind the terminal, which is the worst
-    // of both. Off means plotting behaves the way it does outside CleeCode.
-    #[serde(default = "default_true")]
-    pub diagnostics_figures: bool,
+    // Where a plot drawn in a live Octave or Python session goes. On — the default — it is
+    // captured and opens as a tab, beside the code that drew it. Off, the interpreter keeps its
+    // own windows: qt for Octave, matplotlib's usual backend for Python, exactly as they behave
+    // outside CleeCode.
+    //
+    // Read as a *preference*, not as an instruction: a session with nowhere to put a window
+    // captures anyway. See `wsnap::can_open_a_window` — over ssh, or on a Linux box with no
+    // DISPLAY, "windows" means no plot at all, and silently drawing nothing is not a setting
+    // anybody wants. The old spelling of this key is still read, so a settings.toml written
+    // before the rename keeps working.
+    #[serde(default = "default_true", alias = "diagnostics_figures")]
+    pub plots_in_tabs: bool,
     // Whether the editor paints its own background instead of letting the terminal's show
     // through. Off by default, because a terminal's background is the user's choice and taking
     // it over uninvited is rude — but a translucent one with a bright window behind it turns
@@ -251,7 +258,7 @@ impl Default for Settings {
             auto_pairs: true,
             completion: true,
             diagnostics: true,
-            diagnostics_figures: true,
+            plots_in_tabs: true,
             opaque_background: false,
             last_root: None,
             last_open_files: Vec::new(),
@@ -386,6 +393,22 @@ impl ProjectSettings {
 mod tests {
     use super::*;
 
+    /// The plot destination is a preference on a desktop and a fact on a server. Shown as a
+    /// plain on/off where it is a choice; where it is not, the row says which way it went and
+    /// why, because a switch that reads "off" while the tabs keep arriving is a broken switch.
+    #[test]
+    fn the_plot_row_says_when_the_choice_is_not_the_users_to_make() {
+        use i18n::Lang;
+        assert_eq!(plots_value(Lang::En, true, true), i18n::t(Lang::En, Key::On));
+        assert_eq!(plots_value(Lang::En, false, true), i18n::t(Lang::En, Key::Off));
+        // No screen: what the file says stops mattering, and both answers read the same.
+        for asked in [true, false] {
+            for lang in [Lang::En, Lang::It] {
+                assert_eq!(plots_value(lang, asked, false), i18n::t(lang, Key::SettingPlotsNoDisplay));
+            }
+        }
+    }
+
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
     #[test]
@@ -499,6 +522,20 @@ mod tests {
     }
 }
 
+/// What the plot row reads, which is the state the *session* will be in and not only what the
+/// file says.
+///
+/// On a machine with no screen — a remote one over ssh, a Linux server with no DISPLAY — the
+/// destination is not a choice: the interpreter's own window has nowhere to open, so asking for
+/// one means no plot at all. The row says so and stops taking Enter, rather than flipping to
+/// "off" while the tabs keep arriving, which reads as a broken switch.
+fn plots_value(lang: i18n::Lang, in_tabs: bool, can_open_a_window: bool) -> String {
+    if !can_open_a_window {
+        return i18n::t(lang, Key::SettingPlotsNoDisplay).to_string();
+    }
+    i18n::t(lang, if in_tabs { Key::On } else { Key::Off }).to_string()
+}
+
 pub struct SettingRow {
     pub label: &'static str,
     pub value: String,
@@ -518,6 +555,10 @@ impl Settings {
             SettingRow { label: i18n::t(lang, Key::SettingAutoIndent), value: b(self.auto_indent) },
             SettingRow { label: i18n::t(lang, Key::SettingCompletion), value: b(self.completion) },
             SettingRow { label: i18n::t(lang, Key::SettingDiagnostics), value: b(self.diagnostics) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingPlotsInTabs),
+                value: plots_value(lang, self.plots_in_tabs, crate::wsnap::can_open_a_window()),
+            },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
         ]
@@ -535,8 +576,17 @@ impl Settings {
             6 => self.auto_indent = !self.auto_indent,
             7 => self.completion = !self.completion,
             8 => self.diagnostics = !self.diagnostics,
-            9 => self.mouse_enabled = !self.mouse_enabled,
-            10 => self.lang = self.lang.next(),
+            // Refused where it would mean nothing: see `plots_value`. The row still moves under
+            // the cursor and still reads out the state — it is disabled, not hidden, because
+            // "why can I not turn this off" is a question the value answers and an absence
+            // does not.
+            9 => {
+                if crate::wsnap::can_open_a_window() {
+                    self.plots_in_tabs = !self.plots_in_tabs;
+                }
+            }
+            10 => self.mouse_enabled = !self.mouse_enabled,
+            11 => self.lang = self.lang.next(),
             _ => {}
         }
     }

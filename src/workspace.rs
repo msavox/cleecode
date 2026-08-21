@@ -109,12 +109,14 @@ pub struct Shape {
     pub workspace_view: Option<String>,
 }
 
-/// Below this the frames go one above the other rather than side by side.
+/// Above this a window has room to spare, and the file tree can be a little narrower without
+/// becoming a column of truncated names — the width goes to the editor, which is splitting in
+/// two to put a figure beside the code that drew it.
 ///
-/// Three columns need the editor to keep enough width for code and the prompt enough for a
-/// matrix row: a sidebar, ~70 for the editor and ~55 for the terminal is about 150. Under that,
-/// stacked is not a compromise — it is simply the right answer, because both frames then have
-/// the whole width.
+/// It used to decide something larger: whether the prompt sat beside the editor or under it.
+/// It does not any more — the presets stack, always — because a three-column window leaves the
+/// editor's two halves about a third each once a figure opens, and a plot that size is a
+/// thumbnail.
 const SIDE_BY_SIDE_COLS: u16 = 150;
 
 /// A built-in workspace by name, shaped for the window it is opening in.
@@ -167,11 +169,14 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
 /// and is one keystroke away. Tab 1 is the interpreter, because that is where Ctrl+Shift+X
 /// lands and it should be what you are looking at.
 ///
-/// **The prompt goes beside the editor when there is room**, which is the arrangement the Octave
-/// and MATLAB desktops settled on and for the same reason: numeric output is wide — a matrix row
-/// wraps into nonsense in a narrow pane — and you read it while writing the next line, not after.
-/// The sidebar stays, narrower: this kind of work is usually a handful of scripts, so the tree is
-/// for finding them rather than for living in.
+/// **The prompt goes underneath, across the full width** — the classic arrangement, and it wins
+/// here for a reason that only shows up once plotting works. A figure arrives as a tab and is
+/// read *beside* the code that drew it, which means the editor splits in two; with the prompt
+/// also taking a column, those halves are a third of the window each, and a plot a third of a
+/// window wide is a thumbnail. Underneath, the editor keeps the whole width to divide, and the
+/// prompt keeps it too — which is what numeric output wanted in the first place, since a matrix
+/// row wraps into nonsense in a narrow pane. The sidebar stays, narrower: this kind of work is
+/// usually a handful of scripts, so the tree is for finding them rather than for living in.
 ///
 /// **The workspace view is a second window, not a third tab**, and that is the whole difference
 /// between watching your variables and asking about them. A tab is somewhere you go; a window is
@@ -213,10 +218,10 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
             show_terminal: true,
             show_menubar: true,
             sidebar_width: if wide { 24 } else { 26 },
-            // Wide: a share of the width. Narrow: a share of the height, and a smaller one,
-            // because a prompt needs fewer rows to be useful than an editor does.
-            terminal_pct: if wide { 42 } else { 38 },
-            terminal_on_right: wide,
+            // A share of the height, and a modest one: a prompt needs fewer rows to be useful
+            // than an editor does, and on a wide window those rows are already long.
+            terminal_pct: 38,
+            terminal_on_right: false,
             split_view: false,
             split_pct: 50,
         },
@@ -537,19 +542,26 @@ mod tests {
     }
 
     /// A layout that is right at 200 columns and unusable at 80 is not the best layout, it is
-    /// the best layout for whoever wrote it.
+    /// the best layout for whoever wrote it — so the presets are checked at both ends.
+    ///
+    /// The prompt goes underneath at every width. It used to move beside the editor on a wide
+    /// window, which reads well until a figure opens: the editor splits to put the plot next to
+    /// the code, and three columns leave each half about a third of the window.
     #[test]
-    fn a_preset_stacks_the_frames_when_there_is_no_room_beside() {
+    fn a_preset_stacks_the_frames_at_every_width() {
+        for cols in [200, 150, 90] {
+            let layout = built_in("octave", &shape(cols)).unwrap().layout;
+            assert!(!layout.terminal_on_right, "at {cols} columns the prompt goes underneath");
+            assert!(layout.show_sidebar, "the tree survives either way");
+            assert!(
+                layout.terminal_pct < 50,
+                "at {cols} columns the editor keeps the larger share of the height"
+            );
+        }
+        // The tree gives its columns to the editor once there are enough to give.
         let wide = built_in("octave", &shape(200)).unwrap().layout;
-        assert!(wide.terminal_on_right, "at 200 columns the prompt goes beside the editor");
-
         let narrow = built_in("octave", &shape(90)).unwrap().layout;
-        assert!(!narrow.terminal_on_right, "at 90 it goes underneath, so both keep the width");
-        assert!(narrow.show_sidebar, "the tree survives either way");
-        assert!(
-            narrow.terminal_pct < wide.terminal_pct,
-            "a prompt needs fewer rows to be useful than an editor does"
-        );
+        assert!(wide.sidebar_width < narrow.sidebar_width);
     }
 
     /// The bug this closes was silent: a built-in answered before the disk was ever consulted,

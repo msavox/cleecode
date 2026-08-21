@@ -205,6 +205,11 @@ def _clip(s):
 def _figures(state):
     """Rasterise every open matplotlib figure, but only if matplotlib is already
     imported — importing it here would cost seconds and surprise anyone not plotting."""
+    # A session told to keep matplotlib's own windows has nothing to hand over: the figures are
+    # on screen already, and rendering each one a second time is the most expensive thing this
+    # hook can do — paid, here, for pictures nobody is going to open.
+    if os.environ.get("CLEECODE_PLOTS") == "windows":
+        return []
     plt = sys.modules.get("matplotlib.pyplot")
     if plt is None:
         return []

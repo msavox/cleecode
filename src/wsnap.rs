@@ -355,6 +355,48 @@ pub fn newest_in(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+/// Whether plots are captured into tabs, as opposed to left to the interpreter's own windows.
+///
+/// A static for the same reason the scrollback length is one: it is read where a shell is
+/// spawned, which is four constructors away from anything holding the settings, and it can only
+/// ever affect shells started afterwards — an interpreter reads its plotting mode once, at
+/// startup, and a window already on screen cannot be talked back into a picture.
+static PLOTS_IN_TABS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_plots_in_tabs(on: bool) {
+    PLOTS_IN_TABS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this machine can put a window on a screen at all.
+///
+/// The preference is allowed to ask for the interpreter's own windows; this is what decides
+/// whether that is a thing that can happen — and it is asked about the session, not about the
+/// hardware. Over ssh it is usually no, which is where the figure tabs came from, but *not*
+/// because it is ssh: `ssh -X` into this machine with an X server running on the other end
+/// (XQuartz on a Mac) sets DISPLAY, and a qt window then opens on the user's own screen. Slow
+/// over a thin link, and their choice to make.
+///
+/// So the question is only ever "is there a display": DISPLAY or WAYLAND_DISPLAY names one.
+/// macOS and Windows are the exception, having a window server and no variable to name it
+/// with — and there the session has to be a local one, since a Mac reached over ssh has a
+/// desktop that belongs to whoever is sitting at it.
+pub fn can_open_a_window() -> bool {
+    window_possible(
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        crate::dnd::running_over_ssh(),
+    )
+}
+
+fn window_possible(has_display: bool, over_ssh: bool) -> bool {
+    has_display || ((cfg!(target_os = "macos") || cfg!(windows)) && !over_ssh)
+}
+
+/// What the interpreters are told about where their plots should go: the preference, unless
+/// this machine has no screen to honour it on.
+fn plots_in_tabs() -> bool {
+    PLOTS_IN_TABS.load(std::sync::atomic::Ordering::Relaxed) || !can_open_a_window()
+}
+
 /// The environment an interpreter needs to publish its workspace, for a shell that may end up
 /// running either language — or neither, in which case the hooks are inert and cost nothing.
 ///
@@ -365,7 +407,15 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
     let snapshot = snapshot_path(dir, pane_id);
     let figures = dir.join("figs");
     let _ = std::fs::create_dir_all(&figures);
-    vec![
+    let in_tabs = plots_in_tabs();
+    let mut env = vec![
+        // Where this session's plots are meant to go, read by both languages' hooks. One name
+        // for both, because it is one decision: an Octave that keeps its qt windows and a
+        // matplotlib that keeps its own are the same answer to the same question.
+        (
+            "CLEECODE_PLOTS".to_string(),
+            if in_tabs { "tabs" } else { "windows" }.to_string(),
+        ),
         ("CLEECODE_OCTAVE_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_FIGS".to_string(), figures.to_string_lossy().into_owned()),
         (
@@ -403,10 +453,6 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
             "CLEECODE_PY_BREAK".to_string(),
             dir.join(format!("break-{pane_id}.json")).to_string_lossy().into_owned(),
         ),
-        // Draw without opening a window of its own. matplotlib's default backend on a Mac puts
-        // up a separate GUI window, which is the thing this whole panel exists to avoid; the
-        // capture backend keeps the figure in the session and hands CleeCode the PNG.
-        ("MPLBACKEND".to_string(), "module://cleecode_mpl".to_string()),
         ("CLEECODE_OCTAVE_LIB".to_string(), lib_octave.to_string_lossy().into_owned()),
         // The load path Octave starts with, whoever started it. The library directory holds a
         // PKG_ADD, which Octave runs when the directory joins the path — so an Octave typed at
@@ -427,7 +473,18 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),
         ("PYTHONPATH".to_string(), lib_python.to_string_lossy().into_owned()),
-    ]
+    ];
+    // Draw without opening a window of its own. matplotlib's default backend on a desktop puts
+    // up a separate GUI window, which is the thing the figure tabs exist to avoid; the capture
+    // backend keeps the figure in the session and hands CleeCode the PNG.
+    //
+    // Set here and not chosen later because matplotlib picks its backend when it is imported,
+    // and by the time a user types `plot` it is long past that. Left unset in windows mode —
+    // then matplotlib does what it does anywhere else, which is the whole point of the setting.
+    if in_tabs {
+        env.push(("MPLBACKEND".to_string(), "module://cleecode_mpl".to_string()));
+    }
+    env
 }
 
 #[cfg(test)]
@@ -646,6 +703,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A forwarded display is a display. The first version of this refused windows over ssh on
+    /// principle — which is right for a bare `ssh host` and wrong for `ssh -X`, where the plot
+    /// opens on the screen the user is actually sitting in front of.
+    #[test]
+    fn a_window_needs_a_screen_and_ssh_is_not_the_question() {
+        assert!(window_possible(true, true), "ssh -X forwards a real display");
+        assert!(window_possible(true, false));
+        assert!(!window_possible(false, true), "no display over ssh: nowhere to open");
+    }
+
     /// Both languages' variables are set on every shell. A shell that starts neither interpreter
     /// carries two unread names, which costs nothing; the alternative is guessing at spawn time
     /// what the user is about to type.
@@ -671,5 +738,10 @@ mod tests {
         let by = |key: &str| env.iter().find(|(k, _)| k == key).unwrap().1.clone();
         assert_eq!(by("CLEECODE_OCTAVE_WS"), by("CLEECODE_PY_WS"), "one file per pane, not per language");
         assert!(by("PYTHONSTARTUP").ends_with("pythonstartup.py"));
+        // Where this session's plots go, read by both hooks. matplotlib picks its backend when
+        // it is imported, long before anyone types `plot`, so the choice has to be in the
+        // environment — and it is there exactly when the figures are meant to be captured.
+        assert!(names.contains(&"CLEECODE_PLOTS"));
+        assert_eq!(names.contains(&"MPLBACKEND"), by("CLEECODE_PLOTS") == "tabs");
     }
 }

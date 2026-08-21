@@ -82,6 +82,7 @@ pub enum Key {
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
     ItemOpaqueBackground,
+    ItemPlotsInTabs,
     ToolbarRun,
     ToolbarRefresh,
     ToolbarVenvNone,
@@ -105,6 +106,8 @@ pub enum Key {
     SettingAutoIndent,
     SettingCompletion,
     SettingDiagnostics,
+    SettingPlotsInTabs,
+    SettingPlotsNoDisplay,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -301,6 +304,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemOpaqueBackground) => "Solid background",
         (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
 
+        (Lang::En, ItemPlotsInTabs) => "Plots as tabs",
+        (Lang::It, ItemPlotsInTabs) => "Grafici nelle tab",
+
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",
 
@@ -371,6 +377,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingCompletion) => "Completamento parole",
         (Lang::En, SettingDiagnostics) => "Language server diagnostics",
         (Lang::It, SettingDiagnostics) => "Diagnostici del language server",
+
+        (Lang::En, SettingPlotsInTabs) => "Plots as tabs",
+        (Lang::It, SettingPlotsInTabs) => "Grafici nelle tab",
+
+        (Lang::En, SettingPlotsNoDisplay) => "on — no display",
+        (Lang::It, SettingPlotsNoDisplay) => "attivo — nessun display",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
@@ -1127,6 +1139,31 @@ pub fn msg_opaque_background(lang: Lang, on: bool) -> String {
         (Lang::En, false) => "Solid background off — the terminal's own background is back".to_string(),
         (Lang::It, true) => "Sfondo pieno attivo — il terminale non traspare più".to_string(),
         (Lang::It, false) => "Sfondo pieno disattivato — torna lo sfondo del terminale".to_string(),
+    }
+}
+
+/// The plot destination, and — when the machine has no screen to put a window on — why the
+/// choice did not take. Saying nothing there would leave the menu showing "off" and the plots
+/// still arriving as tabs, which reads as a broken toggle rather than as the only thing that
+/// could have happened.
+pub fn msg_plots_in_tabs(lang: Lang, in_tabs: bool, can_open_a_window: bool) -> String {
+    match (lang, in_tabs, can_open_a_window) {
+        (Lang::En, true, _) => "Plots open as tabs — from the next session".to_string(),
+        (Lang::En, false, true) => {
+            "Plots open in the interpreter's own windows — from the next session".to_string()
+        }
+        (Lang::En, false, false) => {
+            "No display here, so plots stay as tabs — a window would have nowhere to open"
+                .to_string()
+        }
+        (Lang::It, true, _) => "I grafici si aprono nelle tab — dalla prossima sessione".to_string(),
+        (Lang::It, false, true) => {
+            "I grafici si aprono nelle finestre dell'interprete — dalla prossima sessione".to_string()
+        }
+        (Lang::It, false, false) => {
+            "Qui non c'è un display: i grafici restano nelle tab, una finestra non avrebbe dove aprirsi"
+                .to_string()
+        }
     }
 }
 
