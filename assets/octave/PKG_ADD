@@ -1,0 +1,9 @@
+## Run by Octave when this directory joins the load path, which CleeCode arranges through
+## OCTAVE_PATH on every shell it starts. That is the whole point: the workspace panel and the
+## captured figures used to depend on the preset's own `--eval cleecode_boot`, so an Octave
+## started any other way — typed at a shell tab, or launched by the Run button on a .m file —
+## got none of it, and its plots opened in real windows behind the terminal.
+##
+## cleecode_boot returns immediately when CLEECODE_OCTAVE_WS is unset, so a copy of this
+## directory on somebody's path outside CleeCode is inert rather than surprising.
+cleecode_boot ();

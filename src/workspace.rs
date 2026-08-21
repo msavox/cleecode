@@ -128,7 +128,9 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
         "octave" => session_workspace(
             name,
             shape,
-            "octave --no-gui --persist --path \"$CLEECODE_OCTAVE_LIB\" --eval cleecode_boot",
+            // No --path and no --eval: OCTAVE_PATH puts the library on the load path and its
+            // PKG_ADD boots the hook, so this reads like the command a user would type.
+            "octave --no-gui --persist",
             "octave",
         ),
         "pylab" => session_workspace(name, shape, &shape.python, "python"),

@@ -13,10 +13,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 7] = [
+const OCTAVE: [(&str, &str); 8] = [
     ("cleecode_dbg.m", include_str!("../assets/octave/cleecode_dbg.m")),
     ("cleecode_slice.m", include_str!("../assets/octave/cleecode_slice.m")),
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
+    // Not a function: Octave runs a file with this name when the directory joins the load
+    // path, which is how any Octave started in a CleeCode terminal gets the hook — not only
+    // the preset's, which was the whole bug.
+    ("PKG_ADD", include_str!("../assets/octave/PKG_ADD")),
     ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
     ("cleecode_ws.m", include_str!("../assets/octave/cleecode_ws.m")),
     ("cleecode_ws_tick.m", include_str!("../assets/octave/cleecode_ws_tick.m")),
@@ -87,6 +91,19 @@ mod tests {
                 "{called} is called by the hook but does not travel with it"
             );
         }
+        // The one file that makes the hook apply to an Octave nobody told about it. Without
+        // it only the preset's own session captured its figures, and every other Octave — one
+        // typed at a shell tab, one started by the Run button — opened real plot windows
+        // behind the terminal.
+        let pkg_add = OCTAVE.iter().find(|(n, _)| *n == "PKG_ADD").unwrap().1;
+        assert!(pkg_add.contains("cleecode_boot"), "PKG_ADD is what boots a session");
+        let boot = OCTAVE.iter().find(|(n, _)| *n == "cleecode_boot.m").unwrap().1;
+        assert!(
+            boot.contains("CLEECODE_OCTAVE_WS"),
+            "the boot must do nothing outside CleeCode, since PKG_ADD runs it unconditionally"
+        );
+        assert!(boot.contains("gnuplot"), "a headless session needs a toolkit that can print");
+
         let startup = PYTHON.iter().find(|(n, _)| *n == "pythonstartup.py").unwrap().1;
         assert!(startup.contains("cleecode_pyws"), "the startup file installs the hook");
 

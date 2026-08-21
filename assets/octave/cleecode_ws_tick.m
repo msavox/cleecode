@@ -214,6 +214,16 @@ function write_snapshot (out, seq, now, w, vals, figs, history, dbg)
   doc.figures = figs;
   doc.history = history;
   doc.debug = dbg;
+  ## A session with no graphics toolkit can hold variables perfectly well and cannot plot at
+  ## all. Said here, at the top of the panel, rather than left for the user to discover from
+  ## inside whichever line of their own script first calls figure().
+  doc.warn = "";
+  try
+    if (isempty (available_graphics_toolkits ()))
+      doc.warn = "no graphics toolkit: plots will fail. Install gnuplot — it needs no display.";
+    endif
+  catch
+  end_try_catch
 
   ## Write beside the target and rename, so a reader never sees half a file.
   tmp = sprintf ("%s.%d.tmp", out, getpid ());

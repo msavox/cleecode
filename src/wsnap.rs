@@ -71,6 +71,12 @@ pub struct Snapshot {
     pub lang: String,
     #[serde(default)]
     pub vars: Vec<Var>,
+    /// Something about the session the panel should say out loud — at present, only that it
+    /// has no graphics toolkit and so cannot plot at all. It belongs in the snapshot rather
+    /// than in the transcript for the reason everything else does: CleeCode does not write
+    /// into the user's session. Empty in the ordinary case, and in every older writer's output.
+    #[serde(default)]
+    pub warn: String,
     /// The figures the session has open, each already printed to a PNG. Absent from a session
     /// that has never plotted, and from the Octave prototype before figures were wired up.
     #[serde(default)]
@@ -384,6 +390,22 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         // capture backend keeps the figure in the session and hands CleeCode the PNG.
         ("MPLBACKEND".to_string(), "module://cleecode_mpl".to_string()),
         ("CLEECODE_OCTAVE_LIB".to_string(), lib_octave.to_string_lossy().into_owned()),
+        // The load path Octave starts with, whoever started it. The library directory holds a
+        // PKG_ADD, which Octave runs when the directory joins the path — so an Octave typed at
+        // a shell tab, or started by the Run button on a .m file, installs the hook exactly
+        // like the preset's does. Before this, only the preset's own `--eval cleecode_boot`
+        // did, and every other Octave opened its plots in real windows behind the terminal.
+        //
+        // Prepended to whatever the user already had rather than replacing it: Octave builds
+        // its load path from this, and a session that lost the user's own directories would be
+        // a far worse bug than the one being fixed. The standard library is unaffected —
+        // measured, 42 path entries either way.
+        ("OCTAVE_PATH".to_string(), match std::env::var("OCTAVE_PATH") {
+            Ok(theirs) if !theirs.is_empty() => {
+                format!("{}:{}", lib_octave.to_string_lossy(), theirs)
+            }
+            _ => lib_octave.to_string_lossy().into_owned(),
+        }),
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),
         ("PYTHONPATH".to_string(), lib_python.to_string_lossy().into_owned()),
@@ -595,6 +617,16 @@ mod tests {
         let env = shell_env(Path::new("/snaps"), 2, Path::new("/lib/octave"), Path::new("/lib/python"));
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"CLEECODE_OCTAVE_WS"));
+        // Every Octave started from a CleeCode terminal, not only the preset's: the library
+        // holds a PKG_ADD, and Octave runs that when the directory joins the load path.
+        assert!(names.contains(&"OCTAVE_PATH"), "the hook has to reach an Octave typed by hand");
+        let value = |name: &str| {
+            env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        assert!(
+            value("OCTAVE_PATH").starts_with(&value("CLEECODE_OCTAVE_LIB")),
+            "CleeCode's own directory goes first, and whatever the user had keeps its place"
+        );
         assert!(names.contains(&"CLEECODE_OCTAVE_LIB"));
         assert!(names.contains(&"PYTHONSTARTUP"));
         assert!(names.contains(&"CLEECODE_OCTAVE_FIGS"));
