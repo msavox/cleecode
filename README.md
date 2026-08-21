@@ -37,11 +37,12 @@ and CI verifies that install on Ubuntu, but only the *install* is tested.
 
 ### Prebuilt binaries
 
-macOS arm64/x86_64 and x86_64 Linux and Windows builds are attached to each
+macOS arm64/x86_64, Linux arm64/x86_64 and Windows x86_64 builds are attached to each
 [release](https://github.com/msavox/cleecode/releases). Outside macOS they're experimental: CI
-checks they start, nothing more. The Linux binary needs glibc and libxcb — install `libxcb1`
-(Debian/Ubuntu) or `libxcb` (Fedora/Arch) if it fails to start. For Alpine/musl, build from
-source.
+checks they start, nothing more. Each is built on the architecture it names — the arm64 Linux
+one covers an Ampere or Graviton server and a 64-bit Raspberry Pi OS. The Linux binaries need
+glibc and libxcb — install `libxcb1` (Debian/Ubuntu) or `libxcb` (Fedora/Arch) if one fails to
+start. For Alpine/musl, build from source.
 
 ### Optional extras
 

@@ -43,6 +43,15 @@ jobs:
             target: x86_64-unknown-linux-gnu
             slug: linux-x86_64
             smoke: true
+          # GitHub's arm64 Linux runners are free for public repositories, so this builds
+          # natively and gets the same smoke-check as everything else — no cross toolchain,
+          # no qemu, and a binary that has actually started once on the architecture it is
+          # named for. Same reason as x86_64 for the older image: glibc.
+          - label: Linux arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            slug: linux-arm64
+            smoke: true
           - label: Windows x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
