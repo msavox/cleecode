@@ -92,15 +92,18 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
         ];
     }
     if snapshot.vars.is_empty() {
-        return vec![
-            title(snapshot, cols, dim, off),
-            String::new(),
-            format!("{dim}The workspace is empty.{off}"),
-        ];
+        let mut lines = vec![title(snapshot, cols, dim, off), String::new()];
+        lines.extend(warning(snapshot, off));
+        lines.push(format!("{dim}The workspace is empty.{off}"));
+        return fit_to_pane(lines, cols, rows, dim, off)
+            .iter()
+            .map(|line| cut_to(line, cols))
+            .collect();
     }
 
     let layout = Layout::for_width(cols, &snapshot.vars);
     let mut lines = vec![title(snapshot, cols, dim, off), String::new()];
+    lines.extend(warning(snapshot, off));
     lines.extend(stack(snapshot, cols, off));
     lines.push(format!("{head}{}{off}", layout.header()));
     lines.push(format!("{dim}{}{off}", "─".repeat((cols as usize).min(layout.width()))));
@@ -184,6 +187,18 @@ fn cut_to(line: &str, cols: u16) -> String {
         out.push_str("\x1b[0m");
     }
     out
+}
+
+/// Anything the session said about itself that is worth reading before the variables.
+///
+/// One line, at the top, where somebody glancing at the panel will see it. A session with no
+/// graphics toolkit works perfectly until the first `figure()`, and then fails inside the
+/// user's own script — which is a long way from the thing that could have told them.
+fn warning(snapshot: &Snapshot, off: &str) -> Vec<String> {
+    if snapshot.warn.is_empty() {
+        return Vec::new();
+    }
+    vec![format!("\x1b[33m{}{off}", snapshot.warn), String::new()]
 }
 
 /// Where the session is stopped, and how it got there.
