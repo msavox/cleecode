@@ -9,6 +9,10 @@ on:
       tag:
         description: "Existing tag to build and attach artifacts to"
         required: true
+      only:
+        description: "Attach one archive only (slug, e.g. linux-arm64). Empty attaches all."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -130,7 +134,13 @@ jobs:
           cat "${archive}.sha256"
           echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
 
+      # Adding a platform to a release that is already out: everything still builds, so the
+      # tag is checked on every target, but only the named archive is attached. The four that
+      # are already published keep the bytes and the checksums they were published with —
+      # rebuilding them would replace both, and a checksum that changes under whoever already
+      # downloaded the file is the one thing a release must never do.
       - name: Upload to the release
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == matrix.slug }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
