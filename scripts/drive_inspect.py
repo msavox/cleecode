@@ -101,8 +101,16 @@ def main():
                      "cleecode_slice" not in prompt, session,
                      note="the request went through a file")
 
-        report.check("Esc closes it", session.press("\x1b", lambda s: "6x6" not in s.text(), 6),
-                     session)
+        # Its own frame, not the whole screen. "6x6" is also in the workspace table, which
+        # stays there — and used to not: the panel followed the newest .json in the snapshot
+        # directory, so the slice file this inspector had just written became the newest thing
+        # and blanked it. Watching the whole screen made a passing check out of that bug.
+        report.check("Esc closes it",
+                     session.press("\x1b", lambda s: not panel(s), 6), session,
+                     note="and the workspace table is still there behind it")
+        report.check("closing it leaves the workspace panel alone",
+                     "6x6" in session.text(), session,
+                     note="the inspector's question must not displace the session it asked")
         Report.show("final screen", session)
     finally:
         session.close()
