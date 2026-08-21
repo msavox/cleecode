@@ -1,3 +1,43 @@
+## What's new in 0.9.1
+
+Four bugs in the numeric side, all of them reported from real use and none of them visible from
+the machine it was built on.
+
+**The workspace panel worked sometimes.** It followed "the newest `.json` in the snapshot
+directory", and four kinds of JSON live there: the snapshot, the inspector's question, its answer,
+and the breakpoints. So setting a breakpoint or opening the inspector made a request file the
+newest thing there; the panel read it as a snapshot, found it was not one, and went blank until
+the next tick wrote the real file. The same watcher is where the breakpoint file's path comes
+from, so this was worse than a flicker — with the watch pointed at `break-0.json`, the next
+breakpoint went to `break-break-0.json`, a file no session reads. Breakpoints that intermittently,
+silently stopped being set.
+
+**Plots opened in real windows.** The figure capture, and the setting that stops a window opening
+at all, were installed by the `octave` preset's own startup command — so an Octave started any
+other way got none of it: one typed at a shell tab, or the one the Run button starts when no
+prompt is open. Octave's own mechanism fits better: the library directory now carries a `PKG_ADD`,
+which Octave runs when the directory joins the load path, and `OCTAVE_PATH` is set on every shell.
+Any Octave you start in a CleeCode terminal now reports its workspace and hands over its plots.
+It prepends to your own `OCTAVE_PATH` rather than replacing it, and outside CleeCode it stays
+inert.
+
+**A machine with no display had no way to plot, and no way to find that out.** On a remote server
+over ssh there is no display, qt cannot load, and with gnuplot not installed either Octave has no
+graphics toolkit at all — which you discover from inside whichever line of your own script first
+calls `figure()`, as `error: no graphics toolkits are available!`. A session CleeCode drives never
+shows a window, so its toolkit only has to be able to *print*: gnuplot can do that with no display,
+and is now preferred when there is none. With no toolkit at all, the panel says so from the first
+snapshot — install gnuplot, it needs no display.
+
+**The variables panel existed only inside the two built-in workspaces.** A saved workspace of your
+own had none, and no way to ask for one: no menu entry, no command, no key. *Workspace ▸ Show
+session variables* opens one wherever you are, and it follows whichever session last ran
+something — so it picks up an interpreter you started yourself, in any terminal.
+
+Also: `scripts/doctor.sh` reports what CleeCode set, what the interpreters see, and which graphics
+toolkits exist. Two of these bugs were things that could only be described over a chat, which is a
+slow way to find out that a load path is empty.
+
 ## What's new in 0.9.0
 
 An IDE for Octave and Python, a language server, and completion — three releases in one.

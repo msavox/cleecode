@@ -892,3 +892,44 @@ terminale accanto — che è il punto del prodotto.
 
 Libere: `Ctrl+Shift+` `A C D H I J L P Q V X Y Z`. Occupate: `B E F G K M N O R S T U W`.
 Restano vietati i tasti funzione e i simboli che il layout italiano mette già sotto Shift.
+
+---
+
+## 0.9.1 — quattro bug trovati dall'uso vero (2026-08-21)
+
+**La lezione, prima dei bug:** ho misurato tutto il lato numerico su un Mac locale e ho
+rilasciato dicendo che Linux è supportato, senza mai chiedere **dove gira davvero Octave**. La
+risposta era "un server remoto via ssh", che è il posto dove un IDE da terminale serve di più ed
+è l'unico che non avevo provato. Tre dei quattro bug qui sotto erano invisibili da qui.
+
+| bug | perché nessuno dei dieci driver lo ha preso |
+|---|---|
+| **il pannello si svuotava a intermittenza** | `newest_in` prendeva il `.json` più recente, e nella cartella ce ne sono quattro tipi — snapshot, domanda dell'ispettore, risposta, breakpoint. Ogni driver usa **o** il pannello **o** un file di richiesta, mai i due insieme, e il vuoto dura fino al tick dopo |
+| **i breakpoint smettevano di funzionare** | stessa causa, conseguenza peggiore: quel `Watch` è anche da dove `publish_breakpoints` ricava il path, quindi scriveva in `break-break-0.json` |
+| **i plot si aprivano in finestre vere** | l'hook lo installava solo il `--eval` del preset. La funzione funzionava **esattamente nel caso che i test pilotano**, che è la disposizione più lusinghiera possibile |
+| **su una macchina headless non si poteva disegnare** | qui c'è sempre un display |
+
+*Le correzioni, e cosa le ha decise:*
+
+- **`newest_in` guarda solo gli snapshot**, e il prefisso è una costante invece di una stringa
+  scritta in due punti — distinguerli a occhio è quello che è andato storto.
+- **`PKG_ADD` più `OCTAVE_PATH`**: Octave esegue un file `PKG_ADD` quando una cartella entra nel
+  load path, e `OCTAVE_PATH` ce la mette per **qualunque** Octave. Meccanismo di Octave, non
+  nostro, e il comando del preset torna a leggersi come una riga che scriverebbe una persona.
+  Si antepone al path dell'utente invece di sostituirlo: perdergli le sue cartelle sarebbe un
+  bug molto peggiore di quello che stavo correggendo.
+- **gnuplot quando non c'è un display.** Una sessione che CleeCode pilota non mostra mai una
+  finestra, quindi al toolkit basta saper *stampare*. Misurato: gnuplot e qt producono la stessa
+  figura, stessa dimensione, stessa geometria degli assi — 451 ms contro 298. Lento e presente
+  batte veloce e assente. Senza nessun toolkit, il pannello lo dice dal primo snapshot invece di
+  lasciare che `figure()` fallisca dentro lo script dell'utente.
+- **Il pannello si apre da qualsiasi layout.** Esisteva solo dentro i due preset, quindi un
+  workspace salvato tuo — cioè quello in cui sta davvero chi usa CleeCode da un po' — non ne
+  aveva e non poteva chiederne uno.
+
+*E una cosa che vale più dei quattro bug:* `drive_inspect` **asseriva che il bug fosse il
+comportamento giusto**. Chiudeva l'ispettore e aspettava che "6x6" sparisse da **tutto lo
+schermo** — cosa che succedeva perché nello stesso momento si stava svuotando la tabella. Un
+test che guarda troppo largo trasforma un bug in un PASS. Adesso guarda la cornice
+dell'ispettore, e separatamente che la tabella sia rimasta.
+
