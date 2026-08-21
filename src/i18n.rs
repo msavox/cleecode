@@ -73,6 +73,7 @@ pub enum Key {
     ItemRunFile,
     ItemRunSelection,
     ItemToggleBreakpoint,
+    ItemShowWorkspacePanel,
     ItemInspectVariable,
     ItemRunTarget,
     RunMenuTitle,
@@ -273,6 +274,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemRunFile) => "Esegui file corrente",
         (Lang::En, ItemRunSelection) => "Run selection or cell",
         (Lang::It, ItemRunSelection) => "Esegui selezione o cella",
+        (Lang::En, ItemShowWorkspacePanel) => "Show session variables",
+        (Lang::It, ItemShowWorkspacePanel) => "Mostra le variabili della sessione",
         (Lang::En, ItemToggleBreakpoint) => "Breakpoint on this line",
         (Lang::It, ItemToggleBreakpoint) => "Breakpoint su questa riga",
         (Lang::En, ItemInspectVariable) => "Look inside a variable...",
@@ -769,6 +772,13 @@ pub fn shortcut_label(lang: Lang, shortcut: &str) -> &str {
     match (lang, shortcut) {
         (Lang::It, "Del") => "Canc",
         _ => shortcut,
+    }
+}
+
+pub fn msg_workspace_panel(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Watching for a session — start octave or python in a terminal".to_string(),
+        Lang::It => "In ascolto di una sessione — avvia octave o python in un terminale".to_string(),
     }
 }
 

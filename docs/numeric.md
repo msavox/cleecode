@@ -23,8 +23,19 @@ Each opens one terminal window with two tabs — the interpreter, and a plain sh
 `pip` — and a second window showing the workspace. A window rather than a tab, because the point
 is to glance at it while you work rather than to go and look.
 
+**The panel is not only for those two workspaces.** *Workspace ▸ Show session variables* opens one
+in whatever layout you are in, and it watches whichever session last ran something — so it follows
+an interpreter you start yourself, in any terminal, however you started it.
+
 Nothing is installed and nothing is written to your home directory. The interpreter is handed the
-code and a path to write to through its environment; outside CleeCode, neither does anything.
+code and a path to write to through its environment; outside CleeCode, neither does anything. For
+Octave that goes through `OCTAVE_PATH` and a `PKG_ADD`, so any `octave` you type in a CleeCode
+terminal reports its workspace and hands over its plots, exactly like the preset's does.
+
+On a machine with no display — a remote server over ssh — plots need **gnuplot** installed. It
+draws to a file and needs no X and no Qt; CleeCode picks it automatically when there is no
+display. With no toolkit at all, the panel says so from the first snapshot rather than letting
+`figure()` fail inside your script.
 
 ## Running a piece of a file
 

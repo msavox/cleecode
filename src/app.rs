@@ -3743,6 +3743,48 @@ impl App {
         }
     }
 
+    /// Open the variables panel as a window of its own, in whatever layout is up.
+    ///
+    /// It used to exist only inside the two built-in presets, which meant a saved workspace of
+    /// your own — the thing anybody who uses CleeCode for a while is actually in — had no panel
+    /// and no way to ask for one. The feature was reachable only by abandoning your layout.
+    ///
+    /// Already-open ones are focused rather than duplicated: the panel follows whichever session
+    /// last ran something, so a second one would show the same thing beside the first.
+    pub fn show_workspace_panel(&mut self) {
+        let lang = self.settings.lang;
+        let Some(command) = self.workspace_shape().workspace_view else {
+            return;
+        };
+        if let Some(idx) = self
+            .terminals
+            .iter()
+            .position(|w| w.tabs.iter().any(|t| t.name.as_deref() == Some("workspace")))
+        {
+            self.active_terminal = idx;
+            self.settings.show_terminal = true;
+            self.focus = Focus::Terminal;
+            self.status_message = i18n::msg_workspace_panel(lang);
+            return;
+        }
+        match crate::terminal_panel::TerminalPanel::with_startup(24, 80, &self.root, Some(&command))
+        {
+            Ok(mut panel) => {
+                panel.name = Some("workspace".to_string());
+                panel.startup_command = Some(command);
+                self.terminals.push(crate::terminal_panel::TerminalWindow {
+                    tabs: vec![panel],
+                    active: 0,
+                    weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+                });
+                self.active_terminal = self.terminals.len() - 1;
+                self.settings.show_terminal = true;
+                self.status_message = i18n::msg_workspace_panel(lang);
+            }
+            Err(e) => self.status_message = i18n::msg_terminal_create_error(lang, &e.to_string()),
+        }
+    }
+
     /// New terminal *tab*: another shell inside the focused window, sharing its pane. With no
     /// window open yet, there's nothing to tab into, so this opens a window instead.
     pub fn new_terminal_tab(&mut self) {
@@ -5368,6 +5410,7 @@ impl App {
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::RunSelection => self.run_selection(),
             MenuAction::ToggleBreakpoint => self.toggle_breakpoint(),
+            MenuAction::ShowWorkspacePanel => self.show_workspace_panel(),
             MenuAction::InspectVariable => self.open_inspector_picker(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
             MenuAction::ToggleHiddenFiles => self.toggle_hidden_files(),
