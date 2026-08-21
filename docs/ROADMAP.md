@@ -933,3 +933,44 @@ schermo** — cosa che succedeva perché nello stesso momento si stava svuotando
 test che guarda troppo largo trasforma un bug in un PASS. Adesso guarda la cornice
 dell'ispettore, e separatamente che la tabella sia rimasta.
 
+---
+
+## 0.9.2 — la cattura dei plot diventa una scelta (2026-08-21)
+
+**La lezione:** la cattura delle figure era nata come l'unico modo in cui il plotting poteva
+funzionare — una finestra Qt viva non si può spostare dentro un terminale — e da lì è rimasta
+l'unico comportamento possibile, senza che nessuno l'avesse mai deciso. È un default giusto e una
+regola sbagliata: su un desktop una finestra vera ha zoom, pan e rotazione fatti dal toolkit, e
+chi li voleva non aveva modo di chiederli. Un default diventa una prigione nel momento in cui
+smetti di poterlo spegnere.
+
+*Le decisioni, e cosa le ha guidate:*
+
+- **La domanda è "c'è uno schermo", non "sono in ssh".** La prima versione rifiutava le finestre
+  via ssh per principio, che è giusto per un `ssh host` nudo e sbagliato per `ssh -X` con XQuartz
+  dall'altra parte, dove il plot si apre sullo schermo davanti a cui l'utente è davvero seduto.
+  Lento su un link sottile, e affare suo. Quindi si guarda solo `DISPLAY`/`WAYLAND_DISPLAY`, più
+  l'eccezione di macOS e Windows che hanno un window server e nessuna variabile che lo nomini.
+- **Dove la scelta non c'è, la riga lo dice invece di sparire.** Su una macchina senza schermo
+  "finestre" significa nessun grafico: l'impostazione resta a `on — nessun display` e non prende
+  Enter. Un interruttore che legge "off" mentre le tab continuano ad arrivare è un interruttore
+  rotto; una riga assente è la domanda "perché non posso spegnerlo" senza risposta.
+- **Una variabile sola, `CLEECODE_PLOTS`, per tutti e due i linguaggi.** Un Octave che tiene le
+  sue finestre qt e un matplotlib che tiene le proprie sono la stessa risposta alla stessa
+  domanda. `MPLBACKEND` viene messo solo in modalità tab: non messo, matplotlib fa quello che fa
+  ovunque, che è tutto il punto dell'impostazione.
+- **Vale dalla sessione dopo, e lo dice.** Un interprete sceglie il backend una volta sola,
+  all'avvio, e una finestra già a schermo non si convince a diventare un'immagine.
+
+*Tre bug trovati strada facendo, tutti dallo stesso posto — un Octave headless su Linux:*
+
+| bug | perché era invisibile da qui |
+|---|---|
+| **una tab di figura chiusa tornava** | lo snapshot elenca le figure che la sessione *tiene*, e il poll lo leggeva come "mostra queste". Con una figura sola non si vede mai: serve chiuderne una e disegnare nell'altra |
+| **Run scriveva un comando di shell al prompt di Octave** | `/usr/bin/octave` esegue `octave-cli-11.3.0` sulle build senza Qt, e Linux taglia il nome a quindici caratteri. Su un Mac l'eseguibile si chiama `octave` e basta |
+| **l'avviso di Octave su gnuplot arrivava al primo plot** | qui gnuplot non viene mai scelto, perché il display c'è |
+
+*E il layout:* i preset mettono il prompt sotto a ogni larghezza. Di fianco si legge bene finché
+non si apre una figura — poi l'editor si divide per mettere il grafico accanto al codice che lo ha
+disegnato, e con tre colonne ogni metà è un terzo di finestra. Un plot largo un terzo di finestra
+è una miniatura.

@@ -1,3 +1,47 @@
+## What's new in 0.9.2
+
+**Plots can go back to their own windows.** Capture was the only way plotting worked: every
+Octave and matplotlib session was told to open no window and hand over a picture. That is still
+the default, and still the right one — a live Qt window cannot be moved into a terminal, so
+without it the figure appears behind the terminal, which is the worst of both. But on a desktop a
+real figure window zooms, pans and rotates with the toolkit's own tools, and wanting that was not
+something you could ask for. *Run ▸ Plots as tabs* turns capture off, and the settings panel
+carries the same row: off, Octave keeps its qt windows and matplotlib its usual backend, exactly
+as they behave outside CleeCode. It applies to sessions started afterwards, because an
+interpreter picks its backend once, at startup.
+
+Where there is no screen, the choice is not offered. Over ssh without X forwarding, or on a Linux
+box with no `DISPLAY`, asking for a window means no plot at all. The row stays visible and reads
+"on — no display" rather than flipping to "off" while the tabs keep arriving, which is what a
+broken switch looks like. `ssh -X` with an X server at your end is a display like any other, so
+there the choice is yours again — the question is whether a window can open, never whether the
+connection is remote.
+
+**A figure tab you closed came back.** The snapshot lists every figure the session is *holding*,
+and the poll read that as "show these" — so plotting into figure 3 reopened figure 1's tab, closed
+a minute ago because you were done with it. A tab now stays closed until that figure is drawn
+again.
+
+**The Run button typed a shell command at a live Octave prompt.** On a headless Linux build
+`/usr/bin/octave` execs `octave-cli-11.3.0`, and Linux shows that name cut to fifteen characters.
+Neither spelling was recognised as an Octave, so Run decided no prompt was open and sent
+`octave --persist file.m`, which at an Octave prompt is only `error: 'octave' undefined`.
+
+**Octave's advice about gnuplot arrived at your first plot.** Nine lines recommending qt instead,
+printed the first time the toolkit is *used* — so on a machine whose only toolkit is gnuplot they
+landed in the middle of your own output rather than at startup. They are about a choice CleeCode
+made on your behalf, recommending a toolkit that needs the display the machine does not have, so
+that one warning is off for the session. Everything else it wants to tell you still gets through.
+
+**The presets put the prompt underneath at every width.** It used to move beside the editor on a
+wide window. That reads well until a figure opens: the editor splits to put the plot next to the
+code that drew it, and in three columns each half is about a third of the window — a plot that
+size is a thumbnail. Underneath, the editor keeps the whole width to divide and the prompt keeps
+it too, which is what a matrix row wanted in the first place.
+
+A `settings.toml` written before this keeps working: `diagnostics_figures` is still read under its
+new name, `plots_in_tabs`.
+
 ## What's new in 0.9.1
 
 Four bugs in the numeric side, all of them reported from real use and none of them visible from
