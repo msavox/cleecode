@@ -132,9 +132,9 @@ def main():
         filled = session.press("\r", lambda s: "Asking" not in s.text() and "35" in s.text(), 25)
         report.check("the numbers arrive without anything being typed at the prompt",
                      filled, session, note="asked through the same file the Octave side uses")
-        prompt = "\n".join(l[l.rfind("││") + 2:] for l in session.lines() if "││" in l)
+        prompt = "\n".join(session.frame_of(">>>"))
         report.check("nothing was typed at the user's prompt to ask",
-                     "slice" not in prompt.lower(), session)
+                     "slice" not in prompt.lower(), session, note=repr(prompt[-90:]))
         session.press("\x1b", lambda s: True, 4)
 
         # --- the debugger -----------------------------------------------------------------

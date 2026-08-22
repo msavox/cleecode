@@ -94,12 +94,12 @@ def main():
                      session)
 
         # The user's prompt is untouched: nothing was typed there to produce any of this.
-        prompt = "\n".join(
-            l[l.rfind("││") + 2:] for l in session.lines() if "││" in l
-        )
+        # The frame the prompt is really in, not "whatever is rightmost on the row": the
+        # latter was reading a column of blank border, so this check passed for free.
+        prompt = "\n".join(session.frame_of(">>"))
         report.check("nothing was typed at the user's prompt to ask",
                      "cleecode_slice" not in prompt, session,
-                     note="the request went through a file")
+                     note=repr(prompt[-90:]))
 
         # Its own frame, not the whole screen. "6x6" is also in the workspace table, which
         # stays there — and used to not: the panel followed the newest .json in the snapshot
