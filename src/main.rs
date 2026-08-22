@@ -242,18 +242,31 @@ fn main() -> Result<()> {
         stdout(),
     ));
     let mut terminal = ratatui::Terminal::new(backend)?;
-    crossterm::execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
-    // Ask for disambiguated key reporting where the terminal offers it. Without it Ctrl+Tab
-    // arrives as a plain Tab — the two are the same byte, 0x09, in the encoding terminals have
-    // used since VT100 — so cycling frames from the keyboard would be impossible to tell from
-    // indenting. Ghostty, kitty, WezTerm and foot support this; Terminal.app does not, which is
-    // why Alt+1/2/3 reach the frames directly and work everywhere.
-    // Asked here, alongside the other capability query and for the same reason: it writes to
-    // stdout and waits for the terminal's answer, which cannot happen once frames are being
-    // drawn. It has its own timeout and falls back to half-blocks, so a silent terminal costs a
-    // coarser picture rather than a stall.
+    // Both capability questions go out *before* the mouse is captured, and the order is the
+    // whole point. Each writes a query to stdout and then reads stdin for the terminal's reply.
+    // With mouse reporting already on, every twitch of the pointer over the window puts an
+    // `ESC [ < 35 ; col ; row M` into that same stdin — so a hand resting on the trackpad while
+    // CleeCode starts can bury the answer, and the query gives up and reports the terminal
+    // cannot do the thing it can do.
+    //
+    // What that costs is silent and looks like a bug in something else: no graphics protocol
+    // means pictures fall back to half-blocks, and a figure drawn in half-blocks keeps its
+    // curve and loses every label on it — the title, the axes, the tick numbers — because a
+    // pane twenty rows tall is forty pixels of vertical resolution. Reported as "my plots have
+    // no titles", which is a fair description of what you see and no help at all in finding
+    // this. Asking first costs nothing: neither query needs the mouse.
+    //
+    // The keyboard one matters for its own reason. Without it Ctrl+Tab arrives as a plain Tab —
+    // the two are the same byte, 0x09, in the encoding terminals have used since VT100 — so
+    // cycling frames from the keyboard would be impossible to tell from indenting. Ghostty,
+    // kitty, WezTerm and foot support this; Terminal.app does not, which is why Alt+1/2/3 reach
+    // the frames directly and work everywhere.
+    //
+    // Both have their own timeout, so a silent terminal costs a coarser picture rather than a
+    // stall, and neither can happen once frames are being drawn.
     preview::detect_terminal();
     let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    crossterm::execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     if enhanced {
         let _ = crossterm::execute!(
             stdout(),
