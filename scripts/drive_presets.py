@@ -50,17 +50,27 @@ def check_preset(binary, spec, report):
         report.check(f"{spec['name']}: the interpreter is already at its prompt", at_prompt, wide,
                      note="nothing was typed to start it")
 
+        # On the tab, not merely on screen. The name is written in the menu bar's workspace
+        # label, in Octave's own banner (three times, in URLs) and in the shell echo that
+        # started it — so "somewhere on screen" was satisfied for both presets with the tab
+        # strip removed entirely.
+        strip = next((line for line in wide.lines() if "shell ✕" in line), "")
         report.check(f"{spec['name']}: its tab carries the interpreter's name",
-                     spec["tab"] in wide.text(), wide)
+                     spec["tab"] in strip, wide, note=repr(strip[:60]))
         report.check(f"{spec['name']}: a plain shell sits beside it in the same window",
                      "shell" in wide.text(), wide)
 
-        # Beside or underneath is a question about columns, not rows: either way the terminal's
-        # tab strip is near the top of the screen. On the right it starts past the middle.
+        # Underneath, and at this width on purpose. This check used to require the prompt to
+        # be *beside* the editor on a wide window, and it had been failing since 0.9.2 without
+        # anyone reading it: the presets put the prompt underneath at every width, because the
+        # editor splits to put a figure next to the code that drew it and a third window
+        # alongside makes each half a third of the screen. A plot a third of a window wide is a
+        # thumbnail. The decision is in docs/ROADMAP.md under 0.9.2; the check now holds it.
         term_col = wide.column_of("shell")
-        report.check(f"{spec['name']}: at 190 columns the prompt is beside the editor",
-                     term_col is not None and term_col > 95, wide,
-                     note=f"the terminal's tabs start at column {term_col} of 190")
+        term_row = wide.row_of("shell")
+        report.check(f"{spec['name']}: at 190 columns the prompt is underneath, not beside",
+                     term_col is not None and term_col < 95 and term_row is not None and term_row > 10,
+                     wide, note=f"the terminal starts at column {term_col} of 190, row {term_row}")
     finally:
         wide.close()
 
@@ -74,7 +84,10 @@ def check_preset(binary, spec, report):
         narrow.wait(lambda s: spec["prompt"] in s.text(), 40)
         term_col = narrow.column_of("shell")
         term_row = narrow.row_of("shell")
-        report.check(f"{spec['name']}: at 92 columns it moves underneath instead",
+        # And underneath here too — the same arrangement, which is the point. This used to be
+        # written as "it *moves* underneath instead", implying the wide window put it elsewhere;
+        # it passed against a layout identical to the wide one and so demonstrated nothing.
+        report.check(f"{spec['name']}: at 92 columns it is underneath as well",
                      term_col is not None and term_col < 46 and term_row is not None and term_row > 10,
                      narrow, note=f"the terminal starts at column {term_col}, row {term_row}")
         report.check(f"{spec['name']}: the file tree survives the narrow window",
