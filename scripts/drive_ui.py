@@ -45,7 +45,13 @@ def completion(session, report):
                  session.press("co", lambda s: s.popup_open()), session)
     report.check("keywords of the language are offered", "const" in session.text(), session,
                  note="sample.rs, so rust")
-    report.check("words from the buffer are offered too", "config_path" in session.text(), session)
+    # From the popup's own rows, not from the screen: the editor is showing
+    # `let config_path = 1;`, so a whole-screen search was answered by the buffer the popup is
+    # supposed to be reading — the check would have passed with the feature deleted. The
+    # keyword check beside it is genuine, because `const` is written nowhere in the sample.
+    report.check("words from the buffer are offered too",
+                 "config_path" in session.popup_words(), session,
+                 note=str(session.popup_words()))
 
     session.press("nf", lambda s: "const" not in s.text())
     report.check("typing narrows the list", session.popup_open() and "const" not in session.text(),
