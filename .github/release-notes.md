@@ -1,3 +1,28 @@
+## What's new in 0.10.1
+
+Three bugs, all of them silent, all of them found in a real session rather than in a test.
+
+**`clear` did nothing in a terminal pane, and neither did the startup-banner scrub.** A pane
+inherited `TERM` from whatever terminal CleeCode was displayed in — and the pane is not that
+terminal, it is CleeCode's own parser. Reached over ssh from Ghostty, an Ubuntu box was told it
+was an `xterm-ghostty`, an entry it has never heard of, so everything that goes through terminfo
+stopped working inside the panes. They are told `xterm-256color` now, which is what the parser
+actually implements, plus `COLORTERM=truecolor` for the 24-bit colour it does carry.
+
+**Figures could lose their titles and axis labels.** Not in the plot — the picture on disk was
+always right. CleeCode asks the terminal at startup whether it can draw real pixels, and that
+question reads the terminal's reply off stdin. It was asked *after* mouse reporting was switched
+on, so a hand resting on the trackpad during startup could bury the answer under mouse events;
+CleeCode then fell back to half-blocks, where a pane twenty rows tall is forty pixels of vertical
+resolution and every label on a plot disappears. The question is asked first now.
+
+**A session over `ssh -X` could die outright, leaving an unusable terminal.** CleeCode opened a
+system clipboard at startup, always; on Linux that holds an X11 connection for the whole session.
+Under `ssh -X` the display is forwarded, and forwarding expires — after twenty minutes, by
+default. When it goes, libxcb ends the process without unwinding, so none of the terminal
+teardown runs. Over ssh that clipboard was never usable anyway (it is the *server's*, which is
+why copying already went out through OSC 52), so it is no longer opened there.
+
 ## What's new in 0.10.0
 
 **The completion popup gains its second source.** Where a language server is installed, its
