@@ -140,6 +140,36 @@ class Session:
         """The row as pyte Char objects, which carry colour and attributes as well as text."""
         return [self.screen.buffer[row][x] for x in range(self.cols)]
 
+    def full_line(self, y):
+        """The row as text, without the rstrip `lines()` does — so a column index always lands
+        on the character that is drawn there, including in the blank right-hand end of a row."""
+        return "".join(cell.data or " " for cell in self.cells(y))
+
+    def frame_of(self, needle):
+        """The lines inside the bordered frame that `needle` is drawn in.
+
+        Slicing a row at its last `││` is how these drivers used to mean "the right-hand pane",
+        and it lands in whichever frame happens to be rightmost *on that row* — which, on a
+        screen whose frames do not line up, is often not the one wanted. For a check that some
+        text is absent, reading the wrong frame is a pass for free. This walks out to the borders
+        of the frame the text is really in, so what is being read is never in doubt."""
+        lines = self.lines()
+        here = next(((y, line.index(needle)) for y, line in enumerate(lines) if needle in line), None)
+        if here is None:
+            return []
+        y, x = here
+        row = self.full_line(y)
+        left = row.rfind("\u2502", 0, x)
+        right = row.find("\u2502", x)
+        if left < 0 or right < 0:
+            return []
+        top, bottom = y, y
+        while top > 0 and self.full_line(top - 1)[left] == "\u2502":
+            top -= 1
+        while bottom + 1 < self.rows and self.full_line(bottom + 1)[left] == "\u2502":
+            bottom += 1
+        return [self.full_line(r)[left + 1:right] for r in range(top, bottom + 1)]
+
     def row_of(self, needle):
         """The first screen row containing `needle`, or None."""
         for y, line in enumerate(self.lines()):

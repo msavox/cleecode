@@ -1133,3 +1133,25 @@ al pannello**, quindi il test proseguiva su un pannello che stava ancora chieden
 cercare il colore della riga selezionata per nome (`cyan`) non trovava mai niente, perché ratatui
 scrive i colori come codici a 256 e pyte li restituisce in esadecimale. Nessuno dei tre era un bug
 del programma, e tutti e tre avrebbero potuto passare per uno.
+
+### Tre controlli che non controllavano niente (2026-08-22)
+
+`drive_workspace` falliva su "and the other cell's are not", ed era il driver ad avere torto: la
+finestra workspace mostrava esattamente `b`, `nn`, `s` e nessun `first`. `workspace_pane`
+tagliava la riga sull'**ultimo** `││`, che è anche il bordo fra albero dei file ed editor, quindi
+si portava dentro le righe dello script — e `first` era scritto a riga 2 del file aperto.
+
+*E tirando quel filo ne sono venuti fuori altri due, peggiori.* Lo stesso taglio in
+`drive_inspect` e `drive_python` serviva a dire "al prompt dell'utente non è stato scritto
+niente". Sul serio leggeva **una colonna di bordo vuoto**: il riquadro più a destra su quelle
+righe non è il terminale, è la finestra workspace accanto. Quei due controlli passavano a
+prescindere — sarebbero passati anche se CleeCode avesse scritto l'intera richiesta al prompt.
+Un controllo che verifica un'**assenza** e guarda nel posto sbagliato è un PASS gratis, ed è più
+insidioso di uno che guarda troppo largo: quello almeno può fallire.
+
+Adesso `Session.frame_of(needle)` cammina fino ai bordi del riquadro in cui il testo è davvero
+disegnato, e le note dei due controlli stampano cosa hanno letto — perché la prova che un
+controllo guardi nel punto giusto deve stare nel suo output, non nella fiducia di chi l'ha
+scritto. È la terza volta in tre release che salta fuori la stessa forma di errore (`drive_inspect`
+nella 0.9.1, il colore della riga selezionata nella 0.10, questi tre): quando un controllo passa,
+vale la pena guardare *cosa* ha guardato.

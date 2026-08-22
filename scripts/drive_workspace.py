@@ -30,11 +30,26 @@ s = 'ciao';
 
 
 def workspace_pane(session):
-    """The lines of the rightmost frame, which is where the workspace window is."""
+    """The lines inside the workspace window, and nothing else.
+
+    Found by where its own frame starts rather than by the last `││` on the row. That pattern
+    also matches the border between the file tree and the editor, so it was quietly handing back
+    lines of the open script as well — which made two checks here meaningless: the one that has
+    to *not* see `first` was reading it off line 2 of the script, and the one looking for `b` and
+    `s` would have passed against an empty workspace, since single letters are in any line of
+    code. Both were checks that could only fail if the screen were blank."""
+    lines = session.lines()
+    corner = next(((y, line.find("┌ workspace")) for y, line in enumerate(lines)
+                   if "┌ workspace" in line), None)
+    if corner is None:
+        return []
+    top, left = corner
     out = []
-    for line in session.lines():
-        if "││" in line:
-            out.append(line[line.rfind("││") + 2:].rstrip("│ "))
+    for line in lines[top + 1:]:
+        # The frame's own left border on every row of it; the closing `└` ends the window.
+        if line[left:left + 1] != "│":
+            break
+        out.append(line[left + 1:].rstrip("│ "))
     return out
 
 
