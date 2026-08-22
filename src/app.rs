@@ -443,20 +443,31 @@ pub struct App {
     scratch: Editor,
     /// The read-only git panel, when open.
     pub git_panel: Option<GitPanel>,
-    git_panel_tx: Sender<crate::git::Snapshot>,
-    git_panel_rx: Receiver<crate::git::Snapshot>,
+    git_panel_tx: Sender<GitMessage>,
+    git_panel_rx: Receiver<GitMessage>,
 }
 
-/// Which of the three questions the git panel is answering.
+/// Which of the four questions the git panel is answering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GitTab {
+    /// What is changed, file by file — and the only tab you can act on. First, because it is
+    /// the one you came for: the diff tells you what you did, this tells you what to do next.
+    Status,
     Diff,
     Log,
     Branches,
 }
 
 impl GitTab {
-    pub const ALL: [GitTab; 3] = [GitTab::Diff, GitTab::Log, GitTab::Branches];
+    pub const ALL: [GitTab; 4] = [GitTab::Status, GitTab::Diff, GitTab::Log, GitTab::Branches];
+
+    /// Whether the tab is a list you move a cursor through, as opposed to text you scroll.
+    ///
+    /// The difference is whether there is anything to *do* to a row. A diff line is not a thing
+    /// you can act on, so a highlight on one would be a promise the panel does not keep.
+    pub fn picks_a_row(self) -> bool {
+        matches!(self, GitTab::Status | GitTab::Branches)
+    }
 
     fn cycle(self, delta: isize) -> GitTab {
         let at = Self::ALL.iter().position(|t| *t == self).unwrap_or(0) as isize;
@@ -471,7 +482,111 @@ impl GitTab {
 pub struct GitPanel {
     pub tab: GitTab,
     pub scroll: usize,
+    /// The row the cursor is on, in the tabs that have one. Kept across a refresh — staging a
+    /// file redraws the list, and being put back at the top after every action would make
+    /// staging five files an exercise in counting down again.
+    pub selected: usize,
     pub snap: Option<crate::git::Snapshot>,
+    /// A question that has to be answered before anything else happens.
+    pub prompt: Option<GitPrompt>,
+    /// Whether a `git` that writes is still running. One at a time: two `git add`s racing for
+    /// the index lock is a failure that reads as the panel ignoring a keystroke.
+    pub busy: bool,
+    /// What git said about the last thing it was asked to do, and whether it was a complaint.
+    pub notice: Option<(String, bool)>,
+    /// How many rows the list had room for when it was last drawn. Written by the renderer,
+    /// which is the only thing that knows — the same arrangement as the completion popup's
+    /// anchor, and for the same reason: keeping a selection on screen needs the height.
+    pub body_rows: usize,
+}
+
+impl GitPanel {
+    /// How many rows the tab in front of you has.
+    pub fn len(&self) -> usize {
+        let Some(snap) = self.snap.as_ref() else { return 0 };
+        match self.tab {
+            GitTab::Status => snap.changes.len(),
+            GitTab::Diff => snap.diff.len(),
+            GitTab::Log => snap.log.len(),
+            GitTab::Branches => snap.branches.len(),
+        }
+    }
+
+    pub fn selected_change(&self) -> Option<&crate::git::Change> {
+        if self.tab != GitTab::Status {
+            return None;
+        }
+        self.snap.as_ref()?.changes.get(self.selected)
+    }
+
+    pub fn selected_branch(&self) -> Option<&crate::git::Branch> {
+        if self.tab != GitTab::Branches {
+            return None;
+        }
+        self.snap.as_ref()?.branches.get(self.selected)
+    }
+
+    /// How many files are staged — the number a commit is about to be made of.
+    pub fn staged_count(&self) -> usize {
+        self.snap.as_ref().map(|s| s.changes.iter().filter(|c| c.staged()).count()).unwrap_or(0)
+    }
+
+    /// The absolute path of the row the cursor is on. Absolute because git's own paths here are
+    /// relative to the top of the working tree, and the panel is running wherever CleeCode was
+    /// opened — which is not always the same place.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        let change = self.selected_change()?;
+        let top = self.snap.as_ref()?.top.as_ref()?;
+        Some(top.join(&change.path))
+    }
+
+    fn clamp_to_list(&mut self) {
+        let max = self.len().saturating_sub(1);
+        self.selected = self.selected.min(max);
+        self.scroll = self.scroll.min(max);
+        self.reveal();
+    }
+
+    /// Moves the cursor, or the view, depending on which the tab has.
+    fn move_by(&mut self, delta: isize) {
+        let max = self.len().saturating_sub(1) as isize;
+        if self.tab.picks_a_row() {
+            self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+            self.reveal();
+        } else {
+            self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// Scrolls just enough to keep the cursor on screen, and no further: a list that jumped to
+    /// centre the selection would move rows the eye was using to keep its place.
+    fn reveal(&mut self) {
+        if !self.tab.picks_a_row() {
+            return;
+        }
+        let rows = self.body_rows.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + rows {
+            self.scroll = self.selected + 1 - rows;
+        }
+    }
+}
+
+/// A question the panel is holding everything else for.
+pub enum GitPrompt {
+    /// Typing a commit message.
+    Commit(String),
+    /// About to throw away the changes to a file. Holds the whole change rather than the path,
+    /// because whether it is refused depends on what git knows about the file.
+    Discard(crate::git::Change),
+}
+
+/// What comes back from a thread doing something with git.
+enum GitMessage {
+    Snapshot(Box<crate::git::Snapshot>),
+    /// The outcome of a command that wrote — git's own words, either way.
+    Wrote(Result<String, String>),
 }
 
 /// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
@@ -2418,7 +2533,16 @@ impl App {
             self.git_panel = None;
             return;
         }
-        self.git_panel = Some(GitPanel { tab: GitTab::Diff, scroll: 0, snap: None });
+        self.git_panel = Some(GitPanel {
+            tab: GitTab::Status,
+            scroll: 0,
+            selected: 0,
+            snap: None,
+            prompt: None,
+            busy: false,
+            notice: None,
+            body_rows: 1,
+        });
         self.refresh_git_panel();
     }
 
@@ -2429,34 +2553,78 @@ impl App {
         let file = self.editor().path.clone();
         let tx = self.git_panel_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::git::snapshot(&root, file));
+            let _ = tx.send(GitMessage::Snapshot(Box::new(crate::git::snapshot(&root, file))));
         });
     }
 
     pub fn poll_git_panel(&mut self) {
-        while let Ok(snap) = self.git_panel_rx.try_recv() {
-            if let Some(panel) = self.git_panel.as_mut() {
-                panel.snap = Some(snap);
-                panel.scroll = 0;
+        let lang = self.settings.lang;
+        while let Ok(message) = self.git_panel_rx.try_recv() {
+            match message {
+                GitMessage::Snapshot(snap) => {
+                    let Some(panel) = self.git_panel.as_mut() else { continue };
+                    panel.snap = Some(*snap);
+                    // Clamped rather than reset. A refresh follows every action, and being put
+                    // back at the top after each one would make staging five files an exercise
+                    // in counting down to the sixth again.
+                    panel.clamp_to_list();
+                }
+                GitMessage::Wrote(outcome) => {
+                    if let Some(panel) = self.git_panel.as_mut() {
+                        panel.busy = false;
+                        panel.notice = Some(match &outcome {
+                            Ok(said) if said.is_empty() => {
+                                (i18n::msg_git_done(lang).to_string(), false)
+                            }
+                            Ok(said) => (said.clone(), false),
+                            Err(complaint) => (complaint.clone(), true),
+                        });
+                    }
+                    // Whatever happened, what is on screen is now the state from before it.
+                    self.refresh_git_panel();
+                }
             }
         }
     }
 
+    /// Hands a writing `git` to a thread and takes the answer back on the same channel the
+    /// reads come in on.
+    ///
+    /// On a thread for the reason every other slow thing here is: `git commit` runs the hooks,
+    /// and a pre-commit hook that runs a test suite would otherwise stop the frame loop — the
+    /// editor, the terminals and the clock along with it.
+    fn git_write<F>(&mut self, action: F)
+    where
+        F: FnOnce(&Path) -> Result<String, String> + Send + 'static,
+    {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        // Two `git add`s racing for the index lock is a failure that reads as a dropped
+        // keystroke, so the second one is not started.
+        if panel.busy {
+            return;
+        }
+        panel.busy = true;
+        panel.notice = Some((i18n::msg_git_working(self.settings.lang).to_string(), false));
+        let root = self.root.clone();
+        let tx = self.git_panel_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(GitMessage::Wrote(action(&root)));
+        });
+    }
+
     fn handle_git_panel_key(&mut self, key: KeyEvent) {
+        // A question that is up takes the whole keyboard until it is answered. It is the only
+        // nesting in this panel, and it is here because the two things it asks — a commit
+        // message, and whether to throw work away — are exactly the two that must not be
+        // answered by a keystroke meant for the list behind them.
+        if self.git_panel.as_ref().is_some_and(|p| p.prompt.is_some()) {
+            self.handle_git_prompt_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.git_panel = None,
-            KeyCode::Tab | KeyCode::Right => {
-                if let Some(p) = self.git_panel.as_mut() {
-                    p.tab = p.tab.cycle(1);
-                    p.scroll = 0;
-                }
-            }
-            KeyCode::BackTab | KeyCode::Left => {
-                if let Some(p) = self.git_panel.as_mut() {
-                    p.tab = p.tab.cycle(-1);
-                    p.scroll = 0;
-                }
-            }
+            KeyCode::Tab | KeyCode::Right => self.switch_git_tab(1),
+            KeyCode::BackTab | KeyCode::Left => self.switch_git_tab(-1),
             KeyCode::Down => self.scroll_git_panel(1),
             KeyCode::Up => self.scroll_git_panel(-1),
             KeyCode::PageDown => self.scroll_git_panel(10),
@@ -2464,25 +2632,156 @@ impl App {
             KeyCode::Home => {
                 if let Some(p) = self.git_panel.as_mut() {
                     p.scroll = 0;
+                    p.selected = 0;
                 }
             }
-            // Asking again is the only action a read-only panel needs: the answer goes stale the
-            // moment you type in the shell next to it.
+            // The answer goes stale the moment you type in the shell next to it, so asking again
+            // is a first-class action rather than something to close and reopen for.
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 if let Some(p) = self.git_panel.as_mut() {
                     p.snap = None;
+                    p.notice = None;
                 }
                 self.refresh_git_panel();
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => self.git_stage_selected(),
+            KeyCode::Char('u') | KeyCode::Char('U') => self.git_unstage_selected(),
+            KeyCode::Char('a') | KeyCode::Char('A') => self.git_stage_everything(),
+            KeyCode::Char('c') | KeyCode::Char('C') => self.git_ask_for_a_message(),
+            KeyCode::Char('x') | KeyCode::Char('X') => self.git_ask_about_discarding(),
+            KeyCode::Enter => self.git_open_or_switch(),
+            _ => {}
+        }
+    }
+
+    fn switch_git_tab(&mut self, delta: isize) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        panel.tab = panel.tab.cycle(delta);
+        // Each tab is a list of its own length, and carrying an offset across would land in the
+        // middle of a shorter one.
+        panel.scroll = 0;
+        panel.selected = 0;
+    }
+
+    /// The two questions the panel asks. Everything not spelled out here says no — which is the
+    /// safe answer to one of them and a harmless one to the other.
+    fn handle_git_prompt_key(&mut self, key: KeyEvent) {
+        let lang = self.settings.lang;
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        match panel.prompt.as_mut() {
+            Some(GitPrompt::Commit(message)) => match key.code {
+                KeyCode::Esc => panel.prompt = None,
+                KeyCode::Backspace => {
+                    message.pop();
+                }
+                KeyCode::Char(c) => message.push(c),
+                KeyCode::Enter => {
+                    let message = message.clone();
+                    panel.prompt = None;
+                    self.git_write(move |root| crate::git::commit(root, &message));
+                }
+                _ => {}
+            },
+            Some(GitPrompt::Discard(change)) => {
+                // Only the one letter, and only the one the question was asked in. Every other
+                // key means no — including the ones that do something on the list underneath,
+                // which is the whole point of asking.
+                let yes = key.code == KeyCode::Char(i18n::yes_key(lang))
+                    || key.code == KeyCode::Char(i18n::yes_key(lang).to_ascii_uppercase());
+                let change = change.clone();
+                let top = panel.snap.as_ref().and_then(|s| s.top.clone());
+                panel.prompt = None;
+                if yes && let Some(top) = top {
+                    let absolute = crate::git::Change { path: top.join(&change.path), ..change };
+                    self.git_write(move |root| crate::git::discard(root, &absolute));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn git_stage_selected(&mut self) {
+        let Some(path) = self.git_panel.as_ref().and_then(GitPanel::selected_path) else { return };
+        self.git_write(move |root| crate::git::stage(root, &path));
+    }
+
+    fn git_unstage_selected(&mut self) {
+        let Some(path) = self.git_panel.as_ref().and_then(GitPanel::selected_path) else { return };
+        self.git_write(move |root| crate::git::unstage(root, &path));
+    }
+
+    fn git_stage_everything(&mut self) {
+        if self.git_panel.as_ref().is_none_or(|p| p.tab != GitTab::Status) {
+            return;
+        }
+        self.git_write(crate::git::stage_all)
+    }
+
+    /// Opens the commit box, unless there is nothing to commit — in which case it says what to
+    /// do instead. An empty commit box that then fails is a longer way of saying the same thing.
+    fn git_ask_for_a_message(&mut self) {
+        let lang = self.settings.lang;
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        if panel.tab != GitTab::Status {
+            return;
+        }
+        if panel.staged_count() == 0 {
+            panel.notice = Some((i18n::msg_git_nothing_staged(lang).to_string(), true));
+            return;
+        }
+        panel.prompt = Some(GitPrompt::Commit(String::new()));
+    }
+
+    fn git_ask_about_discarding(&mut self) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(change) = panel.selected_change().cloned() else { return };
+        // Said before the question rather than after the answer: a file git has never seen has
+        // no earlier version to go back to, and finding that out by confirming would be finding
+        // it out from an error.
+        if change.untracked() {
+            if let Err(why) = crate::git::discard(Path::new("."), &change) {
+                panel.notice = Some((why, true));
+            }
+            return;
+        }
+        panel.prompt = Some(GitPrompt::Discard(change));
+    }
+
+    /// Enter, which means the obvious thing for whichever list is in front of you: open the file,
+    /// or move to the branch.
+    fn git_open_or_switch(&mut self) {
+        let Some(panel) = self.git_panel.as_ref() else { return };
+        match panel.tab {
+            GitTab::Status => {
+                let Some(path) = panel.selected_path() else { return };
+                // The panel closes: you asked for the file, and reading it behind a full-window
+                // box is not reading it.
+                self.git_panel = None;
+                self.open_file_in_tab(path);
+            }
+            GitTab::Branches => {
+                let Some(branch) = panel.selected_branch() else { return };
+                if branch.current {
+                    return;
+                }
+                let name = branch.name.clone();
+                self.git_write(move |root| crate::git::switch(root, &name));
             }
             _ => {}
         }
     }
 
-    /// A click inside the git panel. Only the tab row does anything: everything below it is text
-    /// to read, and a panel that cannot write has nothing for a click on its body to mean.
-    fn click_git_tab(&mut self, rect: Rect, col: u16, row: u16) {
+    /// A click inside the git panel: the tab row switches tabs, and a row of a list the cursor
+    /// can be on takes the cursor.
+    ///
+    /// The body used to do nothing, and the reason written here was that a panel which cannot
+    /// write has nothing for a click on a line of diff to mean. That is still true of the diff
+    /// and the log — and false of the two lists whose rows have actions attached, where being
+    /// able to reach a row only by pressing Down is a worse answer than the one it replaced.
+    fn click_git_panel(&mut self, rect: Rect, col: u16, row: u16) {
         let inner = ui::inner_rect(rect);
         if row != inner.y {
+            self.click_git_row(inner, row);
             return;
         }
         let header = Rect { height: 1, ..inner };
@@ -2493,22 +2792,37 @@ impl App {
             // Same as switching with the keyboard: each tab is a list of its own length, and
             // carrying the offset across would land in the middle of a shorter one.
             panel.scroll = 0;
+            panel.selected = 0;
         }
     }
 
-    /// Scrolls the panel, stopping at the end of what it has rather than running off it. The
-    /// length is the tab's own, so switching tabs cannot leave the view past the bottom.
+    /// A click on the body. Lands on the row under the pointer, worked out from the same two
+    /// numbers the drawing used: where the list starts, and how far it has been scrolled.
+    fn click_git_row(&mut self, inner: Rect, row: u16) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        if !panel.tab.picks_a_row() {
+            return;
+        }
+        // The list starts one row below the tabs and runs for as many rows as the renderer last
+        // gave it. Below that is the footer, which is not a row of anything.
+        let top = inner.y + 1;
+        if row < top || (row - top) as usize >= panel.body_rows {
+            return;
+        }
+        let landed = panel.scroll + (row - top) as usize;
+        if landed < panel.len() {
+            panel.selected = landed;
+        }
+    }
+
+    /// Moves through the panel, stopping at the end of what it has rather than running off it.
+    ///
+    /// What moves depends on the tab: a cursor where there are rows to act on, the view where
+    /// there is only text. Both stop at the tab's own length, so switching tabs cannot leave
+    /// either past the bottom of a shorter list.
     pub fn scroll_git_panel(&mut self, delta: isize) {
-        let Some(panel) = self.git_panel.as_ref() else { return };
-        let len = match (&panel.snap, panel.tab) {
-            (None, _) => 0,
-            (Some(s), GitTab::Diff) => s.diff.len(),
-            (Some(s), GitTab::Log) => s.log.len(),
-            (Some(s), GitTab::Branches) => s.branches.len(),
-        };
-        let max = len.saturating_sub(1);
         if let Some(panel) = self.git_panel.as_mut() {
-            panel.scroll = (panel.scroll as isize + delta).clamp(0, max as isize) as usize;
+            panel.move_by(delta);
         }
     }
 
@@ -6831,7 +7145,7 @@ impl App {
                     if !within(rect, col, row) {
                         self.git_panel = None;
                     } else {
-                        self.click_git_tab(rect, col, row);
+                        self.click_git_panel(rect, col, row);
                     }
                 }
                 _ => {}
@@ -7619,11 +7933,17 @@ mod tests {
     /// reachable only by passing through the other two.
     #[test]
     fn the_git_panel_tabs_cycle_both_ways() {
+        assert_eq!(GitTab::Status.cycle(1), GitTab::Diff);
         assert_eq!(GitTab::Diff.cycle(1), GitTab::Log);
         assert_eq!(GitTab::Log.cycle(1), GitTab::Branches);
-        assert_eq!(GitTab::Branches.cycle(1), GitTab::Diff, "round, not stuck at the end");
-        assert_eq!(GitTab::Diff.cycle(-1), GitTab::Branches, "and round the other way");
+        assert_eq!(GitTab::Branches.cycle(1), GitTab::Status, "round, not stuck at the end");
+        assert_eq!(GitTab::Status.cycle(-1), GitTab::Branches, "and round the other way");
         assert_eq!(GitTab::Log.cycle(-1), GitTab::Diff);
+
+        // Only the two lists whose rows can be acted on carry a cursor. A highlight on a diff
+        // line would be a promise the panel does not keep.
+        assert!(GitTab::Status.picks_a_row() && GitTab::Branches.picks_a_row());
+        assert!(!GitTab::Diff.picks_a_row() && !GitTab::Log.picks_a_row());
     }
 
     #[test]
