@@ -1155,3 +1155,49 @@ controllo guardi nel punto giusto deve stare nel suo output, non nella fiducia d
 scritto. È la terza volta in tre release che salta fuori la stessa forma di errore (`drive_inspect`
 nella 0.9.1, il colore della riga selezionata nella 0.10, questi tre): quando un controllo passa,
 vale la pena guardare *cosa* ha guardato.
+
+### L'audit dei driver, e i due bug che teneva nascosti (2026-08-22)
+
+Dopo i tre controlli vacui trovati a mano, un agente ha passato tutti gli undici driver con una
+regola sola: un controllo sospetto va **dimostrato** vacuo — stampando cosa legge davvero, o
+rompendone la premessa e verificando che passi lo stesso — non dichiarato tale leggendolo. Ne ha
+confermati quattordici. La maggior parte erano innocui; due nascondevano bug veri, ed è per quelli
+che l'esercizio valeva.
+
+**L'ispettore Python non rispondeva mai.** Il controllo aspettava `35` da qualche parte sullo
+schermo, e 35 è il Max di `arange(36)`, già scritto nella riga di riepilogo del pannello prima che
+all'ispettore fosse chiesto niente. Irrigidito a una terna di valori della matrice, ha mostrato
+"Asking the session…" per sempre. La causa: il lato Python risponde da `sys.ps1` e dal debugger, e
+**nessuno dei due gira mentre nessuno digita** — che è esattamente il momento in cui l'ispettore
+viene aperto. Octave non ha il problema perché `add_input_event_hook` scatta da fermo;
+`_slice_watcher` è quell'hook, ricostruito con quello che Python ha.
+
+**Le figure non si ridisegnavano su nessuna macchina con uno schermo.** `zoom`, pan e reset
+mandavano il comando, la sessione zoomava per davvero — xlim da 0..100 a 25..75, misurato — e la
+tab continuava a mostrare la prima immagine. Octave marca `__modified__` solo sotto gnuplot; con
+qt non lo imposta mai, nemmeno dopo un replot o un `title`. La funzione era stata misurata su una
+macchina headless, dove gnuplot viene scelto e il flag funziona, ed era rotta ovunque altro da
+quando è nata. Il gemello Python era lo specchio: `fig.stale` non veniva mai *azzerato*, quindi
+ogni figura veniva ri-renderizzata a ogni prompt.
+
+**E un terzo, trovato accendendo un controllo che non era mai stato acceso.** La gamba matplotlib
+di `drive_python` chiedeva a `sys.executable` se matplotlib fosse importabile — l'interprete che
+esegue il driver, non il `python3` che la sessione avvia. Su questa macchina sono due python
+diversi. Chiesto a quello giusto, il driver è fallito tre controlli prima di arrivare alle figure:
+il Python di Homebrew su macOS è un framework build e il processo si chiama `Python` con la
+maiuscola, il confronto era case-sensitive, e mandare una cella a una sessione viva scriveva il
+comando di **shell** `python3 file.py` al prompt di Python. Lo stesso bug della 0.9.1 con un altro
+cappello — lì era `octave-cli-11.3.0`, qui è una lettera maiuscola.
+
+*La forma ricorrente,* ormai la terza volta in tre release: un controllo che guarda troppo largo,
+o nel riquadro sbagliato, trasforma un bug in un PASS. E ce n'è una peggiore, comparsa qui: un
+controllo che verifica un'**assenza** guardando nel posto sbagliato è un PASS gratis che non può
+fallire mai. Il rimedio non è la diffidenza generica ma `Session.frame_of`, che cammina fino ai
+bordi del riquadro in cui il testo è davvero disegnato, più l'abitudine di stampare nella nota
+*cosa* è stato letto.
+
+*Due controlli chiedevano il comportamento sbagliato,* e uno era il caso raro che vale di più:
+`drive_presets` pretendeva il prompt di fianco all'editor su finestra larga, cosa deliberatamente
+tolta nella 0.9.2 — e falliva da allora senza che nessuno lo leggesse. Il suo compagno a 92
+colonne passava contro un layout identico a quello largo, quindi non dimostrava nessuna
+adattabilità: sembrava la prova di un comportamento che era stato rimosso.

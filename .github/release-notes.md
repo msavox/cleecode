@@ -1,3 +1,36 @@
+## What's new in 0.10.0
+
+**The completion popup gains its second source.** Where a language server is installed, its
+suggestions drop into the list already on screen — in magenta, ranked by the server's own
+judgement of what belongs at that position. After a dot those are the only names that mean
+anything, and no amount of reading the file could have found them. The list never waits for
+them: it opens on the words in your buffers and gets better a moment later, and a row you have
+already arrowed down to stays where it is. The `diagnostics` setting is now `language_server` —
+it governs the underlines and the list both — and the old spelling is still read.
+
+**The git panel writes.** A new Status tab lists every changed file with git's own two letters in
+front of it, the index's and the working tree's. `S` stages the file under the cursor, `U` takes
+it back out, `A` stages everything, `C` asks for a message and commits, `Enter` opens the file;
+on Branches, `Enter` moves to one. `X` throws away a file's changes behind a question that takes
+one letter and reads every other key as no — it is the only thing here that destroys work.
+Everything goes through `git` on PATH, so hooks run, commits are signed and credential helpers
+are asked, exactly as in the terminal beside it. Push and pull are deliberately absent: they can
+stop to ask for a password, and a panel has no terminal to ask it in.
+
+**The last tab can be closed.** It used to be replaced by an identical untitled buffer, which
+made it the one tab you could not close. What is left is an empty frame that says how to open
+something.
+
+**Figures redraw again on a desktop.** Zoom, pan and reset sent their command and the session
+really did move the plot, but the picture never changed: Octave only marks a figure modified
+under gnuplot, and every machine with a display uses qt. Anyone not on a headless box had a plot
+they could not move. Its Python counterpart had the mirror of the same fault — matplotlib's
+staleness flag was never cleared, so every figure was re-rendered at every prompt.
+
+**A Python that calls itself Python.** Homebrew's Python on macOS is a framework build and the
+process is named with a capital P, so CleeCode did not recognise it as a session: sending a cell
+typed a shell command at the Python prompt instead. Every brew `python3` on macOS was affected.
+
 ## What's new in 0.9.2
 
 **Plots can go back to their own windows.** Capture was the only way plotting worked: every
