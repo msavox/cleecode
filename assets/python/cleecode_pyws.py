@@ -2,7 +2,10 @@
 
 Python has no equivalent of Octave's add_input_event_hook, and it takes two mechanisms to
 build one. Between them they give what Octave cannot: an exact callback per statement,
-with no polling and no idle cost at all.
+with no polling and no idle cost for the snapshots.
+
+(The *inspector* is the one exception to "no polling", and it earned it: see
+_slice_watcher, whose reason to exist is that an idle prompt draws nothing.)
 
   · An audit hook on `exec` says *which* statement. It carries the code object, and the
     REPL compiles each thing you type under a name of its own — `<python-input-7>`, or
@@ -13,6 +16,12 @@ with no polling and no idle cost at all.
     it. But the REPL draws the prompt far more often than that: measured on 2026-08-20,
     four statements restringify it 65 times under PyREPL, and typing twelve characters
     without pressing Enter accounts for 23 more.
+
+    And it says nothing at all while the user is *not* typing. A prompt nobody is
+    touching is never restringified, so anything that only runs from `__str__` waits
+    for the next keystroke — which for the inspector meant "Asking the session…"
+    forever, found on 2026-08-22 when a test that had been passing for the wrong
+    reason was made to look at the inspector's own frame.
 
 So the hook marks and the prompt collects. Measured together in one session: 65
 restringifications become 5 snapshots for 5 statements, each seeing the namespace as the
@@ -74,6 +83,35 @@ class _Prompt:
         except Exception:
             pass
         return self._text
+
+
+def _slice_watcher(state):
+    """A daemon thread that answers the inspector while the prompt sits idle.
+
+    Everything else here runs when a statement ends or a prompt is drawn, and that is the
+    right shape for snapshots: they describe what a statement did. The inspector is a
+    question *CleeCode* asks, at a moment of its own choosing — typically while the user
+    is looking at a panel and touching nothing — and a prompt nobody types at is never
+    restringified, so the `sys.ps1` path never runs and the question sat unanswered
+    forever. Octave does not have this problem because its input hook fires while idle;
+    this thread is that hook, built from what Python has.
+
+    One stat of the request file five times a second, nothing else: `_answer_slice`
+    already returns without work unless the file's mtime moved. Reading the namespace
+    from another thread is safe here because the answer is read-only and the GIL keeps
+    each dict read whole — and the prompt path keeps answering too, so a race at worst
+    writes the same answer twice, through the same atomic rename."""
+    import threading
+
+    def loop():
+        while True:
+            time.sleep(0.2)
+            try:
+                _answer_slice(state)
+            except Exception:
+                pass
+
+    threading.Thread(target=loop, daemon=True, name="cleecode-slice").start()
 
 
 def _statement_watcher(state):
@@ -521,3 +559,4 @@ def install(out=None, figdir=None):
              "frame": None, "dbg": None, "drawn": {}}
     sys.addaudithook(_statement_watcher(state))
     sys.ps1 = _Prompt(getattr(sys, "ps1", ">>> "), state)
+    _slice_watcher(state)

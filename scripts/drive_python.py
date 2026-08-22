@@ -22,6 +22,7 @@ that check is reported as skipped rather than silently dropped.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,16 @@ import numpy as np
 A = np.arange(36).reshape(6, 6)
 testo = 'ciao mondo'
 """
+
+
+def ws_pane(session, needle="python ·"):
+    """The workspace window's own lines, joined — never the whole screen.
+
+    The audit that forced this found three checks here matching the editor, the interpreter's
+    startup banner and the terminal transcript: `a `, `n `, `20` and `np.arange` are all written
+    in places that have nothing to do with the workspace. `frame_of` walks out to the borders of
+    the frame the needle is drawn in, so a row matched here is a row of the pane."""
+    return "\n".join(session.frame_of(needle))
 
 
 def has_matplotlib():
@@ -122,14 +133,16 @@ def main():
         report.check("a numpy array is summarised, not just named",
                      "6x6" in pane and "35" in pane, session,
                      note="shape and range, the same columns Octave's matrices get")
-        report.check("recent commands are listed",
-                     "np.arange" in pane or "arange(36)" in pane, session,
-                     note="from PyREPL's own reader: readline reports none, measured")
 
         # --- looking inside a variable ----------------------------------------------------
         picked = session.press(session.chord("i"), lambda s: "Variables" in s.text(), 10)
         report.check("the variables are offered to pick from", picked, session)
-        filled = session.press("\r", lambda s: "Asking" not in s.text() and "35" in s.text(), 25)
+        # Waited for by a run of consecutive values, not by "35": the Max of arange(36) is 35
+        # and it was already on screen in the workspace's own summary row — the audit printed the
+        # predicate as true before Enter was pressed. `30 31 32` in a row exists only once the
+        # matrix body itself has been drawn.
+        filled = session.press(
+            "\r", lambda s: "Asking" not in s.text() and re.search(r"30\s+31\s+32", s.text()), 25)
         report.check("the numbers arrive without anything being typed at the prompt",
                      filled, session, note="asked through the same file the Octave side uses")
         prompt = "\n".join(session.frame_of(">>>"))
@@ -149,6 +162,15 @@ def main():
         to_terminal(session)
         session.wait(lambda s: True, 1.0)
         session.press("import calcola\r", lambda s: True, 3)
+        # Recent, in the pane, right after typing — which is the only moment the newest entry is
+        # known. The old spelling of this check looked for `np.arange` anywhere on screen and was
+        # answered by the editor showing the script; it also asked at a moment when there was
+        # nothing to list, because a cell run is CleeCode's own injection and the producer filters
+        # those out. And the list is capped to the rows left under the variables, so anything but
+        # the newest command is a check on how tall the pane happens to be.
+        report.check("the command just typed is listed under Recent",
+                     session.wait(lambda s: "import calcola" in ws_pane(s), 15), session,
+                     note="the pane's own rows, and the newest entry — the list is room-capped")
         stopped = session.press("x = calcola.calcola(5)\r", lambda s: "(Pdb)" in s.text(), 25)
         report.check("the session stops at the breakpoint", stopped, session)
         if not stopped:
@@ -158,10 +180,18 @@ def main():
                      session, note=repr(session.lines()[-1][:70]))
         report.check("the workspace window says it is stopped",
                      session.wait(lambda s: "stopped in calcola" in s.text(), 15), session)
+        # Anchored rows of the workspace pane, not substrings of the screen: `a ` and `n ` are
+        # in the module source the editor is showing, and `1x1` was already on a workspace row
+        # listing the module's variables — the audit printed this predicate as true before the
+        # session had even stopped. As written before, a stop that failed to switch the pane to
+        # frame variables would still have passed, which is the bug this check exists to catch.
+        def frame_rows(s):
+            pane = ws_pane(s, "stopped in calcola")
+            return (re.search(r"^a\s+1x1", pane, re.M) and re.search(r"^n\s+1x1", pane, re.M))
+
         report.check("and shows the frame's own variables, not the module's",
-                     session.wait(lambda s: "a " in s.text() and "n " in s.text()
-                                  and "1x1" in s.text(), 15), session,
-                     note="a and n are locals of calcola; A and testo are not in scope there")
+                     session.wait(frame_rows, 15), session,
+                     note="rows of the pane itself; A and testo are not in scope there")
         report.check("the stack stops at the statement, not in the REPL's machinery",
                      "runcode" not in session.text() and "runsource" not in session.text(),
                      session, note="a true account of how it got here, and no help finding a bug")
@@ -176,9 +206,18 @@ def main():
                      session.wait(lambda s: "Running again" in s.lines()[-1]
                                   or "Riparte" in s.lines()[-1], 20), session,
                      note=repr(session.lines()[-1][:50]))
+        # An `x` row of the pane holding 10 — calcola(5) is (5*2+10)/2. The old spelling waited
+        # for "x " and "20" anywhere on screen, and the audit found both already true: "x " in
+        # the typed transcript, "20" inside "2026" in Python's own startup banner. It also had
+        # the arithmetic wrong, which nothing noticed because nothing was being checked.
+        def module_rows(s):
+            pane = ws_pane(s)
+            row = next((l for l in pane.splitlines() if re.match(r"^x\s+1x1", l)), None)
+            return row is not None and "10" in row
+
         report.check("and the workspace goes back to the module's variables",
-                     session.wait(lambda s: "x " in s.text() and "20" in s.text(), 20), session,
-                     note="x is what calcola returned")
+                     session.wait(module_rows, 20), session, note="x is 10.0, on the pane's own row")
+
 
         # --- figures, if this machine can draw them ---------------------------------------
         if not has_matplotlib():
