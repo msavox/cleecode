@@ -6,7 +6,10 @@
 //! wrote a parser for, and it is what remains when anything smarter is unavailable.
 //!
 //! A language server is a *second source* into the same popup, not a second popup — which is why
-//! [`Source`] exists before there is anything but the buffer to put in it.
+//! [`Source`] existed before there was anything but the buffer to put in it. It arrives late, by
+//! its nature: the question goes out when the popup opens and the answer comes back frames later.
+//! So the popup is never waiting on it — it opens on the words in the file, and the server's
+//! names are folded into a list that is already on screen. See [`Popup::absorb`].
 
 use crate::picker::fuzzy_score;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -51,6 +54,13 @@ pub enum Source {
     /// supply — something defined at the prompt is in no buffer at all. It is offered as though
     /// it were on the cursor's own line, because that is how present it is.
     Session,
+    /// A name a language server said could go here.
+    ///
+    /// The only source that knows what the *cursor* is looking at rather than what the file
+    /// contains: after `self.` it offers the methods of that type, none of which need appear in
+    /// the buffer at all. It arrives after the popup is up, so it is the one source that is
+    /// folded in rather than scanned — see [`Popup::absorb`].
+    Lsp,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +165,26 @@ impl Index {
     }
 }
 
+/// Turns a server's answer into candidates, in the order it gave them.
+///
+/// `distance` carries the server's ranking, and that is not an abuse of the field: distance means
+/// "how near this is to the cursor", and a server's ordering is its own answer to exactly that
+/// question — measured by what it knows about the position rather than by counting lines. So the
+/// existing tie-break inside a tier goes on meaning one thing, and the server's first suggestion
+/// competes with a word on the cursor's own line, which is about right.
+///
+/// The [`MIN_WORD`] floor is deliberately not applied. It exists because a word *scraped out of
+/// text* is a guess, and a short guess is not worth a row in a list; a name a server offers is
+/// not a guess. `fn`, `if` and `ok` belong in the list when the server says they belong there —
+/// and [`rank`] already drops the one that is exactly what has been typed.
+pub fn lsp_candidates(words: &[String]) -> Vec<Candidate> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Candidate { text: text.clone(), source: Source::Lsp, distance: i, freq: 1 })
+        .collect()
+}
+
 /// The identifier-shaped words of a line: letters, digits and underscores, starting with a
 /// letter or an underscore so `2024` and `0x1f` are not offered as words.
 pub fn words(line: &str) -> impl Iterator<Item = &str> {
@@ -253,6 +283,13 @@ pub struct Popup {
     pub selected: usize,
     /// First visible row, so a long list scrolls under a fixed window.
     pub scroll: usize,
+    /// Whether the arrows have been used since this list was built.
+    ///
+    /// The difference between a selection and a default. Row zero is where the popup opens, not
+    /// somewhere the user chose to be — so a late answer from the server is free to take that
+    /// row, and must, or its best suggestion arrives underneath the highlight and Enter types
+    /// the wrong word. Once the arrows have been touched, the pick is the user's and is kept.
+    touched: bool,
 }
 
 impl Popup {
@@ -262,7 +299,7 @@ impl Popup {
         if matches.is_empty() {
             return None;
         }
-        Some(Popup { editor, start, prefix, candidates, matches, selected: 0, scroll: 0 })
+        Some(Popup { editor, start, prefix, candidates, matches, selected: 0, scroll: 0, touched: false })
     }
 
     /// Re-filters against a new prefix. `false` means the popup should close: either the word
@@ -275,7 +312,54 @@ impl Popup {
         self.matches = rank(prefix, &self.candidates);
         self.selected = 0;
         self.scroll = 0;
+        // A different word is a different list: whatever was picked was picked out of the old
+        // one, and holding on to it would carry a choice across to somewhere it was never made.
+        self.touched = false;
         !self.matches.is_empty()
+    }
+
+    /// Folds in candidates that arrived after the popup opened — the language server's answer.
+    ///
+    /// The hazard this exists to avoid is the list moving under a finger that is already on it.
+    /// So a pick made with the arrows stays picked, found again by its text after the re-rank.
+    /// A finger that has not moved is not on the list: there, the top row is where the popup
+    /// opened rather than anywhere the user chose, and the server's best suggestion has to be
+    /// allowed to take it — otherwise the good name arrives underneath the highlight and Enter
+    /// still types the word that was there before. Re-ranking rather than appending is the same
+    /// point from the other side: a suggestion that belongs at the top must be able to get there,
+    /// or the second source is a footnote.
+    ///
+    /// Nothing happens at all when there is nothing new. A reply that only repeats words already
+    /// scraped out of the buffer must not cost the user their selection.
+    pub fn absorb(&mut self, extra: Vec<Candidate>) {
+        let known: std::collections::HashSet<String> =
+            self.candidates.iter().map(|c| c.text.clone()).collect();
+        let before = self.candidates.len();
+        // The buffer's word wins a tie on text, and it is not an arbitrary choice: it already
+        // carries a real distance and a real frequency, which is more than a duplicate would.
+        self.candidates.extend(extra.into_iter().filter(|c| !known.contains(&c.text)));
+        if self.candidates.len() == before {
+            return;
+        }
+        let held = self.touched.then(|| self.selected().map(|c| c.text.clone())).flatten();
+        self.matches = rank(&self.prefix, &self.candidates);
+        self.selected = 0;
+        self.scroll = 0;
+        if let Some(text) = held {
+            self.select_text(&text);
+        }
+    }
+
+    /// Puts the selection back on a word by name, and scrolls to it. Silent when it is gone,
+    /// which leaves the selection where the caller put it.
+    fn select_text(&mut self, text: &str) {
+        let found = self
+            .matches
+            .iter()
+            .position(|&i| self.candidates.get(i).is_some_and(|c| c.text == text));
+        let Some(row) = found else { return };
+        self.selected = row;
+        self.scroll = if row < MAX_ROWS { 0 } else { row + 1 - MAX_ROWS };
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -285,6 +369,7 @@ impl Popup {
         let len = self.matches.len() as isize;
         let idx = ((self.selected as isize + delta) % len + len) % len;
         self.selected = idx as usize;
+        self.touched = true;
         // Keep the picked row inside the window, wrapping along with the selection.
         if self.selected < self.scroll {
             self.scroll = self.selected;
@@ -464,6 +549,100 @@ mod tests {
 
     fn ranked<'a>(prefix: &str, cands: &'a [Candidate]) -> Vec<&'a str> {
         rank(prefix, cands).into_iter().map(|i| cands[i].text.as_str()).collect()
+    }
+
+    /// The server's answer competes on the same terms as everything else — no tier of its own —
+    /// and wins inside a tier because its ranking arrives as a distance of nearly nothing.
+    #[test]
+    fn a_servers_first_suggestion_outranks_a_word_from_across_the_file() {
+        let cands = vec![
+            cand("config_path", Source::Buffer, 300, 4),
+            cand("config_reload", Source::Lsp, 0, 1),
+            cand("config_write", Source::Lsp, 1, 1),
+        ];
+        assert_eq!(ranked("config", &cands), ["config_reload", "config_write", "config_path"]);
+
+        // But a word on the cursor's own line still beats the server's fourth suggestion, which
+        // is the point of letting them share a scale instead of stacking them.
+        let near = vec![cand("config_path", Source::Buffer, 0, 1), cand("config_x", Source::Lsp, 4, 1)];
+        assert_eq!(ranked("config", &near), ["config_path", "config_x"]);
+    }
+
+    /// The list may not move under a finger that is already on it. What was picked stays picked,
+    /// found again by name after the re-rank.
+    #[test]
+    fn a_late_answer_keeps_whatever_was_already_picked() {
+        let cands = vec![
+            cand("render_frame", Source::Buffer, 2, 1),
+            cand("render_line", Source::Buffer, 3, 1),
+        ];
+        let mut popup = Popup::open(0, 0, "render".to_string(), cands).unwrap();
+        popup.move_selection(1);
+        assert_eq!(popup.selected().unwrap().text, "render_line");
+
+        // Two names the server offers, both of which would otherwise take the top rows.
+        popup.absorb(lsp_candidates(&["render_all".to_string(), "render_cell".to_string()]));
+        assert_eq!(popup.len(), 4, "the new names are in the list");
+        assert_eq!(popup.selected().unwrap().text, "render_line", "and the picked row is still it");
+        assert_eq!(
+            popup.visible().next().unwrap().0.text,
+            "render_all",
+            "the server's first suggestion did reach the top — it was not merely appended"
+        );
+    }
+
+    /// A reply that only repeats what was already there must cost nothing at all — not the
+    /// selection, and not the scroll.
+    #[test]
+    fn an_answer_with_nothing_new_in_it_leaves_the_popup_alone() {
+        let cands = vec![
+            cand("render_frame", Source::Buffer, 2, 1),
+            cand("render_line", Source::Buffer, 3, 1),
+        ];
+        let mut popup = Popup::open(0, 0, "render".to_string(), cands).unwrap();
+        popup.move_selection(1);
+        popup.absorb(lsp_candidates(&["render_frame".to_string(), "render_line".to_string()]));
+        assert_eq!(popup.len(), 2);
+        assert_eq!(popup.selected().unwrap().text, "render_line");
+    }
+
+    /// Row zero before the arrows are touched is a default, not a choice — so the server's best
+    /// suggestion takes it. Getting this wrong is quiet and expensive: the good name is in the
+    /// list, the highlight is on the old one, and Enter types the wrong word.
+    #[test]
+    fn a_late_answer_with_nothing_picked_yet_opens_on_the_best_row() {
+        let cands = vec![cand("render_frame", Source::Buffer, 2, 1)];
+        let mut popup = Popup::open(0, 0, "render".to_string(), cands).unwrap();
+        popup.absorb(lsp_candidates(&["render_all".to_string()]));
+        assert_eq!(popup.selected, 0);
+        assert_eq!(popup.selected().unwrap().text, "render_all");
+    }
+
+    /// A picked row far down the list has to still be on screen after the re-rank, or keeping
+    /// the selection would only mean losing sight of it.
+    #[test]
+    fn keeping_the_selection_scrolls_it_back_into_view() {
+        let cands: Vec<Candidate> =
+            (0..20).map(|i| cand(&format!("render_{i:02}"), Source::Buffer, i, 1)).collect();
+        let mut popup = Popup::open(0, 0, "render".to_string(), cands).unwrap();
+        for _ in 0..15 {
+            popup.move_selection(1);
+        }
+        let held = popup.selected().unwrap().text.clone();
+        popup.absorb(lsp_candidates(&["render_zz".to_string()]));
+        assert_eq!(popup.selected().unwrap().text, held);
+        let rows: Vec<&str> = popup.visible().map(|(c, _)| c.text.as_str()).collect();
+        assert!(rows.contains(&held.as_str()), "{rows:?} does not show {held}");
+    }
+
+    /// The server's order is what `distance` carries, and the short names it offers are not
+    /// held to the floor that keeps guessed words out of the list.
+    #[test]
+    fn the_servers_words_keep_its_order_and_are_not_measured_for_length() {
+        let cands = lsp_candidates(&["ok".to_string(), "fn".to_string(), "config".to_string()]);
+        assert_eq!(cands.len(), 3, "a two-letter name a server offered is not a guess");
+        assert_eq!((cands[0].distance, cands[1].distance, cands[2].distance), (0, 1, 2));
+        assert!(cands.iter().all(|c| c.source == Source::Lsp));
     }
 
     #[test]

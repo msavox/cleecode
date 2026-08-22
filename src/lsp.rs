@@ -9,21 +9,26 @@
 //! loop — and a language server on stdio is line-oriented JSON-RPC, which that pattern fits. A
 //! second model would mean every contributor having to know which one applies where.
 //!
-//! Only diagnostics. They are non-modal and cannot corrupt a buffer: if the server dies, some
-//! underlines go away. Everything that touches the text while you type comes later, on a channel
-//! that has been running for a release.
+//! Diagnostics first, and completion once they had been running for a release. Both are
+//! non-modal and neither can corrupt a buffer: if the server dies, some underlines go away and
+//! the popup falls back to the words already in the file. Nothing here rewrites text on its own
+//! account — a completion is accepted by the same keystroke and the same one-step edit as a word
+//! scraped out of the buffer, and the server only ever adds names to a list that already exists.
 
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DiagnosticSeverity, InitializeParams, PublishDiagnosticsParams,
+    ClientCapabilities, CompletionClientCapabilities, CompletionItem, CompletionItemCapability,
+    Diagnostic, DiagnosticSeverity, InitializeParams, InsertTextFormat, PublishDiagnosticsParams,
     TextDocumentClientCapabilities, Uri, WindowClientCapabilities,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 /// What the client hands to the application. Deliberately not the protocol's own types: the app
 /// should not have to know what a `TextDocumentIdentifier` is to draw a squiggle.
@@ -40,6 +45,13 @@ pub enum Event {
     /// place that conversion happens; a second one would be a second chance to read the columns
     /// in the wrong units.
     Diagnostics { path: PathBuf, raw: Vec<Diagnostic> },
+    /// The answer to one `textDocument/completion`, reduced to the words that can be typed.
+    ///
+    /// `id` is the request it answers, and it is the whole guard against a stale reply: by the
+    /// time this arrives the cursor may have moved, the file may have changed, or the popup may
+    /// be gone. The application matches the id against the one request it is waiting for and
+    /// drops everything else, rather than trying to work out whether the words still apply.
+    Completion { id: i64, words: Vec<String> },
     /// The server stopped, with whatever it said on the way out. Everything keeps working; the
     /// underlines simply stop arriving.
     Stopped { detail: String },
@@ -227,6 +239,15 @@ pub fn utf16_to_chars(line: &str, utf16_col: usize) -> usize {
     line.chars().count()
 }
 
+/// The other direction, for a column we are about to *send*: characters to UTF-16 code units.
+///
+/// Its own function rather than a flag on [`utf16_to_chars`], because the two are asked at
+/// opposite ends of the conversation — one reads what arrived, one writes what leaves — and a
+/// single function with a direction argument is a single place to pass the wrong one.
+pub fn chars_to_utf16(line: &str, col: usize) -> usize {
+    line.chars().take(col).map(char::len_utf16).sum()
+}
+
 /// Turns the protocol's diagnostics for one file into marks against its text.
 ///
 /// `lines` is the file as the editor holds it. A diagnostic pointing past the end of the buffer
@@ -265,6 +286,36 @@ pub fn marks_from(diagnostics: &[Diagnostic], lines: &[String], utf16: bool) -> 
         });
     }
     out
+}
+
+/// The word a completion item would put in the buffer, or `None` for one that cannot be reduced
+/// to a word.
+///
+/// The popup completes *a word*: it replaces the identifier under the cursor and nothing else.
+/// So an item is taken down to the identifier it starts with — rust-analyzer labels a function
+/// `push_str(…)` and a macro `println!(…)`, and inserting either literally would leave brackets
+/// in the file that the user has to go back and clean up. Taking the leading run gives
+/// `push_str` and `println`, which is what was being typed towards.
+///
+/// `insert_text` is preferred over the label because the label is written to be *read* — it can
+/// carry a type, an arrow, an ellipsis — while `insert_text` is written to be typed. It is
+/// skipped when the server marks it as a snippet: we advertise no snippet support, so a snippet
+/// arriving anyway is a server ignoring the handshake, and `${1:self}` in a buffer is worse than
+/// a label that is merely ugly.
+pub fn word_of(item: &CompletionItem) -> Option<String> {
+    let snippet = item.insert_text_format == Some(InsertTextFormat::SNIPPET);
+    let raw = match item.insert_text.as_deref() {
+        Some(text) if !snippet => text,
+        _ => item.label.as_str(),
+    };
+    let word: String =
+        raw.trim_start().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    // An item that begins with punctuation — an operator, a lifetime, `&str` — has no word at
+    // its head, and half of one would be worse than leaving it out of the list.
+    if !word.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        return None;
+    }
+    Some(word)
 }
 
 // ---- The server ----------------------------------------------------------------------------
@@ -306,6 +357,14 @@ pub struct Client {
     /// Whether positions are counted in UTF-16. Settled during the handshake and remembered,
     /// because it decides how every column that arrives afterwards is read.
     utf16: bool,
+    /// Ids of completion requests still out, shared with the reader thread.
+    ///
+    /// The reader has to tell a completion answer from any other response, and the only thing
+    /// that distinguishes them is the id we chose when asking. Sharing the set is what keeps
+    /// that knowledge in one place: the alternative — "the first response is the handshake and
+    /// everything after it is a completion" — is true today and silently wrong the day a third
+    /// kind of request is added.
+    pending: Arc<Mutex<HashSet<i64>>>,
 }
 
 impl Client {
@@ -336,7 +395,9 @@ impl Client {
         let stdout = child.stdout.take().ok_or("no stdout on the server")?;
         let (tx, rx) = mpsc::channel();
         let name = program.to_string();
-        std::thread::spawn(move || read_loop(BufReader::new(stdout), tx, name));
+        let pending: Arc<Mutex<HashSet<i64>>> = Arc::new(Mutex::new(HashSet::new()));
+        let reader_pending = Arc::clone(&pending);
+        std::thread::spawn(move || read_loop(BufReader::new(stdout), tx, name, reader_pending));
 
         let mut client = Client {
             name: program.to_string(),
@@ -346,6 +407,7 @@ impl Client {
             next_id: 1,
             open: Vec::new(),
             utf16: true,
+            pending,
         };
         client.initialize(root)?;
         Ok(client)
@@ -357,7 +419,20 @@ impl Client {
             #[allow(deprecated)]
             root_uri: uri_for(root),
             capabilities: ClientCapabilities {
-                text_document: Some(TextDocumentClientCapabilities::default()),
+                text_document: Some(TextDocumentClientCapabilities {
+                    // Said out loud rather than left to the default, because the default is the
+                    // one we depend on: a server told nothing about snippets may send them
+                    // anyway, and `${1:self}` inserted into a buffer is a mess the user has to
+                    // undo. This popup types a word, and this is where it says so.
+                    completion: Some(CompletionClientCapabilities {
+                        completion_item: Some(CompletionItemCapability {
+                            snippet_support: Some(false),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
                 window: Some(WindowClientCapabilities::default()),
                 ..Default::default()
             },
@@ -445,6 +520,34 @@ impl Client {
         );
     }
 
+    /// Asks what could be typed at a position, and returns the id the question went out with.
+    ///
+    /// `line_text` is the line the cursor is on and `col` its column in *characters*; the
+    /// conversion to whatever the server counts in happens here, at the one place that knows
+    /// which it negotiated. Nothing waits for the answer — it arrives as [`Event::Completion`]
+    /// some frames later, and the popup is already on screen with the words from the buffer by
+    /// then. That is the whole shape of this feature: the list is never empty while it waits.
+    pub fn completion(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+        let uri = uri_for(path)?;
+        let character = if self.utf16 { chars_to_utf16(line_text, col) } else {
+            // Counted in UTF-8 bytes, which is what the server asked for when it declined UTF-16.
+            line_text.chars().take(col).map(char::len_utf8).sum()
+        };
+        let id = self
+            .request(
+                "textDocument/completion",
+                json!({
+                    "textDocument": {"uri": uri.as_str()},
+                    "position": {"line": line, "character": character}
+                }),
+            )
+            .ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id);
+        }
+        Some(id)
+    }
+
     fn next_version(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
@@ -480,8 +583,54 @@ fn language_id(path: &Path) -> &'static str {
     }
 }
 
+/// The words of one completion answer, in the order the protocol says to offer them.
+///
+/// Sorted by `sortText` — which is the server's own judgement of what is most likely wanted here,
+/// and the only thing in the reply that carries it. The array order is not that judgement: the
+/// protocol tells clients to sort, so servers do not bother. Ignoring it and then claiming the
+/// position in the list means something would be inventing a ranking out of nothing.
+fn completion_words(result: Option<&Value>) -> Vec<String> {
+    let Some(result) = result else { return Vec::new() };
+    // Either shape the protocol allows — a bare array, or a list with the array under `items` —
+    // reached for by name rather than by deserialising the reply whole. `CompletionList` has a
+    // required `isIncomplete`, so a server that leaves it out would cost the entire list: an
+    // empty popup, indistinguishable from a server that had nothing to say. `null` is that
+    // second thing, and it is an ordinary answer rather than an error.
+    let raw = match result {
+        Value::Array(items) => items,
+        _ => match result.get("items").and_then(Value::as_array) {
+            Some(items) => items,
+            None => return Vec::new(),
+        },
+    };
+    let mut items: Vec<CompletionItem> = raw
+        .iter()
+        // One item that will not read is one row lost, not the list. They are independent, and
+        // an unknown field in the twentieth is no reason to drop the first nineteen.
+        .filter_map(|v| serde_json::from_value::<CompletionItem>(v.clone()).ok())
+        .collect();
+    let key = |i: &CompletionItem| i.sort_text.clone().unwrap_or_else(|| i.label.clone());
+    items.sort_by_key(key);
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in &items {
+        let Some(word) = word_of(item) else { continue };
+        // Two items can reduce to the same word — an inherent method and a trait one, say. They
+        // are one row in a list that types a word, and the first is the better ranked.
+        if seen.insert(word.clone()) {
+            out.push(word);
+        }
+    }
+    out
+}
+
 /// The reader thread. Everything the server says arrives here and leaves as an [`Event`].
-fn read_loop(mut reader: BufReader<impl Read>, tx: Sender<Event>, name: String) {
+fn read_loop(
+    mut reader: BufReader<impl Read>,
+    tx: Sender<Event>,
+    name: String,
+    pending: Arc<Mutex<HashSet<i64>>>,
+) {
     let mut handshook = false;
     loop {
         let message = match read_message(&mut reader) {
@@ -512,6 +661,18 @@ fn read_loop(mut reader: BufReader<impl Read>, tx: Sender<Event>, name: String) 
             // agreeing to work it does not do.
             Some(_) => {}
             None => {
+                // A response, and the id says which question it answers. Asked first, so a
+                // completion reply is never mistaken for anything else — including on a server
+                // that answers `initialize` late enough for a request to overtake it.
+                if let Some(id) = value.get("id").and_then(Value::as_i64)
+                    && pending.lock().map(|mut p| p.remove(&id)).unwrap_or(false)
+                {
+                    let _ = tx.send(Event::Completion {
+                        id,
+                        words: completion_words(value.get("result")),
+                    });
+                    continue;
+                }
                 // The first response is the answer to `initialize`, the only request sent before
                 // this point. It carries how the server wants positions counted.
                 if !handshook && value.get("id").is_some() && value.get("result").is_some() {
@@ -533,6 +694,15 @@ mod tests {
     use super::*;
     use lsp_types::{Position, Range};
 
+    /// The set of requests still out, as the client would have left it for the reader thread.
+    fn pending(ids: &[i64]) -> Arc<Mutex<HashSet<i64>>> {
+        Arc::new(Mutex::new(ids.iter().copied().collect()))
+    }
+
+    fn item(label: &str) -> CompletionItem {
+        CompletionItem { label: label.to_string(), ..Default::default() }
+    }
+
     fn diag(line: u32, from: u32, to: u32, message: &str) -> Diagnostic {
         Diagnostic {
             range: Range {
@@ -543,6 +713,112 @@ mod tests {
             message: message.to_string(),
             ..Default::default()
         }
+    }
+
+    /// The two column conversions are opposites, and the reason both exist is that they stop
+    /// agreeing exactly where testing in English would never look.
+    #[test]
+    fn columns_convert_back_and_forth_and_part_company_on_an_emoji() {
+        let plain = "let x = 1;";
+        for col in 0..=plain.chars().count() {
+            assert_eq!(chars_to_utf16(plain, col), col, "ASCII counts the same either way");
+            assert_eq!(utf16_to_chars(plain, col), col);
+        }
+        // Three characters before the cursor, one of which the protocol counts as two.
+        let line = "a🎈b";
+        assert_eq!(chars_to_utf16(line, 3), 4);
+        assert_eq!(utf16_to_chars(line, 4), 3);
+        // And an accent, which is one of each — the case that makes the emoji look like an
+        // exception rather than the rule it is.
+        assert_eq!(chars_to_utf16("caffè", 5), 5);
+    }
+
+    /// The popup types a word, so an item has to come down to one — brackets and all the rest of
+    /// what a label is written to *show* stay out of the buffer.
+    #[test]
+    fn an_item_is_reduced_to_the_word_it_would_type() {
+        assert_eq!(word_of(&item("push_str(…)")).as_deref(), Some("push_str"));
+        assert_eq!(word_of(&item("println!(…)")).as_deref(), Some("println"));
+        assert_eq!(word_of(&item("HashMap")).as_deref(), Some("HashMap"));
+        // No word at the head at all: an operator, a lifetime, a reference type.
+        assert_eq!(word_of(&item("&str")), None);
+        assert_eq!(word_of(&item("'static")), None);
+    }
+
+    #[test]
+    fn what_a_server_would_type_beats_what_it_would_show() {
+        let mut with_insert = item("push_str(…)");
+        with_insert.insert_text = Some("push_str".to_string());
+        assert_eq!(word_of(&with_insert).as_deref(), Some("push_str"));
+
+        // A snippet, from a server that ignored the handshake. The label is the lesser wrong:
+        // `${1:value}` in a buffer is something the user has to go back and undo.
+        let mut snippet = item("push_str(…)");
+        snippet.insert_text = Some("push_str(${1:value})".to_string());
+        snippet.insert_text_format = Some(InsertTextFormat::SNIPPET);
+        assert_eq!(word_of(&snippet).as_deref(), Some("push_str"));
+    }
+
+    /// `sortText` is the server's ranking and the array order is not, so the words come out in
+    /// the order the protocol says to offer them — not the order they happened to be written in.
+    /// An item without one falls back to its label, which is the protocol's own rule and puts it
+    /// after every numbered suggestion: a server that ranked some of its answers and not others
+    /// meant the unranked ones less.
+    #[test]
+    fn the_words_come_out_in_the_servers_own_order() {
+        let result = serde_json::json!({"items": [
+            {"label": "zebra", "sortText": "0001"},
+            {"label": "alpha", "sortText": "0009"},
+            {"label": "beta"}
+        ]});
+        assert_eq!(completion_words(Some(&result)), vec!["zebra", "alpha", "beta"]);
+    }
+
+    /// Two items can reduce to the same word — an inherent method and a trait one. One row.
+    #[test]
+    fn two_items_that_type_the_same_word_are_one_row() {
+        let result = serde_json::json!([
+            {"label": "len()", "sortText": "0001"},
+            {"label": "len(…)", "sortText": "0002"},
+            {"label": "&self"}
+        ]);
+        assert_eq!(completion_words(Some(&result)), vec!["len"]);
+    }
+
+    /// `null` is an ordinary answer — the server has nothing to say here — and so is a shape we
+    /// do not know. Neither is worth a guess at what might have been meant.
+    #[test]
+    fn nothing_to_offer_is_an_answer_not_a_failure() {
+        assert!(completion_words(Some(&serde_json::Value::Null)).is_empty());
+        assert!(completion_words(Some(&serde_json::json!("surprise"))).is_empty());
+        assert!(completion_words(None).is_empty());
+    }
+
+    /// The id is the whole guard. A response we never asked for is a response for somebody else.
+    #[test]
+    fn a_completion_answer_is_recognised_by_the_id_it_carries() {
+        let mut wire = Vec::new();
+        wire.extend(frame(
+            r#"{"jsonrpc":"2.0","id":7,"result":{"items":[{"label":"config_path"}]}}"#,
+        ));
+        // Same shape, an id nobody is waiting for. It falls through to the handshake check, which
+        // wants the first response — so this must not come out as a completion *or* as `Ready`
+        // once the real handshake has been seen.
+        wire.extend(frame(r#"{"jsonrpc":"2.0","id":99,"result":{"items":[{"label":"nope"}]}}"#));
+        let (tx, rx) = mpsc::channel();
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending(&[7]));
+        let events: Vec<Event> = rx.into_iter().collect();
+        match &events[0] {
+            Event::Completion { id, words } => {
+                assert_eq!(*id, 7);
+                assert_eq!(words, &["config_path".to_string()]);
+            }
+            _ => panic!("the answer to the question we asked has to arrive"),
+        }
+        assert!(
+            !events[1..].iter().any(|e| matches!(e, Event::Completion { .. })),
+            "an id nobody is waiting for is not an answer to anything"
+        );
     }
 
     #[test]
@@ -710,7 +986,7 @@ mod tests {
         ));
 
         let (tx, rx) = mpsc::channel();
-        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string());
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending(&[]));
         let events: Vec<Event> = rx.into_iter().collect();
         assert_eq!(events.len(), 3, "ready, diagnostics, and the end of the stream");
 
@@ -745,7 +1021,7 @@ mod tests {
                 "params":{"uri":"file:///tmp/main.rs","diagnostics":[]}}"#,
         );
         let (tx, rx) = mpsc::channel();
-        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string());
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending(&[]));
         let events: Vec<Event> = rx.into_iter().collect();
         match &events[0] {
             Event::Diagnostics { path, raw } => {
@@ -767,7 +1043,7 @@ mod tests {
                 "params":{"uri":"file:///tmp/main.rs","diagnostics":[]}}"#,
         ));
         let (tx, rx) = mpsc::channel();
-        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string());
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending(&[]));
         let events: Vec<Event> = rx.into_iter().collect();
         assert!(matches!(events[0], Event::Diagnostics { .. }), "the good message still arrives");
     }

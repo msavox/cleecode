@@ -88,11 +88,16 @@ pub struct Settings {
     // and a feature that cannot be turned off is one they have to work around instead.
     #[serde(default = "default_true")]
     pub completion: bool,
-    // Whether a language server is started for files that have one, to underline what it finds
-    // wrong. On by default, and it costs nothing where no server is installed — that is simply
-    // an editor without underlines, which is what CleeCode was until this existed.
-    #[serde(default = "default_true")]
-    pub diagnostics: bool,
+    // Whether a language server is started for files that have one. It underlines what the
+    // server finds wrong and feeds its names into the completion popup — two things, which is
+    // why this is no longer called `diagnostics`; the old spelling is still read, so a
+    // settings.toml written before the rename keeps working.
+    //
+    // On by default, and it costs nothing where no server is installed — that is simply an
+    // editor without underlines and a popup with only the words of the file in it, which is what
+    // CleeCode was until this existed.
+    #[serde(default = "default_true", alias = "diagnostics")]
+    pub language_server: bool,
     // Where a plot drawn in a live Octave or Python session goes. On — the default — it is
     // captured and opens as a tab, beside the code that drew it. Off, the interpreter keeps its
     // own windows: qt for Octave, matplotlib's usual backend for Python, exactly as they behave
@@ -257,7 +262,7 @@ impl Default for Settings {
             terminal_scrollback: default_terminal_scrollback(),
             auto_pairs: true,
             completion: true,
-            diagnostics: true,
+            language_server: true,
             plots_in_tabs: true,
             opaque_background: false,
             last_root: None,
@@ -554,7 +559,10 @@ impl Settings {
             SettingRow { label: i18n::t(lang, Key::SettingShowWhitespace), value: b(self.show_whitespace) },
             SettingRow { label: i18n::t(lang, Key::SettingAutoIndent), value: b(self.auto_indent) },
             SettingRow { label: i18n::t(lang, Key::SettingCompletion), value: b(self.completion) },
-            SettingRow { label: i18n::t(lang, Key::SettingDiagnostics), value: b(self.diagnostics) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingLanguageServer),
+                value: b(self.language_server),
+            },
             SettingRow {
                 label: i18n::t(lang, Key::SettingPlotsInTabs),
                 value: plots_value(lang, self.plots_in_tabs, crate::wsnap::can_open_a_window()),
@@ -575,7 +583,7 @@ impl Settings {
             5 => self.show_whitespace = !self.show_whitespace,
             6 => self.auto_indent = !self.auto_indent,
             7 => self.completion = !self.completion,
-            8 => self.diagnostics = !self.diagnostics,
+            8 => self.language_server = !self.language_server,
             // Refused where it would mean nothing: see `plots_value`. The row still moves under
             // the cursor and still reads out the state — it is disabled, not hidden, because
             // "why can I not turn this off" is a question the value answers and an absence

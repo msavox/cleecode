@@ -77,12 +77,17 @@ than a list is to walk. Where an interpreter is open, the names *that session* i
 offered too, in green: a variable you made at the prompt exists in no file, so nothing that reads
 one could suggest it.
 
-Where a language server is installed, what it finds is underlined where it is — red for an error,
-yellow for a warning — the line number takes the same colour, and the message for the line you
-are on sits at the right of the status bar. It speaks LSP over stdio directly rather than through
-a framework, and is told about an edit once you stop typing rather than on every key. Rust is
-wired up so far, through rust-analyzer. A server that is not installed is not an error to report:
-nothing is underlined and everything else carries on.
+Where a language server is installed it feeds the same list, in magenta — and those are the names
+no amount of reading the file could have found, because after a dot they are whatever that *type*
+has. The list never waits for them: it opens on the words in the file and the server's names drop
+into it a moment later, without moving a row you have already arrowed down to.
+
+The same server underlines what it finds wrong, where it is — red for an error, yellow for a
+warning — the line number takes the same colour, and the message for the line you are on sits at
+the right of the status bar. It speaks LSP over stdio directly rather than through a framework,
+and is told about an edit once you stop typing rather than on every key. Rust is wired up so far,
+through rust-analyzer. A server that is not installed is not an error to report: nothing is
+underlined, the list has the file's own words in it, and everything else carries on.
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.

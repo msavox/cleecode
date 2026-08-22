@@ -238,6 +238,17 @@ pub fn turtle_column(elapsed: Duration, nudged: u16, width: u16) -> Option<u16> 
     (walked + 2 <= width as u32).then(|| (width as u32 - 2 - walked) as u16)
 }
 
+/// A completion question out to the language server, and the popup it was asked on behalf of.
+///
+/// The answer comes back frames later, into an editor that may have moved on. These three fields
+/// are what makes the reply refusable: the id says it is the answer to *this* question, and the
+/// buffer and the word's start say the popup is still the one that asked.
+struct PendingCompletion {
+    id: i64,
+    editor: usize,
+    start: usize,
+}
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
@@ -358,6 +369,12 @@ pub struct App {
     /// resolved one — so the translation is kept rather than recomputed, and the file is asked
     /// about the disk once instead of sixty times a second.
     lsp_paths: std::collections::HashMap<PathBuf, PathBuf>,
+    /// The one completion question currently out to the server, if any.
+    ///
+    /// One, not a queue: the popup that would receive an older answer is gone by the time a
+    /// newer question is asked, so keeping the earlier ones would only be keeping answers
+    /// nobody can use.
+    lsp_completion: Option<PendingCompletion>,
     /// The snapshot watched for figures. The editor reads it for pictures; the workspace window
     /// reads the same file for variables. Two readers of one file, which is why the producers
     /// write by rename — neither can ever see half of one.
@@ -1231,6 +1248,7 @@ impl App {
             lsp_sent: std::collections::HashMap::new(),
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
+            lsp_completion: None,
             figures: None,
             figure_drawn: std::collections::HashMap::new(),
             inspector: None,
@@ -2101,7 +2119,7 @@ impl App {
 
     /// Starts a server the first time a file it knows about is open, and never again.
     fn lsp_start_if_wanted(&mut self) {
-        if self.lsp.is_some() || self.lsp_error.is_some() || !self.settings.diagnostics {
+        if self.lsp.is_some() || self.lsp_error.is_some() || !self.settings.language_server {
             return;
         }
         let program = self
@@ -2161,9 +2179,13 @@ impl App {
                     // drawn, so it replaces the old list rather than being skipped.
                     self.diagnostics.insert(path, marks);
                 }
+                crate::lsp::Event::Completion { id, words } => {
+                    self.absorb_lsp_completion(id, words);
+                }
                 crate::lsp::Event::Stopped { detail } => {
                     self.lsp = None;
                     self.lsp_error = Some(detail);
+                    self.lsp_completion = None;
                     self.diagnostics.clear();
                     self.lsp_sent.clear();
                     self.lsp_seen.clear();
@@ -2171,6 +2193,79 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The path the server knows a file by.
+    ///
+    /// Asked of the disk once per file and then remembered, because the server resolves symlinks:
+    /// `/tmp/x` comes back as `/private/tmp/x` on macOS, and no amount of lexical tidying would
+    /// have matched them. `None` means the file is not on disk yet — an unsaved buffer with a
+    /// name — and there is nothing for a server to look at.
+    ///
+    /// Takes the map rather than `&self` so it can be called while the editors are being walked.
+    fn lsp_absolute_for(
+        paths: &std::collections::HashMap<PathBuf, PathBuf>,
+        path: &Path,
+    ) -> Option<PathBuf> {
+        match paths.iter().find(|(_, held)| held.as_path() == path) {
+            Some((absolute, _)) => Some(absolute.clone()),
+            None => std::fs::canonicalize(path).ok(),
+        }
+    }
+
+    /// Asks the server what could be typed where the popup just opened.
+    ///
+    /// The file is sent first, and this is the one place that goes round [`lsp::QUIET`]. The
+    /// debounce is there so a server is not made to re-analyse a file that is still being
+    /// written; a completion request is a question about *this* text, and an answer about the
+    /// text of four hundred milliseconds ago is not a slower right answer, it is a wrong one.
+    /// It costs one extra message per word typed, which is still far less than the editors that
+    /// send one per keystroke.
+    fn lsp_ask_completion(&mut self, editor_index: usize, start: usize) {
+        self.lsp_completion = None;
+        if self.lsp.is_none() {
+            return;
+        }
+        let Some(editor) = self.editors.get(editor_index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        if crate::lsp::server_for(&path).is_none() {
+            return;
+        }
+        let (line, col) = (editor.cursor_line, editor.cursor_col);
+        let line_text = editor.rope.line(line).to_string();
+        let text = editor.rope.to_string();
+        let revision = editor.revision();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else { return };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let Some(client) = self.lsp.as_mut() else { return };
+        client.did_change(&absolute, &text);
+        // Recorded as sent, so the debounce does not turn round and send the same revision again.
+        self.lsp_sent.insert(path, revision);
+        self.lsp_completion = client
+            .completion(&absolute, line, &line_text, col)
+            .map(|id| PendingCompletion { id, editor: editor_index, start });
+    }
+
+    /// Folds a server's answer into the popup that asked for it, or drops it.
+    ///
+    /// Three ways it is dropped, and none of them is an error: it answers a question we are no
+    /// longer waiting for, the popup has closed or moved on, or the server had nothing to say.
+    /// The popup carries on with the words from the buffer in every one of those cases, which is
+    /// the property worth protecting — the list was never waiting on this.
+    fn absorb_lsp_completion(&mut self, id: i64, words: Vec<String>) {
+        let Some(pending) = self.lsp_completion.as_ref().filter(|p| p.id == id) else { return };
+        let (editor, start) = (pending.editor, pending.start);
+        self.lsp_completion = None;
+        if words.is_empty() || !self.completion_live() {
+            return;
+        }
+        let Some(popup) = self.completion.as_mut() else { return };
+        // The popup can have closed and a new one opened on another word since the question went
+        // out; the id alone would not tell them apart.
+        if popup.editor != editor || popup.start != start {
+            return;
+        }
+        popup.absorb(crate::complete::lsp_candidates(&words));
     }
 
     /// Tells the server what is open, what has changed once the typing has stopped, and what has
@@ -2198,17 +2293,8 @@ impl App {
             }
             let since = now.saturating_duration_since(entry.1);
             if crate::lsp::should_send(self.lsp_sent.get(path).copied(), revision, since) {
-                // Asked of the disk once per file, when it is first announced, and then
-                // remembered: the server resolves symlinks, so `/tmp/x` comes back as
-                // `/private/tmp/x` on macOS and no amount of lexical tidying would match it.
-                let absolute = match self.lsp_paths.iter().find(|(_, held)| held.as_path() == path) {
-                    Some((absolute, _)) => absolute.clone(),
-                    None => match std::fs::canonicalize(path) {
-                        Ok(absolute) => absolute,
-                        // Not on disk yet — an unsaved buffer with a name. There is nothing for
-                        // the server to look at, so there is nothing to say about it.
-                        Err(_) => continue,
-                    },
+                let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, path) else {
+                    continue;
                 };
                 resolved.push((absolute.clone(), path.to_path_buf()));
                 to_send.push((absolute, path.to_path_buf(), editor.rope.to_string(), revision));
@@ -6509,6 +6595,11 @@ impl App {
             }
         }
         self.completion = crate::complete::Popup::open(idx, start, prefix, index.into_candidates());
+        // Asked only once the popup is actually up. A question whose answer has nowhere to land
+        // is a question not worth putting to a server that has to think about it.
+        if self.completion.is_some() {
+            self.lsp_ask_completion(idx, start);
+        }
     }
 
     fn move_with_selection(&mut self, shift: bool, mv: impl FnOnce(&mut Editor)) {

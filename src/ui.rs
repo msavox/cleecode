@@ -1840,6 +1840,12 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
                 // Green for something that exists in the interpreter right now, which is worth
                 // telling apart: it means the name is real rather than merely written somewhere.
                 Style::default().fg(Color::Green)
+            } else if cand.source == crate::complete::Source::Lsp {
+                // Magenta for a name the language server offered. Same reason as the green one:
+                // it says the word is known to something that understands the file, rather than
+                // having been read off it — and after a dot, those are the only rows that mean
+                // anything at all.
+                Style::default().fg(Color::Magenta)
             } else {
                 Style::default().fg(Color::Gray)
             };
