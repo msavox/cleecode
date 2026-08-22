@@ -371,6 +371,27 @@ impl TerminalPanel {
         // Marks the shell as running inside CleeCode, so a user's rc can skip heavy startup
         // work (e.g. `fastfetch`) here — `if not set -q CLEECODE; fastfetch; end` in fish.
         cmd.env("CLEECODE", "1");
+        // What the program in this pane is actually talking to.
+        //
+        // Inherited, `TERM` names the terminal CleeCode is *displayed in* — and the pane is not
+        // that terminal, it is the vt100 parser below. The two disagree about what is possible:
+        // a pane advertised as `xterm-kitty` invites a graphics protocol this parser has never
+        // heard of, and one advertised as `xterm-ghostty` names a terminfo entry that only
+        // exists where Ghostty was installed.
+        //
+        // That second half broke a real session on 2026-08-22. CleeCode was running on an Ubuntu
+        // box over ssh from Ghostty, ssh carried `TERM=xterm-ghostty` across, and Ubuntu had no
+        // such entry — so `clear` cleared nothing, and neither did the form feed this sends to
+        // scrub a shell's startup banner, because both go through the same terminfo capability.
+        // Nothing in the pane was wrong; it had simply been told it was a terminal that was not
+        // there.
+        //
+        // `xterm-256color` is the honest answer: it is what this parser implements, and every
+        // terminfo database on earth has it. `COLORTERM` says the rest — the parser does carry
+        // 24-bit colour through to the screen (see `vt100::Color::Rgb` in the renderer), which
+        // `xterm-256color` alone would not let a program ask for.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         // Where an interpreter started in this pane should publish its workspace, and where to
         // find the code that does it. Set on every shell, for both languages: a shell that
         // starts neither carries a few unread names, which costs nothing, and the alternative is

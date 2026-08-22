@@ -129,6 +129,48 @@ def closing_the_last_tab(binary, root, report):
         session.close()
 
 
+def a_pane_is_told_what_it_is_talking_to(binary, root, report):
+    """A terminal pane must be told it is talking to CleeCode's parser, not to the terminal
+    CleeCode happens to be displayed in.
+
+    Started here under a `TERM` no terminfo database has, which is the shape of the bug this
+    exists for: CleeCode on an Ubuntu box, reached over ssh from Ghostty, inherits
+    `TERM=xterm-ghostty` — and Ubuntu has no such entry. `clear` then clears nothing, and
+    neither does the form feed CleeCode sends to scrub a shell's startup banner, because both
+    go through the same terminfo capability. Nothing in the pane is broken; it has been told it
+    is a terminal that is not there."""
+    session = Session(binary, root, env={"TERM": "xterm-nonexistent-9000"})
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the session with a hostile TERM starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x10")                                # Ctrl+P, the palette
+        session.wait(lambda s: "matches" in s.text(), 6)
+        session.send("focus term")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: True, 1.0)
+
+        session.send("echo TERM_IS=$TERM\r")
+        session.wait(lambda s: "TERM_IS=xterm" in s.text(), 8)
+        told = next((l for l in session.lines() if "TERM_IS=" in l and "echo" not in l), "")
+        report.check("a pane is told it is an xterm-256color, whatever is outside",
+                     "TERM_IS=xterm-256color" in told, session, note=repr(told.strip()[:60]))
+
+        # The point of the above, and the thing the user actually notices.
+        session.send("echo MARKER_BEFORE_CLEAR\r")
+        session.wait(lambda s: "MARKER_BEFORE_CLEAR" in s.text(), 8)
+        session.send("clear\r")
+        cleared = session.wait(
+            lambda s: not any("MARKER_BEFORE_CLEAR" in l for l in s.lines()), 8)
+        report.check("clear clears the pane", cleared, session,
+                     note="the same terminfo capability the banner scrub uses")
+    finally:
+        session.close()
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -161,6 +203,7 @@ def main():
 
     try:
         closing_the_last_tab(binary, root, report)
+        a_pane_is_told_what_it_is_talking_to(binary, root, report)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
