@@ -511,11 +511,22 @@ impl TerminalPanel {
     /// Scrubs the startup banner and types the held command, once the shell has settled. Does
     /// nothing until the shell is ready, and each part only ever fires once.
     ///
-    /// The shell has been quiet for a quarter of a second, so there is a prompt: a form feed is
-    /// what a prompt understands as "clear and redraw yourself". Every interactive shell binds
-    /// it, and unlike running `clear` it leaves nothing behind in the history. It also has to
-    /// come *before* the command rather than instead of it — a fastfetch that the rc prints
-    /// after the pane was spawned survives otherwise, whether or not this pane has a command.
+    /// A form feed is what a prompt understands as "clear and redraw yourself". Every
+    /// interactive shell binds it, and unlike running `clear` it leaves nothing behind in the
+    /// history. It also has to come *before* the command rather than instead of it — a fastfetch
+    /// that the rc prints after the pane was spawned survives otherwise, whether or not this
+    /// pane has a command.
+    ///
+    /// Both of those want a shell that is *reading*, and this used to settle for a shell that
+    /// had gone quiet for a quarter of a second. Those are not the same thing: an rc that runs
+    /// `fastfetch` and waits for it looks exactly as quiet as a prompt. Send a form feed then
+    /// and no readline is listening — the tty is in cooked mode with echo on, so the character
+    /// comes straight back as a literal `^L`, printed above a banner that is still arriving.
+    /// That is what a remote Linux box showed: two panes wearing their fastfetch and a `^L` in
+    /// the middle of it, while the same rc on a fast Mac finished inside the quarter second and
+    /// worked every time.
+    ///
+    /// `shell_is_reading_keys` asks the question that was actually meant.
     ///
     /// The command itself goes in through `typed_line`, which empties the line first: whatever
     /// the editor happens to be holding — a leftover from the rc, half a word someone typed
@@ -525,6 +536,14 @@ impl TerminalPanel {
         if !self.is_ready() {
             return;
         }
+        // Nothing typed at a shell that is not reading. Both of these are keystrokes, and a
+        // keystroke sent to an rc still running its own commands is either echoed as a control
+        // character or eaten by whatever *is* reading. Past the deadline it goes anyway: a shell
+        // whose rc never gives the terminal back would otherwise never get its startup command,
+        // which is worse than a command typed into something unexpected.
+        if !self.shell_is_reading_keys() && self.spawn.elapsed() < STARTUP_MAX {
+            return;
+        }
         if !self.cleared {
             self.cleared = true;
             self.write_input(b"\x0c");
@@ -532,6 +551,40 @@ impl TerminalPanel {
         if let Some(command) = self.pending_command.take() {
             self.write_input(&typed_line(&command));
         }
+    }
+
+    /// Whether something in the pane is reading keystrokes as keystrokes.
+    ///
+    /// The terminal's own line discipline answers this, and it is the only thing that does. A
+    /// shell running its rc leaves the pty in canonical mode with echo on: a form feed sent then
+    /// is not a command, it is a character, and it comes straight back as a literal `^L`.
+    /// Readline turns both off to read keys one at a time, and from that moment a form feed
+    /// means "clear and redraw". Measured on a slow rc: `ICANON` reads on for the whole of it and
+    /// off within a tick of the prompt appearing.
+    ///
+    /// The foreground process group was the first thing tried here and it does not work: bash
+    /// does not put its rc's own commands in a group of their own, so `tcgetpgrp` says the shell
+    /// throughout and cannot tell the two apart. The line discipline can, because it is what the
+    /// reader itself changes.
+    ///
+    /// `true` when it cannot be asked, so a platform without this is no worse off than before.
+    #[cfg(unix)]
+    fn shell_is_reading_keys(&self) -> bool {
+        let Some(fd) = self.master.as_raw_fd() else { return true };
+        // SAFETY: `fd` is the pty master this pane owns and is open for as long as the pane is;
+        // `tcgetattr` only reads, into a struct sized by libc itself.
+        unsafe {
+            let mut attrs: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut attrs) != 0 {
+                return true;
+            }
+            attrs.c_lflag & libc::ICANON == 0
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn shell_is_reading_keys(&self) -> bool {
+        true
     }
 
     /// Whether the pane should be shown yet. Stays hidden during the shell's startup

@@ -171,6 +171,49 @@ def a_pane_is_told_what_it_is_talking_to(binary, root, report):
         session.close()
 
 
+def the_startup_banner_is_scrubbed(binary, root, report):
+    """A shell whose rc prints in bursts still ends up at a clean prompt.
+
+    The rc here echoes, sleeps, echoes, sleeps, echoes — which is what `fastfetch` on a loaded
+    remote box looks like from outside, and what a fast Mac never does. CleeCode scrubs the
+    banner by sending a form feed, and it used to send it as soon as the output had been quiet
+    for a quarter of a second. Quiet is not the same as listening: an rc waiting on a command it
+    started is exactly as quiet as a prompt, and a form feed sent then is not a command but a
+    character — echoed straight back as a literal `^L` above a banner that is still arriving.
+
+    So this asserts both halves: nothing of the banner is left, and no `^L` was printed."""
+    rc = os.path.join(root, "slow.bashrc")
+    with open(rc, "w") as handle:
+        handle.write(
+            'echo "BANNER_ONE"\n/bin/sleep 0.6\necho "BANNER_TWO"\n'
+            '/bin/sleep 0.6\necho "BANNER_THREE"\nPS1="probe$ "\n')
+    shell = os.path.join(root, "slowshell.sh")
+    with open(shell, "w") as handle:
+        handle.write("#!/bin/bash\nexec /bin/bash --rcfile %s -i\n" % rc)
+    os.chmod(shell, 0o755)
+
+    session = Session(binary, root, env={"SHELL": shell})
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the session with a slow rc starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        # A predicate that is never true, so this really waits — `lambda s: True` returns on the
+        # first read and would end the session before the rc had finished, which is how this
+        # check first reported a pass it had not earned.
+        session.wait(lambda s: False, 6)
+
+        text = session.text()
+        left = [part for part in ("BANNER_ONE", "BANNER_TWO", "BANNER_THREE") if part in text]
+        report.check("a bursty startup banner is scrubbed", not left, session, note=str(left))
+        report.check("and the form feed was never echoed as a character",
+                     "^L" not in text, session,
+                     note="a literal ^L means it was sent to a shell that was not reading")
+    finally:
+        session.close()
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -204,6 +247,7 @@ def main():
     try:
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
+        the_startup_banner_is_scrubbed(binary, root, report)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
