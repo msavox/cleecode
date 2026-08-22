@@ -974,3 +974,78 @@ smetti di poterlo spegnere.
 non si apre una figura — poi l'editor si divide per mettere il grafico accanto al codice che lo ha
 disegnato, e con tre colonne ogni metà è un terzo di finestra. Un plot largo un terzo di finestra
 è una miniatura.
+
+---
+
+## 0.10 — il language server entra nella lista che c'era già (2026-08-22)
+
+**La decisione presa nella 0.7 ha pagato qui.** Il popup era stato costruito con dentro un
+`Source` che aveva una variante sola vera, e la motivazione scritta allora era: quando arriverà
+l'LSP non sarà una funzionalità nuova da disegnare, sarà una seconda sorgente che si innesta.
+È andata esattamente così — il disegno, i cinque tasti, la non-modalità, l'accettazione in un
+passo di undo non sono stati toccati. Quello che è servito è una variante in più, un colore, e
+il modo di far entrare dei candidati **in ritardo**.
+
+*Il ritardo è tutto il problema.* Le parole del buffer si raccolgono nel momento in cui il popup
+si apre; la risposta del server arriva qualche frame dopo, in un editor che nel frattempo può
+essersi mosso. Da qui le tre scelte che contano:
+
+- **La lista non aspetta mai.** Si apre sulle parole del file e i nomi del server ci cadono
+  dentro dopo. Un popup che aspettasse rust-analyzer sarebbe un popup che a volte non c'è, ed è
+  peggio di uno che a volte è più povero.
+- **`absorb` ri-ordina, non appende.** Un suggerimento che merita la prima riga deve poterci
+  arrivare, altrimenti la seconda sorgente è una nota a piè di pagina.
+- **Una riga scelta e una riga di default non sono la stessa cosa.** Questa l'ha trovata un test,
+  scritto mentre pensavo di documentare il comportamento giusto: tenevo la selezione *sempre*, e
+  così il nome migliore del server arrivava **sotto l'evidenziazione** e Invio scriveva ancora la
+  parola di prima. La riga zero prima che le frecce siano toccate è dove il popup si è aperto,
+  non un posto scelto da qualcuno. Ora `touched` distingue le due cose, e `refilter` lo rimette a
+  zero: una parola diversa è una lista diversa.
+
+*Quattro decisioni di protocollo, e la ragione di ciascuna:*
+
+- **La richiesta scavalca `QUIET` di proposito.** Il debounce esiste perché il server non
+  rianalizzi un file che stai ancora scrivendo; una richiesta di completamento è una domanda su
+  *questo* testo, e una risposta sul testo di quattrocento millisecondi fa non è una risposta
+  giusta più lenta, è una risposta sbagliata. Quindi `didChange` parte prima della domanda. Costa
+  un messaggio per parola scritta — gli editor che ne mandano uno per tasto ne mandano di più.
+- **L'id è l'unica guardia.** Il set delle richieste in volo è condiviso con il thread lettore,
+  invece della scorciatoia "la prima risposta è l'handshake, tutto il resto è completamento": vera
+  oggi e silenziosamente falsa il giorno che si aggiunge un terzo tipo di richiesta.
+- **Si dichiara `snippetSupport: false` a voce.** È il default, ed è proprio il default su cui ci
+  si appoggia: un server a cui non hai detto niente può mandare snippet lo stesso, e `${1:self}`
+  dentro un buffer è roba che l'utente deve disfare a mano. `word_of` regge comunque il caso.
+- **La risposta si legge a mano, non con `CompletionResponse`.** `CompletionList` ha `isIncomplete`
+  obbligatorio: un server che lo omette costerebbe **l'intera lista**, cioè un popup vuoto,
+  indistinguibile da un server che non aveva niente da dire. Stesso motivo per cui un item
+  illeggibile è una riga persa e non la lista.
+
+*Il ranking non è raddoppiato.* Niente tier tutto suo per l'LSP: i candidati del server entrano
+negli stessi tier di prefisso, ordinati per `sortText` — che è il giudizio del server su cosa sia
+più pertinente **in quel punto**, cioè la stessa domanda a cui risponde `distance`. Quindi
+l'ordine del server *è* la distanza, e la prima proposta compete con una parola scritta sulla riga
+del cursore. Due dialetti di "quanto è pertinente" sarebbero lo stesso difetto contestato a
+`tokio` e a `rg` nelle release precedenti.
+
+*E un dettaglio che si vede solo a schermo:* un item si riduce alla parola che scriverebbe.
+rust-analyzer etichetta una funzione `push_str(…)` e una macro `println!(…)` perché quelle
+etichette sono scritte **per essere lette**; inserirle com'è lascia parentesi nel file che
+l'utente deve tornare a togliere. La lista completa *una parola*, e questo è il punto in cui lo
+dice.
+
+**L'impostazione ha cambiato nome:** `diagnostics` → `language_server`, con l'alias che continua a
+leggere la vecchia. Adesso governa due cose e chiamarla come una sola sarebbe stato un nome che
+mente.
+
+*Come è stato provato,* visto che rust-analyzer qui non c'è: `scripts/lsp_stub.py` adesso risponde
+anche a `textDocument/completion`, e **costruisce la risposta con la domanda** — l'etichetta dice
+la riga e la colonna su cui è stato interrogato e la parola che ha trovato lì nel testo che gli è
+stato mandato. Così `du_line4_col2` sullo schermo è la prova che il file è arrivato, che la
+posizione è contata come la conta lui, e che la risposta è tornata nel popup che l'aveva chiesta.
+Una lista inventata dallo stub passerebbe con tre di queste quattro cose rotte.
+
+**E un PASS per il motivo sbagliato, preso al volo:** il controllo del colore guardava la riga in
+cima alla lista, che è quella *selezionata* — nera su ciano per via dell'evidenziazione. Passava
+qualunque colore avessero le sorgenti, e avrebbe continuato a passare togliendo il colore del
+tutto. Adesso guarda una riga non selezionata. È la stessa lezione di `drive_inspect` nella 0.9.1,
+e ha fatto in tempo a ripresentarsi in due release.

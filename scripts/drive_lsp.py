@@ -5,8 +5,9 @@
 
 The client has its own tests in src/lsp.rs, up to and including talking to a real process. What
 none of them can answer is the question that matters to somebody using the editor: *does a
-squiggle appear under the wrong word*. That needs the whole program — the poll in the frame loop,
-the debounce, the span surgery in the renderer — and a screen to look at.
+squiggle appear under the wrong word*, and *does the name the server offered end up in the file*.
+That needs the whole program — the poll in the frame loop, the debounce, the span surgery in the
+renderer, the popup that was already on screen when the answer arrived — and a screen to look at.
 
 There is no rust-analyzer here, and installing one would make this a test of rust-analyzer. So
 scripts/lsp_stub.py is put on PATH under the name CleeCode looks for. It answers the handshake
@@ -18,6 +19,7 @@ things this can actually check rather than infer.
 """
 
 import os
+import re
 import shutil
 import stat
 import sys
@@ -59,6 +61,26 @@ def underlined_run(session, row):
 def coloured(session, row, colour):
     """Columns on `row` painted `colour`. pyte reports colours as hex, not by name."""
     return [x for x, cell in enumerate(session.cells(row)) if cell.fg == colour]
+
+
+def in_buffer(line):
+    """Whether `line` is the file's fifth line holding the accepted word, gutter and all — as
+    opposed to a row of the popup, which shows the same word with no line number beside it."""
+    return re.search(r"\s5 du_line4_col2\b", line) is not None
+
+
+def word_colour(session, word, skip=None):
+    """The colour `word` is painted, found by row *and* column.
+
+    A screen row here runs through the file tree, the editor's border and then the popup, so the
+    first painted cell on it belongs to something else entirely. `skip` passes over a row that
+    also matches for the wrong reason — `dummy` appears in the source above the list as well."""
+    for y, line in enumerate(session.lines()):
+        x = line.find(word)
+        if x < 0 or (skip is not None and skip in line):
+            continue
+        return session.cells(y)[x].fg
+    return None
 
 
 def main():
@@ -132,6 +154,49 @@ def main():
         session.press("\x1b[B" * 2, lambda s: "nope" in s.lines()[-1], 6)
         report.check("the status row says what is wrong with the current line",
                      "nope" in session.lines()[-1], session, note=repr(session.lines()[-1]))
+
+        # ---- completion ------------------------------------------------------------------
+        #
+        # The stub answers with the position it was asked about and the word it found there, so a
+        # name on screen is proof of the whole round trip: the file reached the server, the
+        # position was counted the way it counts, and the answer came back into the popup that
+        # asked. Nothing here is canned, which is why it can fail.
+        session.press("\x1b[B" * 2, lambda s: True, 1)     # to the empty last line, line 4
+        session.send("du")
+        offered = session.wait(lambda s: "du_line4_col2" in s.text(), 15)
+        report.check("the server's answer reaches the open popup", offered, session,
+                     note="the label the stub builds out of the position it was asked about")
+
+        if offered:
+            screen = session.text()
+            report.check("a suggestion with no word at its head is not offered",
+                         "&reference" not in screen, session,
+                         note="the stub sorts it first, so offering it would put it on top")
+            report.check("a label written to be read is reduced to the word it types",
+                         "duplicate" in screen and "duplicate(" not in screen, session)
+            report.check("two items that type the same word are one row",
+                         screen.count("duplicate") == 1, session)
+
+            # The rows have to say where they came from, or the second source is invisible.
+            #
+            # Asked of `duplicate` rather than of the top row, and that is the whole care in this
+            # check: the top row is the *selected* one, painted black on cyan by the highlight.
+            # Comparing that against a word from the file passes whatever the sources are
+            # coloured — it would go on passing with the colour removed altogether. And it is the
+            # popup's own `dummy` row that is the comparison, not the `let dummy = 1;` above it.
+            from_server = word_colour(session, "duplicate")
+            from_buffer = word_colour(session, "dummy", skip="let ")
+            report.check("a name from the server does not look like a word from the file",
+                         from_buffer is not None and from_server != from_buffer, session,
+                         note=f"server={from_server} buffer={from_buffer}")
+
+            # And the point of all of it: the word goes into the file, without the brackets and
+            # in one step. Looked for beside its line number, which is what tells a line of the
+            # buffer from a row of the list that is showing the same word.
+            session.press("\r", lambda s: any(in_buffer(l) for l in s.lines()), 6)
+            typed = [line for line in session.lines() if in_buffer(line)]
+            report.check("accepting types the server's word into the buffer", bool(typed), session,
+                         note=repr(typed[:1]))
 
         Report.show("final screen", session)
     finally:
