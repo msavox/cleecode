@@ -58,8 +58,16 @@ def ws_pane(session, needle="python ·"):
 
 
 def has_matplotlib():
+    """Asked of the `python3` CleeCode will start, not of the one running this script.
+
+    Those diverge — this driver runs under whatever python has `pyte`, while the session runs
+    the `python3` on PATH — and asking the wrong one is how the figure check stayed SKIPped on a
+    machine that could in fact have exercised it."""
+    python3 = shutil.which("python3")
+    if not python3:
+        return False
     try:
-        return subprocess.run([sys.executable, "-c", "import matplotlib"],
+        return subprocess.run([python3, "-c", "import matplotlib"],
                               capture_output=True, timeout=60).returncode == 0
     except Exception:
         return False
@@ -226,9 +234,16 @@ def main():
             session.press("import matplotlib.pyplot as plt\r", lambda s: True, 10)
             session.press("fig, ax = plt.subplots(); _ = ax.plot([1,2,3],[1,4,9])\r",
                           lambda s: True, 6)
-            report.check("a figure is noticed without plt.show()",
-                         session.wait(lambda s: "1 figure" in s.text()
-                                      or "figure 1" in s.text().lower(), 25), session)
+            # A tab with a picture in it, which is what "noticed" means here. The old spelling
+            # waited for "1 figure" or "figure 1" — words the panel does not write anywhere —
+            # so this could only ever have failed, and it never ran to find out: it asked
+            # `sys.executable` for matplotlib, which is this script's interpreter rather than
+            # the `python3` the session starts.
+            drawn = session.wait(
+                lambda s: "fig1.png" in s.text()
+                and sum(1 for l in s.lines() if l.count("▀") + l.count("▄") > 3) > 2, 25)
+            report.check("a figure is noticed without plt.show()", drawn, session,
+                         note="a fig1.png tab, with a picture drawn in it")
 
         Report.show("final screen", session)
     finally:

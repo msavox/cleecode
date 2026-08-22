@@ -46,13 +46,26 @@ impl Language {
     pub fn is_interpreter(self, program: &str) -> bool {
         let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
         let stem = base.strip_suffix(".exe").unwrap_or(base);
-        if self.programs().contains(&stem) {
+        // Compared without case, and that is not tidiness. Homebrew's Python on macOS is a
+        // framework build, so the process the table shows is
+        // `Python.framework/…/Python.app/Contents/MacOS/Python` — the name is `Python`, with a
+        // capital P, for every `python3` installed with brew. Matched case-sensitively it was
+        // not a Python at all, so sending a cell to a live session decided none was open and
+        // typed the *shell* command `python3 /tmp/…/script.py` at the Python prompt, where it
+        // is only `NameError: name 'python3' is not defined`. Windows has the same habit for
+        // its own reasons. This is the Octave-on-headless-Linux bug below wearing a different
+        // hat, and it was found the same way: by running the check that had never been run.
+        let known = |name: &str| {
+            !name.is_empty()
+                && self.programs().iter().any(|p| p.eq_ignore_ascii_case(name))
+        };
+        if known(stem) {
             return true;
         }
         // `python3.13` is a python, and so is `python3.13t`. A version on the end is not part of
         // the name anywhere the name is written down, so it comes off before asking again.
         let bare = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == 't');
-        if !bare.is_empty() && self.programs().contains(&bare) {
+        if known(bare) {
             return true;
         }
         // Octave writes its version with a dash in front: `octave-cli-11.3.0`. That is not a
@@ -64,8 +77,7 @@ impl Language {
         //
         // Truncation is handled by the same line: Linux caps a process name at 15 characters,
         // so the name actually read is `octave-cli-11.3`, and the version comes off either way.
-        let dashed = bare.strip_suffix('-').unwrap_or_default();
-        !dashed.is_empty() && self.programs().contains(&dashed)
+        known(bare.strip_suffix('-').unwrap_or_default())
     }
 
     /// What to type at this language's prompt to run a file.
@@ -313,6 +325,20 @@ mod tests {
         assert!(!Language::Octave.is_interpreter("octave-cli-wrapper"));
         assert!(!Language::Python.is_interpreter("octave"));
         assert!(!Language::Python.is_interpreter("pythonista"));
+
+        // Homebrew's Python on macOS is a framework build, so the process table shows
+        // `Python.app/Contents/MacOS/Python` — a capital P, for every brew `python3` there is.
+        // Matched with case it was not a Python, and a cell sent to a live session became the
+        // shell command `python3 file.py` typed at the Python prompt.
+        assert!(Language::Python.is_interpreter("Python"));
+        assert!(Language::Python.is_interpreter(
+            "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+        ));
+        assert!(Language::Python.is_interpreter("Python3.14"));
+        assert!(Language::Octave.is_interpreter("Octave-CLI"));
+        // And nothing became a python that was not one.
+        assert!(!Language::Python.is_interpreter("Pythonista"));
+        assert!(!Language::Python.is_interpreter(""));
     }
 
     #[test]
