@@ -72,6 +72,57 @@ def completion(session, report):
                  session, note=repr(session.buffer_line(6)))
 
 
+def no_file_open(session):
+    """Whether the editor frame is showing the nothing-open state, in either language."""
+    return "No file open" in session.text() or "Nessun file aperto" in session.text()
+
+
+def closing_the_last_tab(binary, root, report):
+    """Closing every tab has to leave nothing open, not a fresh untitled buffer.
+
+    It used to put an identical untitled buffer in the last tab's place, which made that tab the
+    one tab you could not close: you asked for it to go and something the same took its seat.
+
+    Its own session, because Ctrl+D belongs to the editor and the editor has to have the focus —
+    which it gets by opening a file, and that wants a buffer nobody has typed in. What matters
+    here as much as the frame saying "no file open" is that the app goes on drawing afterwards:
+    every frame reaches for the current editor, and there is no longer one to reach for."""
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the second session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x0f")                            # Ctrl+O, quick-open — and the focus
+        session.wait(lambda s: "sample.rs" in s.text(), 8)
+        session.send("sample")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: "fn configure_pipeline" in s.text(), 8)
+
+        # One tab, not two: a file opened into the untitled buffer the window started on takes
+        # its place rather than sitting beside it, as long as nobody had typed in it.
+        report.check("opening a file took the untitled buffer's place",
+                     "[untitled]" not in session.text() and "[senza nome]" not in session.text(),
+                     session)
+
+        session.press("\x04", no_file_open, 6)          # Ctrl+D, close the only tab
+        report.check("closing the last tab leaves nothing open", no_file_open(session), session)
+        report.check("and no untitled buffer took its place",
+                     "[untitled]" not in session.text() and "[senza nome]" not in session.text(),
+                     session)
+
+        # Still alive. A panic here would leave the last frame on screen, which reads as a pass
+        # until something is asked to change — so something is.
+        session.send("\x0f")
+        report.check("the app is still drawing with nothing open",
+                     session.wait(lambda s: "sample.rs" in s.text(), 8), session)
+        session.send("\x1b")
+    finally:
+        session.close()
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -101,6 +152,10 @@ def main():
         Report.show("final screen", session)
     finally:
         session.close()
+
+    try:
+        closing_the_last_tab(binary, root, report)
+    finally:
         shutil.rmtree(root, ignore_errors=True)
 
     return report.finish()
