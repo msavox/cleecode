@@ -40,6 +40,23 @@ def picture_rows(session):
     return sum(1 for line in session.lines() if line.count("▀") + line.count("▄") > 3)
 
 
+def picture_left_edge(line):
+    """The column a picture row starts at. Either half-block counts: a row made only of `▄`
+    would answer -1 to a search for `▀`, which is how this first got the answer wrong."""
+    hits = [at for at in (line.find("▀"), line.find("▄")) if at >= 0]
+    return min(hits) if hits else None
+
+
+def picture_ink(session):
+    """A fingerprint of the picture on screen — the half-block rows, exactly as drawn.
+
+    Counting rows says a picture is there; it cannot say it is a *different* picture, and the
+    redraw checks need that. Two rows of the same count and different pixels are what a redraw
+    looks like, and what magnifying the old bitmap would not."""
+    return "\n".join(
+        line for line in session.lines() if line.count("▀") + line.count("▄") > 3)
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     if shutil.which("octave") is None:
@@ -79,9 +96,17 @@ def main():
             return 1
         report.check("and it is drawn, not just named", picture_rows(session) > 2, session,
                      note=f"{picture_rows(session)} rows of picture")
+        # Both halves at once, in different columns: the tab strip and the file tree name the
+        # script whatever the split does, so "grafico.m is on screen" was true before the cell
+        # ran and said nothing about the pair being side by side.
+        code_col = session.column_of("plot(")
+        picture_cols = [at for at in (picture_left_edge(line) for line in session.lines()
+                                      if line.count("▀") + line.count("▄") > 3)
+                        if at is not None]
         report.check("the script it came from is still beside it",
-                     "grafico.m" in session.text(), session,
-                     note="split view opened for the pair")
+                     code_col is not None and picture_cols
+                     and min(picture_cols) > code_col, session,
+                     note=f"code at column {code_col}, picture from {min(picture_cols) if picture_cols else None}")
 
         # The keyboard did not move: typing still goes into the script.
         before = session.buffer_line(1)
@@ -105,16 +130,21 @@ def main():
         # that cycles the three *frames* — tree, editor, terminals — and the figure is in the
         # other half of the one we are already in.
         session.press("\x1b[1;7C", lambda s: True, 0.8)
-        before = picture_rows(session)
+        before = picture_ink(session)
         zoomed = session.press("+", lambda s: "zoom(2)" in s.text(), 10)
         report.check("+ on a figure asks the session to redraw it closer", zoomed, session,
                      note="figure(1); zoom(2); appears at the prompt")
         report.check("the status row says what is happening and why",
                      "ridisegnando" in session.lines()[-1] or "redrawing" in session.lines()[-1],
                      session, note=repr(session.lines()[-1][:70]))
+        # The pixels have to change. Waiting for "a picture is on screen" was answered by the
+        # picture that was already there, so this check could not fail — and it is the one check
+        # that tells a redraw from a magnified bitmap, which is the whole claim being made.
         report.check("and the picture is drawn again rather than magnified",
-                     session.wait(lambda s: picture_rows(s) > 0, 15), session,
-                     note=f"{before} rows before, {picture_rows(session)} after")
+                     session.wait(lambda s: picture_ink(s) not in ("", before), 15), session,
+                     note=f"{len(before.splitlines())} rows before, "
+                          f"{picture_rows(session)} after, ink changed: "
+                          f"{picture_ink(session) != before}")
         report.check("an arrow pans it",
                      session.press("\x1b[C", lambda s: "xlim(xl + 0.25" in s.text(), 10),
                      session, note="the window moves, the axes are relabelled with it")

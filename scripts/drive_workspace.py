@@ -102,8 +102,14 @@ def main():
         report.check("the variables appear without anything being typed to ask", filled, session,
                      note="nothing was sent to the prompt but the cell itself")
         pane = "\n".join(workspace_pane(session))
+        # Anchored to the start of a row. `b` and `s` are single letters and the pane's own
+        # header says `3 variables` and names a directory, so a plain `in pane` was satisfied by
+        # the furniture — only `nn` could ever have discriminated. The block just below already
+        # keys rows this way; this one was left behind.
+        rows_named = [line.split()[0] for line in workspace_pane(session) if line[:1].isalpha()]
         report.check("the cell's variables are the ones listed",
-                     all(name in pane for name in ("b", "nn", "s")), session, note=repr(pane[-200:]))
+                     all(name in rows_named for name in ("b", "nn", "s")), session,
+                     note=str(rows_named))
         report.check("and the other cell's are not",
                      "first" not in pane, session, note="only the cell ran, not the file")
 
@@ -124,9 +130,13 @@ def main():
         session.wait(lambda s: True, 0.5)
         session.send("\r")
         session.wait(lambda s: True, 1.0)
+        # Waited for in the workspace pane, not on screen: the terminal echoes the keystrokes as
+        # they are typed, so the old predicate was satisfied by the driver's own input and Octave
+        # could have rejected the assignment without anything noticing.
         made = session.press("calibrazione_lunga = 42;\r",
-                             lambda s: "calibrazione_lunga" in s.text(), 20)
-        report.check("a variable can be made at the prompt", made, session)
+                             lambda s: "calibrazione_lunga" in "\n".join(workspace_pane(s)), 20)
+        report.check("a variable can be made at the prompt", made, session,
+                     note="a row of the pane, not the echo of what was typed")
 
         for _ in range(4):                                     # back to the editor
             session.send("\x0f")

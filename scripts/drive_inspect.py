@@ -17,6 +17,7 @@ Skips if octave is not installed rather than passing quietly.
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -77,7 +78,12 @@ def main():
 
         picked = session.press(session.chord("i"), lambda s: "Variables" in s.text(), 10)
         report.check("the variables are offered to pick from", picked, session)
-        filled = session.press("\r", lambda s: "Asking" not in s.text() and "35" in s.text(), 20)
+        # Not "35": magic(6) is column-major and its Value preview in the workspace row starts
+        # `[35;3;31;…]`, so that digit pair was on screen before the inspector was asked
+        # anything — this predicate was true before Enter. The Python twin hid a real breakage
+        # behind exactly this. A run of three consecutive cells exists only in the grid itself.
+        filled = session.press(
+            "\r", lambda s: "Asking" not in s.text() and re.search(r"35\s+1\s+6", s.text()), 20)
         report.check("the numbers arrive without anything being typed at the prompt",
                      filled, session, note="asked through a file the session's own hook reads")
         if not filled:
