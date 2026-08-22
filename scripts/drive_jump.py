@@ -63,7 +63,10 @@ def main():
         click(session, col + 2, row)
         opened = session.press("", lambda s: True, 0.3) or True
         click(session, col + 2, row)
-        landed = session.wait(lambda s: "CERCAMI" in s.text() and "dati.txt" in s.text(), 8)
+        # Waited for by the buffer holding the line, not by the words being on screen: the grep
+        # output that was clicked reads `dati.txt:5:CERCAMI qui`, so the old predicate was true
+        # before the first click and this check could not fail.
+        landed = session.wait(lambda s: s.buffer_line(5) == "CERCAMI qui", 8)
         report.check("the second click opens the file it named", landed, session,
                      note=repr(session.lines()[-1][:60]))
         report.check("and lands on the line, not at the top",
