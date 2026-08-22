@@ -44,9 +44,13 @@ LANGUAGES = [
         "programs": ["octave"],
         "start": "octave --no-gui --quiet",
         "prompt": ">>",
-        "ask": "disp(marker)",
-        "ask_absent": "disp(exist('first'))",
-        "absent_says": "0",
+        # Doubled, and the absence question answers in words. Both for the same reason: the
+        # editor is showing `marker = 4242` and a bare `0` is somewhere on almost any screen, so
+        # asking for either back would be answered by the screen rather than by the interpreter.
+        "ask": "disp(marker * 2)",
+        "says": "8484",
+        "ask_absent": "printf(\"cell_only=%d\\n\", exist('first'))",
+        "absent_says": "cell_only=0",
     },
     {
         "name": "Python",
@@ -55,9 +59,10 @@ LANGUAGES = [
         "programs": ["python3"],
         "start": "python3",
         "prompt": ">>>",
-        "ask": "print(marker)",
-        "ask_absent": "print('first' in dir())",
-        "absent_says": "False",
+        "ask": "print(marker * 2)",
+        "says": "8484",
+        "ask_absent": "print('cell_only=%d' % ('first' in dir()))",
+        "absent_says": "cell_only=0",
     },
 ]
 
@@ -131,17 +136,23 @@ def run_one(binary, spec, report):
         report.check(f"{spec['name']}: the status row reports the cell it sent", sent, session,
                      note=repr(session.lines()[-1][:70]))
 
-        # The real question: did that session keep it? Asked of the interpreter, not of the
-        # screen CleeCode drew.
+        # The real question: did that session keep it? Asked of the interpreter, and read back
+        # out of the terminal's own frame — the editor is showing `marker = 4242` all along, so
+        # a whole-screen search for that number is answered before the question is asked. The
+        # interpreter is asked to double it for the same reason: 8484 is written nowhere.
         focus_terminal(session)
+        prompt = spec["prompt"]
         session.send(spec["ask"] + "\r")
-        landed = session.wait(lambda s: "4242" in s.text(), 15)
+        landed = session.wait(lambda s: spec["says"] in "\n".join(s.frame_of(prompt)), 15)
         report.check(f"{spec['name']}: the variable exists in the live session", landed, session,
-                     note=spec["ask"])
+                     note=f"{spec['ask']} → {spec['says']}")
 
-        # And only the cell ran, not the whole file — otherwise "run cell" is a fancy Run.
+        # And only the cell ran, not the whole file — otherwise "run cell" is a fancy Run. The
+        # answer is a labelled word rather than a bare `0`, which was on screen already and made
+        # this pass whatever the interpreter said.
         session.send(spec["ask_absent"] + "\r")
-        only_cell = session.wait(lambda s: spec["absent_says"] in s.text(), 10)
+        only_cell = session.wait(
+            lambda s: spec["absent_says"] in "\n".join(s.frame_of(prompt)), 10)
         report.check(f"{spec['name']}: the other cell did not run", only_cell, session,
                      note=f"{spec['ask_absent']} should say {spec['absent_says']}")
     finally:
