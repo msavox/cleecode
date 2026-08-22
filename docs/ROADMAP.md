@@ -1049,3 +1049,22 @@ cima alla lista, che è quella *selezionata* — nera su ciano per via dell'evid
 qualunque colore avessero le sorgenti, e avrebbe continuato a passare togliendo il colore del
 tutto. Adesso guarda una riga non selezionata. È la stessa lezione di `drive_inspect` nella 0.9.1,
 e ha fatto in tempo a ripresentarsi in due release.
+
+### L'ultima scheda si può chiudere (2026-08-22)
+
+Chiudere l'ultima scheda rimetteva al suo posto un buffer senza nome, e quindi l'ultima scheda era
+l'unica che non si potesse chiudere: chiedevi che sparisse e si sedeva lì una cosa identica. Il
+commento nel codice diceva perché — "il resto dell'app dà per scontato che ci sia sempre qualcosa
+da mostrare" — ed è vero: gli ottanta e passa posti che chiedono "il file corrente" non possono
+crescere ognuno un ramo per il caso in cui non ce n'è uno.
+
+La risposta non è farglielo crescere: è `scratch`, un buffer vero che nessuna scheda indica e che
+nessuno disegna. `editor()` e `editor_mut()` ci ripiegano invece di indicizzare una lista vuota, e
+non ci arriva niente in uso normale perché l'editor smette di prendere tasti quando il suo
+riquadro è vuoto e il renderer disegna lo stato vuoto invece di un buffer. Sta lì perché un
+chiamante che chiede lo stesso ottenga un buffer e non un panic.
+
+*E lì accanto c'era un bug latente*, che non era mio ma è saltato fuori guardando: `.min(len - 1)`
+va sotto zero se la lista si è svuotata, e si svuota — chiudere un file chiude anche l'anteprima
+che era una vista di quel file, quindi le ultime *due* schede se ne vanno con un tasto solo. Ora
+c'è un posto solo, `nothing_open`, e ci si arriva da entrambe le strade.

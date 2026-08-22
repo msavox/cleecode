@@ -599,6 +599,17 @@ pub fn msg_git_no_changes(lang: Lang, file: Option<&str>) -> String {
     }
 }
 
+/// The lines drawn in an editor frame with nothing open in it.
+///
+/// A list rather than one sentence because the second line is the way out: a frame that only
+/// said "no file open" would be a dead end, and the tab you closed used to be the way back.
+pub fn msg_no_file_open(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::En => &["No file open", "", "Ctrl+O to open one  ·  Ctrl+P for a command"],
+        Lang::It => &["Nessun file aperto", "", "Ctrl+O per aprirne uno  ·  Ctrl+P per un comando"],
+    }
+}
+
 pub fn msg_search_prompt(lang: Lang) -> String {
     match lang {
         Lang::En => "Search the project for:".to_string(),

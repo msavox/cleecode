@@ -2612,7 +2612,39 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     draw_editor_pane(f, app, panes[1], app.active_editor_right, right_focused, EditorPane::Right);
 }
 
+/// An editor frame with nothing open in it.
+///
+/// The state you get by closing your last tab. It takes the whole frame, tab strip included:
+/// a strip with no tabs on it is a bar of nothing, and the frame is already saying that.
+fn draw_no_file_open(f: &mut Frame, app: &App, area: Rect, focused: bool) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(focused, app.layout_resize_active()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines: Vec<Line> = i18n::msg_no_file_open(app.settings.lang)
+        .iter()
+        .map(|text| {
+            Line::from(Span::styled(*text, Style::default().fg(Color::DarkGray)))
+                .alignment(ratatui::layout::Alignment::Center)
+        })
+        .collect();
+    let height = lines.len() as u16;
+    // A frame too short for the hint says nothing rather than drawing over its own border.
+    if inner.height < height {
+        return;
+    }
+    let y = inner.y + (inner.height - height) / 2;
+    f.render_widget(Paragraph::new(lines), Rect { y, height, ..inner });
+}
+
 fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, pane: EditorPane) {
+    // Asked of the strip rather than of `idx`, which is a buffer number and stays 0 whether or
+    // not there is a buffer 0 to be had.
+    if app.pane_tabs(pane).is_empty() {
+        draw_no_file_open(f, app, area, focused);
+        return;
+    }
     let (tab_bar_area, content_area) = split_editor_area(area);
     if tab_bar_area.height > 0 {
         // Only acts when the active tab changed; a manual scroll survives untouched.

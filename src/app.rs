@@ -432,6 +432,15 @@ pub struct App {
     search_tx: Sender<crate::search::Outcome>,
     search_rx: Receiver<crate::search::Outcome>,
     search_pending: Arc<AtomicBool>,
+    /// Where "the current editor" points when there is no current editor.
+    ///
+    /// Closing the last tab used to put an untitled buffer back, because the eighty-odd places
+    /// that reach for the open file cannot each grow an arm for there not being one. This is the
+    /// other way of keeping that promise: a real buffer that no tab points at and nothing draws.
+    /// Nothing reaches it in normal use — the editor stops taking keys when its pane is empty,
+    /// and the renderer draws the empty state instead of a buffer — so it stays empty. It is
+    /// here so that a caller which asks anyway gets a buffer rather than a panic.
+    scratch: Editor,
     /// The read-only git panel, when open.
     pub git_panel: Option<GitPanel>,
     git_panel_tx: Sender<crate::git::Snapshot>,
@@ -1280,6 +1289,7 @@ impl App {
             search_tx,
             search_rx,
             search_pending: Arc::new(AtomicBool::new(false)),
+            scratch: Editor::empty(),
             git_panel: None,
             git_panel_tx,
             git_panel_rx,
@@ -1579,12 +1589,42 @@ impl App {
     }
 
     pub fn editor(&self) -> &Editor {
-        &self.editors[self.active_editor_index()]
+        self.editors.get(self.active_editor_index()).unwrap_or(&self.scratch)
     }
 
     pub fn editor_mut(&mut self) -> &mut Editor {
         let idx = self.active_editor_index();
-        &mut self.editors[idx]
+        // `get_mut` rather than an index, because with every tab closed there is no buffer to
+        // index. See `scratch`: the answer to "which file am I editing" can be "none", and that
+        // is a state to draw rather than one to avoid by keeping a file open you closed.
+        self.editors.get_mut(idx).unwrap_or(&mut self.scratch)
+    }
+
+    /// Puts the window into the state with no file in it: no buffers, no tabs, no split, and
+    /// the keyboard somewhere that can use it.
+    ///
+    /// One place rather than two, because the second way to get here is easy to miss: closing a
+    /// file also closes the preview that was a view of it, so the last *two* tabs can go on one
+    /// keystroke.
+    fn nothing_open(&mut self) {
+        self.editors.clear();
+        self.tabs = [Vec::new(), Vec::new()];
+        self.active_editor = 0;
+        self.active_editor_right = 0;
+        // A split of two empty halves is two of the same nothing. One frame says it once.
+        self.split_view = false;
+        // And the keyboard leaves with the file: an editor with no buffer that still held the
+        // focus would swallow every keystroke into a buffer nobody can see.
+        if self.focus == Focus::Editor {
+            self.focus =
+                if self.settings.show_sidebar { Focus::FileTree } else { Focus::Terminal };
+        }
+    }
+
+    /// Whether anything is open at all. The window with no file in it is a real state — the one
+    /// you get by closing your last tab — and several things have to be drawn differently in it.
+    pub fn any_tabs_open(&self) -> bool {
+        self.tabs.iter().any(|strip| !strip.is_empty())
     }
 
     pub fn toggle_split_view(&mut self) {
@@ -2925,10 +2965,17 @@ impl App {
         if !self.split_view {
             return;
         }
+        // Nothing open anywhere is a state of its own, not a half that needs filling: handing it
+        // a buffer here would put back the tab that was just closed.
+        if !self.any_tabs_open() {
+            self.split_view = false;
+            return;
+        }
         for pane in [EditorPane::Left, EditorPane::Right] {
             if self.tabs[pane.index()].is_empty() {
-                // An editor with no tabs is not a thing this app can draw, so it gets a fresh
-                // empty buffer — the same one a brand-new window starts with.
+                // One half of an open split with nothing in it does get a fresh empty buffer —
+                // the same one a brand-new window starts with. The half is there because you
+                // asked for it, and an empty frame beside a full one reads as a bug.
                 self.editors.push(Editor::empty());
                 let idx = self.editors.len() - 1;
                 self.tabs[pane.index()].push(idx);
@@ -3720,16 +3767,12 @@ impl App {
         if idx >= self.editors.len() {
             return;
         }
-        // Closing the only tab leaves an empty buffer rather than no buffer: the rest of the app
-        // assumes there is always one to show. Assigning into slot 0 would panic on an already
-        // empty list, so the list is rebuilt instead of indexed.
+        // Closing the only tab leaves nothing open, and that is the whole point of it. It used
+        // to put a fresh untitled buffer in its place, which made the last tab the one tab you
+        // could not close: you asked for it to go and something identical took its seat. What is
+        // left is an empty frame that says how to open a file — see `any_tabs_open`.
         if self.editors.len() <= 1 {
-            self.editors.clear();
-            self.editors.push(Editor::empty());
-            self.tabs = [vec![0], Vec::new()];
-            self.active_editor = 0;
-            self.active_editor_right = 0;
-            self.settle_panes();
+            self.nothing_open();
             return;
         }
         // A rendered preview is a view of a buffer, not a copy of one: with the buffer gone it
@@ -3745,6 +3788,12 @@ impl App {
                 self.editors.remove(orphan);
                 forget_buffer(&mut self.tabs, orphan);
             }
+        }
+        // Two can go at once — a file and the preview that was a view of it — so the list can
+        // empty here even though it had more than one in it a moment ago.
+        if self.editors.is_empty() {
+            self.nothing_open();
+            return;
         }
         for active in [&mut self.active_editor, &mut self.active_editor_right] {
             if *active > idx {
@@ -4186,9 +4235,6 @@ impl App {
         // Unsaved work outlives a workspace switch: dirty buffers stay open alongside the
         // workspace's own files. Everything else makes way.
         self.editors.retain(|e| e.dirty);
-        if self.editors.is_empty() {
-            self.editors.push(Editor::empty());
-        }
         // The buffers that survived are renumbered from scratch, so the strips are rebuilt from
         // them rather than left pointing at what used to be there. Everything lands in the left
         // half; `settle_panes` gives the right one a buffer if the workspace was split.
@@ -6288,6 +6334,12 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
+        // With every tab closed there is no buffer to type into. Said here rather than left to
+        // `editor_mut` finding the scratch: keystrokes disappearing into a buffer nobody can see
+        // is the kind of thing that works for a year and then explains a lost paragraph.
+        if !self.any_tabs_open() {
+            return;
+        }
         // The completion popup goes first, and it is the one overlay in this file that does not
         // swallow the keyboard. Every other one early-returns out of `handle_key` until it is
         // dismissed; this one claims five keys — two to walk the list, two to accept, one to
