@@ -260,9 +260,20 @@ def _figures(state):
         # Only redraw what changed. Rendering a figure is the most expensive thing this hook
         # can do, and it runs at every prompt; a session with a plot open and nothing new to
         # show should cost the same as a session with no plot at all. `stale` is matplotlib's
-        # own answer to the question, and savefig clears it, so this reads it first.
+        # own answer to the question.
+        #
+        # Cleared by hand afterwards, which is the part this got wrong: savefig does *not*
+        # clear it. Measured 2026-08-22 — after a savefig, a set_xlim, a replot and a title,
+        # `fig.stale` reads True every time — so the guard was always open and every figure
+        # was re-rendered at every prompt, which is the exact cost the guard is here to avoid.
+        # Setting it back does what the comment always claimed: False while nothing moves,
+        # True again the moment anything does.
+        #
+        # The Octave side had the mirror image of this, found the same day: there the flag is
+        # never *set* under qt, so a figure was printed once and never again.
         if fig.stale or not drawn.get(num) or not os.path.exists(png):
             fig.savefig(png, dpi=fig.dpi)
+            fig.stale = False
             drawn[num] = True
         entry = {"fig": num, "png": [int(round(w)), int(round(h))], "path": png, "axes": []}
         for ax in fig.axes:
