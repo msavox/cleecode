@@ -1,3 +1,14 @@
+## What's new in 0.10.2
+
+**`grid minor` draws again on a machine with no display.** A plot made over ssh came back
+without a grid — not a faint one, none at all — while the same script on a desktop drew it.
+The difference is not the operating system, it is the toolkit: with no display to open a
+window on, CleeCode starts Octave on gnuplot, and Octave's gnuplot backend states its axis
+ticks as an explicit list, which is precisely the case where gnuplot will not place minor
+ticks between them. Nothing settable from Octave could have changed that. CleeCode now draws
+those grid lines itself at the positions Octave would have used, prints, and removes them
+again — under gnuplot only, and leaving the session's figure exactly as it found it.
+
 ## What's new in 0.10.1
 
 Three bugs, all of them silent, all of them found in a real session rather than in a test.
