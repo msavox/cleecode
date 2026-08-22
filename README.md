@@ -143,9 +143,9 @@ pictures, PDFs and Markdown, and — since 0.9 — Octave and Python as a live n
 ![CleeCode main view](docs/screenshots/main.png)
 
 **Editing.** Multi-file tabs, a split editor, find and replace with regular expressions,
-project-wide search, code folding, column selection, a read-only git panel. Words already in your
-buffers are offered as you type — along with what a language server suggests, where one is
-installed, and its errors underlined where they are.
+project-wide search, code folding, column selection, and a git panel that stages, commits and
+switches branch. Words already in your buffers are offered as you type — along with what a
+language server suggests, where one is installed, and its errors underlined where they are.
 
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named

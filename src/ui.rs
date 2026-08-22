@@ -1276,24 +1276,45 @@ fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
     );
 }
 
-fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
-    use crate::app::GitTab;
-    let Some(panel) = app.git_panel.as_ref() else { return };
+fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
+    use crate::app::{GitPrompt, GitTab};
     let lang = app.settings.lang;
     let rect = git_panel_rect(full);
-    f.render_widget(Clear, rect);
+    let Some(panel) = app.git_panel.as_ref() else { return };
+
     let block = Block::default()
         .title(format!(" {} ", i18n::msg_git_panel_title(lang)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(rect);
-    f.render_widget(block, rect);
     if inner.height < 3 {
         return;
     }
 
+    // The bottom of the panel says what git last said and which keys this tab has. Both come out
+    // of the body's height rather than being drawn over it: a list that runs under its own
+    // footer is a list whose last row is a lie.
+    let notice_rows = u16::from(panel.notice.is_some());
+    let body = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(2 + notice_rows).max(1),
+        ..inner
+    };
+    let rows = body.height as usize;
+    // Told back to the panel before anything is drawn, because keeping a cursor on screen needs
+    // the height and the renderer is the only thing that knows it. The same arrangement as the
+    // completion popup's anchor, and for the same reason.
+    if let Some(panel) = app.git_panel.as_mut() {
+        panel.body_rows = rows;
+    }
+    let app: &App = app;
+    let Some(panel) = app.git_panel.as_ref() else { return };
+
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
     // Tabs on their own row, the current one lit. Which tab you are on is the one thing that
-    // must never be in doubt, since all three are lists of lines in the same box.
+    // must never be in doubt, since all four are lists of lines in the same box.
     //
     // Each drawn into the rectangle `git_tab_slots` gives it, rather than laid out again here:
     // the click asks the same function where the tabs are, and one function cannot disagree
@@ -1313,8 +1334,7 @@ fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
         f.render_widget(Paragraph::new(Span::styled(format!(" {} ", slot.label), style)), area);
     }
 
-    let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
-    let rows = body.height as usize;
+    draw_git_footer(f, panel, lang, inner);
 
     let Some(snap) = panel.snap.as_ref() else {
         f.render_widget(
@@ -1331,7 +1351,24 @@ fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
         return;
     }
 
+    let width = body.width as usize;
     let lines: Vec<Line> = match panel.tab {
+        GitTab::Status => {
+            if snap.changes.is_empty() {
+                vec![Line::from(Span::styled(
+                    i18n::msg_git_clean(lang),
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                snap.changes
+                    .iter()
+                    .enumerate()
+                    .skip(panel.scroll)
+                    .take(rows)
+                    .map(|(row, change)| status_line(change, row == panel.selected, width))
+                    .collect()
+            }
+        }
         GitTab::Diff => {
             if snap.diff.is_empty() {
                 let of = snap.diff_of.as_ref().map(|p| p.display().to_string());
@@ -1359,34 +1396,140 @@ fn draw_git_panel(f: &mut Frame, app: &App, full: Rect) {
         GitTab::Branches => snap
             .branches
             .iter()
+            .enumerate()
             .skip(panel.scroll)
             .take(rows)
-            .map(|b| {
-                let mut spans = vec![
-                    Span::styled(
-                        if b.current { "● " } else { "  " },
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::styled(
-                        b.name.clone(),
-                        if b.current {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        },
-                    ),
-                ];
-                if let Some(upstream) = &b.upstream {
-                    spans.push(Span::styled(format!("  → {upstream}"), Style::default().fg(Color::DarkGray)));
-                }
-                if let Some(track) = &b.track {
-                    spans.push(Span::styled(format!(" {track}"), Style::default().fg(Color::Yellow)));
-                }
-                Line::from(spans)
-            })
+            .map(|(row, b)| branch_line(b, row == panel.selected, width))
             .collect(),
     };
     f.render_widget(Paragraph::new(lines), body);
+
+    if let Some(prompt) = panel.prompt.as_ref() {
+        match prompt {
+            GitPrompt::Commit(message) => {
+                draw_git_question(f, rect, &i18n::msg_git_commit_prompt(lang, panel.staged_count()),
+                                  &format!("{message}▏"), Color::Cyan);
+            }
+            GitPrompt::Discard(change) => {
+                let file = change.path.display().to_string();
+                // Red, and the file named in the question rather than above it. This is the one
+                // box in CleeCode whose answer cannot be undone by anything, including git.
+                draw_git_question(f, rect, &i18n::msg_git_discard_prompt(lang, &file), "", Color::Red);
+            }
+        }
+    }
+}
+
+/// One row of the status list: git's two letters, then the path.
+///
+/// The letters are coloured apart — the index's in green, the working tree's in red — because
+/// the pair is the whole sentence: `MM` is a file that was added and then changed again, and a
+/// single colour would leave that looking like one thing that happened once.
+///
+/// A picked row is one span across the full width instead of three, so the highlight covers the
+/// row rather than stopping where the filename does.
+fn status_line(change: &crate::git::Change, picked: bool, width: usize) -> Line<'static> {
+    let text = format!("{}{} {}", change.index, change.worktree, change.path.display());
+    if picked {
+        let padded = format!("{text:<width$}");
+        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+    }
+    let path = change.path.display().to_string();
+    let untracked = change.untracked();
+    // A file that is staged with nothing left over is exactly what the next commit will carry,
+    // and saying so in the name is what makes the list answerable at a glance: `MM` and `M ` are
+    // one letter apart and mean quite different things about what you are about to commit.
+    let ready = change.staged() && !change.unstaged();
+    Line::from(vec![
+        Span::styled(
+            change.index.to_string(),
+            Style::default().fg(if untracked { Color::DarkGray } else { Color::Green }),
+        ),
+        Span::styled(
+            format!("{} ", change.worktree),
+            Style::default().fg(if untracked { Color::DarkGray } else { Color::Red }),
+        ),
+        Span::styled(
+            path,
+            match (untracked, ready) {
+                (true, _) => Style::default().fg(Color::DarkGray),
+                (_, true) => Style::default().fg(Color::Green),
+                _ => Style::default(),
+            },
+        ),
+    ])
+}
+
+fn branch_line(b: &crate::git::Branch, picked: bool, width: usize) -> Line<'static> {
+    if picked {
+        let mut text = format!("{} {}", if b.current { "●" } else { " " }, b.name);
+        if let Some(upstream) = &b.upstream {
+            text.push_str(&format!("  → {upstream}"));
+        }
+        if let Some(track) = &b.track {
+            text.push_str(&format!(" {track}"));
+        }
+        let padded = format!("{text:<width$}");
+        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+    }
+    let mut spans = vec![
+        Span::styled(if b.current { "● " } else { "  " }, Style::default().fg(Color::Green)),
+        Span::styled(
+            b.name.clone(),
+            if b.current {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
+    ];
+    if let Some(upstream) = &b.upstream {
+        spans.push(Span::styled(format!("  → {upstream}"), Style::default().fg(Color::DarkGray)));
+    }
+    if let Some(track) = &b.track {
+        spans.push(Span::styled(format!(" {track}"), Style::default().fg(Color::Yellow)));
+    }
+    Line::from(spans)
+}
+
+/// The last thing git said, and the keys this tab has.
+///
+/// The keys are drawn rather than left to the manual because they are single letters with no
+/// modifier — which is only safe while the panel owns the keyboard, and only discoverable if the
+/// panel says so. A key that stages a file on one tab and does nothing on the next has to say
+/// which is which, or the way to find out is to press it.
+fn draw_git_footer(f: &mut Frame, panel: &crate::app::GitPanel, lang: i18n::Lang, inner: Rect) {
+    if let Some((text, complaint)) = panel.notice.as_ref() {
+        let colour = if *complaint { Color::Red } else { Color::Green };
+        // The first line only: git's complaints run to paragraphs, and the terminal next door is
+        // where the rest of one is read.
+        let first = text.lines().next().unwrap_or_default().to_string();
+        let area = Rect { y: inner.bottom().saturating_sub(2), height: 1, ..inner };
+        f.render_widget(Paragraph::new(Line::from(Span::styled(first, Style::default().fg(colour)))), area);
+    }
+    let area = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            i18n::msg_git_keys(lang, panel.tab),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        area,
+    );
+}
+
+/// A question drawn over the panel: one line of question, one of answer.
+fn draw_git_question(f: &mut Frame, panel: Rect, question: &str, typed: &str, colour: Color) {
+    let width = panel.width.saturating_sub(6).max(20);
+    let rect = centered_rect(width, 5, panel);
+    f.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(colour));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(Span::styled(question.to_string(), Style::default().fg(colour))),
+        Line::from(Span::raw(typed.to_string())),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 /// One line of a diff, coloured the way every diff has been coloured since diffs were coloured.

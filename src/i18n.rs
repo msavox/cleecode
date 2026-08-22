@@ -564,14 +564,98 @@ pub fn msg_find_flags(lang: Lang, case_sensitive: bool, regex: bool) -> String {
 
 pub fn msg_git_panel_title(lang: Lang) -> &'static str {
     match lang {
-        Lang::En => "Git — Esc closes · Tab/←→ switch · ↑↓ scroll · R refresh",
+        Lang::En => "Git — Esc closes · Tab/←→ switch · ↑↓ move · R refresh",
         Lang::It => "Git — Esc chiude · Tab/←→ cambia · ↑↓ scorre · R aggiorna",
+    }
+}
+
+/// The keys the tab you are on actually has, drawn along its bottom.
+///
+/// Written out rather than left to the manual. Every one of these is a single letter with no
+/// modifier, which is only safe because the panel takes the whole keyboard while it is up — and
+/// a key that does something on one tab and nothing on the next has to say which is which,
+/// or the way to find out is to press it.
+pub fn msg_git_keys(lang: Lang, tab: crate::app::GitTab) -> &'static str {
+    use crate::app::GitTab::*;
+    match (lang, tab) {
+        (Lang::En, Status) => "S stage · U unstage · A stage all · C commit · X discard · Enter open",
+        (Lang::It, Status) => "S in stage · U toglie · A tutto · C commit · X scarta · Invio apre",
+        (Lang::En, Branches) => "Enter switch to the branch",
+        (Lang::It, Branches) => "Invio passa al branch",
+        (Lang::En, Diff) | (Lang::En, Log) => "PgUp/PgDn a page · Home the top",
+        (Lang::It, Diff) | (Lang::It, Log) => "PgSu/PgGiù una pagina · Home in cima",
+    }
+}
+
+pub fn msg_git_clean(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing changed — the working tree matches the last commit",
+        Lang::It => "Niente di modificato — l'albero di lavoro è come l'ultimo commit",
+    }
+}
+
+/// The box that takes a commit message. Says what will be committed, because "everything staged"
+/// is not the same as "everything changed" and the difference is the whole reason staging exists.
+pub fn msg_git_commit_prompt(lang: Lang, staged: usize) -> String {
+    match lang {
+        Lang::En => format!("Commit message — {staged} staged · Enter commits · Esc cancels"),
+        Lang::It => format!("Messaggio del commit — {staged} in stage · Invio conferma · Esc annulla"),
+    }
+}
+
+pub fn msg_git_nothing_staged(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing is staged — S puts a file in, A puts everything in",
+        Lang::It => "Non c'è niente in stage — S ce ne mette uno, A mette tutto",
+    }
+}
+
+/// The one question in the panel that has to be answered rather than dismissed.
+///
+/// It names the file and it says where the work goes, because it does not go anywhere: this is
+/// the only action here that is not in some reflog afterwards.
+pub fn msg_git_discard_prompt(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::En => format!("Throw away every change to {file}? It is in no commit and no stash, and nothing brings it back.  Y / N"),
+        Lang::It => format!("Butto via tutte le modifiche a {file}? Non sono in nessun commit né stash, e non le riporta indietro niente.  S / N"),
+    }
+}
+
+/// The one letter that means yes, in the language the question was asked in.
+///
+/// Its own function so the key and the text of the question cannot drift apart: a box that reads
+/// "S / N" and only answers to `y` is a box that looks broken while it is working exactly as
+/// written.
+pub fn yes_key(lang: Lang) -> char {
+    match lang {
+        Lang::En => 'y',
+        Lang::It => 's',
+    }
+}
+
+pub fn msg_git_working(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "git is working…",
+        Lang::It => "git sta lavorando…",
+    }
+}
+
+/// What to say when git did the thing and said nothing about it, which is most of them: `add`
+/// and `reset` are silent when they work.
+pub fn msg_git_done(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Done",
+        Lang::It => "Fatto",
     }
 }
 
 pub fn msg_git_tab(lang: Lang, tab: crate::app::GitTab) -> &'static str {
     use crate::app::GitTab::*;
     match (lang, tab) {
+        // Not "Files": the file tree's own frame is titled that, and two things called the same
+        // on one screen is one of them being read as the other.
+        (Lang::En, Status) => "Status",
+        (Lang::It, Status) => "Stato",
         (Lang::En, Diff) => "Changes",
         (Lang::It, Diff) => "Modifiche",
         (Lang::En, Log) => "History",
@@ -1564,5 +1648,42 @@ pub fn msg_run_started(lang: Lang, terminal_index: usize, command: &str) -> Stri
     match lang {
         Lang::En => format!("Running in Terminal {}: {command}", terminal_index + 1),
         Lang::It => format!("Eseguo nel Terminale {}: {command}", terminal_index + 1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The question and the key that answers it are two pieces of text a long way apart, and
+    /// nothing else would notice them drifting: a box reading "S / N" that only answers to `y`
+    /// looks broken while working exactly as written, and the user's way of finding out is to
+    /// press the key and watch nothing happen — in front of the one action that cannot be undone.
+    #[test]
+    fn the_discard_question_names_the_key_that_answers_it() {
+        for lang in [Lang::En, Lang::It] {
+            let question = msg_git_discard_prompt(lang, "src/main.rs");
+            let key = yes_key(lang).to_ascii_uppercase();
+            assert!(
+                question.contains(&format!("{key} / N")),
+                "{lang:?}: {question:?} does not offer {key}"
+            );
+            assert!(question.contains("src/main.rs"), "{lang:?}: the file has to be named");
+        }
+    }
+
+    /// Every tab says which keys it has, and the two that can be acted on have to name the
+    /// action rather than only the movement — that is the whole reason the row is drawn.
+    #[test]
+    fn each_tab_says_what_can_be_done_to_it() {
+        for lang in [Lang::En, Lang::It] {
+            for tab in crate::app::GitTab::ALL {
+                assert!(!msg_git_keys(lang, tab).is_empty(), "{lang:?} {tab:?}");
+            }
+            let status = msg_git_keys(lang, crate::app::GitTab::Status);
+            for key in ["S", "U", "A", "C", "X"] {
+                assert!(status.contains(key), "{lang:?}: the status keys leave out {key}");
+            }
+        }
     }
 }

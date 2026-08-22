@@ -89,6 +89,25 @@ and is told about an edit once you stop typing rather than on every key. Rust is
 through rust-analyzer. A server that is not installed is not an error to report: nothing is
 underlined, the list has the file's own words in it, and everything else carries on.
 
+`Ctrl+Shift+D` opens the git panel. **Status** is the tab you act on: every changed file with
+git's own two letters in front of it — the index's and the working tree's — because `MM` is a
+file that was added and then changed again, and one letter would lose half of that. `S` stages
+the file under the cursor, `U` takes it back out, `A` stages everything, `C` asks for a message
+and commits, `Enter` opens the file. **Changes** is the diff, **History** the last 50 commits,
+**Branches** the branches with the current one marked and how far each is from its upstream —
+`Enter` moves to one, and git refuses that itself if it would write over uncommitted work.
+
+`X` throws away every change to a file, and it is the only thing in CleeCode that destroys work:
+what it removes is in no commit and no stash. So it asks first, and the question takes one letter
+and reads every other key as no — including the ones that do something to the list behind it. A
+file git has never been told about is refused rather than deleted; there is nothing to put back,
+and `rm` belongs in the terminal where it reads as what it is.
+
+Everything goes through `git` on PATH rather than a library, so what the panel does is what the
+terminal beside it would do: hooks run, commits are signed, credential helpers are asked. Push
+and pull are not here, and that is the same reasoning from the other end — they can stop to ask
+for a password, and a panel has no terminal to ask it in.
+
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.
 
@@ -213,7 +232,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
 | `Ctrl+U` / `Ctrl+N` | Inside Find: case sensitivity / read the query as a regex |
 | `Ctrl+Shift+H` | Search the project; results are a list, `Enter` opens one at its line |
-| `Ctrl+Shift+D` | Git panel: changes, history, branches — read-only, straight from `git` |
+| `Ctrl+Shift+D` | Git panel: status, changes, history, branches — stage, commit, switch, straight from `git` |
 | `Ctrl+K` | Toggle line comment |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |

@@ -1068,3 +1068,68 @@ chiamante che chiede lo stesso ottenga un buffer e non un panic.
 va sotto zero se la lista si è svuotata, e si svuota — chiudere un file chiude anche l'anteprima
 che era una vista di quel file, quindi le ultime *due* schede se ne vanno con un tasto solo. Ora
 c'è un posto solo, `nothing_open`, e ci si arriva da entrambe le strade.
+
+### Il pannello Git scrive (2026-08-22)
+
+Era in fondo alla coda da tre release, con una motivazione scritta: leggere ha rischio zero,
+scrivere no, e il commit si fa già nel terminale accanto. La motivazione regge ancora — ed è
+proprio lei che ha deciso *cosa* entra e cosa no, invece di essere un motivo per non fare niente.
+
+**Quello che c'è:** una scheda Stato, prima di tutte, con ogni file modificato e davanti le due
+lettere di git. `S` mette in stage la riga sotto il cursore, `U` la toglie, `A` mette tutto, `C`
+chiede un messaggio e committa, `Invio` apre il file. Su Branch, `Invio` ci passa. `X` butta via
+le modifiche a un file, dietro domanda.
+
+**Quello che non c'è, e perché:** push e pull possono fermarsi a chiedere una password, e in un
+pannello non c'è nessun terminale in cui chiederla — resterebbero appesi e si vedrebbero solo
+fallire. Merge e rebase vogliono risolvere conflitti, che è una funzione dell'editor tutta sua.
+
+*Le decisioni che contano, e cosa le ha guidate:*
+
+- **Le due lettere di git restano due lettere.** Un enum nostro avrebbe dovuto crescere un ramo di
+  ripiego — `U` per un conflitto di merge, `T` per un file diventato symlink — e un ramo di
+  ripiego è dove finiscono gli stati a cui nessuno ha pensato, per essere mostrati sbagliati.
+  Sono anche quello che mostra qualsiasi altro strumento git e quello che spiegano le man page.
+  `MM` è un file aggiunto e poi cambiato ancora: una lettera sola ne perderebbe metà.
+- **Le grafie sono quelle vecchie.** `reset HEAD --`, `checkout HEAD --`, `checkout <branch>` e non
+  `restore`/`switch`, che sono di git 2.23 (2019). Abbastanza recenti da mancare su un server di
+  lunga vita — e un server di lunga vita raggiunto via ssh è esattamente il posto dove un editor
+  da terminale serve. La stessa lezione della 0.9.1, applicata prima di prenderla in faccia.
+- **I percorsi partono dalla cima dell'albero.** `--porcelain` li stampa relativi al top del
+  repository, mentre il pannello gira nella cartella in cui CleeCode è stato aperto. Da una root
+  due livelli più giù, `src/app.rs` sarebbe un file che non c'è e git risponderebbe che lo
+  pathspec non corrisponde a niente — vero e inutile. Quindi lo snapshot si porta dietro `top` e
+  le azioni passano percorsi assoluti.
+- **`-z`, e non è un dettaglio.** Senza, git *quota* un percorso con uno spazio o un accento —
+  `"src/prova nuova.rs"` — e ogni chiamante dovrebbe saper togliere le virgolette. Con, i percorsi
+  arrivano come sono su disco, separati da un byte che dentro non ci può stare. Un rename porta
+  con sé il nome di prima come campo a parte: letto come una voce diventerebbe un file chiamato
+  `rc/old.rs` con lettere di stato `sr`, quindi la camminata lo salta.
+- **Una scrittura per volta, su un thread.** `git commit` fa girare gli hook, e un pre-commit che
+  lancia una suite di test fermerebbe il frame loop — editor, terminali e orologio insieme. E due
+  `git add` in corsa per il lock dell'index sono un errore che si legge come un tasto ignorato.
+
+**La domanda dello scarto è l'unica cosa da cui non si torna indietro,** e le regole sono tutte
+lì per questo: prende *una* lettera — quella della lingua in cui è scritta la domanda — e legge
+ogni altro tasto come un no, compresi `s`, `u`, `a` e `c`, che sulla lista dietro fanno qualcosa.
+Un file di cui git non sa niente viene rifiutato *prima* della domanda invece che dopo la
+risposta: non c'è nessuna versione precedente a cui tornare, e l'unico modo di onorare la parola
+sarebbe cancellare il file, che è `rm` nel terminale. Un test in `i18n.rs` verifica che il testo
+della domanda nomini il tasto che la risponde, perché sono due pezzi di testo lontani e un
+riquadro che dice "S / N" e risponde solo a `y` sembra rotto mentre funziona esattamente come
+scritto — davanti all'unica azione irreversibile.
+
+*Come è stato provato:* `scripts/drive_git.py` fa un repository vero, lo cambia, e dopo **ogni**
+azione chiede al repository com'è messo — non al pannello. Un pannello che disegnasse "in stage"
+senza mettere niente in stage passerebbe qualsiasi controllo fatto sullo schermo, e tutto il punto
+del lato scrittura è che sia successo qualcosa su disco. Il controllo più utile dei diciannove è
+quello in mezzo allo scarto: preme `s` mentre la domanda è aperta e verifica che il file sia
+ancora modificato.
+
+**Tre bug nel driver, tutti dello stesso tipo — guardare troppo largo:** `git status --porcelain`
+messo in `.strip()` perde lo spazio iniziale, e `" M main.rs"` diventa indistinguibile da un file
+in stage; aspettare che `main.rs` compaia a schermo si accontentava dell'**albero dei file dietro
+al pannello**, quindi il test proseguiva su un pannello che stava ancora chiedendo a git; e
+cercare il colore della riga selezionata per nome (`cyan`) non trovava mai niente, perché ratatui
+scrive i colori come codici a 256 e pyte li restituisce in esadecimale. Nessuno dei tre era un bug
+del programma, e tutti e tre avrebbero potuto passare per uno.
