@@ -369,6 +369,7 @@ dependencies = [
  "dirs",
  "fancy-regex 0.16.2",
  "image",
+ "libc",
  "lsp-types",
  "portable-pty",
  "pulldown-cmark",

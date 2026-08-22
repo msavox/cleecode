@@ -54,6 +54,13 @@ toml = "1.1.4"
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 vt100 = "0.16.2"
 
+# Unix-only: one call, `tcgetattr` on a pty master, to ask whether the shell in a pane has put
+# the terminal into raw mode — which is how CleeCode tells "a prompt is reading keys" from "the
+# rc is still running". portable-pty already compiles libc, so this adds no crate and no build
+# time; it only makes the dependency one this code states for itself.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows-only: register the bundled Nerd Font with the OS so `--install-font` makes it
 # usable immediately (registry entry + AddFontResourceW into the GDI session).
 [target.'cfg(windows)'.dependencies]

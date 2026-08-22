@@ -28,7 +28,9 @@ be **rectangular** — `Alt`+drag for a column selection over ragged text.
 
 `Ctrl+L` splits the editor into two independent editors sharing one pool of buffers: each half
 has its own tabs, no file is in both strips at once, and closing the last tab of a half closes
-the split rather than leaving it empty. Files changed underneath you are reloaded when they are
+the split rather than leaving it empty. Closing the last tab of all leaves nothing open — an
+empty frame that says how to open something — rather than the untitled buffer that used to take
+its place, which made that tab the one tab you could not close. Files changed underneath you are reloaded when they are
 not dirty, and a binary or non-UTF-8 file opens
 read-only rather than being corrupted on save. Scrollbars appear inside the frame while the view
 moves or the pointer rests on them, and they are working controls: drag the thumb, click the
@@ -167,7 +169,9 @@ A file tree with per-type Nerd Font icons and git status dots, live refresh, cre
 and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
 Three layout presets, a resizable everything, and a settings panel that applies changes live.
 English and Italian throughout, including the manual. The `◐` at the right-hand end of the menu
-bar fills in the background, for a translucent terminal with something bright behind it.
+bar fills in the background, for a translucent terminal with something bright behind it — which
+is worth knowing about the other way round too: by default CleeCode paints no background of its
+own, so a terminal with a translucent window shows your desktop through the editor.
 
 ![Layout and Run menus](screenshots/menu.png)
 

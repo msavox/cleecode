@@ -138,7 +138,7 @@ moving or reinstalling the binary.
 ## What it does
 
 An editor with 200-odd languages highlighted, real terminals in the same window, previews for
-pictures, PDFs and Markdown, and — since 0.9 — Octave and Python as a live numeric session.
+pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 
 ![CleeCode main view](docs/screenshots/main.png)
 
@@ -158,6 +158,17 @@ Markdown file as a document beside its source.
 a second window beside it showing what the session holds — filling in by itself, with nothing
 typed at your prompt to ask. Send a cell to the running session, get plots as tabs, look inside a
 variable, set a breakpoint and stop in it.
+
+![The Octave workspace: script, figure, session and variables in one window](docs/screenshots/octave-ide.png)
+
+*One window: the script on the left, `figure(1)` arriving as the `fig1.png` tab, the Octave
+prompt below it and the workspace panel beside — `x` and `y` with their size, class and range,
+listed without asking.*
+
+![The same figure inverted to match the dark theme](docs/screenshots/octave-plot-dark.png)
+
+*The same figure with `i`: Octave draws on white, the tab inverts it, and the plot belongs to
+the theme around it rather than glowing in the middle of it.*
 
 ![The workspace window filling in from a cell](docs/screenshots/workspace.png)
 
