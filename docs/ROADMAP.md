@@ -1595,3 +1595,52 @@ caricamento; tre giri di uno script con figure generiche lasciano la sessione co
 quattro figure; le due che non ha aperto sono ancora lì; e uno script lanciato in una shell
 qualsiasi, senza nessuna sessione, consegna il suo grafico. Uno di loro passava a vuoto appena
 scritto — lo script che doveva lanciare non partiva — e adesso lo dice.
+
+
+## 0.12.1 — le impostazioni che non si vedevano (2026-08-23)
+
+Partita da una domanda: come si disattiva la cattura dei plot. La risposta era in due posti, e
+uno dei due non esisteva sullo schermo.
+
+**Tre impostazioni disegnate fuori dal riquadro.** `SETTINGS_COUNT` valeva 9 dal primo commit —
+la modale si dimensiona su quel numero e il cursore ci fa il modulo — mentre `rows()` nel
+frattempo era arrivata a dodici. *Dove si aprono i grafici*, *Mouse abilitato* e *Lingua* erano
+sotto il bordo: invisibili, irraggiungibili con le frecce, e nemmeno cliccabili, perché anche il
+click confronta l'indice con la stessa costante. Ecco perché la destinazione dei plot si poteva
+cambiare solo dal menu Esegui o dal file su disco, e la lingua solo dal file. Il riquadro adesso
+si dimensiona sulle righe che ha davvero, e un test fallisce se i due numeri divergono di nuovo.
+Un secondo test prova che ogni riga cambia il *suo* valore e nessun altro: `activate` è un match
+sull'indice, quindi una riga inserita in mezzo senza rinumerare quelle sotto ribalterebbe la
+vicina in silenzio — che è esattamente come si aggiungeva la riga dello splash.
+
+**Il valore contro il bordo destro.** A colonna fissa, `Language server (diagnostici,
+completamento)` — 44 caratteri contro 34 — si portava via il posto del suo `on`, che finiva
+attaccato alla parentesi. Ora l'etichetta spinge il valore invece di essere invasa da lui, e la
+modale è larga quanto la riga più lunga che deve disegnare: in italiano *schede — qui non c'è un
+display* è una frase, non una parola.
+
+**Una modifica fatta lì dentro adesso ha effetto, e resta.** Scegliere una riga scriveva la
+struct e basta. La destinazione dei plot vive però anche in un atomico, che è da dove partono le
+shell — una shell nasce fuori dal thread dell'app e non può leggerla — quindi la riga che nessuno
+poteva raggiungere non avrebbe comunque funzionato. E niente veniva scritto su disco fino a
+un'uscita pulita: modifica nella modale più terminale chiuso con la X, e le due si annullavano. Il
+toggle del menu faceva entrambe le cose da sempre; sono le stesse impostazioni.
+
+**L'interruttore dice da che parte sta.** *Grafici: schede o finestre* poneva la domanda e non
+rispondeva: per sapere com'era messo bisognava ribaltarlo e leggere la barra di stato, cioè
+rispondere per poter chiedere. Adesso scrive `schede` o `finestre` a destra, nella colonna delle
+scorciatoie — nessuna voce ha entrambe, e un test lo tiene vero — e scrive la destinazione
+*effettiva*: su una macchina senza schermo dice `schede`, perché è lì che i grafici vanno
+qualunque cosa dica l'impostazione.
+
+**Lo splash è un'impostazione.** Un argomento sulla riga di comando lo salta da sempre, quindi
+`clee src/main.rs` va dritto al lavoro e `clee` nudo mostra la tartaruga per un secondo e otto
+decimi. *Schermata iniziale all'avvio*, spenta, lo salta anche lì.
+
+Verificato pilotando il binario in uno pseudo-terminale, non solo con `cargo test`: la voce di
+menu che legge `tabs`, le tredici righe tutte disegnate, il file su disco che cambia appena si
+preme Invio, e lo splash che compare o no secondo l'impostazione. Il primo tentativo di quella
+verifica passava a vuoto per un motivo che vale la pena scrivere: il fixture appendeva
+`show_splash = false` in fondo a un `settings.toml` che finisce con `[language_servers]`, quindi
+la chiave finiva dentro la tabella, `toml::from_str` falliva e `Settings::load` tornava ai
+default in silenzio. Una preferenza ignorata e un file che non si legge hanno lo stesso aspetto.

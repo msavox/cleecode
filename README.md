@@ -95,7 +95,8 @@ cargo build --release
 ```
 
 An argument skips the startup splash; the splash only shows on a bare `clee` or with `-w`,
-where it names the workspace being opened.
+where it names the workspace being opened. *Splash screen at startup* in the settings
+(`Ctrl+Shift+O`) turns it off for good, for the bare `clee` too.
 
 ### Nerd Font icons
 

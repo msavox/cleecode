@@ -1560,6 +1560,9 @@ impl App {
         // at construction, so a shell started ahead of the preference would be stuck without one
         // for the whole session.
         let settings = Settings::load();
+        // Read before `settings` is moved into the struct below, where the field that holds it
+        // is initialised ahead of this one.
+        let show_splash = settings.show_splash;
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
@@ -1610,7 +1613,7 @@ impl App {
             menu: MenuBar::new(),
             show_about: false,
             clipboard: Clipboard::new(),
-            show_splash: true,
+            show_splash,
             turtle: None,
             splash_started: Instant::now(),
             show_delete_confirm: false,
@@ -1730,6 +1733,17 @@ impl App {
                 }
             }
             self.turtle = None;
+        }
+    }
+
+    /// What the menu items that hold a setting read out beside themselves.
+    ///
+    /// The plot destination is the *effective* one and not the stored preference: a machine with
+    /// no screen captures whatever the setting says, so reading the setting out would have the
+    /// menu claim "windows" while every figure kept arriving as a tab.
+    pub fn menu_states(&self) -> crate::menu::MenuStates {
+        crate::menu::MenuStates {
+            plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
         }
     }
 
@@ -8029,18 +8043,32 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.settings.activate(self.settings_selected);
-                self.editor_mut().syntax_dirty = true;
+                self.settings_changed();
             }
             KeyCode::Left => {
                 self.settings.adjust(self.settings_selected, -1);
-                self.editor_mut().syntax_dirty = true;
+                self.settings_changed();
             }
             KeyCode::Right => {
                 self.settings.adjust(self.settings_selected, 1);
-                self.editor_mut().syntax_dirty = true;
+                self.settings_changed();
             }
             _ => {}
         }
+    }
+
+    /// What a row of the settings modal does beyond changing the struct.
+    ///
+    /// Two things the modal used to leave undone. The plot destination lives in a second place —
+    /// an atomic the shells are started from, since a shell is spawned off the main thread and
+    /// cannot reach into the app — so a row that only wrote the struct was a switch the next
+    /// session ignored. And nothing here was written to disk until a clean quit, so a change
+    /// made in the modal and a terminal closed by its own X button cancelled each other out.
+    /// The menu's own toggle has always done both; these are the same settings.
+    fn settings_changed(&mut self) {
+        crate::wsnap::set_plots_in_tabs(self.settings.plots_in_tabs);
+        self.settings.save();
+        self.editor_mut().syntax_dirty = true;
     }
 
     fn activate_file_tree_selection(&mut self) {
@@ -9254,7 +9282,7 @@ impl App {
     }
 
     fn mouse_settings(&mut self, col: u16, row: u16, full: Rect) {
-        let modal = ui::settings_modal_rect(full);
+        let modal = ui::settings_modal_rect(self, full);
         if !within(modal, col, row) {
             return;
         }
@@ -9266,7 +9294,7 @@ impl App {
         if idx < settings::SETTINGS_COUNT {
             self.settings_selected = idx;
             self.settings.activate(idx);
-            self.editor_mut().syntax_dirty = true;
+            self.settings_changed();
         }
     }
 

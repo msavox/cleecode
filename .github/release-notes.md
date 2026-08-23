@@ -1,3 +1,29 @@
+## What's new in 0.12.1
+
+**Three settings were drawn off the bottom of the box.** The settings modal is sized from one
+number and the cursor wraps on it, and that number had said nine since the first commit while the
+list grew to twelve. *Where plots open*, *Mouse enabled* and *Language* were below the fold:
+invisible, unreachable by the arrows, and not clickable either — which is why the only way to
+change the plot destination was the Run menu or the file on disk. The box now takes its size from
+the rows it has, a test fails if the two ever disagree again, and each row's value is set against
+the right-hand edge instead of a fixed column that the language-server label had outgrown.
+
+**A change made in the settings modal now takes effect, and survives.** Picking a row wrote the
+struct and nothing else: the plot destination also lives in an atomic the shells are started
+from, so the row nobody could reach would not have worked if they had. Nothing was written to
+disk until a clean quit either, so a change made there and a terminal closed by its own button
+cancelled each other out. Both are fixed for every row at once.
+
+**The plot switch says which way it is set.** *Plots: tabs or windows* in the Run menu asked the
+question and answered neither — you had to flip it and read the status line, which is a question
+you cannot ask without also answering it. It now reads out `tabs` or `windows` on the right, in
+the column the shortcuts use, and it reads out the *effective* destination: on a machine with no
+screen it says `tabs`, because that is where the figures are going whatever the setting says.
+
+**The splash screen is a setting.** An argument on the command line has always skipped it, so
+`clee src/main.rs` went straight to work while a bare `clee` showed the turtle for one and
+eight tenths of a second. *Splash screen at startup*, off, skips it for the bare `clee` too.
+
 ## What's new in 0.12.0
 
 **Animations do not flicker any more, and it was four separate things.** The pane emptied
