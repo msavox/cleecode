@@ -462,11 +462,11 @@ fn columns(text: &str) -> u16 {
     Span::raw(text).width() as u16
 }
 
-pub fn menu_title_ranges(menu: &MenuBar, lang: Lang, workspace: Option<&str>) -> Vec<(u16, u16)> {
+pub fn menu_title_ranges(menu: &MenuBar, lang: Lang) -> Vec<(u16, u16)> {
     let mut ranges = Vec::new();
     let mut x = columns(MENU_LOGO);
     for def in &menu.defs {
-        let label = format!(" {} ", i18n::menu_title(lang, def.title_key, workspace));
+        let label = format!(" {} ", i18n::menu_title(lang, def.title_key));
         let w = columns(&label);
         ranges.push((x, x + w));
         x += w;
@@ -501,7 +501,7 @@ fn workspace_badge(app: &App) -> String {
 /// nothing here removes both at once — the View menu entry still does the job.
 pub fn menu_bar_button_range(app: &App, width: u16) -> std::ops::Range<u16> {
     let badge = columns(&workspace_badge(app));
-    let titles = menu_title_ranges(&app.menu, app.settings.lang, app.active_workspace.as_deref())
+    let titles = menu_title_ranges(&app.menu, app.settings.lang)
         .last()
         .map(|(_, end)| *end)
         .unwrap_or(0);
@@ -516,13 +516,8 @@ fn button_range(width: u16, titles_end: u16, badge: u16) -> std::ops::Range<u16>
     if start < titles_end || end - start < button { start..start } else { start..end }
 }
 
-pub fn menu_dropdown_rect(
-    menu: &MenuBar,
-    lang: Lang,
-    workspace: Option<&str>,
-    full: Rect,
-) -> Rect {
-    let ranges = menu_title_ranges(menu, lang, workspace);
+pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
+    let ranges = menu_title_ranges(menu, lang);
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
@@ -839,7 +834,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
     let mut used = columns(MENU_LOGO);
     for (i, def) in app.menu.defs.iter().enumerate() {
-        let title = i18n::menu_title(lang, def.title_key, app.active_workspace.as_deref());
+        let title = i18n::menu_title(lang, def.title_key);
         let label = format!(" {} ", title);
         used += columns(&label);
         let is_open = app.menu.active && app.menu.menu_index == i;
@@ -901,7 +896,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
-    let rect = menu_dropdown_rect(&app.menu, lang, app.active_workspace.as_deref(), full);
+    let rect = menu_dropdown_rect(&app.menu, lang, full);
     let inner_width = rect.width.saturating_sub(2) as usize;
     // Separator rules are woven in between real items, so the row a given item
     // renders on drifts down by one for every group opened above it. Track the
@@ -2236,6 +2231,27 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// How one row of a chooser is painted.
+///
+/// Almost every row is a row. The exception is the workspace list, where three of the entries
+/// are not files at all: the default layout and the two session presets are built into
+/// CleeCode, cannot be saved over and cannot be deleted, and until they were coloured there was
+/// nothing on screen that said so — they sat in the list looking exactly like something you
+/// had made and could throw away. Cyan is the colour the chooser already uses for the parts
+/// that belong to the app rather than to you: its border, its prompt.
+fn picker_row_style(kind: crate::picker::PickerKind, label: &str, selected: bool) -> Style {
+    if selected {
+        return Style::default().fg(Color::Black).bg(Color::Cyan);
+    }
+    let built_in = matches!(kind, crate::picker::PickerKind::Workspaces)
+        && crate::workspace::is_built_in(label);
+    if built_in {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let Some(p) = app.picker.as_ref() else { return };
     let rect = picker_rect(full);
@@ -2261,11 +2277,7 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     for (row, &item_idx) in p.filtered.iter().enumerate().skip(start).take(list_rows) {
         let item = &p.items[item_idx];
         let selected = row == p.selected;
-        let row_style = if selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
+        let row_style = picker_row_style(p.kind, &item.label, selected);
         let sc = item.shortcut.as_deref().unwrap_or("");
         let sc_w = sc.chars().count();
         // Reserve room for the right-aligned shortcut, then fit/ellipsize the label.
@@ -3848,36 +3860,27 @@ mod tests {
     /// An 80×24 screen, the size every terminal still agrees on.
     const SCREEN: Rect = Rect { x: 0, y: 0, width: 80, height: 24 };
 
-    /// The first menu takes the session's name, and the hit-test moves with it.
-    ///
-    /// The width is the point: "Ottavio" is one column shorter than "CleeCode" and "Pitone" is
-    /// two, so a hit-test still measuring the old name would put every click on the bar one or
-    /// two columns out — and only for people running a preset.
+    /// The three built-in workspaces cannot be saved over and cannot be deleted — the delete
+    /// list is files, and they are not files. What was missing was any way to see that before
+    /// trying: in the list they looked like something you had made yourself. They are coloured
+    /// now, and only there — the same name in the command palette or a file list is an ordinary
+    /// row and must stay one.
     #[test]
-    fn the_first_menu_is_named_after_the_session_and_the_clicks_follow() {
-        use crate::i18n::{menu_title, Key, Lang};
-        let bar = MenuBar::new();
-        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, None), "CleeCode");
-        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("octave")), "Ottavio");
-        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("pylab")), "Pitone");
-        // A workspace of the user's own is not one of the two, and keeps the real name.
-        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("my layout")), "CleeCode");
-        // And it is only the first menu that plays along.
+    fn the_built_in_workspaces_are_marked_as_the_apps_own() {
+        use crate::picker::PickerKind;
+        let colour = |kind, name| picker_row_style(kind, name, false).fg;
+        let mine = colour(PickerKind::Workspaces, "my layout");
+        assert_ne!(colour(PickerKind::Workspaces, "octave"), mine);
+        assert_ne!(colour(PickerKind::Workspaces, "pylab"), mine);
+        assert_ne!(colour(PickerKind::Workspaces, crate::workspace::DEFAULT_NAME), mine);
+        // A file of the user's own that happens to be named like one is impossible — `save_in`
+        // refuses the name — so a row named "octave" in that list is always the built-in.
+        assert_eq!(colour(PickerKind::Files, "octave"), mine, "only the workspace list marks them");
+        // Selected is selected, whatever it is: one highlight, not two competing ones.
         assert_eq!(
-            menu_title(Lang::En, Key::MenuFile, Some("octave")),
-            menu_title(Lang::En, Key::MenuFile, None)
+            picker_row_style(PickerKind::Workspaces, "octave", true),
+            picker_row_style(PickerKind::Workspaces, "my layout", true)
         );
-
-        let plain = menu_title_ranges(&bar, Lang::En, None);
-        let named = menu_title_ranges(&bar, Lang::En, Some("pylab"));
-        assert_eq!(plain.len(), named.len());
-        assert_ne!(plain[0].1, named[0].1, "the first title is a different width");
-        // Every menu after it shifts by the same amount, or the click lands on its neighbour.
-        let shift = plain[1].0 as i32 - named[1].0 as i32;
-        for (a, b) in plain.iter().zip(named.iter()).skip(1) {
-            assert_eq!(a.0 as i32 - b.0 as i32, shift);
-            assert_eq!(a.1 as i32 - b.1 as i32, shift);
-        }
     }
 
     #[test]
