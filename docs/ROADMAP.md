@@ -1497,3 +1497,101 @@ Adesso il default dice `--no-gui`, e — la metà che conta — **la stringa vec
 in `settings.toml`: chi ha eseguito un `.m` anche una volta ce l'ha salvata, e correggere solo il
 default avrebbe corretto solo le installazioni nuove. Riconosciuta alla lettera e solo fra le
 stringhe che CleeCode ha scritto: un comando modificato dall'utente è suo, qualunque cosa dica.
+
+## 0.12 — le animazioni che non sfarfallano, e una figura che resta la stessa (2026-08-23)
+
+L'utente: «le animazioni vanno ma flickerano di brutto». Erano quattro cose diverse, tre nostre.
+
+**La scheda si svuotava fra un fotogramma e l'altro.** Rileggere una figura rimetteva la
+scheda in stato di caricamento — una scritta in mezzo a un riquadro vuoto — mentre il PNG
+veniva decodificato su un thread. Dieci volte al secondo: immagine, buco, immagine. Quello *è*
+il flicker. `rerender_preview` teneva su quello che c'era dai tempi dello zoom; la strada da
+cui passa davvero una figura no. Adesso sì, e una decodifica già in volo fa aspettare il
+fotogramma dopo invece di far partire un secondo thread sullo stesso file. Il fotogramma
+saltato non si perde: il timestamp viene registrato solo quando una lettura è cominciata.
+
+**Ogni fotogramma era un'immagine nuova per il terminale.** `new_resize_protocol` sceglie un id
+kitty a caso, e l'id è scritto *dentro le celle* come colore: un protocollo nuovo per fotogramma
+cambiava ogni cella del riquadro, diceva al terminale di dimenticare un'immagine e di piazzarne
+un'altra sull'intera area, e quello che si vedeva in mezzo era il riquadro. Ora la figura nuova
+va al protocollo che c'è già, sotto l'id che il terminale conosce: le celle restano identiche e
+lui si limita a ridipingere. Smette anche di perdere un id kitty per fotogramma per tutta la
+durata dell'animazione. Un test disegna due fotogrammi e rilegge l'id dalle celle, che è dove lo
+legge anche il terminale; invertendo la fix, fallisce.
+
+**Niente teneva fermo lo schermo mentre il fotogramma veniva scritto.** Adesso ogni frame esce
+dentro un synchronized update (DEC 2026): Ghostty, kitty, WezTerm, iTerm2, foot e tmux tengono
+su l'ultimo fotogramma completo finché questo non è arrivato tutto, e un terminale che non
+conosce quella modalità la ignora. Il ritorno di quadro che una TUI non ha mai avuto. Verificato
+sul flusso grezzo del pty: 27 aperture, 27 chiusure, bilanciate.
+
+**E l'immagine veniva letta mentre veniva scritta.** Tutti e due gli hook stampavano dritti sul
+nome che l'editor sorveglia, quindi un fotogramma preso a metà scrittura si decodificava come
+`unexpected end of file` e la scheda diceva di non riuscire a leggere un file che un millisecondo
+dopo è perfetto — beccato tre volte in cinque secondi dal driver. Ora scrivono di fianco e
+rinominano, che dentro una cartella è atomico. `rename` e non `movefile`: movefile lancia `mv`,
+e un fork per fotogramma è un terzo del budget di un'animazione. Come cintura oltre alle
+bretelle, una decodifica fallita non porta più via l'immagine che è già su.
+
+**«Su octave mi sa che manco partono, scatta un frame ogni tanto»** era una quinta cosa, e
+diversa. La scheda veniva riletta solo quando cambiava lo *snapshot*, e lo snapshot lo scrive un
+hook che gira mentre l'interprete aspetta un comando — un ciclo non aspetta mai. `cleecode_frame`
+ristampa le figure, e non deve ricostruire uno snapshot sessanta volte al secondo, quindi
+un'animazione Octave si muoveva solo quando il ciclo lasciava entrare l'hook per caso. Il
+timestamp della figura è ciò che dice che è stata ridisegnata, e costa uno `stat` per figura
+aperta per tick. Il `frame()` di Python lo snapshot lo scrive: ecco perché pylab animava e Octave
+no.
+
+**Le figure duplicate.** Octave e matplotlib scrivevano `fig1.png` nella stessa cartella —
+entrambi numerano da uno — quindi due sessioni si sovrascrivevano il grafico e le frecce sulla
+scheda chiedevano il ridisegno all'interprete sbagliato. Una cartella per linguaggio. Non per
+pannello, che era l'altro modo: il percorso *è* la scheda, e una cartella per pannello aprirebbe
+una seconda scheda per la figura 1 a ogni sessione riavviata.
+
+E rilanciare uno script accumulava schede — due grafici diventavano quattro al secondo giro e sei
+al terzo — perché tutte e due le lingue danno il primo numero libero, quindi `plt.subplots()` e un
+`figure()` nudo creano figure nuove ogni volta. Ora ▶ Run chiude le figure che *quel file* aveva
+aperto l'ultima volta, e solo quelle: un grafico fatto a mano al prompt non appartiene a nessun
+run e sopravvive. Quali fossero si guarda dal momento in cui il comando viene battuto fino al
+ritorno del prompt, letto dalla disciplina di linea del pty invece che indovinato con un timeout.
+
+**E i grafici devono funzionare senza i preset**, che servono a preparare un layout e una
+sessione viva, non a cambiare come si vedono i plot. Octave lo faceva già, col PKG_ADD sul suo
+load path. Python no: `PYTHONSTARTUP` lo legge solo un interprete interattivo, quindi
+`python3 plot.py` — cioè quello che fa Run quando non c'è un prompt aperto — non installava
+niente, mentre `MPLBACKEND` puntava già al backend senza finestre. La figura veniva disegnata per
+nessuno e `plt.show()` non apriva niente: il grafico non esisteva da nessuna parte. Lo risolve un
+`sitecustomize` sulla cartella della libreria, e la consegna è registrata **dentro il modulo del
+backend**, non lì: gli handler `atexit` girano in ordine inverso e pyplot registra
+`Gcf.destroy_all` mentre viene importato, quindi un hook messo prima che matplotlib fosse mai
+usato trova tutte le figure già distrutte. Misurato: `get_fignums()` lì risponde `[]` ogni volta.
+Il backend viene importato quando matplotlib lo sceglie, che è per forza dopo. Un millisecondo
+sull'avvio di un Python che non disegna.
+
+**Il primo menu ha ripreso il suo nome** — via l'easter egg Ottavio/Pitone, su richiesta — e con
+lui sparisce il parametro `workspace` dalle tre cose che chiedevano il titolo: il disegno, il
+click e il mnemonico, che dovevano concordare su una larghezza. **I tre workspace predefiniti**
+— layout di default, octave e pylab — non si potevano cancellare (l'elenco di cancellazione sono
+i file, e loro non sono file) ma niente lo diceva: nella lista sembravano roba tua da buttare.
+Ora sono del colore che il selettore usa già per le parti che appartengono all'app.
+
+**Il rumore che si può zittire e quello che no.** La riga `qt.qpa.fonts: Populating font family
+aliases…` è logging Qt e se ne va con una regola sola, una categoria, solo i warning. La riga
+`FALLBACK (log once): Fallback to SW vertex processing` è il driver OpenGL di Apple e non
+risponde a nessuna regola: misurato, la stampa il `print` — quello che chiede CleeCode, non il
+`plot` dell'utente — una volta per sessione, e stampare col renderer vettoriale la evita al
+prezzo di 190 ms a fotogramma contro 37.
+
+**Un esempio si chiamava `plot.m`.** Octave cerca le funzioni fra i file della cartella in cui
+lavora *prima* che nella sua libreria, quindi un `plot.m` lì dentro diventa "il" plot per ogni
+script lanciato da quella cartella — e quello aveva pure una parentesi di troppo. Risultato:
+`anima.m` falliva con l'errore di sintassi di un file che non nomina. Ora si chiama `grafico.m`,
+e `anima.m` gira fino in fondo anche fuori da CleeCode, dove `cleecode_frame` non è inerte: non
+esiste proprio.
+
+Nei driver quattro controlli nuovi, tutti falliti prima della loro correzione: un'animazione
+campionata venticinque volte al secondo non sbianca mai e non mostra mai la scritta di
+caricamento; tre giri di uno script con figure generiche lasciano la sessione con le stesse
+quattro figure; le due che non ha aperto sono ancora lì; e uno script lanciato in una shell
+qualsiasi, senza nessuna sessione, consegna il suo grafico. Uno di loro passava a vuoto appena
+scritto — lo script che doveva lanciare non partiva — e adesso lo dice.
