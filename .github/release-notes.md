@@ -1,3 +1,24 @@
+## What's new in 0.12.2
+
+**A markdown file with a picture in it becomes a document again.** Reported as "the README of
+CleeCode only previews as text, the small notes render fine", and the difference between the two
+was a picture. pandoc extracts a document's images into a temporary directory and hands typst
+absolute paths to them — and typst resolves an absolute path against its *root*, not against the
+filesystem, so it looked for `/private/var/…/media/docs/demo.gif` under the working directory and
+reported it missing. The engine is now told where its root is. Every markdown file with an image
+was affected, and the fallback to styled text is silent by design, which is why it read as
+"the graphical preview stopped working".
+
+**And when a preview does fail, the status line says why.** It showed pandoc's last line —
+"Error producing PDF." — which is true and useless. The engine's own report is above it: typst
+opens with `error:`, TeX with `!`, and either now reaches the status line.
+
+**Open outside CleeCode.** New first entry in the file tree's right-click menu (and in the
+command palette): it hands the file to whatever the desktop opens that kind with — a PDF to a
+reader, a `.md` to a browser, anything CleeCode can only show. `open` on macOS, `xdg-open` on
+Linux, `start` on Windows. Over ssh it refuses and says so, rather than opening a window on the
+machine at the other end.
+
 ## What's new in 0.12.1
 
 **Three settings were drawn off the bottom of the box.** The settings modal is sized from one
