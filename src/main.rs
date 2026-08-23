@@ -9,6 +9,7 @@ mod file_tree;
 mod find;
 mod font_install;
 mod git;
+mod git_graph;
 mod git_status;
 mod highlight;
 mod i18n;

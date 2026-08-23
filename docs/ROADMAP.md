@@ -1201,3 +1201,216 @@ bordi del riquadro in cui il testo è davvero disegnato, più l'abitudine di sta
 tolta nella 0.9.2 — e falliva da allora senza che nessuno lo leggesse. Il suo compagno a 92
 colonne passava contro un layout identico a quello largo, quindi non dimostrava nessuna
 adattabilità: sembrava la prova di un comportamento che era stato rimosso.
+
+---
+
+## 0.10.1 e 0.10.2 — quello che è uscito subito dopo (2026-08-22)
+
+Due patch nate dallo stesso posto delle quattro della 0.9.1: una sessione vera su una Ubuntu
+remota. `clear` in un pane, le figure che perdevano le etichette, una sessione `ssh -X` che
+moriva; e poi `grid minor` che via ssh non stampava niente — sembrava Linux ed era il toolkit
+grafico, perché senza display si sceglie gnuplot e gnuplot non sa mettere tacche minori fra
+tacche che gli arrivano una per una.
+
+## 0.11 — git per intero, il grafo, e il server che risponde a più di una domanda (2026-08-23)
+
+### Il pannello Git fa tutto quello che un pannello Git può fare
+
+**Cinque schede invece di quattro,** e Cronologia non è più una lista: è un **grafo di tutti i
+branch insieme**, disegnato in ASCII. `src/git_graph.rs` è un'assegnazione di lane in una
+passata sola, funzione pura della lista di commit, senza accesso al repository e senza disegno
+dentro — quindi le forme scomode (un merge octopus, due storie senza antenato comune, un grafo
+tagliato al limite con genitori che non arrivano mai) sono casi in un file di test invece che
+repository che qualcuno deve costruire.
+
+*Perché ASCII.* I sei caratteri di `git log --graph` — `*`, `|`, `/`, `\`, `-` — ce li ha ogni
+terminale e li spazia allo stesso modo. Box-drawing e braille fanno un grafo più bello dove il
+font ce l'ha, e via ssh verso una console qualsiasi diventano quadratini o mezze colonne di
+disallineamento. **Un grafo che sbaglia a dire quale linea si unisce a quale è peggio di nessun
+grafo.**
+
+*Una scelta contro `git log --graph`:* **le lane non si compattano mai a sinistra.** git compatta
+e ottiene un disegno più stretto al prezzo di una diagonale ogni volta che una lane si chiude più
+a sinistra. In una finestra che tiene anche un editor, le linee che restano nella loro colonna
+sono quello che rende la forma leggibile a colpo d'occhio, e le diagonali che restano sono le due
+che significano qualcosa: un branch che parte e un branch che rientra.
+
+*Due attese sbagliate, trovate dai test.* Avevo trascritto l'output di `git log --graph` senza
+pensarci per l'octopus (`|\ \`) e per tre branch che rientrano insieme (`|/|/|/`). Il layout
+produce `|\-\` e `|/-/-/`, e ha ragione lui: il tratto orizzontale dice *da dove viene* la linea,
+e le lane attraversate non proseguono, quindi non devono disegnare una barra. La regola che conta
+— una lane viva attraversata **tiene la sua `|`**, solo i vuoti prendono `-` — ha un test suo,
+perché senza un merge da una parte all'altra del grafo si disegnerebbe dritto attraverso due
+branch estranei e si leggerebbe come un'unione a tre.
+
+**Quello che il pannello scrive adesso:** stage, unstage, tutto, commit, **amend**, discard,
+**stash** (crea, applica, pop, elimina), **branch** (crea da HEAD o da un commit del grafo,
+elimina, checkout, **merge**), **tag**, **cherry-pick**, **revert**, **reset --hard**, e
+**l'uscita da un merge / pick / revert / rebase fermo a metà** — offerta solo quando ce n'è uno da
+cui uscire, letta dal filesystem (`rebase-merge`, `MERGE_HEAD`, …) e non dalla prosa di
+`git status`, che cambia fra versioni.
+
+**Fetch, pull e push ci sono, e girano nel terminale.** È la risposta alla cosa che li ha tenuti
+fuori per tre release, non un cambio di idea: possono fermarsi a chiedere una password, un codice
+a due fattori o una host key, e un pannello modale non ha dove mettere quella domanda. Un
+terminale è esattamente la cosa che può farla, e CleeCode ne ha di veri a un tasto di distanza.
+Quindi il pannello si chiude, la shell prende il fuoco, e il comando appare a un prompt.
+
+*Le grafie restano quelle vecchie,* per la ragione già scritta nella 0.10: `stash save` e non
+`stash push`, che è del 2017 — questo è il comando che serve di più sul git vecchio di un server
+raggiunto via ssh, ed è l'unico posto dove una grafia deprecata vale più di una corrente.
+
+*Una domanda in rosso e una in giallo, e la differenza è tutta la sicurezza qui.* Rosso solo dove
+il sì distrugge qualcosa che non è in nessun commit, stash o reflog: scartare un file, `reset
+--hard`, eliminare uno stash. Eliminare un branch **non** è in quella lista — i suoi commit
+restano nel reflog novanta giorni — ed è la distinzione, non una dimenticanza: **rosso su tutto è
+rosso su niente.**
+
+### Dove si trova, che era metà del problema
+
+Il pannello esisteva solo dietro `Ctrl+Shift+D` e una riga sepolta nel menu Modifica. Adesso:
+
+- un **menu Git** nella barra, che apre direttamente la scheda che vuoi, più i tre remoti;
+- il **tasto destro su un file versionato** dell'albero ha le azioni git per quel file, sotto due
+  intestazioni di sezione — *Git — questo file* e *Git — il repository* — perché una riga sola non
+  direbbe che «Metti in stage questo file» e «Rinomina...» sono due tipi di cosa diversi;
+- lo scarto dal menu contestuale **non riscrive la domanda**: apre il pannello sul file con la
+  domanda già su. Le sue regole sono la cosa scritta con più cura del pannello e le uniche davanti
+  a un'azione che niente annulla; una seconda copia sarebbe una seconda copia da tenere giusta, e
+  quella che sbaglierebbe è quella che nessuno guarda.
+
+### Tre bug veri, e uno era invisibile da sempre
+
+- **I pallini git nell'albero non comparivano mai** aprendo il progetto come `.` — cioè nel modo
+  normale. `git_status` archiviava per percorso assoluto (`toplevel/rel`) e l'albero cerca con la
+  grafia della root che gli è stata data, che lanciando `clee` in una cartella è `./main.rs`. Ogni
+  lookup mancava, nessuna riga prendeva il pallino, e **niente da nessuna parte lo diceva**: un
+  editor senza marcatori git è identico a un repository senza modifiche. È la stessa forma del bug
+  `file:///./src/main.rs` dell'LSP nella 0.8 — un percorso giusto, in una grafia che l'altro capo
+  non usa.
+- **Incollare in una casella modale scriveva nel file dietro.** `handle_paste` conosceva quattro
+  riquadri su venti e per tutti gli altri cadeva sull'editor: un messaggio di commit incollato
+  finiva nel sorgente aperto sotto il pannello, in silenzio, con la casella lì che continuava a
+  chiederlo. Adesso c'è **una funzione sola** che dice se un riquadro possiede la tastiera, ed è il
+  *cancello* davanti alla catena invece che la catena stessa — quindi un riquadro aggiunto a una e
+  non all'altra o non prende nessun tasto o li mangia tutti, sbagliato **la prima volta che lo
+  apri** invece che solo per un incolla.
+- **`git show --stat` non stampa il patch.** L'ha trovato il driver: il lettore di un commit
+  mostrava i nomi dei file e sotto niente. `--stat` *sostituisce* il patch invece di aggiungersi,
+  e nessuno lo dice — la finestra si apre, ha del contenuto, e il diff semplicemente non c'è.
+- E una fragilità: gli snapshot in volo non avevano un ordine. Adesso ognuno porta il numero
+  dell'interrogazione, e tutto quello che non è l'ultima viene buttato.
+
+### LSP: più server, definizione, hover
+
+**La tabella dei server** ha dodici voci (rust-analyzer, pyright, tsserver, gopls, clangd,
+lua-language-server, zls, solargraph, bash-language-server, json, taplo, texlab) e — quello che
+conta di più — **una tabella dell'utente in `settings.toml`** che vince su quella predefinita:
+`[language_servers]` con `estensione = "riga di comando"`. Una release non deve essere il modo di
+raggiungere un language server nuovo, o il fork che uno si tiene in `~/bin`. Una voce messa a `""`
+ne spegne una predefinita.
+
+**Un processo per programma**, non per linguaggio: clangd serve sette estensioni e uno per
+estensione sarebbero sette clangd a indicizzare lo stesso progetto. Avviato alla prima apertura di
+un file che serve, e a ognuno vengono annunciati solo i suoi file — un `.py` detto a rust-analyzer
+è una pagina di errori su un file che lui legge come Rust. Un server che non parte è ricordato
+**per programma**: una macchina con gopls e senza clangd continua ad avere Go.
+
+**`Ctrl+Shift+J` va alla definizione, `Ctrl+Shift+L` torna indietro** — una pila, perché seguire un
+nome dentro un nome dentro un nome è il modo normale di leggere codice che non conosci, e uno slot
+solo ti lascerebbe a due file da dove sei partito. La risposta si legge in tutte e tre le forme che
+un server può mandare (`Location`, un array, `LocationLink`): sono tutte corrette e sceglierne una
+significherebbe perdere silenziosamente le altre.
+
+**L'hover non ha un tasto, ed è una scelta.** Un hover è la risposta a una domanda che non hai
+proprio fatto — cos'è questo, cosa torna. Quello che va chiesto lo chiede chi già lo sa. Quindi
+arriva da solo quando il cursore si ferma su una parola, nell'unica riga che il server ha già:
+quella di stato, a destra. **Il diagnostico vince quello spazio quando c'è**, e non è vicina: un
+errore su questa riga è una notizia, un tipo no — e finché c'è qualcosa che non va, il tipo è molto
+probabilmente il motivo.
+
+*Il reader del client non indovina più.* Teneva un insieme di id di completamento, con un commento
+che diceva che «la prima risposta è l'handshake e tutto il resto è un completamento» sarebbe stato
+vero quel giorno e silenziosamente falso il giorno di un terzo tipo di richiesta. Quel giorno è
+arrivato due volte insieme: adesso ogni id porta scritto **cosa stava chiedendo**.
+
+*Un bug che solo il driver poteva trovare, di nuovo:* l'hover chiedeva di un file che il server non
+aveva ancora ricevuto. Rispondeva — su un documento che non ha mai visto, cioè su niente — e la
+risposta veniva ricordata come quella di quel file. Era intermittente e restava nascosta dietro un
+predicato lento del driver: la prima versione del controllo falliva e nel fallire *dava tempo* alla
+sincronizzazione. Sistemato il predicato, il bug è comparso.
+
+### La griglia di gnuplot, finalmente uguale a qt
+
+La 0.10.2 disegnava la griglia **minore** che gnuplot rifiuta, e lasciava la **maggiore** al
+toolkit «perché almeno c'è». Messe le due stampe della stessa figura una accanto all'altra, era
+palesemente la scelta sbagliata: qt disegna la maggiore come `gridcolor` a `gridalpha`, cioè il 15%
+di un quasi-nero su bianco — un grigio *attraverso* il quale si legge il grafico. gnuplot la
+disegna nera piena, ed è la cosa più forte della figura: **il dato è una curva sottile dietro una
+gabbia nera.** Correggerne una sola era lo stato peggiore dei tre — due grigi e due pesi in una
+figura sola, che si legge come uno sbaglio anche a chi la versione qt non l'ha mai vista.
+
+Adesso sono entrambe nostre, misurate: i grigi dell'immagine stampata sono **222 e 199**, gli
+stessi identici numeri di qt.
+
+*E la cosa che si vede solo guardandola davvero,* segnalata dall'utente e confermata al pixel: **le
+linee maggiori si fermano una tacca prima del bordo.** qt disegna le sue per tutta l'altezza e poi
+ci passa sopra le tacche, perché lì la decorazione degli assi sta davanti. In gnuplot sta dietro:
+disegna bordo e tacche per primi e i dati — che è quello che le nostre linee sono, per lui — sopra.
+Una linea che arriva al bordo **copre la tacca su cui dovrebbe poggiare**, e il risultato è una
+griglia che fluttua staccata da un asse senza tacche. Che è esattamente quello che sembrava, ed
+esattamente la prima cosa che si nota confrontando le due figure.
+
+*Il lavoro sulla griglia è in due file suoi* (`cleecode_grid.m`, `cleecode_grid_undo.m`) invece che
+sottofunzioni di `cleecode_figs`, perché così si può chiamare, stampare e guardare da sola — che è
+come il difetto della griglia maggiore è stato trovato. E il controllo che il codice interprete
+viaggi dentro al binario **non ha più una lista scritta a mano**: legge le chiamate dal codice. Una
+lista a mano fallisce solo per una funzione che qualcuno si è ricordato di aggiungerci, e il caso
+da cui protegge è quello che nessuno si è ricordato — cioè esattamente questi due file.
+
+### Run entra nella sessione, anche per Python
+
+Trovato dall'utente in tre segnalazioni di fila che erano lo stesso bug: nessun plot, nessuna
+variabile, pannello vuoto. Run per Python avviava sempre una shell nuova, quindi lo script girava
+in un processo che finiva subito — le variabili sparivano prima che il pannello potesse vederle e
+le figure le disegnava qualcosa che non esisteva più. Octave consegna il file alla sessione viva
+dalla 0.9; adesso lo fa anche Python, con `exec(open(...).read())`, che gira nel namespace del
+prompt. Poi puoi continuare a scrivere comandi che usano quello che il file ha lasciato — che è
+il modo in cui `clee -w pylab` somiglia al foglio che sembra.
+
+*La motivazione contraria era scritta e diceva:* un REPL Python aperto di lato mentre editi una
+web application non è dove deve girare `manage.py`. Descrive una sessione vera e manca quella per
+cui CleeCode spedisce un preset. E la scelta adesso non è più nostra: **la tendina del target di
+Run ha una riga in cima, "la sessione già aperta"**, e scegliere un venv significa scegliere di
+avviare un interprete — la stessa domanda detta dall'altro capo. La spunta segue quello che Run
+farebbe *davvero*: preferenza attiva ma nessun prompt aperto, e la spunta sta sul venv.
+
+*E prima ancora, il bug che si vedeva:* con un prompt Python aperto, Run scriveva `python3 file.py`
+lì dentro, cioè un `NameError` nella trascrizione dell'utente con il suo nome sopra. La regola che
+lo produceva diceva "se nessuna shell è libera usa quella in cui eri" — e quella in cui eri è
+esattamente l'interprete in cui stavi lavorando. Terza incarnazione dello stesso errore, dopo
+`octave-cli-11.3.0` nella 0.9.1 e una `P` maiuscola nell'audit della 0.10. Adesso, se non c'è una
+shell libera, se ne apre una: **Run deve eseguire**, e un comando scritto dove non può girare è
+peggio di un pannello che nessuno ha chiesto.
+
+### I controlli delle figure c'erano e non si vedevano
+
+Segnalati come mancanti — pan, rotazione 3-D — ed erano lì dalla 0.9: sulla scheda di una figura
+le frecce spostano un grafico piatto e **girano** un asse tridimensionale, `+`/`−` avvicinano, `r`
+rimette la vista di partenza, `e` esporta. Il comando va alla sessione, che ridisegna, e per
+questo le etichette degli assi restano vere.
+
+Quello che mancava era che la barra lo dicesse. Offriva zoom, fit e invert — i controlli
+dell'*immagine* — e di pan e rotazione non c'era traccia, quindi l'unico modo di scoprirli era
+premere una freccia a caso. Adesso la barra lo scrive, e scrive quale dei due sta facendo, perché
+sono gli stessi quattro tasti su due cose diverse. Con `examples/plot3d.m` e `examples/plot3d.py`
+per provarla, e `examples/plot.py` per il resto del lato pylab.
+
+**Quello che ancora non c'è, ed è il prossimo passo:** il **mouse**. Trascinare per spostare, e
+trascinare un rettangolo per zoomare dentro quello. Il pezzo che manca non è il gesto ma la
+conversione: da pixel della scheda a coordinate dei dati serve sapere dove sta il riquadro degli
+assi *dentro* l'immagine, e quello lo sa solo la sessione — quindi lo snapshot deve portarselo
+dietro, come già porta `xlim`, `ylim` e `view`.
+
+**Dopo:** il mouse sulle figure, un picker quando le definizioni sono più di una, e il resto di
+quello che un language server sa dire (rename, format, i simboli del documento).

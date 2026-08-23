@@ -160,6 +160,85 @@ def run_one(binary, spec, report):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def run_lands_in_the_live_session(binary, report):
+    """Press Run with a Python prompt open, and check the file ran *there*.
+
+    Two things at once, and they were one bug.
+
+    A shell command typed at a prompt that is not a shell's has now been written three times in
+    three hats: `octave-cli-11.3.0` in 0.9.1, a capital `Python` in the 0.10 driver audit, and
+    Run's own "if no shell is idle use the one you were last in" — which is precisely the
+    interpreter you were working in. What the user saw was their own transcript growing a mistake
+    with their name on it:
+
+        >>> python3 /home/ada/hello.py
+        NameError: name 'python3' is not defined
+
+    And underneath it a second one: Run for Python always started a fresh shell, so the script
+    ran in a process that exited immediately. No variables afterwards, an empty workspace panel,
+    and figures drawn by something that no longer existed — three symptoms, one cause, and none
+    of them said so. Octave had handed the file to the live session since 0.9; Python now does
+    the same, which is what makes `clee -w pylab` behave like the notebook it looks like.
+
+    So the check is on all three halves: nothing shell-shaped reaches the prompt, the file runs,
+    and **the session still has what the file defined** — the last is the one that matters, and
+    the only one a fresh shell could not fake.
+    """
+    root = tempfile.mkdtemp(prefix="clee_run_")
+    open(os.path.join(root, "hello.py"), "w").write(
+        "marker = 8484\nprint('ciao dal file')\n")
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, 20):
+            report.check("Run: the app draws its first frame", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "hello.py" in s.text(), 10)
+
+        # The file first, and *then* the prompt. The other order does not work from a driver and
+        # the reason is worth writing down: with the terminal focused, Ctrl+O does not reach the
+        # quick-open box, so the name typed after it goes to whatever is at the prompt — which in
+        # this test is Python, and `hello` is not defined there. Which is the same class of
+        # mistake this whole check is about, arriving from the driver's end.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "hello.py" in s.text(), 8)
+        session.send("hello.py")
+        session.wait(lambda s: True, 0.6)
+        session.send("\r")
+        session.wait(lambda s: "print('ciao dal file')" in s.text(), 8)
+
+        # The prompt has to be up *before* Run is pressed: `shell_running` reads the process
+        # table, and a Python that has not finished starting is not in it yet.
+        session.send("\x1b[1;7B")                             # Ctrl+Alt+↓, focus the terminal
+        session.wait(lambda s: True, 1.5)
+        session.send("python3\r")
+        up = session.wait(lambda s: ">>>" in s.text(), 25)
+        report.check("Run: a Python prompt is open in the only terminal", up, session)
+        if not up:
+            return
+
+        session.press(session.chord("r"), lambda s: "ciao dal file" in s.text(), 12)
+        report.check("Run does not type a shell command at the interpreter's prompt",
+                     "NameError" not in session.text(), session,
+                     note=repr([l.strip()[:60] for l in session.lines() if "NameError" in l]))
+        report.check("Run hands the file to the session that is already open",
+                     any("exec(open(" in line for line in session.lines()), session,
+                     note=repr([l.strip()[:70] for l in session.lines() if "exec(open(" in l][:1]))
+        # And no pane nobody asked for: handing it to the session must not also start a shell.
+        report.check("without opening a terminal of its own",
+                     sum(1 for l in session.lines() if "┌ Terminal" in l) == 1, session,
+                     note=repr([l.strip()[:24] for l in session.lines() if "┌ Terminal" in l]))
+
+        # The half a fresh shell could not fake: ask the session, afterwards, for what the file
+        # defined. This is the whole reason for running it there.
+        session.send("print('marker vale', marker * 2)\r")
+        report.check("and the session still has what the file defined",
+                     session.wait(lambda s: "marker vale 16968" in s.text(), 10), session)
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     report = Report()
@@ -169,6 +248,12 @@ def main():
             print(f"  SKIP  {spec['name']}: {', '.join(missing)} not installed")
             continue
         run_one(binary, spec, report)
+    # Not about cells, and here because this is the file that already knows how to get a real
+    # interpreter prompt up inside CleeCode — which is the whole setup the check needs.
+    if installed("python3"):
+        run_lands_in_the_live_session(binary, report)
+    else:
+        print("  SKIP  Run at a prompt: python3 not installed")
     return report.finish()
 
 

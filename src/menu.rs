@@ -55,6 +55,21 @@ pub enum MenuAction {
     GotoLine,
     SearchProject,
     ToggleGitPanel,
+    GitStatus,
+    GitChanges,
+    GitHistory,
+    GitBranches,
+    GitStashes,
+    GitFetch,
+    GitPull,
+    GitPush,
+    GitStageFile,
+    GitUnstageFile,
+    GitDiscardFile,
+    GitFileDiff,
+    GitCommit,
+    GoToDefinition,
+    JumpBack,
     NewFile,
     NewFolder,
     CommandPalette,
@@ -132,6 +147,21 @@ impl MenuAction {
         MenuAction::GotoLine,
         MenuAction::SearchProject,
         MenuAction::ToggleGitPanel,
+        MenuAction::GitStatus,
+        MenuAction::GitChanges,
+        MenuAction::GitHistory,
+        MenuAction::GitBranches,
+        MenuAction::GitStashes,
+        MenuAction::GitFetch,
+        MenuAction::GitPull,
+        MenuAction::GitPush,
+        MenuAction::GitStageFile,
+        MenuAction::GitUnstageFile,
+        MenuAction::GitDiscardFile,
+        MenuAction::GitFileDiff,
+        MenuAction::GitCommit,
+        MenuAction::GoToDefinition,
+        MenuAction::JumpBack,
         MenuAction::NewFile,
         MenuAction::NewFolder,
         MenuAction::CommandPalette,
@@ -160,6 +190,14 @@ pub struct MenuItemDef {
     /// visual group. Purely cosmetic: the item stays selectable and keyboard
     /// navigation is unaffected.
     pub new_group: bool,
+    /// A caption over the group below it rather than something to pick.
+    ///
+    /// A rule alone says "these are apart from those", which is enough when the reader can see
+    /// what they have in common. Four items that run git and four that do not look alike — they
+    /// are all short sentences about the file you right-clicked — so the group is named. Not
+    /// selectable, has no shortcut, and never reaches the command palette: there is nothing for
+    /// it to do.
+    pub header: bool,
 }
 
 pub struct MenuDef {
@@ -168,12 +206,18 @@ pub struct MenuDef {
 }
 
 fn item(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
-    MenuItemDef { label_key, action, shortcut, new_group: false }
+    MenuItemDef { label_key, action, shortcut, new_group: false, header: false }
+}
+
+/// A caption over the group it opens. Carries an action because every item does, and never runs
+/// it: everything that can pick an item checks [`MenuItemDef::header`] first.
+fn header(label_key: Key, action: MenuAction) -> MenuItemDef {
+    MenuItemDef { label_key, action, shortcut: None, new_group: true, header: true }
 }
 
 /// Like `item`, but marks the start of a new group so a separator rule is drawn above it.
 fn group(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
-    MenuItemDef { label_key, action, shortcut, new_group: true }
+    MenuItemDef { label_key, action, shortcut, new_group: true, header: false }
 }
 
 pub fn menu_defs() -> Vec<MenuDef> {
@@ -215,7 +259,12 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
                 item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
                 item(Key::ItemSearchProject, MenuAction::SearchProject, Some("Ctrl+Shift+H")),
-                item(Key::ItemGitPanel, MenuAction::ToggleGitPanel, Some("Ctrl+Shift+D")),
+                // The two the language server adds to moving around. Here rather than in a menu
+                // of their own: from where you are sitting they are the same kind of thing as
+                // Find and Go to line — ways of arriving somewhere — and which of the three
+                // works depends on the file, not on which menu it was found in.
+                group(Key::ItemGoToDefinition, MenuAction::GoToDefinition, Some("Ctrl+Shift+J")),
+                item(Key::ItemJumpBack, MenuAction::JumpBack, Some("Ctrl+Shift+L")),
                 group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+K")),
                 item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
                 item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),
@@ -278,6 +327,30 @@ pub fn menu_defs() -> Vec<MenuDef> {
             ],
         },
         MenuDef {
+            // Git gets a menu because it grew one. It was a single line in Edit — "Git panel" —
+            // which was honest while the panel only read: one thing, in the menu for the things
+            // you do to the text in front of you. Now it stages, commits, branches, merges,
+            // stashes and talks to a server, and a feature whose whole surface is one chord and
+            // sixteen single letters inside a modal is a feature you have to be told about.
+            title_key: Key::MenuGit,
+            items: vec![
+                item(Key::ItemGitPanel, MenuAction::ToggleGitPanel, Some("Ctrl+Shift+D")),
+                // Each opens the panel already on the tab it names. Which tab you want is the
+                // question you arrive with — "what have I changed", "where am I" — and answering
+                // it from the menu means never landing on a list you did not come for.
+                group(Key::ItemGitStatus, MenuAction::GitStatus, None),
+                item(Key::ItemGitChanges, MenuAction::GitChanges, None),
+                item(Key::ItemGitHistory, MenuAction::GitHistory, None),
+                item(Key::ItemGitBranches, MenuAction::GitBranches, None),
+                item(Key::ItemGitStashes, MenuAction::GitStashes, None),
+                // Below the line because they are the only three that leave this machine, and
+                // the only three that do not happen in the panel at all.
+                group(Key::ItemGitFetch, MenuAction::GitFetch, None),
+                item(Key::ItemGitPull, MenuAction::GitPull, None),
+                item(Key::ItemGitPush, MenuAction::GitPush, None),
+            ],
+        },
+        MenuDef {
             title_key: Key::MenuTerminal,
             items: vec![
                 item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("Ctrl+Shift+N")),
@@ -331,8 +404,13 @@ pub fn command_entries() -> Vec<(Key, MenuItemDef)> {
             ContextTarget::Editor => Key::MenuEdit,
             ContextTarget::Terminal => Key::MenuTerminal,
         };
-        for it in context_items(target) {
-            if !seen.contains(&it.action) {
+        // Asked for with the git half included, because from the palette these act on the
+        // tree's selection exactly as Rename and Delete do — and an action reachable only by
+        // right-clicking is one somebody working from the keyboard does not have.
+        for it in context_items(target, true) {
+            // Headers are captions, not commands. One in the palette would be a row that looks
+            // like an action and does whichever action it happens to carry.
+            if !it.header && !seen.contains(&it.action) {
                 seen.push(it.action);
                 out.push((group_key, it));
             }
@@ -360,35 +438,92 @@ pub struct ContextMenu {
 }
 
 impl ContextMenu {
-    pub fn new(target: ContextTarget, anchor: (u16, u16)) -> Self {
-        ContextMenu { items: context_items(target), selected: 0, anchor }
+    pub fn new(target: ContextTarget, anchor: (u16, u16), versioned: bool) -> Self {
+        let items = context_items(target, versioned);
+        // Never opens on a caption. Today the first item is always a real one, and a menu whose
+        // first row became a heading would otherwise open with Enter doing nothing.
+        let selected = items.iter().position(|i| !i.header).unwrap_or(0);
+        ContextMenu { items, selected, anchor }
     }
 
+    /// Moves the cursor, stepping over the captions.
+    ///
+    /// In the direction of travel, so walking down past a heading lands on the first item under
+    /// it and walking up past one lands on the last item above it. A cursor that stopped on a
+    /// caption would be a row you can highlight and not choose.
     pub fn move_selection(&mut self, delta: isize) {
         let len = self.items.len() as isize;
-        if len == 0 {
+        if len == 0 || self.items.iter().all(|i| i.header) {
             return;
         }
-        self.selected = (((self.selected as isize + delta) % len + len) % len) as usize;
+        let step = if delta < 0 { -1 } else { 1 };
+        let mut at = self.selected as isize;
+        for _ in 0..delta.abs().max(1) {
+            loop {
+                at = ((at + step) % len + len) % len;
+                if !self.items[at as usize].header {
+                    break;
+                }
+            }
+        }
+        self.selected = at as usize;
     }
 
+    /// The action of the row the cursor is on, and `None` if it is on a caption — which the
+    /// cursor does not stop on, but Enter must not run one either way.
     pub fn selected_action(&self) -> Option<MenuAction> {
-        self.items.get(self.selected).map(|i| i.action)
+        self.items.get(self.selected).filter(|i| !i.header).map(|i| i.action)
     }
 }
 
 /// The action list for each frame's context menu. Groups (separator rules) follow the same
 /// `group()` convention as the menu bar.
-fn context_items(target: ContextTarget) -> Vec<MenuItemDef> {
+/// The pop-up's items.
+///
+/// `versioned` is whether the sidebar row git has something to say about — a file it has never
+/// been told about counts, since staging is exactly what you would want to do to one. The git
+/// half is left out entirely when it does not, rather than drawn greyed: a right-click on a file
+/// in a folder that is not a repository at all would otherwise offer four things that cannot
+/// happen, every time.
+fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
     match target {
-        ContextTarget::Sidebar => vec![
-            item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
-            item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
-            // "e" is what the tree actually binds; the hint used to claim F2, which focuses
-            // the editor instead.
-            group(Key::ItemRename, MenuAction::Rename, Some("e")),
-            item(Key::ItemDelete, MenuAction::Delete, Some("Del")),
-        ],
+        ContextTarget::Sidebar => {
+            let mut items = vec![
+                item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
+                item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
+                // "e" is what the tree actually binds; the hint used to claim F2, which focuses
+                // the editor instead.
+                group(Key::ItemRename, MenuAction::Rename, Some("e")),
+                item(Key::ItemDelete, MenuAction::Delete, Some("Del")),
+            ];
+            if versioned {
+                // Named, because a rule alone would not say what these four have in common: they
+                // are the same shape of sentence as Rename and Delete above them and they do a
+                // quite different kind of thing.
+                items.push(header(Key::HeaderGitFile, MenuAction::GitStageFile));
+                // Staging and unstaging happen here and now: they are two commands that change
+                // nothing you cannot change back, and walking to a panel to run one on the file
+                // you are already pointing at is the long way round.
+                items.push(item(Key::ItemGitStageFile, MenuAction::GitStageFile, None));
+                items.push(item(Key::ItemGitUnstageFile, MenuAction::GitUnstageFile, None));
+                items.push(item(Key::ItemGitFileDiff, MenuAction::GitFileDiff, None));
+                // And this one does not: it opens the panel on the file with the question
+                // already up. The question, the one letter that answers it and the refusal for a
+                // file git has never seen are all tested where they are — a second copy of them
+                // out here is a second copy to keep right.
+                items.push(item(Key::ItemGitDiscardFile, MenuAction::GitDiscardFile, None));
+                // And the ones that are about the repository rather than the file. They are here
+                // under a heading of their own instead of only in the Git menu because this is
+                // where the sentence ends: you staged a file, and the next thing you want is to
+                // commit it — not to close a pop-up and go looking along the menu bar.
+                items.push(header(Key::HeaderGitRepo, MenuAction::GitCommit));
+                items.push(item(Key::ItemGitCommit, MenuAction::GitCommit, None));
+                items.push(item(Key::ItemGitFetch, MenuAction::GitFetch, None));
+                items.push(item(Key::ItemGitPull, MenuAction::GitPull, None));
+                items.push(item(Key::ItemGitPush, MenuAction::GitPush, None));
+            }
+            items
+        }
         ContextTarget::Editor => vec![
             item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),

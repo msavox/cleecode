@@ -38,6 +38,11 @@ SAMPLE = """fn main() {
 """
 
 
+# Four lines, each different, so which one the cursor is on can be read off a single character
+# typed into it.
+JUMP = "aaa\nbbb\nccc\nddd\n"
+
+
 def install_stub(root):
     """A directory holding an executable called what CleeCode will look for."""
     bindir = os.path.join(root, "fakebin")
@@ -91,6 +96,11 @@ def main():
         handle.write('[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n')
     with open(os.path.join(root, "src", "main.rs"), "w") as handle:
         handle.write(SAMPLE)
+    # A second file for the jumping, with four lines that are told apart at a glance. Its own
+    # file because the completion checks leave the first one edited, and a check that has to
+    # reason about which edits happened before it is a check nobody can read.
+    with open(os.path.join(root, "src", "jump.rs"), "w") as handle:
+        handle.write(JUMP)
     bindir = install_stub(root)
 
     report = Report()
@@ -197,6 +207,47 @@ def main():
             typed = [line for line in session.lines() if in_buffer(line)]
             report.check("accepting types the server's word into the buffer", bool(typed), session,
                          note=repr(typed[:1]))
+
+        # ---- what it is, and where it is defined -------------------------------------------
+        #
+        # The stub answers both out of the question, as it does for completion: the hover names
+        # the word it was asked about, and the definition points one line further down than the
+        # cursor. So a client that ignored either answer and stayed put would land in the wrong
+        # place and be caught — a canned line number could not pass this.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "jump.rs" in s.text(), 8)
+        session.send("jump.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        # By the gutter number beside it, not by the line ending in it: the editor pads every
+        # row out to the frame, so nothing on this screen ends in anything.
+        opened = session.wait(lambda s: any(re.search(r"\s4 ddd\b", l) for l in s.lines()), 8)
+        report.check("the second file opens", opened, session)
+
+        # Three rights puts the cursor at the end of `aaa` on the first line, which is a word and
+        # is not one of the two lines the stub underlines — a diagnostic would take the status
+        # bar's right-hand spot, and rightly so.
+        session.press("\x1b[C\x1b[C\x1b[C", lambda s: True, 2)
+        hovered = session.wait(lambda s: "kind_of_aaa" in s.text(), 12)
+        report.check("what the thing under the cursor is turns up on its own", hovered, session)
+        report.check("and only the line worth reading, not the markup around it",
+                     "```" not in session.text() and "Prose nobody" not in session.text(),
+                     session)
+
+        # The jump, read by typing into wherever it landed. A screen check for "the cursor
+        # moved" would be a check on the highlight; this is a check on where the next character
+        # actually goes, which is the thing that matters.
+        session.press(session.chord("j"), lambda s: True, 4)
+        session.press("X", lambda s: any("Xbbb" in l for l in s.lines()), 6)
+        report.check("Ctrl+Shift+J goes where the server said the definition is",
+                     any("Xbbb" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "bbb" in l][:1]))
+
+        session.press(session.chord("l"), lambda s: True, 4)
+        session.press("Y", lambda s: any("aaaY" in l for l in s.lines()), 6)
+        report.check("Ctrl+Shift+L comes back to the exact place the jump started from",
+                     any("aaaY" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "aaa" in l][:1]))
 
         Report.show("final screen", session)
     finally:
