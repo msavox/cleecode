@@ -1,3 +1,40 @@
+## What's new in 0.12.0
+
+**Animations do not flicker any more, and it was four separate things.** The pane emptied
+between frames, because re-reading a figure put the tab back into its loading state while the
+new picture was decoded on a thread — a picture, a blank, a picture, ten times a second. Every
+frame was also a *new image* to the terminal: a fresh kitty protocol per frame means a fresh
+image id, the id is written into the cells as a colour, so every cell changed and the terminal
+was told to drop one image and place another over the whole area. Nothing held the screen still
+while a frame was written, which synchronised update (DEC 2026) now does — the vertical retrace
+a TUI never had. And the picture was being read while it was still being written: both hooks
+print beside the name and rename onto it now, which within a directory is atomic.
+
+**Octave animations move.** A figure tab was re-read only when the *snapshot* changed, and the
+snapshot is written by a hook that runs while the interpreter waits for a command — a loop never
+waits. `cleecode_frame` reprints the figures without rebuilding a snapshot, so an Octave
+animation moved only when the loop happened to let the hook in. The picture's own timestamp is
+what says a figure was redrawn.
+
+**A figure is the same figure next time.** Running a script again used to leave a second set of
+tabs beside the first, because both languages hand out the next free number and neither
+`plt.subplots()` nor a bare `figure()` names one. Run now closes the figures that file's previous
+run opened, and only those — a plot made by hand at the prompt survives a rerun. Octave and
+matplotlib also stopped writing `fig1.png` over each other: one directory per language.
+
+**Plots reach a tab without the presets.** `python3 plot.py` — what Run does when no prompt is
+open — installed no hook, because PYTHONSTARTUP is read only by an interactive interpreter, while
+matplotlib was already pointed at CleeCode's windowless backend. The plot existed nowhere at all.
+It works from any Python CleeCode starts now, session or script, which is what Octave has done
+since its hook moved onto the load path.
+
+**Smaller things.** The three built-in workspaces are coloured in the chooser, so it is visible
+that they cannot be deleted rather than only true. The first menu is called CleeCode again under
+every workspace. `examples/plot.m` is `examples/grafico.m`: Octave looks for a function among the
+files of the directory it is working in before its own library, so shipping a `plot.m` renamed
+Octave's `plot` for every example beside it. And Run with no tab open says there is nothing to
+run instead of hitting the panic shield.
+
 ## What's new in 0.10.2
 
 **`grid minor` draws again on a machine with no display.** A plot made over ssh came back

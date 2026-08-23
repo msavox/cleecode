@@ -3,8 +3,13 @@ class Clee < Formula
   homepage "https://github.com/msavox/cleecode"
   # Both values are printed in the release workflow's run summary ("Homebrew source
   # checksum"), so bumping a version is a copy/paste.
-  url "https://github.com/msavox/cleecode/archive/refs/tags/v0.11.2.tar.gz"
-  sha256 "e693b8ea2536ae1107ed698f090969675437ac8234910d0620c42f866643d1fa"
+  #
+  # Whatever you take the checksum from, check it is an archive first. A `curl | shasum` while
+  # GitHub was returning 429 once put the hash of a 199-byte error page in here, and a formula
+  # with the wrong checksum does not fail loudly — it downloads, mismatches, and looks like a
+  # hung install.
+  url "https://github.com/msavox/cleecode/archive/refs/tags/v0.12.0.tar.gz"
+  sha256 "4eb57c244ed9c6560e327e9b23da70124d6c752f000aa68fa30bcb30231f054c"
   license "MIT"
   head "https://github.com/msavox/cleecode.git", branch: "master"
 
@@ -23,6 +28,7 @@ class Clee < Formula
     # Keep the bundled Nerd Font with the install, so it stays available even if the
     # source tree is gone.
     pkgshare.install "assets/fonts"
+    man1.install "docs/clee.1"
   end
 
   def caveats
@@ -32,6 +38,26 @@ class Clee < Formula
 
       A copy also lives at:
         #{opt_pkgshare}/fonts
+
+      On macOS, to give CleeCode an icon in the Dock and let Finder open
+      files with it (needs Ghostty, and builds the bundle locally so it
+      arrives without Gatekeeper's quarantine):
+        clee --install-app
+
+      Previews are optional extras, not requirements — without them CleeCode
+      simply shows less, rather than failing:
+        brew install poppler     PDF pages (ghostscript also works)
+        brew install pandoc typst  Markdown as a real document, pictures and all
+        brew install chafa       pictures inside a terminal pane
+
+      The numeric workspaces (clee -w octave, clee -w pylab) drive the
+      interpreter you already have, and nothing is installed into it.
+      Nothing here is bundled either:
+        brew install octave      an Octave session to run cells in
+        brew install gnuplot     plots from an Octave session with no display
+                                 (a remote server over ssh) — it needs no X
+        pip install matplotlib   plots from a Python session — it has to be
+                                 the same python your terminal runs
     EOS
   end
 
