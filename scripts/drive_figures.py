@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pty_drive import Report, Session, binary_from_argv  # noqa: E402
@@ -32,6 +33,12 @@ figure(1); plot(x, sin(x/10)); title('seno'); grid on;
 
 %% a second figure
 figure(2); plot(x, x.^2); title('quadrato');
+"""
+
+
+AGAIN = """x = 1:60;
+figure(); plot(x, cos(x/8)); title('ancora uno');
+figure(); plot(x, sqrt(x)); title('ancora due');
 """
 
 
@@ -87,6 +94,10 @@ def main():
     root = tempfile.mkdtemp(prefix="clee_figures_")
     with open(os.path.join(root, "grafico.m"), "w") as handle:
         handle.write(SCRIPT)
+    # Written now and not where it is used: the quick-open lists the project as it was when
+    # CleeCode started, so a file made half-way through the session cannot be opened by name.
+    with open(os.path.join(root, "ancora.m"), "w") as handle:
+        handle.write(AGAIN)
 
     report = Report()
     session = Session(binary, root, args=["-w", "octave"], cols=190, rows=40)
@@ -211,6 +222,121 @@ def main():
                 click(session, *back)
                 report.check("and clicking reset puts it back",
                              session.wait(lambda s: "axis auto" in s.text(), 10), session)
+
+        # ---- an animation, which is the same tab read again ten times a second ----------
+        #
+        # This is where the *pane's* own redraw shows, and it is a different question from
+        # whether a re-plot arrives: it does arrive, and it used to arrive through an empty
+        # pane. A re-read put the tab back into its loading state — a word in the middle of
+        # nothing — while the new picture was decoded on a thread, so every frame of an
+        # animation was a picture, a blank, a picture. Ten times a second that is not an
+        # animation, it is a flicker, and it is what this samples for: not that the plot moves,
+        # but that nothing between two frames is missing.
+        session.send("\x1b[1;7B")                            # Ctrl+Alt+↓, focus the terminal
+        session.wait(lambda s: ">>" in s.text(), 8)
+        # Sent as a file rather than typed as a line: a loop written out at the prompt is 150
+        # characters of exactly the kind a pty drops one of, and a dropped bracket would fail
+        # this for a reason that has nothing to do with what it is asking. The axes are pinned,
+        # because an animation under `axis auto` rescales with its own data and draws the same
+        # curve every time — true of the plot, useless as a picture of it.
+        animation = os.path.join(root, "anima.m")
+        with open(animation, "w") as handle:
+            handle.write("set(0, 'currentfigure', 2);\n"
+                         "a = get(2, 'currentaxes');\n"
+                         "h = get(a, 'children');\n"
+                         "x = linspace(0, 2*pi, 100);\n"
+                         "set(h(1), 'ydata', 5000 * sin(x));\n"
+                         "ylim([-6000 6000]);\n"
+                         "for k = 1:60\n"
+                         "  set(h(1), 'ydata', 5000 * sin(x - k/6));\n"
+                         "  cleecode_frame();\n"
+                         "  pause(0.05);\n"
+                         "end\n")
+        before_animation = picture_ink(session)
+        session.send("source('%s')\r" % animation)
+        moving = session.wait(lambda s: picture_ink(s) not in ("", before_animation), 20)
+        blank, loading, frames, caught = 0, 0, set(), None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            session.drain()
+            ink = picture_ink(session)
+            if len(ink.splitlines()) < 3:
+                blank += 1
+            else:
+                frames.add(ink)
+            if "Carico l'immagine" in session.text() or "Loading the picture" in session.text():
+                loading += 1
+                if caught is None:
+                    caught = session.text()
+            time.sleep(0.04)
+        report.check("an animation moves the tab it is drawn in", moving and len(frames) > 3,
+                     session, note=f"{len(frames)} different pictures")
+        report.check("and never blanks the pane between two of its frames",
+                     blank == 0 and loading == 0, session,
+                     note=f"{blank} samples with no picture, {loading} showing the loading word")
+        if caught is not None:
+            print("----- a frame with the loading word in it -----")
+            print("\n".join(l for l in caught.splitlines() if l.strip()))
+            print("-----")
+
+        # ---- the same script, run again ------------------------------------------------
+        #
+        # A script that does not name its figures — `figure()`, or matplotlib's `plt.subplots()`
+        # — gets the next free number every time it runs, so running it three times left three
+        # sets of what the person who wrote it thinks of as two plots. Run now closes the figures
+        # the previous run of *that file* opened, which frees the numbers, so the rerun draws
+        # into the tabs that are already there.
+        #
+        # Asked of Octave rather than read off the tab strip, and that is not a shortcut: the
+        # strip scrolls once there are more tabs than fit, so counting what is on screen counts
+        # the window's width. What the session is holding is the thing this is about, and it is
+        # also what the user means by "the same figure".
+        #
+        # Run beside the two figures the earlier checks opened, because the other half of the
+        # promise is that those are left alone: a rerun closes its own plots and nobody else's.
+        def open_figures(session):
+            session.send("\x1b[1;7B")                        # Ctrl+Alt+↓, to the terminal
+            session.wait(lambda s: True, 0.8)
+            session.send("printf('FIGS=%s\\n', mat2str(sort(get(0, 'children')')));\r")
+            session.wait(lambda s: "FIGS=[" in s.text(), 10)
+            said = [l for l in session.lines() if "FIGS=[" in l and "printf" not in l]
+            session.send("\x1b[1;7A")                        # and back to the editor
+            session.wait(lambda s: True, 0.8)
+            if not said:
+                return None
+            answer = said[-1].split("FIGS=")[1]
+            return answer.split("]")[0].strip("[").split()
+
+        session.send("\x1b[1;7A")                            # Ctrl+Alt+↑, back to the editor
+        session.wait(lambda s: True, 1.0)
+        session.send("\x0f")                                 # quick open
+        session.wait(lambda s: True, 1.0)
+        session.send("ancora")
+        session.wait(lambda s: True, 1.0)
+        session.press("\r", lambda s: "ancora.m" in s.text(), 8)
+
+        before_runs = open_figures(session)
+        runs = []
+        for _ in range(3):
+            session.send(session.chord("r"))                 # Ctrl+Shift+R, Run
+            deadline = time.time() + 14
+            while time.time() < deadline:
+                session.drain()
+                time.sleep(0.2)
+            runs.append(open_figures(session))
+        # A rerun test that never managed to run anything would pass by finding nothing changed,
+        # which is the shape of every vacuous check in this suite's history. So the first run has
+        # to be seen to add figures before the reruns are asked to add none.
+        report.check("the script ran at all, and drew figures of its own",
+                     before_runs is not None and runs[0] is not None
+                     and len(runs[0]) > len(before_runs), session,
+                     note=f"{before_runs} became {runs[0]}")
+        report.check("running it again draws into the same figures, not beside them",
+                     runs[0] == runs[1] == runs[2], session,
+                     note=" then ".join(str(r) for r in runs))
+        report.check("and the figures it did not open are still there",
+                     runs[2] is not None and all(f in runs[2] for f in before_runs or []),
+                     session, note=f"{before_runs} still in {runs[2]}")
 
         Report.show("final screen", session)
     finally:

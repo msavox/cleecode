@@ -246,6 +246,16 @@ pub struct Preview {
     /// even before the page count is known: paging has to work while that is still being asked
     /// for, and on a file whose count cannot be established at all.
     pub pages: Option<Pages>,
+    /// A refresh is being decoded on a thread while the tab goes on showing the picture it
+    /// already has. Set for a re-read that has something to leave up, and the reason a figure
+    /// being animated does not blink: without it every frame took the tab through `Loading`,
+    /// which draws a word in the middle of an empty pane — a hundred milliseconds of nothing
+    /// between two pictures, ten times a second, which is exactly what a flicker is.
+    ///
+    /// It is also a gate: a decode already in flight means the next frame waits rather than
+    /// starting a second thread on the same file. The frame it skips is not lost, because the
+    /// snapshot's timestamp is only recorded once a read has actually begun.
+    pub reloading: bool,
     /// Markdown only: show it as styled text even where a document could be made. The rendered
     /// document is the prettier of the two and the text one is the faster — it follows the
     /// keystrokes, needs no pandoc and no graphics — so which is wanted is a matter of what is
@@ -262,8 +272,24 @@ pub struct Pages {
 }
 
 impl Preview {
+    /// Whether a read is already on its way back, either behind the picture on screen or in
+    /// place of one that was never there. Both mean the same thing to whoever is about to ask
+    /// for another: wait for this one.
+    pub fn reading(&self) -> bool {
+        self.reloading || matches!(self.state, State::Loading)
+    }
+
+    /// Puts a picture up in place of whatever the tab is showing, keeping the protocol it was
+    /// drawn with. Every path that produces a new picture for a tab that already had one — the
+    /// next frame of a figure, a scroll, a zoom — goes through here, and that is what makes
+    /// those changes a repaint rather than a blink. See [`State::ready_from`].
+    pub fn show(&mut self, image: image::DynamicImage) {
+        let previous = std::mem::replace(&mut self.state, State::Loading);
+        self.state = State::ready_from(image, self.inverted, previous);
+    }
+
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false }
+        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false }
     }
 
     pub fn document(page: usize) -> Self {
@@ -284,6 +310,7 @@ impl Preview {
             scroll_px: 0,
             scroll_x: 0,
             text_only: false,
+            reloading: false,
         }
     }
 
@@ -308,6 +335,7 @@ impl Preview {
             scroll_px: 0,
             scroll_x: 0,
             text_only: false,
+            reloading: false,
         }
     }
 
@@ -865,21 +893,56 @@ impl State {
     /// work goes down. Fails loudly rather than silently when the terminal was never asked what
     /// it can do — that would be a startup-order bug, and a blank tab would hide it.
     pub fn ready(image: image::DynamicImage, inverted: bool) -> State {
-        // Inversion is applied to the pixels rather than asked of the terminal, which has no way
-        // to be asked. A white page becomes a dark one with light text, which is what every PDF
-        // reader means by a dark mode.
-        let image = if inverted {
-            let mut rgba = image.to_rgba8();
-            image::imageops::invert(&mut rgba);
-            image::DynamicImage::ImageRgba8(rgba)
-        } else {
-            image
-        };
+        let image = invert_if(image, inverted);
         match picker().cloned() {
             Some(picker) => State::Ready(Box::new(picker.new_resize_protocol(image))),
             None => State::Failed("the terminal was never asked what it can draw".to_string()),
         }
     }
+
+    /// The same, but drawn *as* the picture already on screen rather than as a new one.
+    ///
+    /// A protocol carries an identity the terminal knows it by — under kitty an image id, which
+    /// `new_resize_protocol` picks at random. Build a fresh one per frame and every cell of the
+    /// pane changes, because the id is written into the cells as a colour: the terminal is told
+    /// to forget one image and place another over the whole area, and what you see in between
+    /// is the pane. Handing the new picture to the old protocol transmits it under the id that
+    /// is already there, so the cells are identical and the terminal simply repaints what it
+    /// holds. That is the difference between a plot that animates and one that strobes.
+    ///
+    /// It also stops the session leaking an image id per frame into the terminal, which an
+    /// animation was doing at ten a second for as long as it ran.
+    pub fn ready_from(image: image::DynamicImage, inverted: bool, previous: State) -> State {
+        let State::Ready(protocol) = previous else {
+            return State::ready(image, inverted);
+        };
+        let Some(picker) = picker() else {
+            return State::Failed("the terminal was never asked what it can draw".to_string());
+        };
+        State::Ready(Box::new(redraw_as(picker, invert_if(image, inverted), *protocol)))
+    }
+}
+
+/// A white page shown as a dark one with light text, which is what every PDF reader means by a
+/// dark mode. Done to the pixels rather than asked of the terminal, which has no way to be asked.
+fn invert_if(image: image::DynamicImage, inverted: bool) -> image::DynamicImage {
+    if !inverted {
+        return image;
+    }
+    let mut rgba = image.to_rgba8();
+    image::imageops::invert(&mut rgba);
+    image::DynamicImage::ImageRgba8(rgba)
+}
+
+/// The picture-swap itself, with the picker passed in rather than read from the global — which
+/// is what lets it be tested against a kitty terminal on a machine that has none.
+fn redraw_as(
+    picker: &Picker,
+    image: image::DynamicImage,
+    previous: StatefulProtocol,
+) -> StatefulProtocol {
+    let background = previous.background_color();
+    StatefulProtocol::new(image, picker.font_size(), background, previous.protocol_type_owned())
 }
 
 /// Renders markdown to styled lines.
@@ -1058,6 +1121,46 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The id a kitty terminal knows an image by, as it appears in the cells: the protocol
+    /// writes it into the first cell of every row as a foreground colour, and that is the only
+    /// place it can be read from outside the crate — which is fitting, because it is also
+    /// exactly what the terminal sees.
+    fn kitty_id(protocol: &mut StatefulProtocol) -> String {
+        use ratatui::widgets::StatefulWidget;
+        let area = ratatui::layout::Rect::new(0, 0, 20, 10);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        ratatui_image::StatefulImage::default().render(area, &mut buffer, protocol);
+        let symbol = buffer[(0, 0)].symbol();
+        let start = symbol.rfind("\x1b[38;2;").expect("the id is written as a colour");
+        symbol[start..].split('m').next().unwrap().to_string()
+    }
+
+    fn kitty_picker() -> Picker {
+        let mut picker = Picker::from_fontsize((8, 16).into());
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        picker
+    }
+
+    /// An animated figure is a new picture in a tab ten times a second. Given a new protocol
+    /// each time, each picture arrives under a new kitty id — which is written into every cell
+    /// of the pane, so every cell changes, so the terminal is told to drop one image and place
+    /// another over the whole area. That is the flicker. Reusing the protocol transmits the new
+    /// picture under the id already on screen, and the cells stay as they were.
+    #[test]
+    fn the_next_frame_of_a_figure_keeps_the_id_the_terminal_already_knows() {
+        let picker = kitty_picker();
+        let frame = |shade| image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([shade, shade, shade])));
+
+        let mut first = picker.new_resize_protocol(frame(10));
+        let id = kitty_id(&mut first);
+
+        let mut next = redraw_as(&picker, frame(20), first);
+        assert_eq!(kitty_id(&mut next), id, "the next frame is the same image, redrawn");
+
+        let mut unrelated = picker.new_resize_protocol(frame(30));
+        assert_ne!(kitty_id(&mut unrelated), id, "a picture opened on its own is its own image");
+    }
 
     /// What a tab is a view of, which decides what its bar may offer. A markdown preview keeps
     /// its source whichever rendering is up, so it must not read as a PDF when pandoc gave it

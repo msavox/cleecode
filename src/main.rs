@@ -142,6 +142,28 @@ KEYS TO START WITH:
 More in the manual (Ctrl+Shift+M) and in man clee.
 ";
 
+/// One frame, drawn while the terminal holds its screen still.
+///
+/// The vertical retrace a TUI never had. Without it the terminal paints as the bytes land, so a
+/// frame that replaces a picture is shown half-replaced — the cells blanked, then filled again —
+/// and at ten frames a second that is not a repaint, it is a flicker. Synchronised update
+/// (DEC private mode 2026) tells the terminal to keep showing the last complete frame until this
+/// one has arrived whole. Ghostty, kitty, WezTerm, iTerm2, foot and tmux implement it; anything
+/// else ignores a private mode it does not know, which is why it is safe to send unasked.
+///
+/// The two escapes go out on their own handle rather than through the backend's buffer, which
+/// ratatui does not expose. That is only safe because each step here is flushed before the next
+/// one writes: begin, then the frame (`draw` flushes it), then end.
+fn draw_synchronised(terminal: &mut BufferedTerminal, app: &mut App) -> std::io::Result<()> {
+    use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+    let _ = crossterm::execute!(stdout(), BeginSynchronizedUpdate);
+    let drawn = terminal.draw(|f| ui::draw(f, app)).map(|_| ());
+    // Ended whether or not the frame went well: a terminal left holding its screen would show
+    // nothing at all from here on.
+    let _ = crossterm::execute!(stdout(), EndSynchronizedUpdate);
+    drawn
+}
+
 /// A terminal whose writes go through a large buffer. See where it is built for why.
 type BufferedTerminal =
     ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
@@ -444,7 +466,7 @@ fn run(
     let mut failed_draws = 0u8;
 
     loop {
-        match shielded(|| terminal.draw(|f| ui::draw(f, &mut app))) {
+        match shielded(AssertUnwindSafe(|| draw_synchronised(terminal, &mut app))) {
             Ok(drawn) => {
                 drawn?;
                 failed_draws = 0;
@@ -518,6 +540,7 @@ fn run(
             app.poll_git_panel();
             app.poll_lsp();
             app.poll_figures();
+            app.poll_run_watch();
             app.poll_inspector();
         }));
         if let Err(text) = polled {

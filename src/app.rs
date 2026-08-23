@@ -284,6 +284,55 @@ struct PendingCompletion {
     start: usize,
 }
 
+/// A file handed to a live session, watched until the prompt comes back.
+///
+/// What it is for: knowing which figures that run opened, so running the same file again can
+/// close them and land in the same tabs. Anything the session gains while this is set belongs to
+/// the run — which is why it is *closed* the moment the prompt returns rather than left open
+/// until the next run. A plot typed by hand at the prompt afterwards is not part of any run, and
+/// a rerun must not take it away.
+struct RunWatch {
+    /// The file that was run, which is what the figures are remembered against.
+    file: PathBuf,
+    /// Which language's sessions to read. A `.m` cannot open a matplotlib figure.
+    language: crate::session::Language,
+    /// Which window the command went to, so the right pane is asked whether it is done.
+    terminal: usize,
+    /// The figures that were already open, and are therefore somebody else's.
+    before: Vec<i64>,
+    /// The figures that have appeared since. Grown on every tick, because a script that draws
+    /// four figures is only holding one of them when the first snapshot arrives.
+    opened: Vec<i64>,
+    /// When the command was typed. The prompt is still reading keys for the moment after that —
+    /// the shell has not started the command yet — so "the prompt is back" only counts once the
+    /// pane has been seen busy, or once this has run out for a script too quick to catch at it.
+    started: std::time::Instant,
+    busy_seen: bool,
+    /// When the sessions were last read for their figures. A run can last minutes, and asking
+    /// every frame would read every snapshot on disk thirty times a second for the whole of it.
+    looked: std::time::Instant,
+    /// Since when the prompt has been back. The figures are not in the snapshot at that instant:
+    /// the hook writes it as the prompt is drawn (Python) or once the interpreter is already
+    /// waiting for input (Octave), so a run finalised on the tick the prompt returns records
+    /// nothing at all — which is what made the *second* run of a script open a second set of
+    /// tabs and only the third behave. Held open a moment longer, and read every tick meanwhile.
+    settled: Option<std::time::Instant>,
+}
+
+/// How often a watched run's session is asked what it is holding.
+const RUN_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long the prompt has to have been back before a run counts as finished. Long enough for
+/// the hook to have written the snapshot that says what the run drew — measured at a few tens of
+/// milliseconds for both languages — and short enough that nothing typed afterwards is caught.
+const RUN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long a run that was never caught mid-command is watched before it is called finished.
+/// A script that draws and returns inside one frame is over long before this; what the wait
+/// protects against is the opposite mistake, of calling a run finished while it is still
+/// starting up and attributing its figures to nobody.
+const RUN_WATCH_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
@@ -441,6 +490,12 @@ pub struct App {
     /// the newest changes as panes take turns ticking, and a figure does not stop being the one
     /// already on screen because a different session wrote last.
     figure_drawn: std::collections::HashMap<PathBuf, std::time::SystemTime>,
+    /// What the last run of each file left open in its session, by figure number. Read when the
+    /// same file is run again: those figures are closed first, so the rerun draws into the tabs
+    /// that are already there instead of opening a second set beside them.
+    run_figures: std::collections::HashMap<PathBuf, Vec<i64>>,
+    /// The run being watched, while it runs. See [`RunWatch`].
+    run_watch: Option<RunWatch>,
     /// The variable inspector, when it is open: which name, where in it we are looking, and the
     /// file the session writes its answer to.
     pub inspector: Option<Inspector>,
@@ -1592,6 +1647,8 @@ impl App {
             jumps: Vec::new(),
             figures: None,
             figure_drawn: std::collections::HashMap::new(),
+            run_figures: std::collections::HashMap::new(),
+            run_watch: None,
             inspector: None,
             breakpoints: std::collections::HashMap::new(),
             stopped_at: None,
@@ -1698,6 +1755,10 @@ impl App {
             }) else {
                 continue;
             };
+            // Cleared before the page check below, not after: a reply that is thrown away is
+            // still the end of that read, and leaving the mark set would stop the tab ever
+            // asking for another one.
+            preview.reloading = false;
             // A reply for a page that is no longer the one being looked at: the reader paged on
             // while it was rendering, and putting it up would yank them back a page.
             if done.page != preview.page() {
@@ -1709,7 +1770,6 @@ impl App {
             let rendered_view = preview.source.clone();
             match done.result {
                 Ok(image) => {
-                    let inverted = preview.inverted;
                     let (cols, rows) = (preview.area_cols, preview.area_rows);
                     // A picture asked for before the pane had ever been drawn comes back at its
                     // own size, since there was no box to scale it into then. There is one now,
@@ -1733,7 +1793,7 @@ impl App {
                         preview.scroll_px,
                     );
                     preview.full = Some(image);
-                    preview.state = crate::preview::State::ready(window, inverted)
+                    preview.show(window);
                 }
                 // A document that could not be made is not the end of a markdown preview: it
                 // still has styled text to offer, which is better than a red line where the
@@ -1744,7 +1804,18 @@ impl App {
                     preview.shown_revision = u64::MAX;
                     self.status_message = i18n::msg_preview_failed(self.settings.lang, &message);
                 }
-                Err(message) => preview.state = crate::preview::State::Failed(message),
+                // A picture that could not be read is not a reason to take down the one the
+                // tab is already showing. It is nearly always the newest frame of something
+                // being animated, caught mid-write; the tab that answered it with a red line
+                // was reporting a file that reads perfectly a millisecond later. What is up
+                // stays up, the reason is said once in the status line, and the next frame
+                // settles it. With nothing up there is nothing to keep, and the tab says so.
+                Err(message) => match preview.state {
+                    crate::preview::State::Ready(_) => {
+                        self.status_message = i18n::msg_preview_failed(self.settings.lang, &message)
+                    }
+                    _ => preview.state = crate::preview::State::Failed(message),
+                },
             }
         }
     }
@@ -2359,9 +2430,19 @@ impl App {
             self.figures = Some(crate::wsnap::Watch::new(path));
         }
         let Some(watch) = self.figures.as_mut() else { return };
-        if !watch.poll() {
-            return;
-        }
+        // A new snapshot is news about *which* figures the session holds, and about where a
+        // debugger stopped. What a figure looks like is a different question, and it is asked
+        // below whether or not the snapshot moved — because during a loop it does not.
+        //
+        // The snapshot is written when the interpreter is between commands: Octave's hook runs
+        // from `add_input_event_hook`, which fires while it waits for input, and a loop never
+        // waits. `cleecode_frame` exists for exactly that case and it reprints the figures — it
+        // does not, and should not, rebuild the whole snapshot, which means walking every
+        // variable in the session sixty times a second. Gated on the snapshot, an animation in
+        // Octave therefore moved only when the loop happened to let the hook in, which is what
+        // "it jumps a frame now and then" was. The picture's own timestamp is what says a
+        // figure was redrawn, and it costs one stat per open figure per tick to ask.
+        let fresh = watch.poll();
         let (debug, figures): (crate::wsnap::Debug, Vec<PathBuf>) = watch
             .snapshot
             .as_ref()
@@ -2369,7 +2450,9 @@ impl App {
                 (s.debug.clone(), s.figures.iter().map(|f| PathBuf::from(&f.path)).collect())
             })
             .unwrap_or_default();
-        self.follow_stop(&debug);
+        if fresh {
+            self.follow_stop(&debug);
+        }
         for path in figures {
             // A snapshot lists every figure the session is holding, not the one that just moved.
             // Followed literally that reopens all of them on every tick: plot into figure 3 and
@@ -2387,9 +2470,70 @@ impl App {
             match self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
                 // Already a tab: the picture on disk is new, and nothing about a decoded image
                 // knows its file moved on.
-                Some(idx) => self.reread_preview(idx, None),
+                //
+                // Unless the previous frame is still being decoded. An animation can write
+                // faster than a decode returns, and starting a thread per write piles up
+                // threads that each produce a picture already out of date by the time it
+                // arrives. Marked as drawn only once the read has begun, so the frame skipped
+                // here is picked up on the next tick — the newest one on disk, which is the
+                // only one worth having.
+                Some(idx) => {
+                    if self.editors[idx].preview.as_ref().is_some_and(|p| p.reading()) {
+                        // Put back what `redrawn` just recorded: this frame has not been shown,
+                        // and the next tick must be free to see it again.
+                        self.figure_drawn.remove(&path);
+                        continue;
+                    }
+                    self.reread_preview(idx, None);
+                }
                 None => self.open_figure_tab(path),
             }
+        }
+    }
+
+    /// Watches a file handed to a live session until its prompt comes back, remembering which
+    /// figures it opened along the way. See [`RunWatch`] for why the watch closes there and not
+    /// at the next run.
+    pub fn poll_run_watch(&mut self) {
+        let Some((language, terminal, looked)) =
+            self.run_watch.as_ref().map(|w| (w.language, w.terminal, w.looked))
+        else {
+            return;
+        };
+        // Every tick once the prompt is back, throttled while the script is still running.
+        let settling = self.run_watch.as_ref().is_some_and(|w| w.settled.is_some());
+        let open = (settling || looked.elapsed() >= RUN_WATCH_INTERVAL)
+            .then(|| crate::wsnap::open_figures(&crate::wsnap::snapshot_dir(), language.snapshot_lang()));
+        // A pane that is gone takes its run with it: there is nothing left to be at a prompt,
+        // and nothing left to close figures in either.
+        let at_prompt =
+            self.terminals.get(terminal).map(|w| w.active_tab().is_at_prompt()).unwrap_or(true);
+        let Some(watch) = self.run_watch.as_mut() else { return };
+        if let Some(open) = open {
+            watch.looked = std::time::Instant::now();
+            for number in open {
+                if !watch.before.contains(&number) && !watch.opened.contains(&number) {
+                    watch.opened.push(number);
+                }
+            }
+        }
+        if !at_prompt {
+            watch.busy_seen = true;
+            watch.settled = None;
+            return;
+        }
+        // Still at the prompt because the command has not started yet, rather than because it
+        // has finished. A script quick enough never to be caught running is over by the time
+        // the wait runs out, and its figures are in the snapshot by then too.
+        if !watch.busy_seen && watch.started.elapsed() < RUN_WATCH_MAX {
+            return;
+        }
+        if watch.settled.get_or_insert_with(std::time::Instant::now).elapsed() < RUN_SETTLE {
+            return;
+        }
+        let Some(watch) = self.run_watch.take() else { return };
+        if !watch.opened.is_empty() {
+            self.run_figures.insert(watch.file, watch.opened);
         }
     }
 
@@ -4155,8 +4299,7 @@ impl App {
         }
         let window =
             crate::preview::visible_window(full, cols, rows, preview.scroll_x, preview.scroll_px);
-        let inverted = preview.inverted;
-        preview.state = crate::preview::State::ready(window, inverted);
+        preview.show(window);
         self.editors[idx].mark_scrolled();
     }
 
@@ -4183,8 +4326,7 @@ impl App {
         preview.scroll_x = x;
         preview.scroll_px = y;
         let window = crate::preview::visible_window(full, cols, rows, x, y);
-        let inverted = preview.inverted;
-        preview.state = crate::preview::State::ready(window, inverted);
+        preview.show(window);
         // The bars fade on idleness, and a page being moved is not idle.
         self.editors[idx].mark_scrolled();
         true
@@ -4307,6 +4449,15 @@ impl App {
             })
             .collect();
         for (i, path, page) in stale {
+            // A figure being animated is a file changing on disk ten times a second, and the
+            // figure poll is already reading it. Left to also fire here, this asked for the same
+            // picture a second time and — worse — blanked the pane to do it, on its own 700 ms
+            // rhythm: a flicker with a beat of its own, twice a second, laid over a smooth one.
+            // The timestamp is deliberately not recorded when we skip, so an edit that lands
+            // while a read is in flight is still noticed once that read is done.
+            if self.editors[i].preview.as_ref().is_some_and(|p| p.reading()) {
+                continue;
+            }
             self.editors[i].disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
             let width_px =
                 self.editors[i].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
@@ -4316,13 +4467,20 @@ impl App {
                 .map(|p| (p.picture_box(), p.fit))
                 .unwrap_or(((0, 0), crate::preview::Fit::Page));
             if let Some(preview) = self.editors[i].preview.as_mut() {
-                preview.state = crate::preview::start_loading(
+                let started = crate::preview::start_loading(
                     match page {
                         Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
                         None => crate::preview::Job::Picture { path: path.clone(), box_px, fit },
                     },
                     self.preview_tx.clone(),
                 );
+                // What is up stays up while the new one is made — the same rule the rest of the
+                // preview paths follow. A typeset page being rebuilt should not take the old one
+                // off the screen for half a second.
+                match preview.state {
+                    crate::preview::State::Ready(_) => preview.reloading = true,
+                    _ => preview.state = started,
+                }
             }
         }
     }
@@ -5886,13 +6044,22 @@ impl App {
             .map(|p| (p.picture_box(), p.fit))
             .unwrap_or(((0, 0), crate::preview::Fit::Page));
         if let Some(preview) = self.editors[idx].preview.as_mut() {
-            preview.state = crate::preview::start_loading(
+            let started = crate::preview::start_loading(
                 match page {
                     Some(page) => crate::preview::Job::Page { path, page, width_px },
                     None => crate::preview::Job::Picture { path, box_px, fit },
                 },
                 self.preview_tx.clone(),
             );
+            // A tab with a picture in it keeps that picture while the next one is decoded. This
+            // is the path a figure being animated comes down — the file on disk has changed and
+            // is read again, ten times a second — and blanking it to `Loading` in between is a
+            // pane that spends half its life empty. `rerender_preview` has said the same thing
+            // for its own reasons since zoom existed.
+            match preview.state {
+                crate::preview::State::Ready(_) => preview.reloading = true,
+                _ => preview.state = started,
+            }
         }
     }
 
@@ -6168,9 +6335,43 @@ impl App {
             let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
             if let Some(idx) = dnd::shell_running(language, &pids) {
                 let command = language.run_file(&named.to_string_lossy());
+                // The figures this file's last run left behind, closed before it runs again.
+                //
+                // Both languages hand out the next free figure number, so a script that does not
+                // name its figures — `plt.subplots()`, or a bare `figure()` — draws a new one
+                // every time it runs: two plots became four tabs on the second run and six on
+                // the third, all showing the same two pictures. Closing the previous set frees
+                // the numbers, so the rerun draws into the tabs that are already open. Only that
+                // set: a plot made by hand at the prompt belongs to nobody's run and stays.
+                let previous = self.run_figures.remove(&named).unwrap_or_default();
+                if !previous.is_empty() {
+                    let close = language.close_figures(&previous);
+                    if let Some(term) = self.window_tab_mut(idx) {
+                        term.type_line(&close);
+                    }
+                }
                 if let Some(term) = self.window_tab_mut(idx) {
                     term.type_line(&command);
                 }
+                // What the session is holding *now* is the baseline: everything that appears
+                // between here and the prompt coming back is this run's doing. Read after the
+                // close above was typed rather than before — the numbers just closed are gone,
+                // and counting them as somebody else's would make them immortal.
+                let before = crate::wsnap::open_figures(&crate::wsnap::snapshot_dir(), language.snapshot_lang())
+                    .into_iter()
+                    .filter(|n| !previous.contains(n))
+                    .collect();
+                self.run_watch = Some(RunWatch {
+                    file: named.clone(),
+                    language,
+                    terminal: idx,
+                    before,
+                    opened: Vec::new(),
+                    started: std::time::Instant::now(),
+                    busy_seen: false,
+                    looked: std::time::Instant::now(),
+                    settled: None,
+                });
                 self.active_terminal = idx;
                 self.status_message = i18n::msg_run_started(lang, idx, &command);
                 return;

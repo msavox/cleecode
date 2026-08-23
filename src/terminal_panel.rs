@@ -553,6 +553,12 @@ impl TerminalPanel {
         }
     }
 
+    /// Whether the pane is back at a prompt: something in it is reading keystrokes rather than
+    /// running a command. Used by the run watcher to know when a script it started is over.
+    pub fn is_at_prompt(&self) -> bool {
+        self.shell_is_reading_keys()
+    }
+
     /// Whether something in the pane is reading keystrokes as keystrokes.
     ///
     /// The terminal's own line discipline answers this, and it is the only thing that does. A

@@ -273,7 +273,18 @@ def _figures(state):
         # The Octave side had the mirror image of this, found the same day: there the flag is
         # never *set* under qt, so a figure was printed once and never again.
         if fig.stale or not drawn.get(num) or not os.path.exists(png):
-            fig.savefig(png, dpi=fig.dpi)
+            # Written beside the real name and moved onto it, because the editor is watching
+            # this file and reads it the moment it changes. A savefig straight onto the name
+            # is a picture that exists half-written for as long as it takes to write, and a
+            # frame of an animation caught there decodes as "unexpected end of file" — the tab
+            # then says it could not read the picture, which is a lie about a file that is
+            # perfectly good a millisecond later. A rename within a directory is atomic: the
+            # watcher sees the old picture or the new one, never half of either.
+            # Still ending in .png: matplotlib reads the format off the suffix, and a
+            # ".part" one is a picture it refuses to write at all.
+            part = png + ".part.png"
+            fig.savefig(part, dpi=fig.dpi)
+            os.replace(part, png)
             fig.stale = False
             drawn[num] = True
         entry = {"fig": num, "png": [int(round(w)), int(round(h))], "path": png, "axes": []}
@@ -557,6 +568,87 @@ def _debug_state(state):
         "line": frame.f_lineno,
         "stack": stack,
     }
+
+
+def capture_on_exit():
+    """Arrange for a *script's* figures to reach their tabs when it ends.
+
+    A session installs the full hook from PYTHONSTARTUP, which Python reads only when it is
+    interactive. `python3 plot.py` — which is what the Run button does when no prompt is open —
+    therefore installed nothing, and that was worse than doing nothing: CleeCode already points
+    matplotlib at its own windowless backend, so `plt.show()` in a script drew no window *and*
+    handed the figure to nobody. The plot simply did not exist anywhere.
+
+    This is the other half of that decision, and the mirror of what Octave already does through
+    the PKG_ADD on its load path: every interpreter CleeCode starts can hand its plots over,
+    session or script.
+
+    It leaves `_STATE` behind: that is what `cleecode_pyws.frame()` needs to work inside a
+    script's own loop, and what the backend's exit hook writes through when the script ends. A
+    script that never draws anything pays for an import and a function call that returns.
+    """
+    global _STATE                                      # noqa: PLW0603 — one process, one state
+    if _STATE is not None:
+        return                                         # an interactive session got here first
+    out = os.environ.get("CLEECODE_PY_WS")
+    figdir = os.environ.get("CLEECODE_PY_FIGS")
+    if not out or not figdir:
+        return                                         # not started by CleeCode: nothing to do
+    try:
+        os.makedirs(figdir, exist_ok=True)
+    except OSError:
+        return
+    _STATE = {"out": out, "figdir": figdir, "seq": 0, "pending": True,
+              "frame": None, "dbg": None, "drawn": {}}
+
+
+def capture_now():
+    """Hand over whatever figures are open, right now. Called as a script ends.
+
+    Only if it drew any. The snapshot carries the variables as well, and a shell tab whose
+    workspace panel filled up with the leftovers of every `python3 something.py` typed in it
+    would be reporting a session that does not exist.
+
+    The *when* lives in `cleecode_mpl`, which is imported late enough for its atexit handler to
+    run before matplotlib destroys the figures. See the note there.
+    """
+    state = _STATE
+    if state is None:
+        return
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is None:
+        return
+    try:
+        if not plt.get_fignums():
+            return
+        _snapshot(state)
+    except Exception:                                  # noqa: BLE001 — an exit is not a place to raise
+        pass
+
+
+def close_figures(*numbers):
+    """Close these figures, if they are still open, and say nothing either way.
+
+    Called by CleeCode before it reruns a file it ran before. matplotlib numbers a figure when
+    it is created, so `plt.subplots()` in a script run three times makes figures 1,2 then 3,4
+    then 5,6 — six tabs of what the person at the keyboard thinks of as two plots. Closing the
+    ones the previous run left frees those numbers, and the rerun lands on 1 and 2 again, in the
+    tabs that are already open.
+
+    Only the numbers it is given, so a figure made by hand at the prompt is none of its
+    business. And nothing is printed or returned: this is typed at the user's own prompt, and a
+    line of CleeCode's that answers `[None, None]` into their transcript would be worse than the
+    problem it fixes.
+    """
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is None:
+        return
+    for num in numbers:
+        try:
+            if plt.fignum_exists(num):
+                plt.close(num)
+        except Exception:                              # noqa: BLE001 — a stale number is not an error
+            pass
 
 
 def frame():

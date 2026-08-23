@@ -368,6 +368,29 @@ pub fn figure_owner(dir: &Path, png: &str) -> Option<(Figure, Snapshot)> {
     None
 }
 
+/// The figures every session of `lang` says it is holding, by number.
+///
+/// Asked of all of them and not of the newest, for the same reason [`figure_owner`] is: with two
+/// prompts open the newest snapshot is simply whichever was typed at last, which has nothing to
+/// do with who is holding a figure.
+pub fn open_figures(dir: &Path, lang: &str) -> Vec<i64> {
+    let mut numbers = Vec::new();
+    for path in snapshots_in(dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Some(snapshot) = Snapshot::parse(&text) else { continue };
+        if snapshot.lang != lang {
+            continue;
+        }
+        for figure in &snapshot.figures {
+            if !numbers.contains(&figure.fig) {
+                numbers.push(figure.fig);
+            }
+        }
+    }
+    numbers.sort_unstable();
+    numbers
+}
+
 pub fn newest_in(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -446,8 +469,23 @@ fn plots_in_tabs() -> bool {
 /// interpreter simply carries two unread variables.
 pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path) -> Vec<(String, String)> {
     let snapshot = snapshot_path(dir, pane_id);
-    let figures = dir.join("figs");
-    let _ = std::fs::create_dir_all(&figures);
+    // One directory per language, not one for everything.
+    //
+    // A figure is named after its number — `fig1.png` — and both languages number from one, so
+    // a shared directory meant Octave's figure 1 and matplotlib's figure 1 were the same file.
+    // Two sessions open at once, which is exactly what the two presets invite, and each plot
+    // overwrote the other's: one tab, showing whichever interpreter drew last, and the arrow
+    // keys on it asking the wrong session to redraw.
+    //
+    // Not one per *pane*, which would have been the other way to keep them apart. The path is
+    // what a tab is, so a per-pane directory would open a second tab for figure 1 every time a
+    // session was restarted — and Run without a prompt open starts a fresh shell each time. Per
+    // language, a rerun lands on the same file and redraws the tab that is already there, which
+    // is what "figure 1 is figure 1" means to whoever wrote the script.
+    let octave_figures = dir.join("figs").join("octave");
+    let python_figures = dir.join("figs").join("python");
+    let _ = std::fs::create_dir_all(&octave_figures);
+    let _ = std::fs::create_dir_all(&python_figures);
     let in_tabs = plots_in_tabs();
     let mut env = vec![
         // Where this session's plots are meant to go, read by both languages' hooks. One name
@@ -458,7 +496,7 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
             if in_tabs { "tabs" } else { "windows" }.to_string(),
         ),
         ("CLEECODE_OCTAVE_WS".to_string(), snapshot.to_string_lossy().into_owned()),
-        ("CLEECODE_OCTAVE_FIGS".to_string(), figures.to_string_lossy().into_owned()),
+        ("CLEECODE_OCTAVE_FIGS".to_string(), octave_figures.to_string_lossy().into_owned()),
         (
             "CLEECODE_OCTAVE_SLICE".to_string(),
             dir.join(format!("slice-{pane_id}.json")).to_string_lossy().into_owned(),
@@ -481,7 +519,7 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         // Python reads the same three files, because they hold the same three questions. One
         // set of names per language rather than one shared set: a shell can start either
         // interpreter, and a variable named for the wrong one is a variable nobody explains.
-        ("CLEECODE_PY_FIGS".to_string(), figures.to_string_lossy().into_owned()),
+        ("CLEECODE_PY_FIGS".to_string(), python_figures.to_string_lossy().into_owned()),
         (
             "CLEECODE_PY_SLICE".to_string(),
             dir.join(format!("slice-{pane_id}.json")).to_string_lossy().into_owned(),
@@ -597,6 +635,38 @@ mod tests {
     fn a_session_that_never_plotted_has_no_figures_rather_than_failing_to_parse() {
         let snap = Snapshot::parse(SAMPLE).unwrap();
         assert!(snap.figures.is_empty());
+    }
+
+    /// Which figures a language's sessions are holding, which is what a rerun closes.
+    ///
+    /// Read from every snapshot and filtered by language, because the two number their figures
+    /// from one apiece: a Python rerun that closed Octave's figure 1 because a snapshot happened
+    /// to mention one would be a script taking down somebody else's plot.
+    #[test]
+    fn the_figures_a_language_is_holding_are_its_own() {
+        let dir = std::env::temp_dir().join(format!("cleecode_open_figs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |pane: u64, lang: &str, figs: &[i64]| {
+            let list: Vec<String> = figs
+                .iter()
+                .map(|n| format!(r#"{{"fig":{n},"path":"/figs/{lang}/fig{n}.png","png":[800,600],"axes":[]}}"#))
+                .collect();
+            let text = format!(
+                r#"{{"v":1,"seq":1,"lang":"{lang}","vars":[],"figures":[{}]}}"#,
+                list.join(",")
+            );
+            std::fs::write(snapshot_path(&dir, pane), text).unwrap();
+        };
+        write(1, "octave", &[1, 3]);
+        write(2, "python", &[1, 2]);
+        assert_eq!(open_figures(&dir, "octave"), vec![1, 3]);
+        assert_eq!(open_figures(&dir, "python"), vec![1, 2]);
+        // Two sessions of the same language are one answer, not two: a figure is a figure.
+        write(3, "python", &[2, 5]);
+        assert_eq!(open_figures(&dir, "python"), vec![1, 2, 5]);
+        assert!(open_figures(&dir, "julia").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Quoted from what the hook actually wrote while stopped at a breakpoint.
@@ -778,6 +848,14 @@ mod tests {
         assert!(names.contains(&"PYTHONPATH"));
         let by = |key: &str| env.iter().find(|(k, _)| k == key).unwrap().1.clone();
         assert_eq!(by("CLEECODE_OCTAVE_WS"), by("CLEECODE_PY_WS"), "one file per pane, not per language");
+        // The figures are the other way round, and for the reason a snapshot is not: both
+        // languages number their figures from one, so a shared directory made Octave's figure 1
+        // and matplotlib's figure 1 the same file — one tab, showing whichever drew last.
+        assert_ne!(
+            by("CLEECODE_OCTAVE_FIGS"),
+            by("CLEECODE_PY_FIGS"),
+            "fig1.png means two different pictures, and they must not be the same file"
+        );
         assert!(by("PYTHONSTARTUP").ends_with("pythonstartup.py"));
         // Where this session's plots go, read by both hooks. matplotlib picks its backend when
         // it is imported, long before anyone types `plot`, so the choice has to be in the
