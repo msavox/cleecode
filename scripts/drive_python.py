@@ -37,6 +37,16 @@ MODULE = """def calcola(n):
     return b / 2
 """
 
+# A script rather than a session: run with `python3 file.py`, which is what the Run button does
+# when no prompt is open. Figure 7 by name, so it cannot be confused with the figures the live
+# session in the other pane is holding.
+PLAIN_SCRIPT = """import matplotlib.pyplot as plt
+fig = plt.figure(7)
+fig.gca().plot([1, 2, 3], [3, 1, 2])
+plt.show()
+print("lo script e' finito")
+"""
+
 SCRIPT = """# %% setup
 first = 111
 
@@ -244,6 +254,28 @@ def main():
                 and sum(1 for l in s.lines() if l.count("▀") + l.count("▄") > 3) > 2, 25)
             report.check("a figure is noticed without plt.show()", drawn, session,
                          note="a fig1.png tab, with a picture drawn in it")
+
+            # ---- and the same thing from a script, with no prompt involved ------------
+            #
+            # `python3 plot.py` is what Run does when no Python prompt is open, and it used to
+            # produce nothing at all: PYTHONSTARTUP is read only by an interactive interpreter,
+            # so the hook was never installed — while MPLBACKEND was already pointing matplotlib
+            # at CleeCode's windowless backend. The figure was drawn into a session that had
+            # nobody to hand it to, and `plt.show()` opened nothing. The plot existed nowhere.
+            #
+            # Typed into the *shell* tab, not the Python one: the whole point is that no session
+            # is involved.
+            with open(os.path.join(root, "solo.py"), "w") as handle:
+                handle.write(PLAIN_SCRIPT)
+            session.send("\x1b[1;7B")                        # Ctrl+Alt+↓, into the terminals
+            session.wait(lambda s: True, 1.0)
+            session.send("\x1b[1;6C")                        # Ctrl+Shift+→, next tab: the shell
+            session.wait(lambda s: True, 1.5)
+            session.send("python3 %s\r" % os.path.join(root, "solo.py"))
+            arrived = session.wait(lambda s: "fig7.png" in s.text(), 60)
+            report.check("a script hands its figures over too, with no session open",
+                         arrived, session,
+                         note="python3 solo.py in a plain shell, and a fig7.png tab")
 
         Report.show("final screen", session)
     finally:

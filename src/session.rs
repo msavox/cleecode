@@ -134,6 +134,46 @@ impl Language {
         }
     }
 
+    /// What a snapshot calls this language, which is how a session on disk is recognised as
+    /// one of ours rather than the other one's.
+    pub fn snapshot_lang(self) -> &'static str {
+        match self {
+            Language::Octave => "octave",
+            Language::Python => "python",
+        }
+    }
+
+    /// What to say at the prompt to close these figures and leave every other one alone.
+    ///
+    /// Typed before a file is run again, with the numbers that file's previous run opened. The
+    /// point is the numbering: both languages hand out the next free number, so a script that
+    /// says `figure()` — or `plt.subplots()`, which is the same thing — makes new figures every
+    /// time it runs, and three runs leave six tabs of what the person who wrote it thinks of as
+    /// two plots. Closing the previous set frees the numbers, so the rerun draws into the tabs
+    /// that are already open. A script that names its figures (`figure(1)`) was already fine and
+    /// stays fine: it closes 1 and immediately creates 1 again.
+    ///
+    /// Neither form prints anything, and neither touches a figure it was not given — a plot made
+    /// by hand at the prompt is not part of any run and must survive one.
+    pub fn close_figures(self, numbers: &[i64]) -> String {
+        let list =
+            numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        match self {
+            // `intersect` with what the session actually holds, because `close` on a number
+            // that is not a figure is an error — and a figure the user closed by hand between
+            // the two runs is exactly that.
+            Language::Octave => {
+                format!("close(intersect([{list}], get(0, 'children')'));{}", self.marker())
+            }
+            // Through the hook's own module rather than as an expression at the prompt: it
+            // returns nothing, so nothing is echoed into the transcript, and it does the
+            // "is matplotlib even imported" check where that check belongs.
+            Language::Python => {
+                format!("_cleecode_pyws.close_figures({list}){}", self.marker())
+            }
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Language::Octave => "Octave",
@@ -482,5 +522,22 @@ mod tests {
         assert_eq!(cell_at(&[], 0), (0, 0));
         // A cursor past the end — a buffer that shrank under it — clamps rather than panicking.
         assert_eq!(cell_at(&lines, 99), (0, 3));
+    }
+
+    /// What a rerun types before it runs. The numbers are the previous run's, and everything
+    /// about both forms is aimed at the same two rules: close only those, and print nothing.
+    #[test]
+    fn closing_a_runs_figures_names_them_and_says_nothing() {
+        let octave = Language::Octave.close_figures(&[1, 2]);
+        assert!(octave.starts_with("close(intersect([1, 2], get(0, 'children')'));"));
+        // Guarded by what the session actually holds: `close` on a number that is not a figure
+        // is an error, and the user may have closed one by hand between the two runs.
+        assert!(octave.contains("get(0, 'children')"));
+        assert!(octave.ends_with(Language::Octave.marker()));
+
+        let python = Language::Python.close_figures(&[3]);
+        assert_eq!(python, format!("_cleecode_pyws.close_figures(3){}", Language::Python.marker()));
+        // Through the hook's module rather than as an expression, so the prompt echoes nothing.
+        assert!(!python.contains("plt.close"));
     }
 }

@@ -88,7 +88,21 @@ function figs = cleecode_figs (dir, dpi)
         ## objects the session never asked for, which is why nothing that reads the figure
         ## runs between them.
         undo = cleecode_grid (f);
-        print (f, "-dpng", sprintf ("-r%d", dpi), png);
+        ## Printed beside the real name and moved onto it, because the editor is watching this
+        ## file and reads it the moment it changes. A print straight onto the name is a picture
+        ## that exists half-written for as long as the print takes, and a frame of an animation
+        ## caught there decodes as "unexpected end of file" — the tab then says it could not
+        ## read the picture, about a file that is perfectly good a millisecond later. A rename
+        ## within a directory is atomic: the watcher sees the old picture or the new one.
+        part = [png ".part.png"];
+        print (f, "-dpng", sprintf ("-r%d", dpi), part);
+        ## `rename` and not `movefile`: movefile shells out to `mv` for anything it does not
+        ## recognise as trivial, and a fork per frame is a third of an animation's budget —
+        ## measured here, it halved the frame rate. This is one call into the C library.
+        [err, msg] = rename (part, png);
+        if (err)
+          error ("cleecode: could not put the figure in place: %s", msg);
+        endif
         cleecode_grid_undo (undo);
         set (f, "__modified__", false);
         shape.(key) = now_shape;

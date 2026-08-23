@@ -30,10 +30,15 @@ const OCTAVE: [(&str, &str); 11] = [
     ("wsinfo.m", include_str!("../assets/octave/wsinfo.m")),
 ];
 
-const PYTHON: [(&str, &str); 3] = [
+const PYTHON: [(&str, &str); 4] = [
     ("cleecode_pyws.py", include_str!("../assets/python/cleecode_pyws.py")),
     ("cleecode_mpl.py", include_str!("../assets/python/cleecode_mpl.py")),
     ("pythonstartup.py", include_str!("../assets/python/pythonstartup.py")),
+    // Imported by every Python that starts with this directory on its path, which is the only
+    // hook Python offers a *script*: PYTHONSTARTUP is read by an interactive interpreter and
+    // nothing else. It is what lets Run on a .py file put its plot in a tab without a prompt
+    // being open first — the counterpart of the PKG_ADD above.
+    ("sitecustomize.py", include_str!("../assets/python/sitecustomize.py")),
 ];
 
 /// Where the Octave code was unpacked to. Empty if it could not be written, which an interpreter
