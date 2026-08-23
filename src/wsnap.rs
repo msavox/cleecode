@@ -553,6 +553,20 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),
         ("PYTHONPATH".to_string(), lib_python.to_string_lossy().into_owned()),
     ];
+    // Qt's own logging, off — and only the part of it that is noise. Octave's figures are
+    // rendered by Qt, and on a Mac without the font it looks for it says so on every print:
+    // "qt.qpa.fonts: Populating font family aliases took 31 ms. Replace uses of missing font
+    // family FreeSans…". That lands in the user's transcript, caused by a print CleeCode asked
+    // for rather than by anything they typed, and it is advice about a font they do not choose.
+    //
+    // Narrow on purpose: one category, and only its warnings. A rule of `*=false` would also
+    // silence a Qt program of theirs that had something real to say.
+    //
+    // What this does *not* cover is the other line on that screen — "FALLBACK (log once):
+    // Fallback to SW vertex processing" — which is Apple's OpenGL driver, not Qt, and answers
+    // to no logging rule. Measured: it is printed by `print`, once per session, and printing
+    // through the vector renderer instead avoids it at 190 ms a frame against 37.
+    env.push(("QT_LOGGING_RULES".to_string(), "qt.qpa.fonts.warning=false".to_string()));
     // Draw without opening a window of its own. matplotlib's default backend on a desktop puts
     // up a separate GUI window, which is the thing the figure tabs exist to avoid; the capture
     // backend keeps the figure in the session and hands CleeCode the PNG.

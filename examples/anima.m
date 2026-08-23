@@ -9,7 +9,10 @@
 % cleecode_frame() ristampa le figure lì, in quel punto del ciclo.
 %
 % Fuori da CleeCode, e in una sessione impostata sulle finestre vere, non fa
-% niente: quindi lo script continua a funzionare dovunque.
+% niente: quindi lo script continua a funzionare dovunque. Le due righe qui
+% sotto sono quel «dovunque»: fuori da CleeCode la funzione non esiste affatto,
+% e chiamarla sarebbe un errore invece di un niente, quindi il nome diventa una
+% funzione anonima che non fa nulla. Dentro CleeCode la funzione c'è e vince.
 %
 % Quanto va veloce, misurato su questa macchina — un fotogramma costa:
 %
@@ -19,6 +22,10 @@
 % Via ssh è più lenta e si vede lo stesso: il terminale riceve un PNG per
 % fotogramma, non un flusso video. Se ti serve fluida su un collegamento
 % sottile, disegna meno punti o allunga il pause.
+
+if (! exist ("cleecode_frame"))
+  cleecode_frame = @() [];
+endif
 
 %% onda che scorre
 % Il caso base: un solo oggetto che cambia dati. Gli assi sono fissati con
