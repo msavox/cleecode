@@ -699,6 +699,29 @@ pub fn msg_git_unfinished(lang: Lang, what: crate::git::Unfinished) -> String {
 /// The buttons carry their own keys, so this does not list them — that was the duplication the
 /// bar already had once and lost. What a button cannot say is which of the two things it does:
 /// the same arrow slides a flat plot and turns a solid one, and only the axes knows which.
+/// What a menu is called on the bar.
+///
+/// Everything but the first one is just its label. The first one is CleeCode's own name, and it
+/// takes the name of the session when there is one: **Ottavio** with the Octave workspace up,
+/// **Pitone** with pylab. It is a joke, and it is also the clearest possible sign of which of
+/// the two presets you are in — a thing you otherwise read off the small grey text at the far
+/// end of the bar.
+///
+/// One function, because three things ask: the drawing, the hit-test that says which title a
+/// click landed on, and the mnemonic that opens a menu by its first letter. A title that were
+/// one length to the drawing and another to the hit-test would put every click on the wrong
+/// menu, and only for people running a preset — which is the kind of bug that survives.
+pub fn menu_title(lang: Lang, key: Key, workspace: Option<&str>) -> &'static str {
+    if matches!(key, Key::MenuCleeCode) {
+        match workspace {
+            Some("octave") => return "Ottavio",
+            Some("pylab") => return "Pitone",
+            _ => {}
+        }
+    }
+    t(lang, key)
+}
+
 pub fn msg_figure_keys(lang: Lang, is3d: bool) -> &'static str {
     match (lang, is3d) {
         (Lang::En, false) => "arrows pan  ",

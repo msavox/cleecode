@@ -1414,3 +1414,69 @@ dietro, come già porta `xlim`, `ylim` e `view`.
 
 **Dopo:** il mouse sulle figure, un picker quando le definizioni sono più di una, e il resto di
 quello che un language server sa dire (rename, format, i simboli del documento).
+
+---
+
+## 0.11.1 — perché si aprivano due grafici (2026-08-23)
+
+Segnalato subito dopo la 0.11.0: su un Mac, con una figura come scheda, si apriva **anche** una
+finestra Qt. La causa è una riga sola, e non era dove la cercavo.
+
+**`figure(n)` su una figura che esiste già la *alza*** — e alzare, in Octave, vuol dire rimettere
+`visible` a `"on"`. `defaultfigurevisible`, che la sessione tiene a `off` proprio perché nessuna
+finestra si apra mai, decide solo come una figura *nasce*. Quindi un `figure(n)` la disfa per
+sempre. E ogni comando di navigazione che CleeCode mandava cominciava così: `figure(2); view(60,
+30);`. Premere una freccia su una scheda faceva comparire una finestra vera e ce la lasciava.
+
+Misurato in Octave 11.3.0: `set(0, 'currentfigure', n)` seleziona **senza** alzare, e `xlim()`
+subito dopo lavora sulla figura giusta. È quello che CleeCode manda adesso, e l'export non
+seleziona affatto — l'handle di una figura numerata *è* il suo numero, quindi `print(n, ...)`
+basta.
+
+*E il rimedio dall'altro capo,* perché la lista dei modi in cui una figura può tornare visibile
+non la finisce nessuno: il tick la rimette a `off` a ogni giro. Lo script dell'utente che disegna
+due volte nella stessa figura la alza esattamente allo stesso modo, ed è codice suo, legittimo.
+
+**Il controllo che lo tiene chiuso chiede alla sessione, non allo schermo:** una finestra Qt si
+apre fuori dal disegno di CleeCode, quindi dal terminale non se ne può leggere niente. Il driver
+scrive `printf('VISIBLE=%s\n', get(1,'visible'))` al prompt dopo aver premuto tutti i tasti che
+muovono il grafico. Dimostrato non vacuo rimettendo il bug: fallisce.
+
+### La scheda si era fermata al primo fotogramma
+
+Trovato tirando lo stesso filo, ed è peggio del primo. `fingerprint` decideva se ristampare
+guardando **geometria**: dimensioni, limiti, vista, posizione, numero di figli, titolo. Un
+`set(h, "ydata", ...)` — cioè qualunque animazione, e qualunque aggiornamento in place — non
+tocca niente di tutto ciò con gli assi fissati da `axis(...)`. La fingerprint veniva identica, la
+figura non veniva mai ristampata, e la scheda mostrava il primo fotogramma **per il resto della
+sessione**. Senza dire niente: era una foto vera di una figura vera, solo non più di quella.
+
+Adesso la fingerprint campiona anche i dati — al massimo trentadue punti per array, così una
+superficie da un milione di numeri costa come una linea da cento.
+
+### E le animazioni si possono guardare
+
+Il pannello si aggiorna quando l'interprete **aspetta un comando**: misurato, `add_input_event_hook`
+non scatta nemmeno una volta durante un comando che dura due secondi. Giusto per un pannello di
+variabili, e vuol dire che un ciclo è invisibile mentre gira.
+
+Quindi un ciclo che vuole essere guardato lo dice: `cleecode_frame()` in Octave,
+`_cleecode_pyws.frame()` in Python. Fuori da CleeCode non fanno niente, così lo script resta
+eseguibile dovunque. Costo di un fotogramma, misurato qui:
+
+| | ms per fotogramma | |
+|---|---|---|
+| Octave, toolkit qt | 28 (linea), 35 (superficie 60×60) | ~30 al secondo |
+| Octave, gnuplot (headless, via ssh) | 148 | ~7 al secondo |
+| matplotlib | 12 | più di quanto un terminale disegni |
+
+Con `examples/anima.m` e `examples/anima.py` per provarlo.
+
+### E un easter egg
+
+Il primo menu della barra prende il nome della sessione: **Ottavio** con il workspace Octave,
+**Pitone** con pylab. È uno scherzo ed è anche il segno più chiaro di quale dei due preset sei
+dentro — cosa che altrimenti si legge nel grigetto in fondo alla barra. Una funzione sola decide
+il nome, perché a chiederlo sono in tre — il disegno, il click e il mnemonico — e "Ottavio" è una
+colonna più corto di "CleeCode": una larghezza diversa fra disegno e hit-test manderebbe ogni
+click sul menu sbagliato, e solo a chi usa un preset.

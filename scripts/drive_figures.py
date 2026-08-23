@@ -172,6 +172,29 @@ def main():
         report.check("r puts the whole plot back",
                      session.press("r", lambda s: "axis auto" in s.text(), 10), session)
 
+        # Ask the *session* whether its figure is still invisible.
+        #
+        # Not the screen: a Qt window opens outside CleeCode's own drawing, so nothing about it
+        # can be read off the terminal. Octave is the only thing that knows, so Octave is asked.
+        #
+        # This is the invariant the tabs exist for — "no figure window ever opens" — and every
+        # nav key broke it. `figure(n)` on a figure that already exists *raises* it, which sets
+        # visible back to "on", and `defaultfigurevisible` only decides how a figure is born. So
+        # pressing an arrow put the plot on screen twice: the tab, and a real window behind the
+        # terminal. Fixed in two places — CleeCode selects with `currentfigure` now, and the tick
+        # puts back a visibility anything else turned on — and checked here after the keys have
+        # been pressed, which is the only moment it used to be wrong.
+        session.send("\x1b[1;7B")                             # Ctrl+Alt+↓, focus the terminal
+        session.wait(lambda s: True, 1.2)
+        session.send("printf('VISIBLE=%s\\n', get(1, 'visible'));\r")
+        hidden = session.wait(lambda s: "VISIBLE=" in s.text(), 12)
+        said = next((l for l in session.lines() if "VISIBLE=" in l and "printf" not in l), "")
+        report.check("the figure is still invisible after every key that moved it",
+                     hidden and "VISIBLE=off" in said, session, note=repr(said.strip()[:40]))
+        # Back to the figure tab for the clicking below.
+        session.send("\x1b[1;7A")
+        session.wait(lambda s: True, 1.2)
+
         # And the same things with the mouse. The bar draws them as buttons, and a button that
         # is only a picture of a key is worse than no button: it invites a click that does
         # nothing. Both go through one function, so this is checking that they are wired at all
