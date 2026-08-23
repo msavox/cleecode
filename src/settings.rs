@@ -1,7 +1,12 @@
 use crate::i18n::{self, Key, Lang};
 use serde::{Deserialize, Serialize};
 
-pub const SETTINGS_COUNT: usize = 9;
+/// How many rows the settings modal draws and the arrows can reach. Kept honest by
+/// `every_setting_row_is_reachable`: it sat at 9 while `rows()` grew to a dozen, and the three
+/// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
+/// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
+/// see is a setting that does not exist.
+pub const SETTINGS_COUNT: usize = 13;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -128,6 +133,15 @@ pub struct Settings {
     // before the rename keeps working.
     #[serde(default = "default_true", alias = "diagnostics_figures")]
     pub plots_in_tabs: bool,
+    // Whether the title card appears at startup. On, because it is where a named workspace
+    // announces itself and it costs under two seconds — but it is still two seconds in front of
+    // the file you opened the editor to change, and somebody starting CleeCode twenty times a
+    // day has seen the turtle. Off, the first frame is the editor.
+    //
+    // The command line already skips it when it was given a file to open: this is the same
+    // decision made once instead of per invocation.
+    #[serde(default = "default_true")]
+    pub show_splash: bool,
     // Whether the editor paints its own background instead of letting the terminal's show
     // through. Off by default, because a terminal's background is the user's choice and taking
     // it over uninvited is rude — but a translucent one with a bright window behind it turns
@@ -293,6 +307,7 @@ impl Default for Settings {
             completion: true,
             language_server: true,
             plots_in_tabs: true,
+            show_splash: true,
             opaque_background: false,
             last_root: None,
             last_open_files: Vec::new(),
@@ -491,6 +506,43 @@ mod tests {
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
     #[test]
+    /// The modal is sized from `SETTINGS_COUNT` and the cursor wraps on it, so a row past that
+    /// number is drawn nowhere and reachable by nothing. This is how three settings — where
+    /// plots open, the mouse, the language — went missing while the constant stayed at 9.
+    #[test]
+    fn every_setting_row_is_reachable() {
+        let settings = Settings::default();
+        assert_eq!(settings.rows().len(), SETTINGS_COUNT);
+    }
+
+    /// `activate` is a match on the row's index, so a row inserted in the middle without
+    /// renumbering below it silently flips its neighbour instead. Every row has to *do*
+    /// something: toggled twice, each one comes back to where it started, and toggled once, at
+    /// least one thing about the settings is different.
+    #[test]
+    fn every_row_changes_something_of_its_own() {
+        for idx in 0..SETTINGS_COUNT {
+            let mut settings = Settings::default();
+            let before = settings.rows();
+            settings.activate(idx);
+            let after = settings.rows();
+            assert_ne!(
+                before[idx].value, after[idx].value,
+                "row {idx} ({}) did not change when it was picked", before[idx].label
+            );
+            // The language row is the one exception, and not a leak: it repaints every other
+            // row in the other language, which is the whole of what it does.
+            if settings.lang == Settings::default().lang {
+                for (other, (was, now)) in before.iter().zip(after.iter()).enumerate() {
+                    assert!(
+                        other == idx || was.value == now.value,
+                        "picking row {idx} changed row {other} ({})", now.label
+                    );
+                }
+            }
+        }
+    }
+
     fn settings_survive_a_toml_round_trip() {
         let mut settings = Settings::default();
         settings.registered_venvs = vec![
@@ -641,6 +693,7 @@ impl Settings {
                 label: i18n::t(lang, Key::SettingPlotsInTabs),
                 value: plots_value(lang, self.plots_in_tabs, crate::wsnap::can_open_a_window()),
             },
+            SettingRow { label: i18n::t(lang, Key::SettingSplash), value: b(self.show_splash) },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
         ]
@@ -667,8 +720,9 @@ impl Settings {
                     self.plots_in_tabs = !self.plots_in_tabs;
                 }
             }
-            10 => self.mouse_enabled = !self.mouse_enabled,
-            11 => self.lang = self.lang.next(),
+            10 => self.show_splash = !self.show_splash,
+            11 => self.mouse_enabled = !self.mouse_enabled,
+            12 => self.lang = self.lang.next(),
             _ => {}
         }
     }

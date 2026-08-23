@@ -84,6 +84,8 @@ pub enum Key {
     ItemToggleHiddenFiles,
     ItemOpaqueBackground,
     ItemPlotsInTabs,
+    MenuValuePlotsTabs,
+    MenuValuePlotsWindows,
     ToolbarRun,
     ToolbarRefresh,
     ToolbarVenvNone,
@@ -111,6 +113,7 @@ pub enum Key {
     SettingPlotsNoDisplay,
     SettingPlotsTabs,
     SettingPlotsWindows,
+    SettingSplash,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -332,6 +335,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemPlotsInTabs) => "Plots: tabs or windows",
         (Lang::It, ItemPlotsInTabs) => "Grafici: schede o finestre",
 
+        // Where a session started right now would put its plots, read out on the right of the
+        // menu item that changes it. One word, because the label beside it has already asked
+        // the question and the column is the same one the shortcuts use — and because the
+        // settings row's own wording ("the interpreter's own windows") would make the Run menu
+        // half again as wide for a value that is only ever one of two things.
+        (Lang::En, MenuValuePlotsTabs) => "tabs",
+        (Lang::It, MenuValuePlotsTabs) => "schede",
+        (Lang::En, MenuValuePlotsWindows) => "windows",
+        (Lang::It, MenuValuePlotsWindows) => "finestre",
+
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",
 
@@ -416,6 +429,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingPlotsTabs) => "schede, dentro CleeCode",
         (Lang::En, SettingPlotsWindows) => "the interpreter's own windows",
         (Lang::It, SettingPlotsWindows) => "finestre dell'interprete",
+
+        (Lang::En, SettingSplash) => "Splash screen at startup",
+        (Lang::It, SettingSplash) => "Schermata iniziale all'avvio",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",

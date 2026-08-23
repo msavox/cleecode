@@ -1,4 +1,4 @@
-use crate::i18n::Key;
+use crate::i18n::{self, Key, Lang};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
@@ -203,6 +203,46 @@ pub struct MenuItemDef {
 pub struct MenuDef {
     pub title_key: Key,
     pub items: Vec<MenuItemDef>,
+}
+
+/// The parts of the app's state that a menu item reads out on its own right-hand side.
+///
+/// A menu that only names what an item *does* is fine for "Save" and silent for a switch: "Plots:
+/// tabs or windows" was reachable, said what it was about, and left the one question anybody
+/// opens it with — which of the two is it right now — unanswered until they flipped it and read
+/// the status line.
+#[derive(Clone, Copy)]
+pub struct MenuStates {
+    /// Where a session started now would put its figures. The *effective* destination, not the
+    /// setting: on a machine with no screen the setting may say windows while every plot still
+    /// arrives as a tab, and the menu would then be reading out a preference nobody is honouring.
+    pub plots_in_tabs: bool,
+}
+
+/// What `action` says about its state, in the column the shortcuts live in. `None` for the
+/// items that do something once rather than hold a setting, which is almost all of them.
+pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<&'static str> {
+    match action {
+        MenuAction::TogglePlotsInTabs => Some(i18n::t(
+            lang,
+            if states.plots_in_tabs { Key::MenuValuePlotsTabs } else { Key::MenuValuePlotsWindows },
+        )),
+        _ => None,
+    }
+}
+
+/// How wide that column has to be for `action`, whatever the state happens to be.
+///
+/// The widest of the values it can take, so the dropdown is the same size before and after a
+/// toggle: a menu that changed width under the cursor would move every other item's shortcut
+/// sideways at the moment of pressing Enter.
+pub fn item_value_width(lang: Lang, action: MenuAction) -> usize {
+    [true, false]
+        .into_iter()
+        .filter_map(|plots_in_tabs| item_value(lang, action, MenuStates { plots_in_tabs }))
+        .map(|value| value.chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 fn item(label_key: Key, action: MenuAction, shortcut: Option<&'static str>) -> MenuItemDef {
@@ -600,6 +640,40 @@ impl MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The switch reads out which way it is set. Without this the Run menu offered "Plots: tabs
+    /// or windows" and answered neither — the only way to learn the state was to change it and
+    /// read the status line, which is a question you cannot ask without also answering it.
+    #[test]
+    fn the_plot_item_says_which_of_the_two_it_is() {
+        for lang in [Lang::En, Lang::It] {
+            let tabs = item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true });
+            let windows = item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false });
+            assert!(tabs.is_some() && windows.is_some(), "{lang:?}");
+            assert_ne!(tabs, windows, "{lang:?}: both states read the same");
+            // Wide enough for either, so the dropdown does not resize under the cursor at the
+            // moment the item is picked.
+            let width = item_value_width(lang, MenuAction::TogglePlotsInTabs);
+            assert_eq!(width, tabs.unwrap().chars().count().max(windows.unwrap().chars().count()));
+        }
+    }
+
+    /// Everything else is something to do once, and a value beside it would be a value about
+    /// nothing. Guarded because the column is shared with the shortcuts: an action that grew a
+    /// value *and* has a key would draw one over the other.
+    #[test]
+    fn an_item_never_carries_both_a_shortcut_and_a_state() {
+        for def in menu_defs() {
+            for item in def.items {
+                assert!(
+                    item.shortcut.is_none()
+                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true }).is_none(),
+                    "\"{}\" has both a shortcut and a state to read out",
+                    i18n::t(Lang::En, item.label_key)
+                );
+            }
+        }
+    }
 
     /// The rule this whole audit exists to enforce: nothing is mouse-only. Every action the app
     /// knows must appear in the command palette, which is built from `command_entries`.

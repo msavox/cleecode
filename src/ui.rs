@@ -1,6 +1,6 @@
 use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
-use crate::menu::{ContextMenu, MenuBar};
+use crate::menu::{self, ContextMenu, MenuBar};
 use crate::terminal_panel::TerminalWindow;
 use crate::settings;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -521,10 +521,15 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
+    // The right-hand column carries two kinds of thing: a shortcut, and — for an item that holds
+    // a setting rather than doing something once — what that setting is right now. They share the
+    // column because they are never both on the same row, and the width is the widest of either.
     let shortcut_width = items
         .iter()
-        .filter_map(|i| i.shortcut)
-        .map(|s| i18n::shortcut_label(lang, s).chars().count())
+        .map(|i| match i.shortcut {
+            Some(sc) => i18n::shortcut_label(lang, sc).chars().count(),
+            None => menu::item_value_width(lang, i.action),
+        })
         .max()
         .unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
@@ -601,8 +606,20 @@ pub fn about_modal_rect(full: Rect) -> Rect {
     centered_rect(60, 13, full)
 }
 
-pub fn settings_modal_rect(full: Rect) -> Rect {
-    let width = 54u16;
+pub fn settings_modal_rect(app: &App, full: Rect) -> Rect {
+    // Wide enough for the longest row it actually has to draw, rather than a number that was
+    // right when it was written: the values are sentences in places ("the interpreter's own
+    // windows") and the labels grow when a language server is mentioned, so a fixed 54 columns
+    // put the value on top of the label in English and further over in Italian.
+    let widest = app
+        .settings
+        .rows()
+        .iter()
+        .map(|r| r.label.chars().count() + r.value.chars().count())
+        .max()
+        .unwrap_or(0);
+    // Two for the borders, two for the cursor's marker, and two between label and value.
+    let width = (widest + 6).max(54) as u16;
     let height = settings::SETTINGS_COUNT as u16 + 2;
     centered_rect(width, height, full)
 }
@@ -907,6 +924,7 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     )));
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
+    let states = app.menu_states();
     for (idx, i) in app.menu.defs[app.menu.menu_index].items.iter().enumerate() {
         if i.new_group {
             items.push(separator.clone());
@@ -915,7 +933,14 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
             selected_row = items.len();
         }
         let label = i18n::t(lang, i.label_key);
-        let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
+        // A shortcut if it has one, otherwise what it currently is — see `menu::item_value`.
+        // Nothing has both: a row that carries a setting is a row you have to open the menu to
+        // read, which is the whole reason its value is drawn here.
+        let right = match i.shortcut {
+            Some(sc) => Some(i18n::shortcut_label(lang, sc)),
+            None => menu::item_value(lang, i.action, states),
+        };
+        let line = match right {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
                 let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
@@ -994,15 +1019,22 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
 }
 
 fn draw_settings_modal(f: &mut Frame, app: &App, full: Rect) {
-    let rect = settings_modal_rect(full);
+    let rect = settings_modal_rect(app, full);
     f.render_widget(Clear, rect);
     let rows = app.settings.rows();
+    let inner_width = rect.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let marker = if i == app.settings_selected { "> " } else { "  " };
-            ListItem::new(Line::from(format!("{marker}{:<34}{}", r.label, r.value)))
+            // The value against the right-hand edge rather than at a fixed column, so a label
+            // longer than the column — "Language server (diagnostics, completion)" was — pushes
+            // its value along instead of being run into by it.
+            let pad = inner_width
+                .saturating_sub(marker.chars().count() + r.label.chars().count() + r.value.chars().count())
+                .max(1);
+            ListItem::new(Line::from(format!("{marker}{}{}{}", r.label, " ".repeat(pad), r.value)))
         })
         .collect();
     let mut state = ListState::default();
