@@ -168,7 +168,22 @@ impl Language {
     pub fn nav_command(self, nav: Nav, number: i64, is3d: bool, view: (f64, f64)) -> String {
         match self {
             Language::Octave => {
-                let select = format!("figure({number}); ");
+                // `set(0, "currentfigure", n)` and not `figure(n)`, and this is not a
+                // stylistic preference: `figure(n)` on a figure that already exists *raises*
+                // it, which in Octave means setting `visible` back to "on". CleeCode's
+                // sessions run with `defaultfigurevisible` off precisely so no window ever
+                // opens — but that default only applies when a figure is created, so one
+                // `figure(n)` undoes it for good.
+                //
+                // The effect, measured on a Mac with the qt toolkit: pressing an arrow on a
+                // figure tab popped a real Qt window and left it there, so the plot was on
+                // screen twice — once as the tab and once as a window behind the terminal,
+                // which is the exact thing the tab exists to avoid. Every nav key did it, and
+                // so did the button beside it.
+                //
+                // `currentfigure` selects without raising. Checked in Octave 11.3.0: the
+                // figure stays "off" and `xlim()` afterwards operates on the right one.
+                let select = format!("set(0, 'currentfigure', {number}); ");
                 let body = match (nav, is3d) {
                     // `zoom(factor)`, not `zoom on`: the mode wants a real window to click in,
                     // the factor form does not.
@@ -225,11 +240,11 @@ impl Language {
     pub fn export_command(self, number: i64, path: &str) -> String {
         match self {
             Language::Octave => {
-                format!(
-                    "figure({number}); print(figure({number}), '-dpdf', {});{}",
-                    self.quote(path),
-                    self.marker()
-                )
+                // The handle straight to `print`, with nothing selected first. A numbered
+                // figure's handle *is* its number, so there is nothing here that needs a
+                // current figure — and `figure(n)` would raise a window, as it does in
+                // `nav_command`, where the reasoning is written out.
+                format!("print({number}, '-dpdf', {});{}", self.quote(path), self.marker())
             }
             Language::Python => format!(
                 "import matplotlib.pyplot as _plt; _plt.figure({number}).savefig({}){}",
@@ -375,14 +390,14 @@ mod tests {
     #[test]
     fn moving_around_a_figure_is_said_in_the_language_of_the_session() {
         let octave = Language::Octave;
-        assert!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)).starts_with("figure(1); zoom(2);"));
-        assert!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)).starts_with("figure(3); zoom(0.5);"));
+        assert!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 1); zoom(2);"));
+        assert!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 3); zoom(0.5);"));
         assert!(octave.nav_command(Nav::Right, 1, false, (0.0, 90.0)).contains("xlim(xl + 0.25"));
         assert!(octave.nav_command(Nav::Down, 1, false, (0.0, 90.0)).contains("ylim(yl - 0.25"));
         // Every figure is named before it is acted on, or the command lands on whichever one
         // the session last drew.
         for nav in [Nav::In, Nav::Out, Nav::Left, Nav::Right, Nav::Up, Nav::Down, Nav::Reset] {
-            assert!(octave.nav_command(nav, 7, false, (0.0, 90.0)).starts_with("figure(7);"));
+            assert!(octave.nav_command(nav, 7, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 7);"));
         }
     }
 
@@ -391,12 +406,12 @@ mod tests {
     #[test]
     fn arrows_rotate_a_surface_instead_of_panning_it() {
         let octave = Language::Octave;
-        assert!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)).starts_with("figure(2); view(60, 30);"));
-        assert!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)).starts_with("figure(2); view(30, 30);"));
+        assert!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(60, 30);"));
+        assert!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(30, 30);"));
         // Elevation stops at the poles rather than turning the surface inside out.
         assert!(octave.nav_command(Nav::Up, 2, true, (45.0, 85.0)).contains("view(45, 90)"));
         assert!(octave.nav_command(Nav::Down, 2, true, (45.0, -85.0)).contains("view(45, -90)"));
-        assert!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)).starts_with("figure(2); view(-37.5, 30);"));
+        assert!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(-37.5, 30);"));
     }
 
     #[test]
@@ -417,7 +432,7 @@ mod tests {
     fn a_figure_leaves_as_a_vector_file() {
         assert!(Language::Octave
             .export_command(1, "/proj/fig1.pdf")
-            .starts_with("figure(1); print(figure(1), '-dpdf', '/proj/fig1.pdf');"));
+            .starts_with("print(1, '-dpdf', '/proj/fig1.pdf');"));
         let python = Language::Python.export_command(2, "/proj/fig2.pdf");
         assert!(python.contains("figure(2).savefig(\"/proj/fig2.pdf\")"), "{python}");
         // A path with a quote in it still parses at the prompt it is going to.

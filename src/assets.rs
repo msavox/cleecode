@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 10] = [
+const OCTAVE: [(&str, &str); 11] = [
     ("cleecode_dbg.m", include_str!("../assets/octave/cleecode_dbg.m")),
     ("cleecode_slice.m", include_str!("../assets/octave/cleecode_slice.m")),
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
@@ -22,6 +22,7 @@ const OCTAVE: [(&str, &str); 10] = [
     // the preset's, which was the whole bug.
     ("PKG_ADD", include_str!("../assets/octave/PKG_ADD")),
     ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
+    ("cleecode_frame.m", include_str!("../assets/octave/cleecode_frame.m")),
     ("cleecode_grid.m", include_str!("../assets/octave/cleecode_grid.m")),
     ("cleecode_grid_undo.m", include_str!("../assets/octave/cleecode_grid_undo.m")),
     ("cleecode_ws.m", include_str!("../assets/octave/cleecode_ws.m")),

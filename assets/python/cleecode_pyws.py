@@ -49,6 +49,7 @@ import sys
 import time
 
 _STAT_LIMIT = 1_000_000      # elements above which min/max/mean are not paid for
+_STATE = None                # the installed session's state, for `frame()` to find
 _PREVIEW = 60                # characters of repr kept
 
 
@@ -558,6 +559,33 @@ def _debug_state(state):
     }
 
 
+def frame():
+    """Put what the figures look like right now into their tabs. For a loop.
+
+    Everything else here happens at the prompt: the snapshot is written when a statement
+    finishes, which is the right design for a panel of variables and means a loop is invisible
+    while it runs — the tab holds the frame from before it until it is over. So a loop that
+    wants to be watched says so:
+
+        for k in range(200):
+            line.set_ydata(np.sin(x + k / 20))
+            _cleecode_pyws.frame()
+
+    The underscore is not an accident: PYTHONSTARTUP runs in the user's own namespace, and the
+    one name this leaves there is `_cleecode_pyws`, so that `dir()` and the workspace panel stay
+    the user's own. This is the one thing on it worth calling by hand.
+
+    Outside CleeCode it does nothing: there is no directory to write to.
+    """
+    state = _STATE
+    if state is None:
+        return
+    try:
+        _snapshot(state)
+    except Exception:                                  # noqa: BLE001 — a frame is not worth a raise
+        pass
+
+
 def install(out=None, figdir=None):
     out = out or os.environ.get("CLEECODE_PY_WS")
     if not out:
@@ -568,6 +596,10 @@ def install(out=None, figdir=None):
     # empty workspace is a fact about the session, not a failure to report one.
     state = {"out": out, "figdir": figdir, "seq": 0, "pending": True,
              "frame": None, "dbg": None, "drawn": {}}
+    # Kept where `frame()` can reach it. The hooks below close over `state` and have never
+    # needed a global; the one thing a user calls by hand does.
+    global _STATE                                      # noqa: PLW0603 — one session, one state
+    _STATE = state
     sys.addaudithook(_statement_watcher(state))
     sys.ps1 = _Prompt(getattr(sys, "ps1", ">>> "), state)
     _slice_watcher(state)

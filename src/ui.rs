@@ -462,11 +462,11 @@ fn columns(text: &str) -> u16 {
     Span::raw(text).width() as u16
 }
 
-pub fn menu_title_ranges(menu: &MenuBar, lang: Lang) -> Vec<(u16, u16)> {
+pub fn menu_title_ranges(menu: &MenuBar, lang: Lang, workspace: Option<&str>) -> Vec<(u16, u16)> {
     let mut ranges = Vec::new();
     let mut x = columns(MENU_LOGO);
     for def in &menu.defs {
-        let label = format!(" {} ", i18n::t(lang, def.title_key));
+        let label = format!(" {} ", i18n::menu_title(lang, def.title_key, workspace));
         let w = columns(&label);
         ranges.push((x, x + w));
         x += w;
@@ -501,7 +501,7 @@ fn workspace_badge(app: &App) -> String {
 /// nothing here removes both at once — the View menu entry still does the job.
 pub fn menu_bar_button_range(app: &App, width: u16) -> std::ops::Range<u16> {
     let badge = columns(&workspace_badge(app));
-    let titles = menu_title_ranges(&app.menu, app.settings.lang)
+    let titles = menu_title_ranges(&app.menu, app.settings.lang, app.active_workspace.as_deref())
         .last()
         .map(|(_, end)| *end)
         .unwrap_or(0);
@@ -516,8 +516,13 @@ fn button_range(width: u16, titles_end: u16, badge: u16) -> std::ops::Range<u16>
     if start < titles_end || end - start < button { start..start } else { start..end }
 }
 
-pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
-    let ranges = menu_title_ranges(menu, lang);
+pub fn menu_dropdown_rect(
+    menu: &MenuBar,
+    lang: Lang,
+    workspace: Option<&str>,
+    full: Rect,
+) -> Rect {
+    let ranges = menu_title_ranges(menu, lang, workspace);
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
@@ -834,7 +839,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
     let mut used = columns(MENU_LOGO);
     for (i, def) in app.menu.defs.iter().enumerate() {
-        let title = i18n::t(lang, def.title_key);
+        let title = i18n::menu_title(lang, def.title_key, app.active_workspace.as_deref());
         let label = format!(" {} ", title);
         used += columns(&label);
         let is_open = app.menu.active && app.menu.menu_index == i;
@@ -896,7 +901,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
-    let rect = menu_dropdown_rect(&app.menu, lang, full);
+    let rect = menu_dropdown_rect(&app.menu, lang, app.active_workspace.as_deref(), full);
     let inner_width = rect.width.saturating_sub(2) as usize;
     // Separator rules are woven in between real items, so the row a given item
     // renders on drifts down by one for every group opened above it. Track the
@@ -3842,6 +3847,38 @@ mod tests {
 
     /// An 80×24 screen, the size every terminal still agrees on.
     const SCREEN: Rect = Rect { x: 0, y: 0, width: 80, height: 24 };
+
+    /// The first menu takes the session's name, and the hit-test moves with it.
+    ///
+    /// The width is the point: "Ottavio" is one column shorter than "CleeCode" and "Pitone" is
+    /// two, so a hit-test still measuring the old name would put every click on the bar one or
+    /// two columns out — and only for people running a preset.
+    #[test]
+    fn the_first_menu_is_named_after_the_session_and_the_clicks_follow() {
+        use crate::i18n::{menu_title, Key, Lang};
+        let bar = MenuBar::new();
+        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, None), "CleeCode");
+        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("octave")), "Ottavio");
+        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("pylab")), "Pitone");
+        // A workspace of the user's own is not one of the two, and keeps the real name.
+        assert_eq!(menu_title(Lang::En, Key::MenuCleeCode, Some("my layout")), "CleeCode");
+        // And it is only the first menu that plays along.
+        assert_eq!(
+            menu_title(Lang::En, Key::MenuFile, Some("octave")),
+            menu_title(Lang::En, Key::MenuFile, None)
+        );
+
+        let plain = menu_title_ranges(&bar, Lang::En, None);
+        let named = menu_title_ranges(&bar, Lang::En, Some("pylab"));
+        assert_eq!(plain.len(), named.len());
+        assert_ne!(plain[0].1, named[0].1, "the first title is a different width");
+        // Every menu after it shifts by the same amount, or the click lands on its neighbour.
+        let shift = plain[1].0 as i32 - named[1].0 as i32;
+        for (a, b) in plain.iter().zip(named.iter()).skip(1) {
+            assert_eq!(a.0 as i32 - b.0 as i32, shift);
+            assert_eq!(a.1 as i32 - b.1 as i32, shift);
+        }
+    }
 
     #[test]
     fn the_completion_list_hangs_under_the_cursor_and_lines_up_with_the_word() {

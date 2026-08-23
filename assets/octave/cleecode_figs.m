@@ -46,6 +46,21 @@ function figs = cleecode_figs (dir, dpi)
   for k = numel (handles):-1:1          # oldest first, so figure 1 stays figure 1
     f = handles(k);
     try
+      ## Back to invisible, whoever turned it on.
+      ##
+      ## `defaultfigurevisible` is off for this session, and that only decides how a figure is
+      ## *born*: `figure(n)` on one that already exists raises it, which sets visible back to
+      ## "on" for good. A script that draws into the same figure twice does that, and so did
+      ## CleeCode itself until the nav commands stopped saying `figure(n)`. The result is the
+      ## plot on screen twice — the tab, and a real window behind the terminal — which is
+      ## precisely what the tab exists to avoid.
+      ##
+      ## Put right here rather than only at the places that raise it, because this is the one
+      ## piece of code that sees every figure on every tick, and the ways a figure can come to
+      ## be visible are not a list anybody can finish. Free when it is already off.
+      if (strcmp (get (f, "visible"), "on"))
+        set (f, "visible", "off");
+      endif
       num = get (f, "number");
       png = fullfile (dir, sprintf ("fig%d.png", num));
 
@@ -90,13 +105,25 @@ function s = fingerprint (f)
   ## What would make a figure look different, in the cheapest terms that catch it.
   ##
   ## The figure's own size, and for each axes: the limits, the view, where it sits, how
-  ## many things are drawn in it, and its title. Between them these cover what the
-  ## navigation keys do (limits and view), what a replot does (the child count and
-  ## usually the limits) and what labelling does. It is a handful of `get` calls per
-  ## figure per command — next to nothing beside the 37 ms a print costs, which is the
-  ## whole reason for asking the question at all.
+  ## many things are drawn in it, its title — and a sample of what those things hold.
+  ## Between them these cover what the navigation keys do (limits and view), what a replot
+  ## does (the child count and usually the limits), what labelling does, and what changing
+  ## the data in place does. It is a handful of `get` calls per figure per command — next
+  ## to nothing beside the 37 ms a print costs, which is the whole reason for asking.
+  ##
+  ## The sample is the late addition, and it is the difference between a picture that
+  ## follows the session and one that stops at its first frame. Everything above is
+  ## *geometry*: an animation — `set(h, "ydata", ...)` in a loop, with the axes pinned by
+  ## `axis(...)` so nothing moves — changes none of it. The fingerprint came out identical
+  ## every time round, so the figure was never reprinted, and the tab showed frame one
+  ## after the loop had finished and for the rest of the session. Nothing said so: the
+  ## picture was a real picture of a real figure, just not of that one any more.
   ##
   ## Not a hash of the PNG: that would mean printing it to find out whether to print it.
+  ## And not the whole of the data either — a surface is a million numbers and this runs
+  ## ten times a second. Thirty-two points spread through it costs the same whether the
+  ## array holds a hundred or a million, and there is no realistic redraw that moves none
+  ## of them while leaving every count and limit alone.
 
   parts = {sprintf("%g,", get (f, "position"))};
   ax = get (f, "children");
@@ -114,9 +141,13 @@ function s = fingerprint (f)
         endif
       catch
       end_try_catch
+      kids = get (a, "children");
       parts{end+1} = sprintf ("%g,", get (a, "xlim"), get (a, "ylim"), get (a, "zlim"), ...
-                              get (a, "view"), get (a, "position"), numel (get (a, "children")));
+                              get (a, "view"), get (a, "position"), numel (kids));
       parts{end+1} = t;
+      for j = 1:numel (kids)
+        parts{end+1} = drawn_data (kids(j));
+      endfor
     catch
       ## An axes that will not answer is not worth taking the snapshot down for.
     end_try_catch
@@ -153,4 +184,35 @@ function d = describe (f, num, png, W, H)
   ## array into a bare object rather than a one-element array, so a figure with exactly
   ## one axes would serialise to a different shape than every other.
   d.axes = axes_list;
+endfunction
+
+function s = drawn_data (h)
+  ## A cheap sample of what one drawn thing holds, for [`fingerprint`].
+  ##
+  ## Thirty-two points at most out of each array, so a surface of a million numbers costs the
+  ## same as a line of a hundred. The count goes in too, because a plot that grew a point is a
+  ## plot that changed even if every sampled value happens to land the same.
+  ##
+  ## Everything is inside its own try: a child may be a legend, a text object or something with
+  ## no data at all, and the tick must not fall over on one to leave every other figure unprinted.
+
+  s = "";
+  for prop = {"xdata", "ydata", "zdata", "cdata", "string"}
+    try
+      v = get (h, prop{1});
+      if (ischar (v))
+        s = [s, v, ","];
+        continue;
+      endif
+      v = v(:);
+      n = numel (v);
+      if (n == 0)
+        continue;
+      endif
+      at = unique (round (linspace (1, n, min (n, 32))));
+      s = [s, sprintf("%d:", n), sprintf("%g,", v(at))];
+    catch
+      ## Not a thing with that property. The next one may be.
+    end_try_catch
+  endfor
 endfunction
