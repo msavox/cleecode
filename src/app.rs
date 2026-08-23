@@ -6990,7 +6990,7 @@ impl App {
         let target = c.to_ascii_lowercase();
         let lang = self.settings.lang;
         self.menu.defs.iter().position(|d| {
-            i18n::menu_title(lang, d.title_key, self.active_workspace.as_deref())
+            i18n::menu_title(lang, d.title_key)
                 .chars()
                 .next()
                 .map(|first| first.to_ascii_lowercase() == target)
@@ -8988,8 +8988,7 @@ impl App {
     }
 
     fn mouse_menu_bar_click(&mut self, col: u16, width: u16) {
-        let ranges =
-            ui::menu_title_ranges(&self.menu, self.settings.lang, self.active_workspace.as_deref());
+        let ranges = ui::menu_title_ranges(&self.menu, self.settings.lang);
         // Anything left of the first menu title is the logo.
         if ranges.first().is_some_and(|(first, _)| col < *first) {
             self.poke_turtle();
@@ -9011,12 +9010,7 @@ impl App {
     }
 
     fn mouse_menu(&mut self, col: u16, row: u16, full: Rect) {
-        let dropdown = ui::menu_dropdown_rect(
-            &self.menu,
-            self.settings.lang,
-            self.active_workspace.as_deref(),
-            full,
-        );
+        let dropdown = ui::menu_dropdown_rect(&self.menu, self.settings.lang, full);
         if within(dropdown, col, row) {
             let inner = ui::inner_rect(dropdown);
             if row >= inner.y {
