@@ -566,6 +566,7 @@ fn markdown_to_pdf(source: &Path, text: &str) -> Result<TempFile, String> {
         return Err("no PDF engine found - install tectonic, typst or a TeX distribution".to_string());
     };
     command.arg(format!("--pdf-engine={}", engine.display()));
+    command.args(engine_options(&engine));
     let out = command
         .output()
         .map_err(|e| match e.kind() {
@@ -574,9 +575,47 @@ fn markdown_to_pdf(source: &Path, text: &str) -> Result<TempFile, String> {
         })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("pandoc: {}", stderr.trim().lines().last().unwrap_or("failed")));
+        return Err(format!("pandoc: {}", engine_error(&stderr)));
     }
     Ok(output)
+}
+
+/// What an engine needs told to it that pandoc does not say on its own, passed through
+/// `--pdf-engine-opt`.
+///
+/// typst reads no file outside its *root*, and it resolves an absolute path against that root
+/// rather than against the filesystem — so `/private/var/…/media/docs/demo.gif`, which is where
+/// pandoc puts a picture it has extracted from the document, was looked for under the working
+/// directory and reported as not found. Every markdown file with a picture in it therefore
+/// failed to become a document and fell back to styled text, silently, while a file with no
+/// pictures rendered perfectly: the README of this very project was the report.
+///
+/// The root is the one the temporary media directory is on, since that is where the paths
+/// pandoc writes point — `/` everywhere except Windows, where it is the drive.
+fn engine_options(engine: &Path) -> Vec<String> {
+    let name = engine.file_stem().and_then(|n| n.to_str()).unwrap_or_default();
+    if !name.eq_ignore_ascii_case("typst") {
+        return Vec::new();
+    }
+    let temp = std::env::temp_dir();
+    let root = temp.ancestors().last().unwrap_or(Path::new("/"));
+    vec![format!("--pdf-engine-opt=--root={}", root.display())]
+}
+
+/// The line of an engine's output worth putting in the status line.
+///
+/// pandoc's own last word is "Error producing PDF.", which says only that something went wrong —
+/// and it is the *last* line, which is what used to be shown. The engine says why above it:
+/// typst opens its report with `error:`, TeX with a `!`. Either of those beats the summary; with
+/// neither, the last line is still better than nothing.
+fn engine_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines
+        .iter()
+        .find(|line| line.starts_with("error:") || line.starts_with('!'))
+        .or_else(|| lines.last())
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| "failed".to_string())
 }
 
 fn decode(path: &Path) -> Result<image::DynamicImage, String> {
@@ -1121,6 +1160,68 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// typst is told where its root is, because pandoc hands it absolute paths into the
+    /// temporary directory it extracted the document's pictures to — and typst reads an absolute
+    /// path as relative to its root. Without this every markdown file with a picture in it
+    /// failed to become a document and fell back, silently, to styled text.
+    #[test]
+    fn typst_is_given_a_root_and_the_others_are_left_alone() {
+        let typst = engine_options(Path::new("/opt/homebrew/bin/typst"));
+        assert_eq!(typst.len(), 1, "{typst:?}");
+        assert!(typst[0].starts_with("--pdf-engine-opt=--root="), "{typst:?}");
+        // The root the temporary directory is on, since that is where the paths point.
+        let root = typst[0].trim_start_matches("--pdf-engine-opt=--root=");
+        assert!(std::env::temp_dir().starts_with(root), "{root} is not a root of the temp dir");
+        // Windows names it typst.exe, and the option is just as necessary there.
+        assert_eq!(engine_options(Path::new("C:/tools/typst.exe")).len(), 1);
+        for other in ["tectonic", "pdflatex", "xelatex", "lualatex"] {
+            assert!(engine_options(&PathBuf::from("/usr/bin").join(other)).is_empty(), "{other}");
+        }
+    }
+
+    /// The bug itself, end to end, on a machine that has the tools: a markdown file with a
+    /// picture in it becomes a PDF. Skipped where pandoc or an engine is missing — the point is
+    /// to catch the day the engine's rules change, not to demand a TeX distribution of everyone.
+    #[test]
+    fn a_markdown_with_a_picture_becomes_a_document() {
+        if !has_pandoc() || pdf_engine().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cleecode-md-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A one-pixel PNG, written out rather than fetched: the test must not need a network.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d,
+            0xb0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(dir.join("dot.png"), png).unwrap();
+        let source = dir.join("note.md");
+        let text = "# Titolo\n\n![un punto](dot.png)\n";
+        std::fs::write(&source, text).unwrap();
+        let made = markdown_to_pdf(&source, text);
+        let ok = made.is_ok();
+        let why = made.err().unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(ok, "a picture in a markdown file stopped it becoming a document: {why}");
+    }
+
+    /// pandoc's last word is "Error producing PDF.", which was what the status line used to show:
+    /// true, and no help. The engine says why, above it.
+    #[test]
+    fn the_reason_beats_the_summary() {
+        let typst = "error: file not found (searched at /tmp/media/docs/demo.gif)\n  \u{250c}\u{2500} x.typ:162\nError producing PDF.";
+        assert!(engine_error(typst).starts_with("error: file not found"));
+        let tex = "! LaTeX Error: File `foo.sty' not found.\nError producing PDF.";
+        assert!(engine_error(tex).starts_with("! LaTeX Error"));
+        // Nothing that names itself an error: the last line is still better than nothing, and
+        // an empty stderr still has to say something.
+        assert_eq!(engine_error("something went wrong\nError producing PDF."), "Error producing PDF.");
+        assert_eq!(engine_error("   \n\n"), "failed");
+    }
 
     /// The id a kitty terminal knows an image by, as it appears in the cells: the protocol
     /// writes it into the first cell of every row as a foreground colour, and that is the only

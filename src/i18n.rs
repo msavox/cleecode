@@ -149,6 +149,7 @@ pub enum Key {
     HeaderGitRepo,
     ItemNewFile,
     ItemNewFolder,
+    ItemOpenOutside,
     ItemRename,
     ItemDelete,
     ItemCommandPalette,
@@ -331,6 +332,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemOpaqueBackground) => "Solid background",
         (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
+
+        // Named for where the file goes rather than for the machinery: "with the default
+        // application" is how a settings dialog would say it, and this is a right-click on a
+        // PDF.
+        (Lang::En, ItemOpenOutside) => "Open outside CleeCode",
+        (Lang::It, ItemOpenOutside) => "Apri fuori da CleeCode",
 
         (Lang::En, ItemPlotsInTabs) => "Plots: tabs or windows",
         (Lang::It, ItemPlotsInTabs) => "Grafici: schede o finestre",
@@ -1598,6 +1605,30 @@ pub fn msg_plots_in_tabs(lang: Lang, in_tabs: bool, can_open_a_window: bool) -> 
             "Qui non c'è un display: i grafici restano nelle tab, una finestra non avrebbe dove aprirsi"
                 .to_string()
         }
+    }
+}
+
+/// Handed to the desktop. Named, because a right-click menu is a place where the wrong row is
+/// easy to hit and the window may take a moment to appear in front of the terminal.
+pub fn msg_opened_outside(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("{name} handed to the desktop"),
+        Lang::It => format!("{name} passato al desktop"),
+    }
+}
+
+/// Why it could not be. Over ssh there is no desktop this side of the connection to hand it to,
+/// which is a different thing from an opener that failed and is said differently.
+pub fn msg_open_outside_failed(lang: Lang, name: &str, err: &str) -> String {
+    match (lang, err) {
+        (Lang::En, "over ssh") => {
+            format!("{name} stays here: over ssh there is no desktop to open it on")
+        }
+        (Lang::It, "over ssh") => {
+            format!("{name} resta qui: via ssh non c'è un desktop su cui aprirlo")
+        }
+        (Lang::En, _) => format!("Could not open {name} outside: {err}"),
+        (Lang::It, _) => format!("Impossibile aprire {name} fuori: {err}"),
     }
 }
 

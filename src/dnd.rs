@@ -228,6 +228,33 @@ fn parse_ssh_command(cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The opener is the platform's, and on Windows it is a shell builtin with an empty window
+    /// title in front of the path — leave that out and the path becomes the title, so nothing
+    /// opens and nothing says why.
+    #[test]
+    fn the_desktop_opener_is_the_one_this_platform_has() {
+        let (program, before) = desktop_opener();
+        assert!(!program.is_empty());
+        if cfg!(target_os = "macos") {
+            assert_eq!((program, before), ("open", &[] as &[&str]));
+        } else if cfg!(windows) {
+            assert_eq!(program, "cmd");
+            assert_eq!(before, ["/C", "start", ""]);
+        } else {
+            assert_eq!(program, "xdg-open");
+        }
+    }
+
+    /// Over ssh it refuses rather than running the opener on the far machine, where the desktop
+    /// belongs to whoever is sitting at it — if there is one at all.
+    #[test]
+    fn over_ssh_there_is_nothing_to_hand_a_file_to() {
+        if !running_over_ssh() {
+            return;
+        }
+        assert_eq!(open_with_the_desktop(std::path::Path::new("/etc/hosts")), Err("over ssh".into()));
+    }
     use super::*;
 
     #[test]
@@ -317,3 +344,49 @@ mod tests {
     }
 }
 
+
+/// The command this desktop opens a file with, as a program and the arguments that go before the
+/// path. Split out from the spawning so the choice can be tested on a machine that is not the
+/// one it names.
+///
+/// Windows has no opener binary: `start` is a builtin of the shell, and its first quoted argument
+/// is the *window title* — leave it out and a path in quotes becomes the title of a window that
+/// never opens, which is the classic bug of this three-line function.
+fn desktop_opener() -> (&'static str, &'static [&'static str]) {
+    #[cfg(target_os = "macos")]
+    {
+        ("open", &[])
+    }
+    #[cfg(windows)]
+    {
+        ("cmd", &["/C", "start", ""])
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        ("xdg-open", &[])
+    }
+}
+
+/// Hands a file to whatever the desktop opens that kind of file with, and returns once it has
+/// been handed over — not once the other program is finished with it.
+///
+/// Refused over ssh, where there is a desktop at neither end that this could reach: the opener
+/// would run on the far machine, against a display nobody is sitting at, and either fail slowly
+/// or open a window for no one. Saying so is more useful than a viewer that never appears.
+pub fn open_with_the_desktop(path: &std::path::Path) -> Result<(), String> {
+    if running_over_ssh() {
+        return Err("over ssh".to_string());
+    }
+    let (program, before) = desktop_opener();
+    std::process::Command::new(program)
+        .args(before)
+        .arg(path)
+        // Detached from CleeCode's own streams: an opener that printed to stdout would print
+        // over the editor, and one that waited on stdin would wait for ever.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}

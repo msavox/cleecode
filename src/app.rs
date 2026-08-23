@@ -7361,6 +7361,7 @@ impl App {
             MenuAction::JumpBack => self.lsp_jump_back(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
+            MenuAction::OpenOutside => self.open_outside(),
             MenuAction::Rename => self.start_rename(),
             MenuAction::Delete => self.start_delete(),
             MenuAction::CommandPalette => self.open_command_palette(),
@@ -7978,6 +7979,23 @@ impl App {
 
     /// Opens the delete-confirmation prompt for the file-tree selection — the same flow the Delete
     /// key triggers, reached here from the context menu.
+    /// Hands the tree's selection to the desktop — Preview, a browser, whatever the system
+    /// opens that kind of file with.
+    ///
+    /// On the tree's selection and not on the open tab, which is what Rename and Delete beside it
+    /// in the same pop-up act on: one pop-up, one subject. The files this is for are the ones
+    /// CleeCode can only *show* — a PDF, a picture, a markdown document — and for those the tree
+    /// is where you are pointing anyway.
+    fn open_outside(&mut self) {
+        let lang = self.settings.lang;
+        let Some(path) = self.file_tree.selected_path() else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.status_message = match crate::dnd::open_with_the_desktop(&path) {
+            Ok(()) => i18n::msg_opened_outside(lang, &name),
+            Err(e) => i18n::msg_open_outside_failed(lang, &name, &e),
+        };
+    }
+
     fn start_delete(&mut self) {
         if let Some(path) = self.file_tree.selected_path() {
             self.delete_target = Some(path);

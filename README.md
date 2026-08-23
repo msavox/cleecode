@@ -153,7 +153,9 @@ name and a startup command. Save the whole set-up — root, files, frames, shell
 workspace and open it with `clee -w NAME`.
 
 **Previews.** A `.png` opens as pixels, a PDF as pages that re-render when you typeset them, a
-Markdown file as a document beside its source.
+Markdown file as a document beside its source. When a file wants a real application instead,
+right-click it in the tree: *Open outside CleeCode* hands it to whatever the desktop opens that
+kind with.
 
 **Octave and Python, as an IDE.** `clee -w octave` or `clee -w pylab` opens the interpreter with
 a second window beside it showing what the session holds — filling in by itself, with nothing

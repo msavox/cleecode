@@ -1644,3 +1644,30 @@ verifica passava a vuoto per un motivo che vale la pena scrivere: il fixture app
 `show_splash = false` in fondo a un `settings.toml` che finisce con `[language_servers]`, quindi
 la chiave finiva dentro la tabella, `toml::from_str` falliva e `Settings::load` tornava ai
 default in silenzio. Una preferenza ignorata e un file che non si legge hanno lo stesso aspetto.
+
+
+## 0.12.2 — l'immagine che rompeva l'anteprima (2026-08-23)
+
+Segnalato come "alcuni md li vedo, il README di clee solo in modalità testo": la differenza fra
+i due era una figura.
+
+**typst e i percorsi assoluti.** pandoc estrae le immagini di un documento in una directory
+temporanea e passa al motore percorsi assoluti — e typst legge un percorso assoluto come relativo
+alla sua *root*, non al filesystem. Cercava quindi `/private/var/…/media/docs/demo.gif` sotto la
+directory di lavoro e diceva che non c'era. Adesso il motore riceve `--root`, ed è la root su cui
+sta la temporanea, perché è lì che puntano quei percorsi. Riguardava ogni markdown con
+un'immagine dentro; il ripiego a testo stilato è silenzioso per scelta, ed è per questo che si
+leggeva come "l'anteprima grafica non va più". Il test lo prova end-to-end dove pandoc e un motore
+ci sono: invertita la correzione, fallisce con l'errore vero.
+
+**E quando fallisce, la barra di stato dice perché.** Mostrava l'ultima riga di pandoc — "Error
+producing PDF." — vera e inutile. Il motore la spiega sopra: typst apre con `error:`, TeX con
+`!`, e adesso è quella a comparire.
+
+**Apri fuori da CleeCode.** Prima voce del menu contestuale dell'albero, e nella palette: passa il
+file al programma che il sistema associa a quel tipo — un PDF al lettore, un `.md` al browser,
+tutto quello che CleeCode può solo mostrare. `open` su macOS, `xdg-open` su Linux, `start` su
+Windows, dove il primo argomento fra virgolette è il *titolo della finestra* e non il percorso —
+il bug classico di quella funzione da tre righe, qui evitato e testato. Via ssh rifiuta e lo dice:
+l'apertura avverrebbe sulla macchina in fondo alla connessione, su un desktop dove non è seduto
+nessuno.

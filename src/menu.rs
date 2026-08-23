@@ -72,6 +72,7 @@ pub enum MenuAction {
     JumpBack,
     NewFile,
     NewFolder,
+    OpenOutside,
     CommandPalette,
     OpenFilePicker,
     Rename,
@@ -164,6 +165,7 @@ impl MenuAction {
         MenuAction::JumpBack,
         MenuAction::NewFile,
         MenuAction::NewFolder,
+        MenuAction::OpenOutside,
         MenuAction::CommandPalette,
         MenuAction::OpenFilePicker,
         MenuAction::Rename,
@@ -529,7 +531,11 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
     match target {
         ContextTarget::Sidebar => {
             let mut items = vec![
-                item(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
+                // First, and not among the git rows below: a PDF or a .md that CleeCode can only
+                // show is exactly what you right-click to send somewhere that can do more with
+                // it, and that is a different kind of errand from staging.
+                item(Key::ItemOpenOutside, MenuAction::OpenOutside, None),
+                group(Key::ItemNewFile, MenuAction::NewFile, Some("n")),
                 item(Key::ItemNewFolder, MenuAction::NewFolder, Some("N")),
                 // "e" is what the tree actually binds; the hint used to claim F2, which focuses
                 // the editor instead.
