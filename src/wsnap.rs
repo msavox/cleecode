@@ -327,6 +327,47 @@ const SNAPSHOT_PREFIX: &str = "ws-";
 /// than by wiring it to a particular pane. With one interpreter open that is the only answer;
 /// with two it follows the one being worked in, which is what a single window that stays on
 /// screen should do — and it means the viewer needs to know nothing about panes at all.
+/// Every session's snapshot in `dir`, newest first.
+///
+/// [`newest_in`] answers "which session should the panel show", and there is only one panel. This
+/// answers a different question — "which session drew *this* figure" — and for that the newest is
+/// the wrong one as often as not: two panes at two prompts write two files, and the one that
+/// ticks most recently is simply whichever was typed at last.
+pub fn snapshots_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| {
+            entry.path().extension().map(|e| e == "json").unwrap_or(false)
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(SNAPSHOT_PREFIX))
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The session that says it is holding the figure saved at `png`, and what it says about it.
+///
+/// Asked of every snapshot rather than of the one the panel happens to be showing. That is the
+/// whole of a bug: a figure tab's keys — the arrows that pan or turn it, `r`, `e` — went through
+/// the panel's own session, so with two prompts open the tab of one of them silently stopped
+/// answering. Not with a message: the key simply fell through to the picture underneath and
+/// scrolled it, which looks exactly like a feature that does not exist.
+pub fn figure_owner(dir: &Path, png: &str) -> Option<(Figure, Snapshot)> {
+    for path in snapshots_in(dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Some(snapshot) = Snapshot::parse(&text) else { continue };
+        if let Some(figure) = snapshot.figures.iter().find(|f| f.path == png).cloned() {
+            return Some((figure, snapshot));
+        }
+    }
+    None
+}
+
 pub fn newest_in(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {

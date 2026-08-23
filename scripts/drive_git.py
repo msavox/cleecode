@@ -69,6 +69,36 @@ def status(root):
     return [line for line in out.stdout.split("\n") if line.strip()]
 
 
+def graph_art(session):
+    """The art column of the history tab, read out of the panel.
+
+    Taken from the column the tab labels start in, not from the whole screen line: the file tree
+    behind the panel draws `│` of its own and the frames draw more, so a check that searched the
+    line would find a graph in the borders and pass with the graph itself missing. This is the
+    same lesson as `Session.frame_of` — a check has to look inside the box it is a check about."""
+    start = None
+    for y, line in enumerate(session.lines()):
+        if "Status" in line and "Branches" in line:
+            # One left of the label: the lit tab is drawn as " Status " with a space either
+            # side, so the label starts one column inside the body the graph is drawn in. Off by
+            # that one, every row loses its first character and `*` reads as blank.
+            start, left = y, line.index("Status") - 1
+            break
+    if start is None:
+        return []
+    art = []
+    for line in session.lines()[start + 1:]:
+        run = ""
+        for ch in line[left:]:
+            if ch in "*|\\/_- ":
+                run += ch
+            else:
+                break
+        if run.strip():
+            art.append(run.rstrip())
+    return art
+
+
 def open_panel(session):
     """Opens the panel and waits for git to have answered.
 
@@ -209,6 +239,101 @@ def main():
         report.check("Enter moves to the branch",
                      session.wait(lambda s: git(root, "rev-parse", "--abbrev-ref", "HEAD") == "spike", 10),
                      session, note=git(root, "rev-parse", "--abbrev-ref", "HEAD"))
+
+
+        # ---- the graph ---------------------------------------------------------------------
+        #
+        # `git_graph.rs` has the lane layout under test as a pure function, so what is left to
+        # check here is the half those tests cannot reach: that the art the layout produced is
+        # what reaches the screen, and that the cursor moving over it lands where the commits
+        # are. A shape is built for it — a branch and a merge — because a repository with one
+        # straight line of commits draws a column of `*` and would pass with the diagonals
+        # broken.
+        with open(os.path.join(root, "spike.txt"), "w") as handle:
+            handle.write("work done on the branch\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "A commit on spike")
+        git(root, "checkout", "-q", "main")
+        with open(os.path.join(root, "main.txt"), "w") as handle:
+            handle.write("work done on main\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "A commit on main")
+        git(root, "merge", "-q", "--no-ff", "--no-edit", "spike")
+
+        session.press("r", lambda s: True, 3)
+        session.press("\x1b[Z", lambda s: "A commit on main" in s.text(), 8)   # back to History
+        report.check("the history tab draws the commits", "A commit on main" in session.text(),
+                     session)
+
+        # The art itself. Both diagonals are named, because they are the two that mean opposite
+        # things: `|\\` is a branch leaving and `|/` is one coming back, and a graph that had
+        # lost either would still draw a `*` per commit and look perfectly plausible. What was
+        # read is printed either way — the proof that a check looked in the right place has to be
+        # in its own output.
+        art = graph_art(session)
+        report.check("a merge draws both of its diagonals",
+                     any(row.startswith("|\\") for row in art)
+                     and any(row.startswith("|/") for row in art),
+                     session, note=repr(art))
+        report.check("and the commits are on lanes rather than all in one column",
+                     any(row.startswith("* |") or row.startswith("| *") for row in art),
+                     session, note=repr(art))
+
+        # The cursor lands on commits and never on the `|/` between them. Pressed down further
+        # than there are commits on purpose: the end of the list is where a cursor that steps
+        # over rows is most likely to come to rest on one.
+        landings = []
+        for _ in range(6):
+            row = selected_row(session)
+            if row:
+                landings.append(row)
+            session.press("\x1b[B", lambda s: True, 1)
+        report.check("the cursor only ever sits on a commit, never on the lines between them",
+                     landings and all("*" in row for row in landings), session,
+                     note=repr(landings))
+
+        # ---- one commit in full ------------------------------------------------------------
+        session.press("\r", lambda s: "A commit on main" in s.text() or "diff --git" in s.text(), 8)
+        opened = session.wait(lambda s: "diff --git" in s.text() or "spike.txt" in s.text(), 10)
+        report.check("Enter opens the commit and shows its patch", opened, session)
+        session.press("\x1b", lambda s: True, 3)
+        report.check("Esc leaves the reader and not the panel",
+                     session.wait(lambda s: "Status" in s.text() and "Branches" in s.text(), 6),
+                     session)
+
+        # ---- a branch made at the commit under the cursor ------------------------------------
+        session.press("b", lambda s: "Esc" in s.text(), 5)
+        session.send("made-from-the-graph")
+        session.press("\r", lambda s: True, 3)
+        made = session.wait(
+            lambda s: git(root, "rev-parse", "--abbrev-ref", "HEAD") == "made-from-the-graph", 10)
+        report.check("B makes a branch at the commit the cursor was on", made, session,
+                     note=git(root, "rev-parse", "--abbrev-ref", "HEAD"))
+
+        # ---- stashes -------------------------------------------------------------------------
+        with open(os.path.join(root, "main.rs"), "w") as handle:
+            handle.write("fn main() { /* to be put away */ }\n")
+        session.press("r", lambda s: True, 3)
+        session.press("\x1b[Z\x1b[Z", lambda s: "main.rs" in s.text(), 8)      # back to Status
+        session.press("z", lambda s: "Esc" in s.text(), 5)
+        session.send("put away by the driver")
+        session.press("\r", lambda s: True, 3)
+        stashed = session.wait(lambda s: "put away by the driver" in git(root, "stash", "list"), 12)
+        report.check("Z puts the working tree away with the name that was typed", stashed, session,
+                     note=git(root, "stash", "list"))
+        report.check("and the file is back to what the commit says",
+                     session.wait(lambda s: not status(root), 8), session, note=str(status(root)))
+
+        session.press("\t\t\t\t", lambda s: "stash@{0}" in s.text(), 8)       # round to Stashes
+        report.check("the stash list shows it", "stash@{0}" in session.text(), session)
+        session.press("d", lambda s: "Y / N" in s.text() or "S / N" in s.text(), 5)
+        report.check("D asks before dropping one",
+                     "Y / N" in session.text() or "S / N" in session.text(), session)
+        answer = "y" if "Y / N" in session.text() else "s"
+        session.press(answer, lambda s: True, 3)
+        report.check("and answering yes drops it",
+                     session.wait(lambda s: not git(root, "stash", "list"), 10), session,
+                     note=repr(git(root, "stash", "list")))
 
         Report.show("final screen", session)
     finally:

@@ -54,6 +54,24 @@ pub struct Settings {
     pub interpreter_paths: std::collections::HashMap<String, String>,
     // Off by default: a project root is usually full of dot-directories (.git, .venv, caches)
     // that bury the actual source files. `H` (or the View menu) brings them back.
+    // Extension (no dot) -> the command line of a language server, overriding the built-in
+    // table and adding to it. An entry set to the empty string turns a built-in one off.
+    //
+    // This is what keeps the built-in list from being the limit. A release should not be the way
+    // to reach a new language server, or the fork of one somebody keeps in ~/bin, or a language
+    // nobody here thought of. Hand-editable in settings.toml, like run_commands beside it.
+    // Whether Run hands a file to an interpreter that is already at a prompt, instead of
+    // starting a fresh one in a shell.
+    //
+    // On by default, because the alternative is what CleeCode used to do for Python and it was
+    // the wrong answer three ways at once: a script that ran in a process that exited took its
+    // variables with it, so the workspace panel stayed empty, and the figures were drawn by
+    // something that no longer existed. The run-target drop-down turns it off — choosing a venv
+    // is choosing to start an interpreter, which is the same choice said from the other end.
+    #[serde(default = "default_true")]
+    pub run_in_session: bool,
+    #[serde(default)]
+    pub language_servers: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub show_hidden_files: bool,
     // Lines of scrolled-off output each shell keeps, for scrolling back through. Costs
@@ -255,6 +273,8 @@ impl Default for Settings {
             active_venv: None,
             registered_venvs: Vec::new(),
             interpreter_paths: std::collections::HashMap::new(),
+            run_in_session: true,
+            language_servers: std::collections::BTreeMap::new(),
             show_hidden_files: false,
             preview_dark: false,
             preview_dark_markdown: false,
@@ -398,14 +418,21 @@ impl ProjectSettings {
 mod tests {
     use super::*;
 
-    /// The plot destination is a preference on a desktop and a fact on a server. Shown as a
-    /// plain on/off where it is a choice; where it is not, the row says which way it went and
-    /// why, because a switch that reads "off" while the tabs keep arriving is a broken switch.
+    /// The plot destination is a preference on a desktop and a fact on a server. It names both
+    /// of its answers rather than reading on/off: "off" meant the interpreter's own windows,
+    /// which is a different way of working and not a feature being switched off. Where the
+    /// choice is not the user's, the row says which way it went and why — a switch that reads
+    /// "off" while the tabs keep arriving is a broken switch.
     #[test]
     fn the_plot_row_says_when_the_choice_is_not_the_users_to_make() {
         use i18n::Lang;
-        assert_eq!(plots_value(Lang::En, true, true), i18n::t(Lang::En, Key::On));
-        assert_eq!(plots_value(Lang::En, false, true), i18n::t(Lang::En, Key::Off));
+        assert_eq!(plots_value(Lang::En, true, true), i18n::t(Lang::En, Key::SettingPlotsTabs));
+        assert_eq!(plots_value(Lang::En, false, true), i18n::t(Lang::En, Key::SettingPlotsWindows));
+        // Neither answer is a bare "on" or "off": the row has to say what it chose.
+        for asked in [true, false] {
+            assert_ne!(plots_value(Lang::En, asked, true), i18n::t(Lang::En, Key::On));
+            assert_ne!(plots_value(Lang::En, asked, true), i18n::t(Lang::En, Key::Off));
+        }
         // No screen: what the file says stops mattering, and both answers read the same.
         for asked in [true, false] {
             for lang in [Lang::En, Lang::It] {
@@ -538,7 +565,7 @@ fn plots_value(lang: i18n::Lang, in_tabs: bool, can_open_a_window: bool) -> Stri
     if !can_open_a_window {
         return i18n::t(lang, Key::SettingPlotsNoDisplay).to_string();
     }
-    i18n::t(lang, if in_tabs { Key::On } else { Key::Off }).to_string()
+    i18n::t(lang, if in_tabs { Key::SettingPlotsTabs } else { Key::SettingPlotsWindows }).to_string()
 }
 
 pub struct SettingRow {

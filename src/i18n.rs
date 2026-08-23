@@ -70,6 +70,7 @@ pub enum Key {
     ItemToggleResizeMode,
     ResizeModeHint,
     MenuRun,
+    MenuGit,
     ItemRunFile,
     ItemRunSelection,
     ItemToggleBreakpoint,
@@ -108,6 +109,8 @@ pub enum Key {
     SettingLanguageServer,
     SettingPlotsInTabs,
     SettingPlotsNoDisplay,
+    SettingPlotsTabs,
+    SettingPlotsWindows,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -124,6 +127,23 @@ pub enum Key {
     ItemGotoLine,
     ItemSearchProject,
     ItemGitPanel,
+    ItemGoToDefinition,
+    ItemJumpBack,
+    ItemGitStatus,
+    ItemGitChanges,
+    ItemGitHistory,
+    ItemGitBranches,
+    ItemGitStashes,
+    ItemGitFetch,
+    ItemGitPull,
+    ItemGitPush,
+    ItemGitStageFile,
+    ItemGitUnstageFile,
+    ItemGitDiscardFile,
+    ItemGitFileDiff,
+    ItemGitCommit,
+    HeaderGitFile,
+    HeaderGitRepo,
     ItemNewFile,
     ItemNewFolder,
     ItemRename,
@@ -272,6 +292,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, MenuRun) => "Run",
         (Lang::It, MenuRun) => "Esegui",
+        // Its own menu rather than one line buried in Edit, which is where the panel used to be
+        // reachable from. Everything git can do here is now something you can find by looking,
+        // instead of a chord you have to have been told about.
+        (Lang::En, MenuGit) => "Git",
+        (Lang::It, MenuGit) => "Git",
 
         (Lang::En, ItemRunFile) => "Run current file",
         (Lang::It, ItemRunFile) => "Esegui file corrente",
@@ -304,8 +329,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemOpaqueBackground) => "Solid background",
         (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
 
-        (Lang::En, ItemPlotsInTabs) => "Plots as tabs",
-        (Lang::It, ItemPlotsInTabs) => "Grafici nelle tab",
+        (Lang::En, ItemPlotsInTabs) => "Plots: tabs or windows",
+        (Lang::It, ItemPlotsInTabs) => "Grafici: schede o finestre",
 
         (Lang::En, ToolbarRun) => "Run",
         (Lang::It, ToolbarRun) => "Esegui",
@@ -378,11 +403,19 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, SettingLanguageServer) => "Language server (diagnostics, completion)",
         (Lang::It, SettingLanguageServer) => "Language server (diagnostici, completamento)",
 
-        (Lang::En, SettingPlotsInTabs) => "Plots as tabs",
-        (Lang::It, SettingPlotsInTabs) => "Grafici nelle tab",
+        // Named for the question rather than for one of its two answers. As "Plots as tabs"
+        // with an on/off beside it, the row said nothing about what "off" meant — and "off"
+        // meant the interpreter's own windows, which is a whole other way of working and the
+        // thing somebody hunting for this row is usually hunting for.
+        (Lang::En, SettingPlotsInTabs) => "Where plots open",
+        (Lang::It, SettingPlotsInTabs) => "Dove si aprono i grafici",
 
-        (Lang::En, SettingPlotsNoDisplay) => "on — no display",
-        (Lang::It, SettingPlotsNoDisplay) => "attivo — nessun display",
+        (Lang::En, SettingPlotsNoDisplay) => "tabs — no display here",
+        (Lang::It, SettingPlotsNoDisplay) => "schede — qui non c'è un display",
+        (Lang::En, SettingPlotsTabs) => "tabs, inside CleeCode",
+        (Lang::It, SettingPlotsTabs) => "schede, dentro CleeCode",
+        (Lang::En, SettingPlotsWindows) => "the interpreter's own windows",
+        (Lang::It, SettingPlotsWindows) => "finestre dell'interprete",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
@@ -433,6 +466,53 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemSearchProject) => "Cerca nel progetto...",
         (Lang::En, ItemGitPanel) => "Git panel",
         (Lang::It, ItemGitPanel) => "Pannello Git",
+        (Lang::En, ItemGoToDefinition) => "Go to definition",
+        (Lang::It, ItemGoToDefinition) => "Vai alla definizione",
+        (Lang::En, ItemJumpBack) => "Back where you were",
+        (Lang::It, ItemJumpBack) => "Torna dov'eri",
+
+        // Each opens the panel on the tab it names. The panel's own tab strip does the same
+        // thing in one keypress once it is open — these are for finding it in the first place.
+        (Lang::En, ItemGitStatus) => "What has changed",
+        (Lang::It, ItemGitStatus) => "Cosa è cambiato",
+        (Lang::En, ItemGitChanges) => "The diff",
+        (Lang::It, ItemGitChanges) => "Le modifiche",
+        (Lang::En, ItemGitHistory) => "History and branches drawn",
+        (Lang::It, ItemGitHistory) => "Cronologia e branch disegnati",
+        (Lang::En, ItemGitBranches) => "Branches",
+        (Lang::It, ItemGitBranches) => "Branch",
+        (Lang::En, ItemGitStashes) => "Stashes",
+        (Lang::It, ItemGitStashes) => "Stash",
+        // Named for where they run, because that is the surprising part: the panel is not
+        // involved, and the command appears at a prompt where it can ask you for a password.
+        (Lang::En, ItemGitFetch) => "Fetch, in the terminal",
+        (Lang::It, ItemGitFetch) => "Fetch, nel terminale",
+        (Lang::En, ItemGitPull) => "Pull, in the terminal",
+        (Lang::It, ItemGitPull) => "Pull, nel terminale",
+        (Lang::En, ItemGitPush) => "Push, in the terminal",
+        (Lang::It, ItemGitPush) => "Push, nel terminale",
+
+        // On the right-click of a file the tree has a git mark against. Each names the file
+        // rather than saying "this": the pop-up is anchored at the pointer and the row it came
+        // from is behind it.
+        (Lang::En, ItemGitStageFile) => "Stage this file",
+        (Lang::It, ItemGitStageFile) => "Metti in stage questo file",
+        (Lang::En, ItemGitUnstageFile) => "Take it back out of the index",
+        (Lang::It, ItemGitUnstageFile) => "Toglilo dall'index",
+        (Lang::En, ItemGitFileDiff) => "What changed in it",
+        (Lang::It, ItemGitFileDiff) => "Cosa è cambiato dentro",
+        (Lang::En, ItemGitDiscardFile) => "Throw its changes away...",
+        (Lang::It, ItemGitDiscardFile) => "Butta via le sue modifiche...",
+        (Lang::En, ItemGitCommit) => "Commit what is staged...",
+        (Lang::It, ItemGitCommit) => "Committa quello che è in stage...",
+
+        // The two captions over the git half of a file's right-click. They say which of the two
+        // things below them is about — the file you clicked, or the repository it is in — because
+        // "Stage this file" and "Push" are the same shape of sentence and a very different reach.
+        (Lang::En, HeaderGitFile) => "Git — this file",
+        (Lang::It, HeaderGitFile) => "Git — questo file",
+        (Lang::En, HeaderGitRepo) => "Git — the repository",
+        (Lang::It, HeaderGitRepo) => "Git — il repository",
 
         (Lang::En, ItemNewFile) => "New file...",
         (Lang::It, ItemNewFile) => "Nuovo file...",
@@ -578,13 +658,204 @@ pub fn msg_git_panel_title(lang: Lang) -> &'static str {
 pub fn msg_git_keys(lang: Lang, tab: crate::app::GitTab) -> &'static str {
     use crate::app::GitTab::*;
     match (lang, tab) {
-        (Lang::En, Status) => "S stage · U unstage · A stage all · C commit · X discard · Enter open",
-        (Lang::It, Status) => "S in stage · U toglie · A tutto · C commit · X scarta · Invio apre",
-        (Lang::En, Branches) => "Enter switch to the branch",
-        (Lang::It, Branches) => "Invio passa al branch",
-        (Lang::En, Diff) | (Lang::En, Log) => "PgUp/PgDn a page · Home the top",
-        (Lang::It, Diff) | (Lang::It, Log) => "PgSu/PgGiù una pagina · Home in cima",
+        (Lang::En, Status) => "S stage · U unstage · A all · C commit · E amend · Z stash · X discard · Enter open",
+        (Lang::It, Status) => "S in stage · U toglie · A tutto · C commit · E emenda · Z stash · X scarta · Invio apre",
+        (Lang::En, Graph) => "Enter show · B branch here · T tag · K cherry-pick · V revert · H reset --hard",
+        (Lang::It, Graph) => "Invio mostra · B branch qui · T tag · K cherry-pick · V revert · H reset --hard",
+        (Lang::En, Branches) => "Enter switch · N new · D delete · M merge here · F fetch · L pull · P push",
+        (Lang::It, Branches) => "Invio passa · N nuovo · D elimina · M unisce qui · F fetch · L pull · P push",
+        (Lang::En, Stashes) => "Enter apply · O pop · D drop · Z stash what is here now",
+        (Lang::It, Stashes) => "Invio applica · O pop · D elimina · Z mette via quello che c'è ora",
+        (Lang::En, Diff) => "PgUp/PgDn a page · Home the top",
+        (Lang::It, Diff) => "PgSu/PgGiù una pagina · Home in cima",
     }
+}
+
+/// The one line that says a command stopped half-way, and the one key that gets out of it.
+///
+/// Drawn only while there is one to get out of. A panel that always said "no merge in progress"
+/// would be spending a row on the answer to a question nobody asked.
+pub fn msg_git_unfinished(lang: Lang, what: crate::git::Unfinished) -> String {
+    use crate::git::Unfinished::*;
+    let name = match (lang, what) {
+        (Lang::En, Merge) => "A merge",
+        (Lang::It, Merge) => "Un merge",
+        (Lang::En, CherryPick) => "A cherry-pick",
+        (Lang::It, CherryPick) => "Un cherry-pick",
+        (Lang::En, Revert) => "A revert",
+        (Lang::It, Revert) => "Un revert",
+        (Lang::En, Rebase) => "A rebase",
+        (Lang::It, Rebase) => "Un rebase",
+    };
+    match lang {
+        Lang::En => format!("{name} stopped part-way — stage the files it marked and commit, or press Q to put it back"),
+        Lang::It => format!("{name} si è fermato a metà — metti in stage i file che ha segnato e committa, oppure Q per tornare indietro"),
+    }
+}
+
+/// The run-target row that means "the prompt that is already open".
+/// What the four arrows on a figure's bar do, in a word.
+///
+/// The buttons carry their own keys, so this does not list them — that was the duplication the
+/// bar already had once and lost. What a button cannot say is which of the two things it does:
+/// the same arrow slides a flat plot and turns a solid one, and only the axes knows which.
+pub fn msg_figure_keys(lang: Lang, is3d: bool) -> &'static str {
+    match (lang, is3d) {
+        (Lang::En, false) => "arrows pan  ",
+        (Lang::It, false) => "le frecce spostano  ",
+        (Lang::En, true) => "arrows turn it  ",
+        (Lang::It, true) => "le frecce ruotano  ",
+    }
+}
+
+pub fn msg_run_session_row(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The session that is open",
+        Lang::It => "La sessione già aperta",
+    }
+}
+
+/// Whether there is one right now. The row means two different things either way — with nothing
+/// open it is a preference for next time rather than a destination — so it says which.
+pub fn msg_run_session_detail(lang: Lang, open: bool) -> &'static str {
+    match (lang, open) {
+        (Lang::En, true) => "the file runs at that prompt and it keeps what the file made",
+        (Lang::It, true) => "il file gira a quel prompt e la sessione tiene quello che fa",
+        (Lang::En, false) => "none open — Run starts one in a shell until there is",
+        (Lang::It, false) => "nessuna aperta — finché non c'è, Run ne avvia una in una shell",
+    }
+}
+
+pub fn msg_run_session_chosen(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Run will hand the file to the interpreter already at a prompt",
+        Lang::It => "Run consegnerà il file all'interprete già al prompt",
+    }
+}
+
+pub fn msg_git_needs_a_name(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That needs a name",
+        Lang::It => "Serve un nome",
+    }
+}
+
+pub fn msg_git_nothing_to_amend(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "There is no commit yet to amend",
+        Lang::It => "Non c'è ancora un commit da emendare",
+    }
+}
+
+pub fn msg_git_nothing_to_stash(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing to put away — git only stashes files it knows about",
+        Lang::It => "Niente da mettere via — git mette in stash solo i file che conosce",
+    }
+}
+
+/// Said instead of asking. git refuses to delete the branch you are standing on, and it names
+/// the branch rather than the reason — which is the one thing you already knew.
+pub fn msg_git_branch_is_current(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("{name} is the branch you are on — move to another one first"),
+        Lang::It => format!("{name} è il branch su cui sei — passa prima a un altro"),
+    }
+}
+
+pub fn msg_git_merge_into_itself(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That is the branch you are on — pick the one to merge into it",
+        Lang::It => "È il branch su cui sei — scegli quello da unire a questo",
+    }
+}
+
+pub fn msg_git_nothing_to_abort(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing is half-done — Q puts back a merge, a pick, a revert or a rebase",
+        Lang::It => "Non c'è niente a metà — Q annulla un merge, un pick, un revert o un rebase",
+    }
+}
+
+/// Fetch, pull and push are typed into a shell rather than run behind the panel, and the message
+/// says so — because the panel vanishing and a command appearing at a prompt is otherwise a
+/// thing that happened *to* you rather than the thing you asked for.
+pub fn msg_git_in_terminal(lang: Lang, command: &str) -> String {
+    match lang {
+        Lang::En => format!("{command} — running in the terminal, where it can ask you for a password"),
+        Lang::It => format!("{command} — gira nel terminale, dove può chiederti una password"),
+    }
+}
+
+pub fn msg_git_file_unchanged(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That file is already what the last commit says it is",
+        Lang::It => "Quel file è già come dice l'ultimo commit",
+    }
+}
+
+pub fn msg_git_no_commits(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No commits yet",
+        Lang::It => "Ancora nessun commit",
+    }
+}
+
+pub fn msg_git_no_stashes(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing put away — Z stashes what is changed right now",
+        Lang::It => "Niente messo via — Z mette in stash quello che è cambiato adesso",
+    }
+}
+
+/// The heading over a box you type into.
+pub fn msg_git_text_prompt(lang: Lang, kind: &crate::app::GitText, staged: usize) -> String {
+    use crate::app::GitText::*;
+    match (lang, kind) {
+        (_, Commit) => msg_git_commit_prompt(lang, staged),
+        (Lang::En, Amend) => format!("Rewrite the last commit — {staged} staged go into it · Enter · Esc cancels"),
+        (Lang::It, Amend) => format!("Riscrive l'ultimo commit — ci finiscono {staged} in stage · Invio · Esc annulla"),
+        (Lang::En, Branch { at: Some(at) }) => format!("Name for a branch starting at {at} · Enter · Esc cancels"),
+        (Lang::It, Branch { at: Some(at) }) => format!("Nome del branch che parte da {at} · Invio · Esc annulla"),
+        (Lang::En, Branch { at: None }) => "Name for a branch starting here · Enter · Esc cancels".to_string(),
+        (Lang::It, Branch { at: None }) => "Nome del branch che parte da qui · Invio · Esc annulla".to_string(),
+        (Lang::En, Tag { at }) => format!("Name for a tag on {at} · Enter · Esc cancels"),
+        (Lang::It, Tag { at }) => format!("Nome del tag su {at} · Invio · Esc annulla"),
+        (Lang::En, Stash) => "A name for what you are putting away — or none, and git writes one · Enter".to_string(),
+        (Lang::It, Stash) => "Un nome per quello che metti via — o nessuno, e lo scrive git · Invio".to_string(),
+    }
+}
+
+/// The heading over a question that takes one letter.
+///
+/// Every one of them ends in the same two letters as the discard question, and for the same
+/// reason: the key that answers has to be in the text that asks, or a box that reads "S / N" and
+/// answers only to `y` looks broken while working exactly as written.
+pub fn msg_git_confirm_prompt(lang: Lang, confirm: &crate::app::GitConfirm) -> String {
+    use crate::app::GitConfirm::*;
+    let yes = yes_key(lang).to_ascii_uppercase();
+    let no = match lang {
+        Lang::En => 'N',
+        Lang::It => 'N',
+    };
+    let body = match (lang, confirm) {
+        (_, Discard(change)) => return msg_git_discard_prompt(lang, &change.path.display().to_string()),
+        (Lang::En, DeleteBranch(name)) => format!(
+            "Delete the branch {name}? Anything on it and nowhere else is only in the reflog afterwards."
+        ),
+        (Lang::It, DeleteBranch(name)) => format!(
+            "Elimino il branch {name}? Quello che c'è sopra e da nessun'altra parte resta solo nel reflog."
+        ),
+        (Lang::En, ResetHard { hash, subject }) => format!(
+            "Move this branch back to {hash} ({subject}) and make the files match? Commits after it stay in the reflog; changes you have not committed do not."
+        ),
+        (Lang::It, ResetHard { hash, subject }) => format!(
+            "Riporto il branch a {hash} ({subject}) e allineo i file? I commit dopo restano nel reflog; le modifiche non committate no."
+        ),
+        (Lang::En, DropStash(name)) => format!("Throw away {name}? A dropped stash is not in any branch."),
+        (Lang::It, DropStash(name)) => format!("Butto via {name}? Uno stash eliminato non è in nessun branch."),
+    };
+    format!("{body}  {yes} / {no}")
 }
 
 pub fn msg_git_clean(lang: Lang) -> &'static str {
@@ -658,10 +929,12 @@ pub fn msg_git_tab(lang: Lang, tab: crate::app::GitTab) -> &'static str {
         (Lang::It, Status) => "Stato",
         (Lang::En, Diff) => "Changes",
         (Lang::It, Diff) => "Modifiche",
-        (Lang::En, Log) => "History",
-        (Lang::It, Log) => "Cronologia",
+        (Lang::En, Graph) => "History",
+        (Lang::It, Graph) => "Cronologia",
         (Lang::En, Branches) => "Branches",
         (Lang::It, Branches) => "Branch",
+        (Lang::En, Stashes) => "Stashes",
+        (Lang::It, Stashes) => "Stash",
     }
 }
 
@@ -984,6 +1257,46 @@ pub fn msg_lsp_missing(lang: Lang, program: &str) -> String {
     match lang {
         Lang::En => format!("{program} is not installed — editing without diagnostics"),
         Lang::It => format!("{program} non è installato — si modifica senza diagnostici"),
+    }
+}
+
+pub fn msg_lsp_needs_saving(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Save the file first — a server can only look at what is on disk",
+        Lang::It => "Salva prima il file — un server guarda solo quello che è su disco",
+    }
+}
+
+/// Said when the key is pressed in a file no server serves — a `.txt`, or a language nothing is
+/// installed for. Named as a fact about this file rather than as a failure: nothing went wrong.
+pub fn msg_lsp_none_here(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No language server for this file",
+        Lang::It => "Nessun language server per questo file",
+    }
+}
+
+pub fn msg_lsp_looking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking where that is defined…",
+        Lang::It => "Chiedo dov'è definito…",
+    }
+}
+
+/// An answer, and worth saying out loud. A key that does nothing and says nothing is a key you
+/// press again harder — and this is the common case on a keyword, in a comment, or on a name the
+/// server has not finished indexing.
+pub fn msg_lsp_no_definition(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server knows of no definition for that",
+        Lang::It => "Il server non conosce nessuna definizione per quello",
+    }
+}
+
+pub fn msg_lsp_nowhere_back(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "You have not jumped anywhere to come back from",
+        Lang::It => "Non sei saltato da nessuna parte da cui tornare",
     }
 }
 

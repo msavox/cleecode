@@ -3,7 +3,8 @@
 
 Speaks just enough of the protocol to exercise CleeCode's side of it: answers `initialize`,
 publishes one warning and one error against whatever file it is told was opened, and answers
-`textDocument/completion`. It echoes back the URI it was given rather than inventing one, which
+`textDocument/completion`, `textDocument/definition` and `textDocument/hover`. It echoes back the
+URI it was given rather than inventing one, which
 is the whole point — a canned URI would pass even if the client's path-to-URI encoding were
 broken, and that encoding is the part most likely to be.
 
@@ -117,6 +118,50 @@ def complete(message):
     ]}})
 
 
+def define(message):
+    """A definition built out of the question, like the completion answer above.
+
+    The line it points at is the *word's own* line plus one, and the file it names is the file it
+    was asked about. Both are read back off the screen after the jump, so an answer with a canned
+    line number in it could not pass: the check is that the client went where it was told."""
+    params = message.get("params", {})
+    uri = params.get("textDocument", {}).get("uri", "")
+    position = params.get("position", {})
+    line = position.get("line", 0)
+    character = position.get("character", 0)
+    word = word_at(TEXTS.get(uri, ""), line, character)
+    # One line further down than the cursor, so a client that ignored the answer and stayed put
+    # would land on the wrong row and be caught.
+    target = line + 1
+    log(f"   defining {word!r} at line {target}")
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": {
+        "uri": uri,
+        "range": {
+            "start": {"line": target, "character": 0},
+            "end": {"line": target, "character": max(1, len(word))},
+        },
+    }})
+
+
+def hover(message):
+    """A hover whose first line names the word and the place it was asked about.
+
+    Wrapped in a code fence and followed by prose, because that is what a real server sends and
+    because the client has to take exactly the first line out of it — a status bar that showed
+    the fence, or the paragraph, would be showing markup."""
+    params = message.get("params", {})
+    uri = params.get("textDocument", {}).get("uri", "")
+    position = params.get("position", {})
+    line = position.get("line", 0)
+    character = position.get("character", 0)
+    word = word_at(TEXTS.get(uri, ""), line, character)
+    log(f"   hovering {word!r}")
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"contents": {
+        "kind": "markdown",
+        "value": f"```rust\nkind_of_{word}\n```\n\n---\n\nProse nobody has room for.",
+    }}})
+
+
 def main():
     while True:
         message = read_message(sys.stdin.buffer)
@@ -142,6 +187,10 @@ def main():
             publish(uri)
         elif method == "textDocument/completion":
             complete(message)
+        elif method == "textDocument/definition":
+            define(message)
+        elif method == "textDocument/hover":
+            hover(message)
         elif method == "exit":
             return 0
 

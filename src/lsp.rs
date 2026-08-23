@@ -22,7 +22,7 @@ use lsp_types::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -52,6 +52,12 @@ pub enum Event {
     /// be gone. The application matches the id against the one request it is waiting for and
     /// drops everything else, rather than trying to work out whether the words still apply.
     Completion { id: i64, words: Vec<String> },
+    /// Where a definition is, or `None` when the server knows of none. The `None` is delivered
+    /// rather than dropped: "nothing is defined there" is an answer, and a key that silently
+    /// does nothing is a key you press again.
+    Definition { id: i64, target: Option<Jump> },
+    /// What the thing under the cursor is, in one line. `None` when the server had nothing.
+    Hover { id: i64, text: Option<String> },
     /// The server stopped, with whatever it said on the way out. Everything keeps working; the
     /// underlines simply stop arriving.
     Stopped { detail: String },
@@ -334,15 +340,131 @@ pub fn should_send(last_sent: Option<u64>, current: u64, since_change: std::time
     last_sent != Some(current) && since_change >= QUIET
 }
 
-/// Which server to run for a file, or `None` for a language we have nothing to offer.
+/// The servers CleeCode knows the name of, by file extension.
 ///
-/// One entry, on purpose. A second server is a second set of startup quirks, and the first one
-/// has to be proven before it is worth having two of them to debug at once.
-pub fn server_for(path: &Path) -> Option<&'static str> {
-    match path.extension()?.to_str()? {
-        "rs" => Some("rust-analyzer"),
-        _ => None,
+/// Names and arguments only — nothing here is installed, configured or bundled, and a machine
+/// without the program is the ordinary case rather than a fault. This is a table of *what to try
+/// running*, which is why it can afford to be long: an entry for a server nobody has costs one
+/// failed `spawn`, said once, and then nothing.
+///
+/// The argument lists are each server's own required spelling. `--stdio` is not decoration:
+/// typescript-language-server and pyright default to a socket and simply sit there without it,
+/// which reads as a server that started and never answered.
+const SERVERS: &[(&[&str], &[&str])] = &[
+    (&["rs"], &["rust-analyzer"]),
+    (&["py", "pyi"], &["pyright-langserver", "--stdio"]),
+    (&["ts", "tsx", "js", "jsx", "mjs", "cjs"], &["typescript-language-server", "--stdio"]),
+    (&["go"], &["gopls"]),
+    (&["c", "h", "cpp", "cxx", "cc", "hpp", "hxx"], &["clangd"]),
+    (&["lua"], &["lua-language-server"]),
+    (&["zig"], &["zls"]),
+    (&["rb"], &["solargraph", "stdio"]),
+    (&["sh", "bash"], &["bash-language-server", "start"]),
+    (&["json", "jsonc"], &["vscode-json-language-server", "--stdio"]),
+    (&["toml"], &["taplo", "lsp", "stdio"]),
+    (&["tex", "latex", "bib"], &["texlab"]),
+];
+
+/// Which server to run for a file, or `None` for a language nothing here can offer one for.
+///
+/// `configured` is the user's own table — extension to command line — and it wins over the built
+/// in one. That is the important half: the list above is a convenience, and the setting is what
+/// makes this work for a language nobody thought to put in it, or with the fork of a server
+/// somebody keeps in `~/bin`. A release should not be the way to reach a new language server.
+///
+/// The command line is split on spaces rather than parsed as a shell would: a path with a space
+/// in it needs the `interpreter_paths` treatment and not a quoting dialect of our own, and a
+/// half-implemented quoting dialect is worse than none.
+pub fn server_for(path: &Path, configured: &BTreeMap<String, String>) -> Option<Vec<String>> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if let Some(command) = configured.get(&extension) {
+        let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+        // An entry set to nothing is how a built-in is turned off — the alternative would be a
+        // second setting whose only job is to say "not that one".
+        return (!argv.is_empty()).then_some(argv);
     }
+    SERVERS
+        .iter()
+        .find(|(extensions, _)| extensions.contains(&extension.as_str()))
+        .map(|(_, argv)| argv.iter().map(|a| a.to_string()).collect())
+}
+
+/// What a request was asking, so the answer can be read as that.
+///
+/// The reader thread has nothing but the id to tell one response from another, so what the id
+/// meant is written down when it goes out. This used to be a set of completion ids, with a
+/// comment saying that "the first response is the handshake and everything after it is a
+/// completion" would be true today and silently wrong the day a third kind of request appeared.
+/// This is that day, twice over.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ask {
+    Completion,
+    Definition,
+    Hover,
+}
+
+/// Where a definition is, before the file it names has been opened.
+///
+/// The column is in the server's units and stays that way. Turning it into a character offset
+/// needs the target file's text, and this arrives on a thread that has never read it — the same
+/// reason a diagnostic arrives as a `Diagnostic` and becomes a [`Mark`] somewhere else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Jump {
+    pub path: PathBuf,
+    pub line: usize,
+    pub column: usize,
+}
+
+/// The one place a definition answer is read, in any of the three shapes a server may send it.
+///
+/// `Location`, an array of them, or `LocationLink` — which names the same two fields
+/// `targetUri` and `targetSelectionRange`. Servers pick whichever they like and are all correct,
+/// so this reads whichever arrived rather than declaring a preference and losing the others.
+///
+/// The first of an array, deliberately. More than one definition is real — a trait method with
+/// several implementations — and a picker for them is a feature of its own; going to the first
+/// is what every editor does before it grows one, and it is right far more often than not.
+pub fn first_location(result: Option<&Value>) -> Option<Jump> {
+    let value = result?;
+    let one = if value.is_array() { value.get(0)? } else { value };
+    let uri = one.get("uri").or_else(|| one.get("targetUri"))?.as_str()?;
+    let range = one
+        .get("range")
+        .or_else(|| one.get("targetSelectionRange"))
+        .or_else(|| one.get("targetRange"))?;
+    let line = range.pointer("/start/line")?.as_u64()? as usize;
+    let column = range.pointer("/start/character")?.as_u64()? as usize;
+    let uri: Uri = uri.parse().ok()?;
+    Some(Jump { path: path_for(&uri)?, line, column })
+}
+
+/// A hover answer, reduced to the one line that fits in a status bar.
+///
+/// A hover is documentation: rust-analyzer sends the signature, then a rule, then paragraphs of
+/// prose. All of it belongs in a window this release does not have, and the first meaningful
+/// line of it is the part people actually look at — the type, or the signature. So that is what
+/// is taken, with the code fence around it removed: ```` ```rust ```` is markup for a renderer
+/// and noise in a status bar.
+pub fn hover_text(result: Option<&Value>) -> Option<String> {
+    let contents = result?.get("contents")?;
+    // Three shapes again, and all three are in the specification: a string, a
+    // `{language, value}` pair, a `MarkupContent`, or an array of any of those.
+    let text = match contents {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                other => other.get("value").and_then(Value::as_str).map(str::to_string),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.get("value").and_then(Value::as_str)?.to_string(),
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```") && *line != "---")
+        .map(str::to_string)
 }
 
 pub struct Client {
@@ -357,28 +479,11 @@ pub struct Client {
     /// Whether positions are counted in UTF-16. Settled during the handshake and remembered,
     /// because it decides how every column that arrives afterwards is read.
     utf16: bool,
-    /// Ids of completion requests still out, shared with the reader thread.
-    ///
-    /// The reader has to tell a completion answer from any other response, and the only thing
-    /// that distinguishes them is the id we chose when asking. Sharing the set is what keeps
-    /// that knowledge in one place: the alternative — "the first response is the handshake and
-    /// everything after it is a completion" — is true today and silently wrong the day a third
-    /// kind of request is added.
-    pending: Arc<Mutex<HashSet<i64>>>,
+    /// What each request still out was asking, shared with the reader thread. See [`Ask`].
+    pending: Arc<Mutex<HashMap<i64, Ask>>>,
 }
 
 impl Client {
-    /// Starts a server for `root`, or explains why not.
-    ///
-    /// A missing server is an ordinary outcome, not an error to recover from: most machines do
-    /// not have rust-analyzer, and CleeCode has to be exactly as useful there as it was before
-    /// this file existed.
-    pub fn start(program: &str, root: &Path) -> Result<Client, String> {
-        Client::start_with(&[program], root)
-    }
-
-    /// The same, for a server that takes arguments. Separate rather than a `&[&str]` everywhere,
-    /// because every caller in the program has exactly one word to give.
     pub fn start_with(argv: &[&str], root: &Path) -> Result<Client, String> {
         let (program, args) = argv.split_first().ok_or("no server named")?;
         let mut child = Command::new(program)
@@ -395,7 +500,7 @@ impl Client {
         let stdout = child.stdout.take().ok_or("no stdout on the server")?;
         let (tx, rx) = mpsc::channel();
         let name = program.to_string();
-        let pending: Arc<Mutex<HashSet<i64>>> = Arc::new(Mutex::new(HashSet::new()));
+        let pending: Arc<Mutex<HashMap<i64, Ask>>> = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = Arc::clone(&pending);
         std::thread::spawn(move || read_loop(BufReader::new(stdout), tx, name, reader_pending));
 
@@ -543,7 +648,7 @@ impl Client {
             )
             .ok()?;
         if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(id);
+            pending.insert(id, Ask::Completion);
         }
         Some(id)
     }
@@ -551,6 +656,43 @@ impl Client {
     fn next_version(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    /// Asks where the thing under the cursor is defined.
+    ///
+    /// Same position arithmetic as [`Self::completion`], and the same reason it goes out without
+    /// waiting for the debounce: the question is about *this* text, and an answer about the text
+    /// of four hundred milliseconds ago is not a slower right answer, it is a wrong one.
+    pub fn definition(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+        self.position_request("textDocument/definition", Ask::Definition, path, line, line_text, col)
+    }
+
+    /// Asks what the thing under the cursor is.
+    pub fn hover(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+        self.position_request("textDocument/hover", Ask::Hover, path, line, line_text, col)
+    }
+
+    /// The shape both of those share: a method name, a file and a place in it.
+    fn position_request(
+        &mut self,
+        method: &str,
+        ask: Ask,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+    ) -> Option<i64> {
+        let uri = uri_for(path)?;
+        let character = if self.utf16 { chars_to_utf16(line_text, col) } else { col };
+        let params = json!({
+            "textDocument": { "uri": uri.as_str() },
+            "position": { "line": line, "character": character },
+        });
+        let id = self.request(method, params).ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, ask);
+        }
+        Some(id)
     }
 
     pub fn try_recv(&self) -> Option<Event> {
@@ -629,7 +771,7 @@ fn read_loop(
     mut reader: BufReader<impl Read>,
     tx: Sender<Event>,
     name: String,
-    pending: Arc<Mutex<HashSet<i64>>>,
+    pending: Arc<Mutex<HashMap<i64, Ask>>>,
 ) {
     let mut handshook = false;
     loop {
@@ -664,12 +806,20 @@ fn read_loop(
                 // A response, and the id says which question it answers. Asked first, so a
                 // completion reply is never mistaken for anything else — including on a server
                 // that answers `initialize` late enough for a request to overtake it.
-                if let Some(id) = value.get("id").and_then(Value::as_i64)
-                    && pending.lock().map(|mut p| p.remove(&id)).unwrap_or(false)
-                {
-                    let _ = tx.send(Event::Completion {
-                        id,
-                        words: completion_words(value.get("result")),
+                let asked = value
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .and_then(|id| Some((id, pending.lock().ok()?.remove(&id)?)));
+                if let Some((id, ask)) = asked {
+                    let result = value.get("result");
+                    let _ = tx.send(match ask {
+                        Ask::Completion => {
+                            Event::Completion { id, words: completion_words(result) }
+                        }
+                        Ask::Definition => {
+                            Event::Definition { id, target: first_location(result) }
+                        }
+                        Ask::Hover => Event::Hover { id, text: hover_text(result) },
                     });
                     continue;
                 }
@@ -694,9 +844,14 @@ mod tests {
     use super::*;
     use lsp_types::{Position, Range};
 
-    /// The set of requests still out, as the client would have left it for the reader thread.
-    fn pending(ids: &[i64]) -> Arc<Mutex<HashSet<i64>>> {
-        Arc::new(Mutex::new(ids.iter().copied().collect()))
+    /// The requests still out, as the client would have left them for the reader thread. Every
+    /// one a completion unless a test says otherwise, which is what all but one of them wants.
+    fn pending(ids: &[i64]) -> Arc<Mutex<HashMap<i64, Ask>>> {
+        Arc::new(Mutex::new(ids.iter().map(|id| (*id, Ask::Completion)).collect()))
+    }
+
+    fn pending_asks(asks: &[(i64, Ask)]) -> Arc<Mutex<HashMap<i64, Ask>>> {
+        Arc::new(Mutex::new(asks.iter().copied().collect()))
     }
 
     fn item(label: &str) -> CompletionItem {
@@ -1048,11 +1203,127 @@ mod tests {
         assert!(matches!(events[0], Event::Diagnostics { .. }), "the good message still arrives");
     }
 
+    fn argv(path: &str, configured: &[(&str, &str)]) -> Option<Vec<String>> {
+        let configured: BTreeMap<String, String> =
+            configured.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        server_for(Path::new(path), &configured)
+    }
+
     #[test]
     fn a_server_is_offered_only_for_a_language_we_have_one_for() {
-        assert_eq!(server_for(Path::new("main.rs")), Some("rust-analyzer"));
-        assert_eq!(server_for(Path::new("notes.md")), None);
-        assert_eq!(server_for(Path::new("Makefile")), None);
+        assert_eq!(argv("main.rs", &[]), Some(vec!["rust-analyzer".to_string()]));
+        // The arguments are part of the entry, and not decoration: without `--stdio` this one
+        // listens on a socket and looks like a server that started and never answered.
+        assert_eq!(
+            argv("app.ts", &[]),
+            Some(vec!["typescript-language-server".to_string(), "--stdio".to_string()])
+        );
+        // Case does not decide it. `README.MD` off a Windows share is the same file as `.md`.
+        assert_eq!(argv("MAIN.RS", &[]), Some(vec!["rust-analyzer".to_string()]));
+        assert_eq!(argv("notes.md", &[]), None);
+        assert_eq!(argv("Makefile", &[]), None);
+    }
+
+    /// The user's own table is what keeps the built-in list from being the limit: a language
+    /// nobody put in it, or the fork of a server somebody keeps in `~/bin`, without waiting for
+    /// a release.
+    #[test]
+    fn the_users_own_table_wins_over_the_built_in_one() {
+        // A language the built-in table says nothing about.
+        assert_eq!(
+            argv("thing.ml", &[("ml", "ocamllsp")]),
+            Some(vec!["ocamllsp".to_string()])
+        );
+        // And one it does — replaced, arguments and all.
+        assert_eq!(
+            argv("main.rs", &[("rs", "my-analyzer --stdio")]),
+            Some(vec!["my-analyzer".to_string(), "--stdio".to_string()])
+        );
+        // Set to nothing is how a built-in is turned off. The alternative would be a second
+        // setting whose whole job is to say "not that one".
+        assert_eq!(argv("main.rs", &[("rs", "")]), None);
+        assert_eq!(argv("main.rs", &[("rs", "   ")]), None);
+    }
+
+    /// A definition comes back in any of three shapes and they are all correct, so all three are
+    /// read rather than one being preferred and the others quietly missed.
+    #[test]
+    fn a_definition_is_read_in_whichever_shape_it_arrives() {
+        let location = json!({
+            "uri": "file:///src/main.rs",
+            "range": { "start": { "line": 41, "character": 8 }, "end": { "line": 41, "character": 12 } }
+        });
+        let want = Jump { path: PathBuf::from("/src/main.rs"), line: 41, column: 8 };
+        assert_eq!(first_location(Some(&location)), Some(want.clone()));
+        // An array of them: the first is taken. More than one definition is real — a trait
+        // method with several implementations — and going to the first is what every editor does
+        // before it grows a picker for them.
+        assert_eq!(first_location(Some(&json!([location]))), Some(want.clone()));
+        // A LocationLink, which names the same two things differently.
+        let link = json!([{
+            "targetUri": "file:///src/main.rs",
+            "targetRange": { "start": { "line": 40, "character": 0 }, "end": { "line": 45, "character": 1 } },
+            "targetSelectionRange": { "start": { "line": 41, "character": 8 }, "end": { "line": 41, "character": 12 } }
+        }]);
+        assert_eq!(first_location(Some(&link)), Some(want), "the name, not the whole body");
+
+        // "I know of no definition" is an answer and arrives as null or as an empty array.
+        assert_eq!(first_location(Some(&Value::Null)), None);
+        assert_eq!(first_location(Some(&json!([]))), None);
+        assert_eq!(first_location(None), None);
+    }
+
+    /// A hover is documentation — a signature, a rule, then paragraphs. One line of a status bar
+    /// is what there is, and the first meaningful line is the part anyone looks at.
+    #[test]
+    fn a_hover_comes_down_to_the_line_worth_reading() {
+        let markup = json!({ "contents": {
+            "kind": "markdown",
+            "value": "```rust\nfn push_str(&mut self, string: &str)\n```\n\n---\n\nAppends a string slice."
+        }});
+        assert_eq!(
+            hover_text(Some(&markup)).as_deref(),
+            Some("fn push_str(&mut self, string: &str)"),
+            "the fence and the rule are markup for a renderer, not text"
+        );
+        // The two older shapes, both still sent by servers in use.
+        assert_eq!(hover_text(Some(&json!({ "contents": "usize" }))).as_deref(), Some("usize"));
+        assert_eq!(
+            hover_text(Some(&json!({ "contents": [{ "language": "go", "value": "var x int" }] }))).as_deref(),
+            Some("var x int")
+        );
+        // Nothing to say, said as nothing rather than as an empty line.
+        assert_eq!(hover_text(Some(&json!({ "contents": "" }))), None);
+        assert_eq!(hover_text(Some(&json!({ "contents": "```\n```" }))), None);
+        assert_eq!(hover_text(None), None);
+    }
+
+    /// The reader tells the three kinds of answer apart by what the id was asking, and nothing
+    /// else. The set it used to keep could only say "a completion or not one", which was true
+    /// while there was one other kind of request and wrong the moment there were three.
+    #[test]
+    fn an_answer_is_read_as_the_question_it_answers() {
+        let bodies = [
+            (1, Ask::Completion, json!(["alpha"])),
+            (2, Ask::Definition, json!({
+                "uri": "file:///a.rs",
+                "range": { "start": { "line": 3, "character": 1 }, "end": { "line": 3, "character": 4 } }
+            })),
+            (3, Ask::Hover, json!({ "contents": "usize" })),
+        ];
+        let mut wire = Vec::new();
+        for (id, _, result) in &bodies {
+            wire.extend(frame(&json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()));
+        }
+        let (tx, rx) = mpsc::channel();
+        let asks: Vec<(i64, Ask)> = bodies.iter().map(|(id, ask, _)| (*id, *ask)).collect();
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending_asks(&asks));
+        let events: Vec<Event> = rx.into_iter().collect();
+        assert!(matches!(events[0], Event::Completion { id: 1, .. }));
+        assert!(matches!(events[1], Event::Definition { id: 2, target: Some(_) }));
+        assert!(
+            matches!(&events[2], Event::Hover { id: 3, text } if text.as_deref() == Some("usize"))
+        );
     }
 
     /// The whole client against a real process: spawn, write the handshake, read the answer,
@@ -1121,7 +1392,7 @@ mod tests {
 
     #[test]
     fn missing_server_is_an_answer_not_a_crash() {
-        let started = Client::start("cleecode-no-such-language-server", Path::new("."));
+        let started = Client::start_with(&["cleecode-no-such-language-server"], Path::new("."));
         let Err(err) = started else { panic!("a server that does not exist must not start") };
         assert!(err.contains("cleecode-no-such-language-server"), "{err}");
     }

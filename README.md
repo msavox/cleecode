@@ -165,6 +165,13 @@ variable, set a breakpoint and stop in it.
 prompt below it and the workspace panel beside — `x` and `y` with their size, class and range,
 listed without asking.*
 
+![The pylab workspace: a matplotlib figure as a tab, the session below and its variables beside](docs/screenshots/pylab-ide.png)
+
+*The same arrangement in Python. `▶ Run` on `plot.py` did not start a fresh interpreter: it typed
+`exec(open(...).read())` at the prompt that was already there, so the session kept everything the
+file made — which is what the panel on the right is listing, `ndarray` shapes and ranges and all,
+and what lets the next line you type carry on from where the script left off.*
+
 ![The same figure inverted to match the dark theme](docs/screenshots/octave-plot-dark.png)
 
 *The same figure with `i`: Octave draws on white, the tab inverts it, and the plot belongs to

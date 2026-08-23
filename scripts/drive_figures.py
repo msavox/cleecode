@@ -57,6 +57,27 @@ def picture_ink(session):
         line for line in session.lines() if line.count("▀") + line.count("▄") > 3)
 
 
+
+def click(session, col, row):
+    """One press and release, in the SGR encoding CleeCode turns on at startup. One-based."""
+    session.send(f"\x1b[<0;{col + 1};{row + 1}M")
+    session.send(f"\x1b[<0;{col + 1};{row + 1}m")
+
+
+def button_at(session, label):
+    """Where a button of the figure's bar is, as (col, row), or None.
+
+    Found by its label on screen rather than by working the layout out again here. A hit-test
+    that recomputes the layout is a hit-test that will one day disagree with what is drawn —
+    which is the reason `nav_bar_layout` is one function used by both sides in the first place,
+    and the reason this driver reads the screen instead of doing arithmetic."""
+    for row, line in enumerate(session.lines()):
+        at = line.find(label)
+        if at >= 0 and "reset" in line and "invert" in line:
+            return at, row
+    return None
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     if shutil.which("octave") is None:
@@ -150,6 +171,23 @@ def main():
                      session, note="the window moves, the axes are relabelled with it")
         report.check("r puts the whole plot back",
                      session.press("r", lambda s: "axis auto" in s.text(), 10), session)
+
+        # And the same things with the mouse. The bar draws them as buttons, and a button that
+        # is only a picture of a key is worse than no button: it invites a click that does
+        # nothing. Both go through one function, so this is checking that they are wired at all
+        # rather than that they agree.
+        spot = button_at(session, "\u25c2")
+        report.check("the figure's bar draws its controls as buttons", spot is not None, session,
+                     note=repr([l.strip()[-60:] for l in session.lines() if "reset" in l][:1]))
+        if spot is not None:
+            click(session, *spot)
+            report.check("clicking the arrow moves the plot, as pressing it does",
+                         session.wait(lambda s: "xlim(xl - 0.25" in s.text(), 10), session)
+            back = button_at(session, "reset")
+            if back is not None:
+                click(session, *back)
+                report.check("and clicking reset puts it back",
+                             session.wait(lambda s: "axis auto" in s.text(), 10), session)
 
         Report.show("final screen", session)
     finally:

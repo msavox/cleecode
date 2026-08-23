@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const OCTAVE: [(&str, &str); 8] = [
+const OCTAVE: [(&str, &str); 10] = [
     ("cleecode_dbg.m", include_str!("../assets/octave/cleecode_dbg.m")),
     ("cleecode_slice.m", include_str!("../assets/octave/cleecode_slice.m")),
     ("cleecode_boot.m", include_str!("../assets/octave/cleecode_boot.m")),
@@ -22,6 +22,8 @@ const OCTAVE: [(&str, &str); 8] = [
     // the preset's, which was the whole bug.
     ("PKG_ADD", include_str!("../assets/octave/PKG_ADD")),
     ("cleecode_figs.m", include_str!("../assets/octave/cleecode_figs.m")),
+    ("cleecode_grid.m", include_str!("../assets/octave/cleecode_grid.m")),
+    ("cleecode_grid_undo.m", include_str!("../assets/octave/cleecode_grid_undo.m")),
     ("cleecode_ws.m", include_str!("../assets/octave/cleecode_ws.m")),
     ("cleecode_ws_tick.m", include_str!("../assets/octave/cleecode_ws_tick.m")),
     ("wsinfo.m", include_str!("../assets/octave/wsinfo.m")),
@@ -73,6 +75,36 @@ fn write_all(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Every `cleecode_something (` in a body of Octave code: a call, as opposed to a mention
+    /// in a comment, which is why the bracket is part of the pattern.
+    fn calls_in(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (at, _) in body.match_indices("cleecode_") {
+            let rest = &body[at..];
+            let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+            let (name, after) = rest.split_at(end);
+            // A call, not a comment: the next thing that is not a space has to be an opening
+            // bracket. `cleecode_grid (f)` counts and "see cleecode_grid for why" does not.
+            if after.trim_start().starts_with('(') {
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    /// Every `cleecode_something` this code *defines*, whether as a file's own function or as
+    /// a subfunction inside one. A call is satisfied by either.
+    fn definitions_in(body: &str) -> Vec<String> {
+        body.lines()
+            .filter_map(|line| line.trim().strip_prefix("function "))
+            // `function out = name (args)` and `function name (args)` both end up as the word
+            // before the bracket.
+            .filter_map(|rest| rest.rsplit('=').next()?.split('(').next())
+            .map(|name| name.trim().to_string())
+            .filter(|name| name.starts_with("cleecode_"))
+            .collect()
+    }
+
     /// The check that matters is that they are *in* the binary at all: a released CleeCode has
     /// no repository beside it, so a path that resolves during development and not afterwards
     /// would be a feature that works only for whoever built it.
@@ -85,10 +117,23 @@ mod tests {
         assert!(tick.contains("jsonencode"), "the Octave hook writes the snapshot");
         // Every function the hook calls has to travel with it: one missing name and the whole
         // tick lands in its own catch, silently, and the panel simply never fills in.
-        for called in ["cleecode_figs", "cleecode_ws_tick", "cleecode_dbg", "cleecode_slice"] {
+        //
+        // Read out of the code rather than listed by hand, which the list above used to be.
+        // A hand-written list only fails for a function somebody remembered to add to it, and
+        // the failure this is guarding against is the one nobody remembered — which is exactly
+        // what happened when the grid work moved into files of its own: they were called from
+        // the first frame after the change and shipped in nothing.
+        let called: std::collections::BTreeSet<String> =
+            OCTAVE.iter().flat_map(|(_, body)| calls_in(body)).collect();
+        let defined: std::collections::BTreeSet<String> =
+            OCTAVE.iter().flat_map(|(_, body)| definitions_in(body)).collect();
+        assert!(called.len() > 3, "the scan found almost nothing, so it is not scanning");
+        for name in called {
+            // Either it has a file of its own, or it is a subfunction of one that ships. Both
+            // are fine; what is not fine is a name that reaches Octave and resolves to nothing.
             assert!(
-                OCTAVE.iter().any(|(name, _)| *name == format!("{called}.m")),
-                "{called} is called by the hook but does not travel with it"
+                OCTAVE.iter().any(|(file, _)| *file == format!("{name}.m")) || defined.contains(&name),
+                "{name} is called by the interpreter code but does not travel with it"
             );
         }
         // The one file that makes the hook apply to an Octave nobody told about it. Without

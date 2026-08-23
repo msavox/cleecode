@@ -86,18 +86,58 @@ into it a moment later, without moving a row you have already arrowed down to.
 
 The same server underlines what it finds wrong, where it is — red for an error, yellow for a
 warning — the line number takes the same colour, and the message for the line you are on sits at
-the right of the status bar. It speaks LSP over stdio directly rather than through a framework,
-and is told about an edit once you stop typing rather than on every key. Rust is wired up so far,
-through rust-analyzer. A server that is not installed is not an error to report: nothing is
-underlined, the list has the file's own words in it, and everything else carries on.
+the right of the status bar. When the line is clean, that spot says what the thing under the
+cursor **is** instead: the type, or the signature, one line of it. Nothing is pressed for it — it
+arrives when the cursor stops on a word, and a diagnostic wins the space when there is one,
+because an error on this line is news and a type is not.
 
-`Ctrl+Shift+D` opens the git panel. **Status** is the tab you act on: every changed file with
-git's own two letters in front of it — the index's and the working tree's — because `MM` is a
-file that was added and then changed again, and one letter would lose half of that. `S` stages
-the file under the cursor, `U` takes it back out, `A` stages everything, `C` asks for a message
-and commits, `Enter` opens the file. **Changes** is the diff, **History** the last 50 commits,
-**Branches** the branches with the current one marked and how far each is from its upstream —
-`Enter` moves to one, and git refuses that itself if it would write over uncommitted work.
+`Ctrl+Shift+J` goes to the definition of what is under the cursor and `Ctrl+Shift+L` comes back.
+A stack of them, so following a name into a name into a name still leads home.
+
+It speaks LSP over stdio directly rather than through a framework, and is told about an edit once
+you stop typing rather than on every key. Names are known for rust-analyzer, pyright, tsserver,
+gopls, clangd, lua-language-server, zls, solargraph, bash-language-server, texlab and a couple
+more; one process per program, started the first time a file it serves is open, so a project with
+Rust and Python in it ends up with both and each is told only about its own files. For anything
+else — a language nobody put in that list, or your own build of a server — `settings.toml` takes a
+`[language_servers]` table of `extension = "command line"`, which wins over the built-in names, and
+an entry set to `""` turns a built-in one off. A server that is not installed is not an error to
+report: nothing is underlined, the list has the file's own words in it, and everything else carries
+on.
+
+`Ctrl+Shift+D` opens the git panel — or the **Git** menu, which opens it already on the tab you
+came for, and a right-click on a changed file in the tree, which offers the same actions for that
+file under a heading of their own.
+
+**Status** is the tab you act on: every changed file with git's own two letters in front of it —
+the index's and the working tree's — because `MM` is a file that was added and then changed again,
+and one letter would lose half of that. `S` stages the file under the cursor, `U` takes it back
+out, `A` stages everything, `C` asks for a message and commits, `E` rewrites the last commit, `Z`
+puts the working tree away as a stash, `Enter` opens the file. **Changes** is the diff.
+**Branches** lists them with the current one marked and how far each is from its upstream —
+`Enter` moves to one and git refuses that itself if it would write over uncommitted work, `N`
+makes one, `D` deletes one, `M` merges it into where you are. **Stashes** is what you have put
+away: `Enter` applies, `O` pops, `D` drops.
+
+**History** is a graph — every branch at once, in lanes, drawn with `git log --graph`'s own six
+ASCII characters. That is deliberate: box-drawing and braille make a prettier picture where the
+font has them and come out as boxes or half-column offsets over `ssh` to whatever console is
+there, and a graph that is wrong about which line joins which is worse than no graph. `[main]` is
+where you are standing, `(spike)` a branch, `<v1>` a tag. `Enter` opens the commit in full — its
+message, what it touched and the patch; `B` starts a branch at it, `T` tags it, `K` copies it onto
+your branch, `V` undoes it in a new commit, `H` moves the branch back to it.
+
+Unlike `git log --graph`, lanes never shuffle left: a lane that empties stays empty until
+something reuses it. That costs a column or two and buys lines that stay in their column, so the
+only diagonals left are the two that mean something — a branch leaving and a branch coming back.
+
+`Q` gets out of a merge, a pick, a revert or a rebase that stopped part-way, and is offered only
+while there is one to get out of.
+
+`F`, `L` and `P` — fetch, pull and push — are typed into one of your shells rather than run behind
+the panel, and that is the point rather than a shortcut: they can stop to ask for a passphrase, a
+two-factor code or a host key, and a modal panel has nowhere to put such a question. A terminal is
+exactly the thing that can ask it. The panel closes and the shell takes the focus.
 
 `X` throws away every change to a file, and it is the only thing in CleeCode that destroys work:
 what it removes is in no commit and no stash. So it asks first, and the question takes one letter
@@ -105,10 +145,17 @@ and reads every other key as no — including the ones that do something to the 
 file git has never been told about is refused rather than deleted; there is nothing to put back,
 and `rm` belongs in the terminal where it reads as what it is.
 
+`X` and the other questions that cannot be taken back are drawn in red only where saying yes
+destroys something that is in no commit, no stash and no reflog — throwing a file's changes away,
+`reset --hard`, dropping a stash. Deleting a branch asks in the same shape and not in the same
+colour, because its commits stay in the reflog for ninety days and red on every question is red on
+none of them.
+
 Everything goes through `git` on PATH rather than a library, so what the panel does is what the
-terminal beside it would do: hooks run, commits are signed, credential helpers are asked. Push
-and pull are not here, and that is the same reasoning from the other end — they can stop to ask
-for a password, and a panel has no terminal to ask it in.
+terminal beside it would do: hooks run, commits are signed, credential helpers are asked. The
+spellings are the old ones — `reset HEAD --`, `checkout HEAD --`, `stash save` — because a
+long-lived server reached over `ssh` is exactly where a terminal editor earns its keep, and it is
+also where the newer commands are missing.
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
 layout and session untouched.

@@ -937,6 +937,15 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     f.render_stateful_widget(list, rect, &mut state);
 }
 
+/// A caption over a group: dim and italic, so it reads as a label for the rows under it rather
+/// than as a row that has been greyed out because it cannot be chosen.
+fn menu_header(label: &str, width: usize) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!(" {label:<width$}"),
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    )))
+}
+
 fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
     let Some(menu) = app.context_menu.as_ref() else { return };
@@ -958,6 +967,10 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
             selected_row = items.len();
         }
         let label = i18n::t(lang, i.label_key);
+        if i.header {
+            items.push(menu_header(&label, inner_width.saturating_sub(1)));
+            continue;
+        }
         let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
@@ -1380,19 +1393,26 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                 snap.diff.iter().skip(panel.scroll).take(rows).map(|l| Line::from(diff_span(l))).collect()
             }
         }
-        GitTab::Log => snap
-            .log
-            .iter()
-            .skip(panel.scroll)
-            .take(rows)
-            .map(|c| {
-                Line::from(vec![
-                    Span::styled(format!("{:<9}", c.hash), Style::default().fg(Color::Yellow)),
-                    Span::raw(c.subject.clone()),
-                    Span::styled(format!("  — {}, {}", c.author, c.when), Style::default().fg(Color::DarkGray)),
-                ])
-            })
-            .collect(),
+        GitTab::Graph => {
+            if panel.rows.is_empty() {
+                vec![Line::from(Span::styled(
+                    i18n::msg_git_no_commits(lang),
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                // One column for the art, the same on every row. A graph whose text starts in a
+                // different place on each line is a graph nobody reads down.
+                let art = crate::git_graph::width(&panel.rows);
+                panel
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .skip(panel.scroll)
+                    .take(rows)
+                    .map(|(row, r)| graph_line(r, &snap.graph, art, row == panel.selected, width))
+                    .collect()
+            }
+        }
         GitTab::Branches => snap
             .branches
             .iter()
@@ -1401,23 +1421,211 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
             .take(rows)
             .map(|(row, b)| branch_line(b, row == panel.selected, width))
             .collect(),
+        GitTab::Stashes => {
+            if snap.stashes.is_empty() {
+                vec![Line::from(Span::styled(
+                    i18n::msg_git_no_stashes(lang),
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                snap.stashes
+                    .iter()
+                    .enumerate()
+                    .skip(panel.scroll)
+                    .take(rows)
+                    .map(|(row, st)| stash_line(st, row == panel.selected, width))
+                    .collect()
+            }
+        }
     };
     f.render_widget(Paragraph::new(lines), body);
 
+    // A command that stopped half-way is said over the top of whatever tab you are on, because
+    // it is true of the repository rather than of the list: every action below behaves
+    // differently until it is finished or put back.
+    if let Some(unfinished) = snap.unfinished {
+        let area = Rect { y: body.y, height: 1, ..body };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                i18n::msg_git_unfinished(lang, unfinished),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ))),
+            area,
+        );
+    }
+
+    if let Some(detail) = panel.detail.as_ref() {
+        draw_git_detail(f, detail, lang, rect);
+    }
+
     if let Some(prompt) = panel.prompt.as_ref() {
         match prompt {
-            GitPrompt::Commit(message) => {
-                draw_git_question(f, rect, &i18n::msg_git_commit_prompt(lang, panel.staged_count()),
-                                  &format!("{message}▏"), Color::Cyan);
+            GitPrompt::Text { kind, typed } => {
+                draw_git_question(
+                    f,
+                    rect,
+                    &i18n::msg_git_text_prompt(lang, kind, panel.staged_count()),
+                    &format!("{typed}▏"),
+                    Color::Cyan,
+                );
             }
-            GitPrompt::Discard(change) => {
-                let file = change.path.display().to_string();
-                // Red, and the file named in the question rather than above it. This is the one
-                // box in CleeCode whose answer cannot be undone by anything, including git.
-                draw_git_question(f, rect, &i18n::msg_git_discard_prompt(lang, &file), "", Color::Red);
+            GitPrompt::Confirm(confirm) => {
+                // Red only where saying yes destroys something that is in no commit, no stash
+                // and no reflog. Deleting a branch asks in the same shape and not in the same
+                // colour, because red on every question is red on none of them.
+                let colour = if confirm.destroys_work() { Color::Red } else { Color::Yellow };
+                draw_git_question(f, rect, &i18n::msg_git_confirm_prompt(lang, confirm), "", colour);
             }
         }
     }
+}
+
+/// The colours the lanes are drawn in, and the reason the graph is readable at all.
+///
+/// Six, and none of them the cyan the panel highlights a row with: a lane in the colour of the
+/// cursor is a lane that looks selected on every row. They repeat past six, which is honest —
+/// two lanes in one colour is a graph with more branches than a screen has room to tell apart,
+/// and the lines themselves still say which is which.
+const LANE_COLOURS: [Color; 6] =
+    [Color::Green, Color::Magenta, Color::Yellow, Color::Blue, Color::Red, Color::LightGreen];
+
+fn lane_colour(lane: usize) -> Color {
+    LANE_COLOURS[lane % LANE_COLOURS.len()]
+}
+
+/// One row of the graph: the drawing, then — if the row is a commit rather than the lines
+/// between two — its hash, what points at it, and what it says.
+fn graph_line(
+    row: &crate::git_graph::Row,
+    commits: &[crate::git::GraphCommit],
+    art_width: usize,
+    picked: bool,
+    width: usize,
+) -> Line<'static> {
+    let art: String = row.art();
+    let commit = row.commit.and_then(|at| commits.get(at));
+    let Some(commit) = commit else {
+        // A row of pure lines. Each character keeps its own lane's colour, which is what makes a
+        // diagonal readable as *which* branch is joining.
+        return Line::from(
+            row.glyphs
+                .iter()
+                .map(|g| {
+                    Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(g.lane)))
+                })
+                .collect::<Vec<_>>(),
+        );
+    };
+
+    let refs = refs_text(&commit.refs);
+    let tail = format!("  — {}, {}", commit.author, commit.when);
+    if picked {
+        // The whole row in one span, as everywhere else in this panel — the art included, so
+        // the shape stays readable under the cursor even though its colours do not.
+        let text = format!("{art:<art_width$} {:<9}{refs}{} {}", commit.hash, commit.subject, tail);
+        let padded = format!("{text:<width$}");
+        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+    }
+
+    let mut spans: Vec<Span<'static>> = row
+        .glyphs
+        .iter()
+        .map(|g| Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(g.lane))))
+        .collect();
+    spans.push(Span::raw(" ".repeat(art_width.saturating_sub(art.chars().count()) + 1)));
+    spans.push(Span::styled(format!("{:<9}", commit.hash), Style::default().fg(Color::DarkGray)));
+    for name in &commit.refs {
+        spans.push(Span::styled(format!("{} ", ref_label(name)), ref_style(name.kind)));
+    }
+    spans.push(Span::raw(commit.subject.clone()));
+    spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
+}
+
+/// What a ref is drawn as. The kinds git's own log colours apart are coloured apart here for the
+/// same reason: `main` and `origin/main` on different commits is the whole of "have I pushed
+/// this", and in one colour it is two words that look alike.
+fn ref_style(kind: crate::git::RefKind) -> Style {
+    use crate::git::RefKind::*;
+    match kind {
+        Head => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Local => Style::default().fg(Color::Green),
+        Remote => Style::default().fg(Color::Red),
+        Tag => Style::default().fg(Color::Yellow),
+    }
+}
+
+fn ref_label(name: &crate::git::RefName) -> String {
+    match name.kind {
+        // The branch that is checked out says so. Which commit you are standing on is the
+        // question the graph is opened to answer, and a label identical to every other branch's
+        // does not answer it.
+        crate::git::RefKind::Head => format!("[{}]", name.text),
+        crate::git::RefKind::Tag => format!("<{}>", name.text),
+        _ => format!("({})", name.text),
+    }
+}
+
+/// The refs as plain text, for the selected row where everything is one span.
+fn refs_text(refs: &[crate::git::RefName]) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    refs.iter().map(ref_label).collect::<Vec<_>>().join(" ") + " "
+}
+
+fn stash_line(stash: &crate::git::Stash, picked: bool, width: usize) -> Line<'static> {
+    let text = format!("{}  {}", stash.name, stash.subject);
+    if picked {
+        let padded = format!("{text:<width$}");
+        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+    }
+    Line::from(vec![
+        Span::styled(format!("{:<11}", stash.name), Style::default().fg(Color::Yellow)),
+        Span::raw(stash.subject.clone()),
+    ])
+}
+
+/// One commit read in full, over the graph it was picked from.
+///
+/// Its own box rather than a sixth tab: it is about the row the cursor is on rather than about
+/// the repository, and a tab you can only reach from one row of one other tab is a tab that is
+/// empty most of the time you look at it.
+fn draw_git_detail(f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::Lang, panel: Rect) {
+    let rect = Rect {
+        x: panel.x + 2,
+        y: panel.y + 2,
+        width: panel.width.saturating_sub(4),
+        height: panel.height.saturating_sub(4),
+    };
+    if rect.height < 3 {
+        return;
+    }
+    f.render_widget(Clear, rect);
+    let title = format!(" {} — {} ", detail.hash, detail.subject);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let lines: Vec<Line> = match detail.lines.as_ref() {
+        None => vec![Line::from(Span::styled(
+            i18n::msg_git_loading(lang),
+            Style::default().fg(Color::DarkGray),
+        ))],
+        Some(Err(complaint)) => {
+            vec![Line::from(Span::styled(complaint.clone(), Style::default().fg(Color::Red)))]
+        }
+        Some(Ok(text)) => text
+            .iter()
+            .skip(detail.scroll)
+            .take(inner.height as usize)
+            .map(|l| Line::from(diff_span(l)))
+            .collect(),
+    };
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// One row of the status list: git's two letters, then the path.
@@ -2475,6 +2683,21 @@ pub enum NavControl {
     Invert,
     /// Markdown only: the rendered document, or the styled text.
     TextMode,
+    /// The four that move a live figure. On a 2-D plot they slide the window, on a 3-D one they
+    /// turn it — the same four, because that is what the keys do and a button that did something
+    /// else would be a second thing to learn.
+    ///
+    /// Buttons rather than a line of text saying which keys to press. A picture with a bar under
+    /// it is a thing people click, and the arrows are the controls somebody looking at a plot
+    /// reaches for first.
+    FigLeft,
+    FigRight,
+    FigUp,
+    FigDown,
+    /// Back to the view the figure was drawn with.
+    FigReset,
+    /// Out of the tab and into a file of its own.
+    FigExport,
 }
 
 /// The bar's controls with the cells each occupies, left to right.
@@ -2488,6 +2711,20 @@ pub fn nav_bar_layout(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, Rec
     let Some(row) = nav_bar_rect(area) else { return Vec::new() };
     let kind = preview.kind();
     let mut controls = Vec::new();
+    // A live figure gets its own controls, first, because they are what it is for. They go to
+    // the session, which redraws with new limits — so the axis labels stay true, which is the
+    // reason none of this magnifies the pixels the way the zoom beside it does.
+    let figure = app.figure_nav_hint(idx).is_some();
+    if figure {
+        controls.extend([
+            NavControl::FigLeft,
+            NavControl::FigRight,
+            NavControl::FigUp,
+            NavControl::FigDown,
+            NavControl::FigReset,
+            NavControl::FigExport,
+        ]);
+    }
     // Styled text is scrolled, not paged, and has no pixels to zoom or invert: over it the bar
     // carries the one control that means anything there, the way back to the document.
     if !preview.text_view() {
@@ -2548,6 +2785,14 @@ fn nav_label(control: NavControl, kind: crate::preview::Kind) -> (&'static str, 
         NavControl::Invert if kind == crate::preview::Kind::Picture => ("invert", "i"),
         NavControl::Invert => ("dark", "d"),
         NavControl::TextMode => ("text", "t"),
+        // Named by the arrow they answer to. The label is the key, which is the whole of the
+        // convention on this bar.
+        NavControl::FigLeft => ("\u{25c2}", "\u{2190}"),
+        NavControl::FigRight => ("\u{25b8}", "\u{2192}"),
+        NavControl::FigUp => ("\u{25b4}", "\u{2191}"),
+        NavControl::FigDown => ("\u{25be}", "\u{2193}"),
+        NavControl::FigReset => ("reset", "r"),
+        NavControl::FigExport => ("save", "e"),
     }
 }
 
@@ -2620,6 +2865,17 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     let free = (row.x + row.width).saturating_sub(buttons_end + 1);
 
     let mut state = String::new();
+    // What the arrows do on a live figure, which the buttons cannot say.
+    //
+    // They have always worked — arrows pan a 2-D plot and turn a 3-D one, `r` puts it back — and
+    // the bar carried no sign of it, so the only way to find out was to press an arrow and see.
+    // Somebody reading a bar that offers zoom, fit and invert reasonably concludes that panning
+    // and rotating are the things it does not have. And unlike the buttons beside them these
+    // keys do not act on the picture: they go to the session, which redraws with new limits, so
+    // the numbers on the axes stay true.
+    if let Some(hint) = app.figure_nav_hint(idx) {
+        state.push_str(&hint);
+    }
     if let Some(pages) = &preview.pages {
         state.push_str(&match pages.total {
             Some(total) => i18n::msg_page_of(lang, pages.current, total),
@@ -3506,6 +3762,12 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     }
 }
 
+/// A colour as a style. One line, and it exists so the diagnostic and the hover go through the
+/// same drawing instead of two nearly identical branches.
+fn colour_of(colour: Color) -> Style {
+    Style::default().fg(colour)
+}
+
 /// The worst diagnostic on the line the cursor is on, if any.
 ///
 /// The worst rather than the first: two servers' worth of hints can sit on a line that also has
@@ -3542,7 +3804,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // about a word's worth there is nothing useful to say, and a truncated diagnostic that says
     // "cann…" is worse than the squiggle already on screen.
     let room = (area.width as usize).saturating_sub(msg.chars().count() + 2);
-    if let Some((text, severity)) = diagnostic_under_cursor(app)
+    // A diagnostic wins that space over what the thing under the cursor *is*, and it is not
+    // close. An error on this line is news and the type of a name is not — while there is
+    // something wrong with it, the type is very likely the reason. So the hover fills the same
+    // spot only when the line is clean, and in a colour that says it is not a complaint.
+    let said = diagnostic_under_cursor(app)
+        .map(|(text, severity)| (text, severity_colour(severity)))
+        .or_else(|| app.what_it_is().map(|text| (text.to_string(), Color::DarkGray)));
+    if let Some((text, colour)) = said
         && !app.resize_mode
         && room >= 8
     {
@@ -3552,8 +3821,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         };
         let width = text.chars().count() as u16;
         let spot = Rect { x: area.right() - width, y: area.y, width, height: 1 };
-        let style = Style::default().fg(severity_colour(severity));
-        f.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), spot);
+        f.render_widget(Paragraph::new(Line::from(Span::styled(text, colour_of(colour)))), spot);
     }
 
     // The easter egg walks along the status line, over whatever message is there. It is the one
@@ -3839,13 +4107,13 @@ mod tests {
         use crate::menu::{ContextMenu, ContextTarget};
         let full = Rect { x: 0, y: 0, width: 80, height: 24 };
         // Anchored comfortably inside: the menu opens exactly there.
-        let m = ContextMenu::new(ContextTarget::Editor, (10, 5));
+        let m = ContextMenu::new(ContextTarget::Editor, (10, 5), false);
         let rect = context_menu_rect(&m, Lang::En, full);
         assert_eq!((rect.x, rect.y), (10, 5));
         assert!(rect.x + rect.width <= full.width && rect.y + rect.height <= full.height);
 
         // Anchored in the far bottom-right: pulled back so it never spills off either edge.
-        let m2 = ContextMenu::new(ContextTarget::Editor, (79, 23));
+        let m2 = ContextMenu::new(ContextTarget::Editor, (79, 23), false);
         let rect2 = context_menu_rect(&m2, Lang::En, full);
         assert_eq!(rect2.x + rect2.width, full.width);
         assert_eq!(rect2.y + rect2.height, full.height);

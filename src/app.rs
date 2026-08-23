@@ -59,6 +59,7 @@ pub fn is_python_ext(ext: &str) -> bool {
 ///
 /// A free function so the index-to-action mapping a click relies on can be tested without
 /// standing up an App (which would need real ptys).
+#[allow(clippy::too_many_arguments, reason = "one row list, and every argument is a source of rows")]
 fn run_rows(
     ext: &str,
     active: Option<&str>,
@@ -66,14 +67,32 @@ fn run_rows(
     registered: &[settings::RegisteredVenv],
     run_commands: &std::collections::HashMap<String, String>,
     project_commands: &std::collections::HashMap<String, String>,
+    session: SessionTarget,
     lang: Lang,
 ) -> Vec<RunRow> {
     let mut rows = Vec::new();
+    // The session comes first, and only for a language that can hold one. It is the top of the
+    // list because when there *is* a prompt open it is nearly always the answer: the point of
+    // `clee -w pylab` is that the session is where the work is, and a Run that started a fresh
+    // interpreter every time threw away everything the last one held.
+    if session.possible {
+        rows.push(RunRow {
+            label: i18n::msg_run_session_row(lang).to_string(),
+            // Says whether there is one right now, because the row means different things
+            // either way — with nothing open it is a preference, not a destination.
+            detail: Some(i18n::msg_run_session_detail(lang, session.open).to_string()),
+            // Marked only when it is what Run would really do. With the preference on and no
+            // prompt open, Run falls back to a shell, and the tick belongs on the venv it
+            // would use — which is the whole reason this marker exists.
+            active: session.wanted && session.open,
+            action: RunRowAction::UseSession,
+        });
+    }
     if is_python_ext(ext) {
         rows.push(RunRow {
             label: i18n::t(lang, Key::ToolbarVenvNone).to_string(),
             detail: None,
-            active: active.is_none(),
+            active: active.is_none() && !(session.wanted && session.open),
             action: RunRowAction::SelectVenv(None),
         });
         for venv in available {
@@ -84,7 +103,7 @@ fn run_rows(
                 // project-root venvs.
                 detail: (*venv != label).then(|| venv.clone()),
                 label,
-                active: active == Some(venv.as_str()),
+                active: active == Some(venv.as_str()) && !(session.wanted && session.open),
                 action: RunRowAction::SelectVenv(Some(venv.clone())),
             });
         }
@@ -127,6 +146,19 @@ fn run_rows(
     rows
 }
 
+/// What the drop-down needs to know about running in a live session, rather than working it out
+/// itself — the answer needs the process table and the settings, and neither belongs in a
+/// function whose job is to lay out rows.
+#[derive(Clone, Copy, Default)]
+pub struct SessionTarget {
+    /// Whether this language can hold a session at all: Octave and Python can, LaTeX cannot.
+    pub possible: bool,
+    /// Whether one is running in a pane right now.
+    pub open: bool,
+    /// Whether the user has asked for it, which is a preference and survives there being none.
+    pub wanted: bool,
+}
+
 /// Which file a run command is written to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunScope {
@@ -137,7 +169,10 @@ pub enum RunScope {
 }
 
 pub enum RunRowAction {
-    /// Use this venv, or the system python for `None`.
+    /// Hand the file to the interpreter that is already running, instead of starting one.
+    UseSession,
+    /// Use this venv, or the system python for `None`. Turns the session off: they are two
+    /// answers to one question, and a list where both can be ticked answers neither.
     SelectVenv(Option<String>),
     /// Browse the disk for a venv folder, rather than typing its path by hand.
     Browse,
@@ -352,10 +387,15 @@ pub struct App {
     pub completion_anchor: (u16, u16),
     /// The language server, once a file it knows about has been opened. `None` is the ordinary
     /// state, not a failure: most machines do not have one installed.
-    lsp: Option<crate::lsp::Client>,
+    /// The running language servers, by program name. One process per program rather than per
+    /// language: `clangd` serves seven extensions, and one of it per extension would be seven
+    /// clangds indexing the same project.
+    lsp: std::collections::HashMap<String, crate::lsp::Client>,
     /// Why there is no server, said once. Kept so the attempt is not repeated at every keystroke
     /// — spawning a process that is not there, sixty times a second, is its own kind of bug.
-    lsp_error: Option<String>,
+    /// Why a server did not start, by program name — so a machine with `gopls` and without
+    /// `clangd` still gets Go, and neither is tried twice.
+    lsp_error: std::collections::HashMap<String, String>,
     /// What the server says about each file. Replaced wholesale per file, because that is what
     /// the protocol sends: a list, not a diff.
     pub diagnostics: std::collections::HashMap<PathBuf, Vec<crate::lsp::Mark>>,
@@ -375,6 +415,22 @@ pub struct App {
     /// newer question is asked, so keeping the earlier ones would only be keeping answers
     /// nobody can use.
     lsp_completion: Option<PendingCompletion>,
+    /// The one definition or hover request still out.
+    ///
+    /// One at a time, and the newest wins: both are questions about where the cursor is now, so
+    /// an answer to where it was is not a late answer, it is an answer about somewhere else.
+    lsp_asked: Option<PendingAsk>,
+    /// Where the cursor was when the last hover was asked, so the same question is not asked
+    /// again every frame while nothing moves.
+    lsp_hovered: Option<(PathBuf, usize, usize)>,
+    /// The one line the server had to say about what is under the cursor.
+    lsp_what_it_is: Option<String>,
+    /// Where you were before each jump to a definition, newest last.
+    ///
+    /// A stack rather than one remembered place: following a definition into a definition into a
+    /// definition is the ordinary way of reading unfamiliar code, and a single slot would strand
+    /// you two files from where you started.
+    jumps: Vec<(PathBuf, usize, usize)>,
     /// The snapshot watched for figures. The editor reads it for pictures; the workspace window
     /// reads the same file for variables. Two readers of one file, which is why the producers
     /// write by rename — neither can ever see half of one.
@@ -445,28 +501,47 @@ pub struct App {
     pub git_panel: Option<GitPanel>,
     git_panel_tx: Sender<GitMessage>,
     git_panel_rx: Receiver<GitMessage>,
+    /// A question asked from outside the panel, waiting for the panel to be able to ask it.
+    ///
+    /// Neither can go up until the snapshot is in — one names a row of a list that does not
+    /// exist yet, the other has to know how many files are staged — so the request is held here
+    /// and tried again when the answer lands.
+    git_wanted: Option<GitWanted>,
+    /// How many times the panel has asked git what it looks like.
+    ///
+    /// Each ask runs on a thread of its own, and threads finish in whatever order they finish
+    /// in: two asks in flight — pressing `R` twice, or pressing it while a write is landing —
+    /// could deliver the older answer last and leave the panel showing the state from before the
+    /// action it had just taken, with nothing on screen to say so. The answer carries the number
+    /// it was asked under and anything but the latest is dropped.
+    git_asked: u64,
 }
 
-/// Which of the four questions the git panel is answering.
+/// Which of the five questions the git panel is answering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GitTab {
-    /// What is changed, file by file — and the only tab you can act on. First, because it is
-    /// the one you came for: the diff tells you what you did, this tells you what to do next.
+    /// What is changed, file by file. First, because it is the one you came for: the diff tells
+    /// you what you did, this tells you what to do next.
     Status,
     Diff,
-    Log,
+    /// The history with its shape: every branch at once, drawn in lanes. This is the tab the
+    /// flat list of the last fifty commits used to be — the graph says everything that list said
+    /// and also which of those commits are on the branch you are standing on.
+    Graph,
     Branches,
+    Stashes,
 }
 
 impl GitTab {
-    pub const ALL: [GitTab; 4] = [GitTab::Status, GitTab::Diff, GitTab::Log, GitTab::Branches];
+    pub const ALL: [GitTab; 5] =
+        [GitTab::Status, GitTab::Diff, GitTab::Graph, GitTab::Branches, GitTab::Stashes];
 
     /// Whether the tab is a list you move a cursor through, as opposed to text you scroll.
     ///
     /// The difference is whether there is anything to *do* to a row. A diff line is not a thing
     /// you can act on, so a highlight on one would be a promise the panel does not keep.
     pub fn picks_a_row(self) -> bool {
-        matches!(self, GitTab::Status | GitTab::Branches)
+        !matches!(self, GitTab::Diff)
     }
 
     fn cycle(self, delta: isize) -> GitTab {
@@ -487,6 +562,13 @@ pub struct GitPanel {
     /// staging five files an exercise in counting down again.
     pub selected: usize,
     pub snap: Option<crate::git::Snapshot>,
+    /// The graph laid out into rows, worked out once when a snapshot arrives rather than once a
+    /// frame: the lane assignment is a walk over every commit, and the answer only changes when
+    /// the commits do.
+    pub rows: Vec<crate::git_graph::Row>,
+    /// One commit opened in full, drawn over the graph. Esc closes this before it closes the
+    /// panel, because leaving a reader means going back to what you were reading.
+    pub detail: Option<GitDetail>,
     /// A question that has to be answered before anything else happens.
     pub prompt: Option<GitPrompt>,
     /// Whether a `git` that writes is still running. One at a time: two `git add`s racing for
@@ -503,13 +585,53 @@ pub struct GitPanel {
 impl GitPanel {
     /// How many rows the tab in front of you has.
     pub fn len(&self) -> usize {
+        // The graph is measured in drawn rows and not in commits: a merge costs two or three
+        // rows, and a cursor counting commits would slide out of step with the picture it is
+        // moving over. They are the panel's own rows rather than the snapshot's, which is why
+        // this is asked before the snapshot is.
+        if self.tab == GitTab::Graph {
+            return self.rows.len();
+        }
         let Some(snap) = self.snap.as_ref() else { return 0 };
         match self.tab {
             GitTab::Status => snap.changes.len(),
             GitTab::Diff => snap.diff.len(),
-            GitTab::Log => snap.log.len(),
             GitTab::Branches => snap.branches.len(),
+            GitTab::Stashes => snap.stashes.len(),
+            GitTab::Graph => self.rows.len(),
         }
+    }
+
+    /// The commit the cursor is on, when it is on one. Rows that are only lines have none, and
+    /// the cursor never rests on those.
+    pub fn selected_commit(&self) -> Option<&crate::git::GraphCommit> {
+        if self.tab != GitTab::Graph {
+            return None;
+        }
+        let at = self.rows.get(self.selected)?.commit?;
+        self.snap.as_ref()?.graph.get(at)
+    }
+
+    pub fn selected_stash(&self) -> Option<&crate::git::Stash> {
+        if self.tab != GitTab::Stashes {
+            return None;
+        }
+        self.snap.as_ref()?.stashes.get(self.selected)
+    }
+
+    /// The nearest row at or past `from` that draws a commit, walking in `delta`'s direction.
+    ///
+    /// The cursor lands on commits and never on the lines between them: a highlight on a row of
+    /// `|/` would be offering an action on a piece of the drawing.
+    fn commit_row(&self, from: isize, delta: isize) -> Option<usize> {
+        let mut at = from;
+        while at >= 0 && (at as usize) < self.rows.len() {
+            if self.rows[at as usize].commit.is_some() {
+                return Some(at as usize);
+            }
+            at += if delta == 0 { 1 } else { delta.signum() };
+        }
+        None
     }
 
     pub fn selected_change(&self) -> Option<&crate::git::Change> {
@@ -544,18 +666,33 @@ impl GitPanel {
         let max = self.len().saturating_sub(1);
         self.selected = self.selected.min(max);
         self.scroll = self.scroll.min(max);
+        if self.tab == GitTab::Graph {
+            // A refresh redraws the graph, and a row that was a commit can become a line: a new
+            // commit above shifts everything down, and a merge adds two rows where there was one.
+            let at = self.selected as isize;
+            self.selected = self.commit_row(at, 1).or_else(|| self.commit_row(at, -1)).unwrap_or(0);
+        }
         self.reveal();
     }
 
     /// Moves the cursor, or the view, depending on which the tab has.
     fn move_by(&mut self, delta: isize) {
         let max = self.len().saturating_sub(1) as isize;
-        if self.tab.picks_a_row() {
-            self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-            self.reveal();
-        } else {
+        if !self.tab.picks_a_row() {
             self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
+            return;
         }
+        let wanted = (self.selected as isize + delta).clamp(0, max);
+        self.selected = if self.tab == GitTab::Graph {
+            // Past the end of the graph in either direction, the cursor stays on the last commit
+            // there is rather than sliding onto the lines below it.
+            self.commit_row(wanted, delta)
+                .or_else(|| self.commit_row(wanted, -delta.signum()))
+                .unwrap_or(self.selected)
+        } else {
+            wanted as usize
+        };
+        self.reveal();
     }
 
     /// Scrolls just enough to keep the cursor on screen, and no further: a list that jumped to
@@ -573,20 +710,96 @@ impl GitPanel {
     }
 }
 
+/// A question asked from outside the panel and waiting on it.
+#[derive(Clone)]
+pub enum GitWanted {
+    /// Throw away the changes to this file, once the panel can find the row it is on.
+    Discard(PathBuf),
+    /// Commit what is staged, once the panel knows how much that is.
+    Commit,
+}
+
+/// A definition or hover request that has not been answered yet.
+///
+/// `from` is where the cursor was when it went out — checked when the answer arrives, since by
+/// then it may be somewhere else entirely, and used as the place to come back to after a jump.
+pub struct PendingAsk {
+    pub id: i64,
+    pub from: (PathBuf, usize, usize),
+}
+
 /// A question the panel is holding everything else for.
+///
+/// Two kinds, and the difference is the whole of the safety here. Something you *type* can be
+/// abandoned by pressing Esc and costs nothing if you change your mind halfway. Something you
+/// *agree to* takes a single letter and reads every other key as no — which is why the actions
+/// that cannot be undone are all on that side of the line.
 pub enum GitPrompt {
-    /// Typing a commit message.
-    Commit(String),
+    Text { kind: GitText, typed: String },
+    Confirm(GitConfirm),
+}
+
+/// The boxes you type into.
+pub enum GitText {
+    Commit,
+    /// Replacing the last commit. Opens holding the message it already has: retyping a sentence
+    /// to add one forgotten file is how a commit loses the sentence that explained it.
+    Amend,
+    /// A new branch, starting at a commit picked out of the graph or at HEAD when `at` is none.
+    Branch { at: Option<String> },
+    Tag { at: String },
+    Stash,
+}
+
+/// The questions that take one letter.
+pub enum GitConfirm {
     /// About to throw away the changes to a file. Holds the whole change rather than the path,
     /// because whether it is refused depends on what git knows about the file.
     Discard(crate::git::Change),
+    DeleteBranch(String),
+    /// Moving the branch to an older commit and making the working tree match it.
+    ResetHard { hash: String, subject: String },
+    DropStash(String),
+}
+
+impl GitConfirm {
+    /// Whether the question is drawn in red, which here means one thing exactly: saying yes
+    /// destroys something that is in no commit, no stash and no reflog.
+    ///
+    /// Deleting a branch is not in this list, and that is the distinction rather than an
+    /// oversight — its commits stay in the reflog for ninety days, so it is a question worth
+    /// asking and not a warning worth shouting. Red on everything is red on nothing.
+    pub fn destroys_work(&self) -> bool {
+        match self {
+            GitConfirm::Discard(_) => true,
+            // The commits it leaves behind are in the reflog; anything uncommitted it stepped on
+            // is nowhere at all, and that is the half that decides the colour.
+            GitConfirm::ResetHard { .. } => true,
+            GitConfirm::DropStash(_) => true,
+            GitConfirm::DeleteBranch(_) => false,
+        }
+    }
+}
+
+/// One commit read in full, over the top of the graph.
+pub struct GitDetail {
+    pub hash: String,
+    pub subject: String,
+    /// `None` while `git show` is still running: a large commit is not instant, and a reader
+    /// that opened empty and filled in later would be read as an empty commit.
+    pub lines: Option<Result<Vec<String>, String>>,
+    pub scroll: usize,
 }
 
 /// What comes back from a thread doing something with git.
 enum GitMessage {
-    Snapshot(Box<crate::git::Snapshot>),
+    /// The panel's state, and which ask it is the answer to.
+    Snapshot(u64, Box<crate::git::Snapshot>),
     /// The outcome of a command that wrote — git's own words, either way.
     Wrote(Result<String, String>),
+    /// One commit in full. Carries the hash it was asked about so a slow answer cannot land in a
+    /// reader that has since been opened on a different commit.
+    Detail(String, Result<Vec<String>, String>),
 }
 
 /// Computes git status on a background thread so a slow (or merely process-spawn-heavy)
@@ -1366,13 +1579,17 @@ impl App {
             completion: None,
             completion_anchor: (0, 0),
             startup_cols: term_cols,
-            lsp: None,
-            lsp_error: None,
+            lsp: std::collections::HashMap::new(),
+            lsp_error: std::collections::HashMap::new(),
             diagnostics: std::collections::HashMap::new(),
             lsp_sent: std::collections::HashMap::new(),
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
             lsp_completion: None,
+            lsp_asked: None,
+            lsp_hovered: None,
+            lsp_what_it_is: None,
+            jumps: Vec::new(),
             figures: None,
             figure_drawn: std::collections::HashMap::new(),
             inspector: None,
@@ -1408,6 +1625,8 @@ impl App {
             git_panel: None,
             git_panel_tx,
             git_panel_rx,
+            git_asked: 0,
+            git_wanted: None,
         })
     }
 
@@ -1579,7 +1798,15 @@ impl App {
             self.show_splash = false;
             return;
         }
-        if self.show_about || self.show_settings || self.menu.active {
+        if self.show_about {
+            return;
+        }
+        // A paste is keys, and while a box is up the keys are its. Into the one kind of box that
+        // takes text it arrives as text; over any other it does nothing at all — which is the
+        // point, because doing nothing is what a box that has no use for it should do, and
+        // falling through to the editor underneath is what it used to do instead.
+        if self.a_modal_owns_the_keyboard() {
+            self.paste_into_a_modal(&text);
             return;
         }
         match self.focus {
@@ -1598,6 +1825,24 @@ impl App {
             Focus::Editor => self.editor_mut().insert_multiline(&text),
             Focus::Terminal => self.handle_terminal_paste(&text),
         }
+    }
+
+    /// A paste while a box is up.
+    ///
+    /// Only the boxes that take typing take it, and today that is the git panel's. The rest
+    /// ignore it rather than passing it on: a paste over a question that wants one letter is not
+    /// an answer to it, and a paste over a list is not anything.
+    ///
+    /// Newlines become spaces because every one of these boxes is a single line. A pasted commit
+    /// message with a blank line in it would otherwise arrive as a message with two invisible
+    /// characters in the middle of it.
+    fn paste_into_a_modal(&mut self, text: &str) {
+        let Some(GitPrompt::Text { typed, .. }) =
+            self.git_panel.as_mut().and_then(|p| p.prompt.as_mut())
+        else {
+            return;
+        };
+        typed.push_str(&text.replace(['\n', '\r'], " "));
     }
 
     fn handle_terminal_paste(&mut self, text: &str) {
@@ -2155,12 +2400,50 @@ impl App {
     /// need to know, and it is the only thing that distinguishes the two.
     fn figure_for(&self, path: Option<&Path>) -> Option<(crate::wsnap::Figure, crate::session::Language)> {
         let path = path?.to_string_lossy().into_owned();
-        let snapshot = self.figures.as_ref()?.snapshot.as_ref()?;
-        let language = match snapshot.lang.as_str() {
+        // The session the panel is showing first, because it is already in memory and it is the
+        // right answer nearly always.
+        let held = self.figures.as_ref().and_then(|w| w.snapshot.as_ref()).and_then(|snapshot| {
+            snapshot
+                .figures
+                .iter()
+                .find(|f| f.path == path)
+                .cloned()
+                .map(|f| (f, snapshot.lang.clone()))
+        });
+        // And then every other session's, off disk. Two prompts write two snapshots and the
+        // panel follows whichever ticked last — so a figure drawn by the other one belonged to
+        // no session as far as this was concerned, and its keys fell through to the picture and
+        // scrolled it. Which is indistinguishable, from the outside, from controls that do not
+        // exist. A handful of small files, read only when a key is pressed on a figure tab.
+        let (figure, lang) = held
+            .or_else(|| {
+                crate::wsnap::figure_owner(&crate::wsnap::snapshot_dir(), &path)
+                    .map(|(figure, snapshot)| (figure, snapshot.lang))
+            })?;
+        let language = match lang.as_str() {
             "python" => crate::session::Language::Python,
             _ => crate::session::Language::Octave,
         };
-        snapshot.figures.iter().find(|f| f.path == path).cloned().map(|f| (f, language))
+        Some((figure, language))
+    }
+
+    /// What the arrow keys do on the figure in this tab, or `None` when it is not one.
+    ///
+    /// A 3-D axes turns and a 2-D one slides, and the same four keys do both — so the bar has to
+    /// say which, or the hint is only right half the time.
+    pub fn figure_nav_hint(&self, idx: usize) -> Option<String> {
+        let path = self.editors.get(idx).and_then(|e| e.path.clone());
+        let (figure, _) = self.figure_for(path.as_deref())?;
+        let is3d = figure.axes.first().map(|a| a.is3d).unwrap_or(false);
+        Some(i18n::msg_figure_keys(self.settings.lang, is3d).to_string())
+    }
+
+    /// A click on one of the figure bar's buttons, run through the same code the key runs.
+    ///
+    /// One path, so a button and its key cannot come to mean different things — which is the
+    /// same reason `git_tab_slots` is one function and not two.
+    fn figure_nav_click(&mut self, code: KeyCode) {
+        self.figure_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     /// A key pressed on a figure tab. `true` when it was one of the ones that moves the plot.
@@ -2270,43 +2553,84 @@ impl App {
         self.lsp_start_if_wanted();
         self.lsp_take_events();
         self.lsp_sync_open_files();
+        self.lsp_ask_what_this_is();
     }
 
-    /// Starts a server the first time a file it knows about is open, and never again.
-    fn lsp_start_if_wanted(&mut self) {
-        if self.lsp.is_some() || self.lsp_error.is_some() || !self.settings.language_server {
-            return;
+    /// The command line for a file, and `None` for a language nothing here can serve.
+    fn lsp_argv_for(&self, path: &Path) -> Option<Vec<String>> {
+        if !self.settings.language_server {
+            return None;
         }
-        let program = self
+        crate::lsp::server_for(path, &self.settings.language_servers)
+    }
+
+    /// The running server for a file.
+    ///
+    /// Keyed on the program name rather than on the language: `typescript-language-server` serves
+    /// six extensions and `clangd` seven, and one process for each of those would be seven
+    /// clangds indexing the same project at once.
+    fn lsp_client_for(&mut self, path: &Path) -> Option<&mut crate::lsp::Client> {
+        let program = self.lsp_argv_for(path)?.first()?.clone();
+        self.lsp.get_mut(&program)
+    }
+
+    /// Starts a server the first time a file it knows about is open, and never twice.
+    ///
+    /// One process per program, started on demand: opening a Rust file in a project that also
+    /// has Python in it should not start pyright, and a project with both open ends up with both
+    /// — each told only about the files it serves.
+    fn lsp_start_if_wanted(&mut self) {
+        let wanted: Vec<Vec<String>> = self
             .editors
             .iter()
             .filter(|e| e.preview.is_none())
             .filter_map(|e| e.path.as_deref())
-            .find_map(crate::lsp::server_for);
-        let Some(program) = program else { return };
-        match crate::lsp::Client::start(program, &self.root) {
-            Ok(client) => self.lsp = Some(client),
-            // Said once, in the status bar, and then remembered rather than retried. Not having
-            // rust-analyzer installed is the normal case, and CleeCode has to be exactly as
-            // useful there as it was before any of this existed.
-            Err(detail) => {
-                self.lsp_error = Some(detail);
-                self.status_message = i18n::msg_lsp_missing(self.settings.lang, program);
+            .filter_map(|path| self.lsp_argv_for(path))
+            .filter(|argv| {
+                argv.first().is_some_and(|program| {
+                    !self.lsp.contains_key(program) && !self.lsp_error.contains_key(program)
+                })
+            })
+            .collect();
+        for argv in wanted {
+            let program = argv[0].clone();
+            if self.lsp.contains_key(&program) || self.lsp_error.contains_key(&program) {
+                continue;
+            }
+            let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match crate::lsp::Client::start_with(&borrowed, &self.root) {
+                Ok(client) => {
+                    self.lsp.insert(program, client);
+                }
+                // Said once, in the status bar, and then remembered rather than retried. Not
+                // having the server installed is the normal case, and CleeCode has to be exactly
+                // as useful there as it was before any of this existed. Remembered *per program*,
+                // so a machine with gopls and without clangd still gets Go.
+                Err(detail) => {
+                    self.status_message = i18n::msg_lsp_missing(self.settings.lang, &program);
+                    self.lsp_error.insert(program, detail);
+                }
             }
         }
     }
 
     fn lsp_take_events(&mut self) {
         let lang = self.settings.lang;
-        loop {
-            let Some(client) = self.lsp.as_ref() else { return };
-            let Some(event) = client.try_recv() else { return };
+        // Drained first and handled after, because handling one needs `&mut self` — and which
+        // server said it has to travel with it, since two of them are entitled to disagree about
+        // how positions are counted.
+        let mut arrived: Vec<(String, crate::lsp::Event)> = Vec::new();
+        for (program, client) in self.lsp.iter() {
+            while let Some(event) = client.try_recv() {
+                arrived.push((program.clone(), event));
+            }
+        }
+        for (program, event) in arrived {
             match event {
                 crate::lsp::Event::Ready { utf16 } => {
-                    if let Some(client) = self.lsp.as_mut() {
-                        client.confirm_ready(utf16);
-                    }
-                    let name = self.lsp.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                    let Some(client) = self.lsp.get_mut(&program) else { continue };
+                    client.confirm_ready(utf16);
+                    let name = client.name.clone();
                     self.status_message = i18n::msg_lsp_ready(lang, &name);
                 }
                 crate::lsp::Event::Diagnostics { path, raw } => {
@@ -2315,11 +2639,12 @@ impl App {
                     // announced; without it, a diagnostic for a project opened as `.` matches no
                     // tab and is silently dropped.
                     let Some(path) = self.lsp_paths.get(&path).cloned() else { continue };
+                    let utf16 = self.lsp.get(&program).map(|c| c.utf16()).unwrap_or(true);
                     // Converted here because this is where the buffer is. A diagnostic for a file
                     // that is not open has nothing to be measured against, so it is dropped
                     // rather than stored against a guess at the text.
-                    let utf16 = self.lsp.as_ref().map(|c| c.utf16()).unwrap_or(true);
-                    let Some(editor) = self.editors.iter().find(|e| e.path.as_deref() == Some(path.as_path()))
+                    let Some(editor) =
+                        self.editors.iter().find(|e| e.path.as_deref() == Some(path.as_path()))
                     else {
                         self.diagnostics.remove(&path);
                         continue;
@@ -2337,18 +2662,42 @@ impl App {
                 crate::lsp::Event::Completion { id, words } => {
                     self.absorb_lsp_completion(id, words);
                 }
+                crate::lsp::Event::Definition { id, target } => self.lsp_go_there(id, target),
+                crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
                 crate::lsp::Event::Stopped { detail } => {
-                    self.lsp = None;
-                    self.lsp_error = Some(detail);
+                    // Only this one. Another server that is still running goes on underlining
+                    // its own files, and the marks that came from the one that died are the only
+                    // ones that have to go.
+                    self.lsp.remove(&program);
+                    self.lsp_error.insert(program.clone(), detail);
                     self.lsp_completion = None;
-                    self.diagnostics.clear();
-                    self.lsp_sent.clear();
-                    self.lsp_seen.clear();
+                    self.lsp_asked = None;
+                    self.lsp_forget(&program);
                     self.status_message = i18n::msg_lsp_stopped(lang);
                 }
             }
         }
     }
+
+    /// Drops everything remembered about the files a dead server was serving, and leaves the
+    /// rest alone.
+    fn lsp_forget(&mut self, program: &str) {
+        let served: Vec<PathBuf> = self
+            .lsp_sent
+            .keys()
+            .filter(|path| {
+                self.lsp_argv_for(path).and_then(|argv| argv.first().cloned()).as_deref()
+                    == Some(program)
+            })
+            .cloned()
+            .collect();
+        for path in served {
+            self.lsp_sent.remove(&path);
+            self.lsp_seen.remove(&path);
+            self.diagnostics.remove(&path);
+        }
+    }
+
 
     /// The path the server knows a file by.
     ///
@@ -2378,12 +2727,12 @@ impl App {
     /// send one per keystroke.
     fn lsp_ask_completion(&mut self, editor_index: usize, start: usize) {
         self.lsp_completion = None;
-        if self.lsp.is_none() {
+        if self.lsp.is_empty() {
             return;
         }
         let Some(editor) = self.editors.get(editor_index) else { return };
         let Some(path) = editor.path.clone() else { return };
-        if crate::lsp::server_for(&path).is_none() {
+        if self.lsp_argv_for(&path).is_none() {
             return;
         }
         let (line, col) = (editor.cursor_line, editor.cursor_col);
@@ -2392,13 +2741,13 @@ impl App {
         let revision = editor.revision();
         let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else { return };
         self.lsp_paths.insert(absolute.clone(), path.clone());
-        let Some(client) = self.lsp.as_mut() else { return };
+        let Some(client) = self.lsp_client_for(&path) else { return };
         client.did_change(&absolute, &text);
+        let asked = client.completion(&absolute, line, &line_text, col);
         // Recorded as sent, so the debounce does not turn round and send the same revision again.
         self.lsp_sent.insert(path, revision);
-        self.lsp_completion = client
-            .completion(&absolute, line, &line_text, col)
-            .map(|id| PendingCompletion { id, editor: editor_index, start });
+        self.lsp_completion =
+            asked.map(|id| PendingCompletion { id, editor: editor_index, start });
     }
 
     /// Folds a server's answer into the popup that asked for it, or drops it.
@@ -2426,7 +2775,7 @@ impl App {
     /// Tells the server what is open, what has changed once the typing has stopped, and what has
     /// gone away.
     fn lsp_sync_open_files(&mut self) {
-        if self.lsp.is_none() {
+        if self.lsp.is_empty() {
             return;
         }
         let now = Instant::now();
@@ -2435,7 +2784,7 @@ impl App {
         let mut resolved: Vec<(PathBuf, PathBuf)> = Vec::new();
         for editor in self.editors.iter().filter(|e| e.preview.is_none()) {
             let Some(path) = editor.path.as_deref() else { continue };
-            if crate::lsp::server_for(path).is_none() {
+            if self.lsp_argv_for(path).is_none() {
                 continue;
             }
             live.push(path.to_path_buf());
@@ -2461,9 +2810,12 @@ impl App {
         for (absolute, held) in resolved {
             self.lsp_paths.insert(absolute, held);
         }
-        let Some(client) = self.lsp.as_mut() else { return };
+        // Each file goes to the one server that serves it. A `.py` announced to rust-analyzer
+        // is a file it will parse as Rust and report a page of errors about.
         for (absolute, held, text, revision) in to_send {
-            client.did_open(&absolute, &text);
+            if let Some(client) = self.lsp_client_for(&held) {
+                client.did_open(&absolute, &text);
+            }
             self.lsp_sent.insert(held, revision);
         }
         for path in gone {
@@ -2471,13 +2823,185 @@ impl App {
                 self.lsp_paths.iter().find(|(_, held)| held.as_path() == path.as_path())
             {
                 let absolute = absolute.clone();
-                client.did_close(&absolute);
+                if let Some(client) = self.lsp_client_for(&path) {
+                    client.did_close(&absolute);
+                }
                 self.lsp_paths.remove(&absolute);
             }
             self.lsp_sent.remove(&path);
             self.lsp_seen.remove(&path);
             self.diagnostics.remove(&path);
         }
+    }
+
+    /// Asks the server where the thing under the cursor is defined.
+    ///
+    /// The file is sent first, for the same reason a completion sends it first: the question is
+    /// about *this* text, and an answer about the text of four hundred milliseconds ago would
+    /// point into a file that has since moved under it.
+    pub fn lsp_go_to_definition(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        let (line, col) = (editor.cursor_line, editor.cursor_col);
+        let line_text = editor.rope.line(line).to_string();
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let from = (path.clone(), line, col);
+        let Some(client) = self.lsp_client_for(&path) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        client.did_change(&absolute, &text);
+        let asked = client.definition(&absolute, line, &line_text, col);
+        match asked {
+            Some(id) => {
+                self.lsp_asked = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_lsp_looking(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Opens what the server pointed at, and remembers where you were.
+    fn lsp_go_there(&mut self, id: i64, target: Option<crate::lsp::Jump>) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_asked.take().filter(|a| a.id == id) else { return };
+        let Some(target) = target else {
+            // An answer, and worth saying. A key that does nothing and says nothing is a key you
+            // press again harder, and "there is no definition of that" is usually the news:
+            // the cursor is on a keyword, a comment, or a name the server has not indexed yet.
+            self.status_message = i18n::msg_lsp_no_definition(lang).to_string();
+            return;
+        };
+        // Written down before the jump rather than after it, so the place remembered is where
+        // the key was pressed and not wherever the file that opened happened to be scrolled to.
+        self.jumps.push(asked.from);
+        // Back to the spelling the tabs use. The server answers in resolved paths — symlinks
+        // followed, `.` gone — and opening a second tab on a file that is already open under
+        // another name is how one file ends up with two buffers and one of them silently stale.
+        let path = self.lsp_paths.get(&target.path).cloned().unwrap_or(target.path);
+        self.open_file_in_tab(path);
+        // The column arrives in the server's units and is turned into characters here, which is
+        // the first place that has the target file's text to measure it against.
+        let index = self.active_editor_index();
+        let utf16 = self
+            .editors
+            .get(index)
+            .and_then(|e| e.path.clone())
+            .and_then(|p| self.lsp_argv_for(&p))
+            .and_then(|argv| argv.first().cloned())
+            .and_then(|program| self.lsp.get(&program))
+            .map(crate::lsp::Client::utf16)
+            .unwrap_or(true);
+        let line_text = self
+            .editors
+            .get(index)
+            .map(|e| e.rope.line(target.line.min(e.rope.len_lines().saturating_sub(1))).to_string())
+            .unwrap_or_default();
+        let column = if utf16 {
+            crate::lsp::utf16_to_chars(&line_text, target.column)
+        } else {
+            target.column
+        };
+        // The protocol counts lines from zero and `goto_line` counts them the way a person does.
+        self.editor_mut().goto_line(target.line + 1);
+        let index = self.active_editor_index();
+        let len = self.editors[index].line_char_len(self.editors[index].cursor_line);
+        self.editors[index].cursor_col = column.min(len);
+        self.status_message = String::new();
+    }
+
+    /// Back to where the last jump started from.
+    pub fn lsp_jump_back(&mut self) {
+        let lang = self.settings.lang;
+        let Some((path, line, col)) = self.jumps.pop() else {
+            self.status_message = i18n::msg_lsp_nowhere_back(lang).to_string();
+            return;
+        };
+        // Counted as a person counts them, which is what `goto_line` takes; the stack holds the
+        // editor's own zero-based line.
+        self.open_file_at(path, line + 1, col);
+    }
+
+    /// Asks what the thing under the cursor is, once the cursor has stopped moving.
+    ///
+    /// No key of its own, and that is the design rather than a shortage of keys — though there
+    /// is one of those too. A hover is the answer to a question you did not quite ask: what is
+    /// this, what does it return. Anything that has to be asked for is asked for by people who
+    /// already know. So it arrives on its own, in the one line of the status bar that already
+    /// carries what the server has to say about the line you are on.
+    ///
+    /// The diagnostic wins that space when there is one. An error on this line is news; the type
+    /// of the name under the cursor is not, while there is something wrong with it.
+    fn lsp_ask_what_this_is(&mut self) {
+        if self.lsp.is_empty() || self.completion.is_some() || self.a_modal_owns_the_keyboard() {
+            return;
+        }
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        // Nothing is asked about a file the server has not been told about yet. It would answer
+        // — about a document it has never seen, which is to say about nothing — and the answer
+        // would be remembered as this file's. Announcing the file happens a frame or two after
+        // it opens, and this is the window in between.
+        //
+        // Unlike the definition, which sends the file with the question, a hover is asked so
+        // often that sending the whole buffer each time would be a copy of the file per word
+        // read. So it waits for the announcement instead of forcing one. And it waits without
+        // writing anything down, so the next frame asks again.
+        if !self.lsp_sent.contains_key(&path) {
+            return;
+        }
+        let (line, col) = (editor.cursor_line, editor.cursor_col);
+        // Asked once per place. Without this the same question goes out every frame for as long
+        // as the cursor sits still, which is most of the time a file is open.
+        let here = (path.clone(), line, col);
+        if self.lsp_hovered.as_ref() == Some(&here) {
+            return;
+        }
+        // Only on a word. A hover over a bracket is a request the server answers with nothing,
+        // sent thirty times a second while somebody reads.
+        let line_text = editor.rope.line(line).to_string();
+        if !crate::complete::prefix_at(&editor.rope, line, col)
+            .is_some_and(|(_, word)| !word.is_empty())
+        {
+            self.lsp_hovered = Some(here);
+            self.lsp_what_it_is = None;
+            return;
+        }
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else { return };
+        // Not while a definition is still out: one question at a time, and that one was asked
+        // on purpose.
+        if self.lsp_asked.is_some() {
+            return;
+        }
+        self.lsp_hovered = Some(here.clone());
+        self.lsp_what_it_is = None;
+        let Some(client) = self.lsp_client_for(&path) else { return };
+        if let Some(id) = client.hover(&absolute, line, &line_text, col) {
+            self.lsp_asked = Some(PendingAsk { id, from: here });
+        }
+    }
+
+    /// Holds on to what the server said, if the cursor is still where it was asked about.
+    fn lsp_show_what_it_is(&mut self, id: i64, text: Option<String>) {
+        let Some(asked) = self.lsp_asked.take().filter(|a| a.id == id) else { return };
+        if self.lsp_hovered.as_ref() != Some(&asked.from) {
+            return;
+        }
+        self.lsp_what_it_is = text;
+    }
+
+    /// What the server says the thing under the cursor is, for the status bar to draw when it
+    /// has nothing more pressing to say there.
+    pub fn what_it_is(&self) -> Option<&str> {
+        self.lsp_what_it_is.as_deref()
     }
 
     /// The diagnostics for a file, or an empty slice — so the renderer can ask without checking.
@@ -2538,6 +3062,8 @@ impl App {
             scroll: 0,
             selected: 0,
             snap: None,
+            rows: Vec::new(),
+            detail: None,
             prompt: None,
             busy: false,
             notice: None,
@@ -2547,13 +3073,15 @@ impl App {
     }
 
     fn refresh_git_panel(&mut self) {
+        self.git_asked += 1;
+        let asked = self.git_asked;
         let root = self.root.clone();
         // The diff is of the file in front of you when there is one: that is what "what have I
         // changed" means while you are looking at it. With no file open it is the whole tree.
         let file = self.editor().path.clone();
         let tx = self.git_panel_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(GitMessage::Snapshot(Box::new(crate::git::snapshot(&root, file))));
+            let _ = tx.send(GitMessage::Snapshot(asked, Box::new(crate::git::snapshot(&root, file))));
         });
     }
 
@@ -2561,13 +3089,27 @@ impl App {
         let lang = self.settings.lang;
         while let Ok(message) = self.git_panel_rx.try_recv() {
             match message {
-                GitMessage::Snapshot(snap) => {
+                GitMessage::Snapshot(asked, snap) => {
+                    // Anything but the answer to the latest ask is thrown away: it describes a
+                    // repository that has since been written to, and drawing it would put the
+                    // panel back to before the action that finished.
+                    if asked != self.git_asked {
+                        continue;
+                    }
                     let Some(panel) = self.git_panel.as_mut() else { continue };
+                    // Laid out here rather than while drawing: the walk is over every commit in
+                    // the repository up to the limit, and it only has a new answer when the
+                    // commits change.
+                    panel.rows = crate::git_graph::lay_out(&snap.graph);
                     panel.snap = Some(*snap);
+                    let wanted = self.git_wanted.is_some();
                     // Clamped rather than reset. A refresh follows every action, and being put
                     // back at the top after each one would make staging five files an exercise
                     // in counting down to the sixth again.
                     panel.clamp_to_list();
+                    if wanted {
+                        self.git_put_up_the_wanted_question();
+                    }
                 }
                 GitMessage::Wrote(outcome) => {
                     if let Some(panel) = self.git_panel.as_mut() {
@@ -2582,6 +3124,26 @@ impl App {
                     }
                     // Whatever happened, what is on screen is now the state from before it.
                     self.refresh_git_panel();
+                    // And so are the dots in the file tree, which are the same facts drawn in
+                    // the frame behind the panel. They have their own sweep every 700 ms, which
+                    // is soon enough for a file changed by something else and far too slow for a
+                    // commit made from here: the panel would say the tree was clean while the
+                    // tree beside it still had a row marked.
+                    spawn_git_status_refresh(
+                        self.root.clone(),
+                        self.git_status_tx.clone(),
+                        self.git_status_pending.clone(),
+                    );
+                }
+                GitMessage::Detail(hash, lines) => {
+                    // Only into the reader that asked. A `git show` on a large commit takes long
+                    // enough for the cursor to have moved on, and an answer landing in the wrong
+                    // reader is a commit shown under another commit's name.
+                    if let Some(detail) = self.git_panel.as_mut().and_then(|p| p.detail.as_mut())
+                        && detail.hash == hash
+                    {
+                        detail.lines = Some(lines);
+                    }
                 }
             }
         }
@@ -2614,11 +3176,19 @@ impl App {
 
     fn handle_git_panel_key(&mut self, key: KeyEvent) {
         // A question that is up takes the whole keyboard until it is answered. It is the only
-        // nesting in this panel, and it is here because the two things it asks — a commit
-        // message, and whether to throw work away — are exactly the two that must not be
-        // answered by a keystroke meant for the list behind them.
+        // nesting in this panel that changes what a key means, and it is here because the boxes
+        // it puts up — a message, a name, and whether to throw work away — must not be answered
+        // by a keystroke meant for the list behind them.
         if self.git_panel.as_ref().is_some_and(|p| p.prompt.is_some()) {
             self.handle_git_prompt_key(key);
+            return;
+        }
+        // A commit opened in full is a reader, not a list: it scrolls and it closes, and the
+        // letters that act on the graph underneath are not offered on top of it. Esc goes back
+        // to the graph rather than out of the panel, because leaving a reader is going back to
+        // what you were reading.
+        if self.git_panel.as_ref().is_some_and(|p| p.detail.is_some()) {
+            self.handle_git_detail_key(key);
             return;
         }
         match key.code {
@@ -2633,6 +3203,7 @@ impl App {
                 if let Some(p) = self.git_panel.as_mut() {
                     p.scroll = 0;
                     p.selected = 0;
+                    p.clamp_to_list();
                 }
             }
             // The answer goes stale the moment you type in the shell next to it, so asking again
@@ -2640,16 +3211,85 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 if let Some(p) = self.git_panel.as_mut() {
                     p.snap = None;
+                    p.rows.clear();
                     p.notice = None;
                 }
                 self.refresh_git_panel();
             }
-            KeyCode::Char('s') | KeyCode::Char('S') => self.git_stage_selected(),
-            KeyCode::Char('u') | KeyCode::Char('U') => self.git_unstage_selected(),
-            KeyCode::Char('a') | KeyCode::Char('A') => self.git_stage_everything(),
-            KeyCode::Char('c') | KeyCode::Char('C') => self.git_ask_for_a_message(),
-            KeyCode::Char('x') | KeyCode::Char('X') => self.git_ask_about_discarding(),
-            KeyCode::Enter => self.git_open_or_switch(),
+            // The way out of a merge, pick, revert or rebase that stopped on a conflict. Offered
+            // from every tab, and only while there is one to get out of: the state it undoes is
+            // one you did not choose to be in, and hunting for the right tab to leave it from
+            // would be a puzzle on top of a problem.
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.git_abort(),
+            KeyCode::Enter => self.git_enter(),
+            KeyCode::Char(c) => self.git_letter(c.to_ascii_lowercase()),
+            _ => {}
+        }
+    }
+
+    /// The single letters, which mean what the tab you are on says they mean.
+    ///
+    /// A letter does one thing per tab and nothing on the others, rather than one thing
+    /// everywhere. `d` deletes a branch on the branch list and drops a stash on the stash list,
+    /// and neither of those is a thing you can do to the other — a key that guessed which list
+    /// you meant would be guessing about deleting something.
+    fn git_letter(&mut self, c: char) {
+        let Some(tab) = self.git_panel.as_ref().map(|p| p.tab) else { return };
+        match (tab, c) {
+            (GitTab::Status, 's') => self.git_stage_selected(),
+            (GitTab::Status, 'u') => self.git_unstage_selected(),
+            (GitTab::Status, 'a') => self.git_stage_everything(),
+            (GitTab::Status, 'c') => self.git_ask_for_a_message(),
+            (GitTab::Status, 'e') => self.git_ask_to_amend(),
+            (GitTab::Status, 'x') => self.git_ask_about_discarding(),
+            (GitTab::Status, 'z') | (GitTab::Stashes, 'z') => self.git_ask_for_a_stash(),
+
+            (GitTab::Graph, 'b') => self.git_ask_for_a_branch(true),
+            (GitTab::Graph, 't') => self.git_ask_for_a_tag(),
+            (GitTab::Graph, 'k') => self.git_cherry_pick(),
+            (GitTab::Graph, 'v') => self.git_revert(),
+            (GitTab::Graph, 'h') => self.git_ask_about_resetting(),
+
+            (GitTab::Branches, 'n') => self.git_ask_for_a_branch(false),
+            (GitTab::Branches, 'd') => self.git_ask_about_deleting_a_branch(),
+            (GitTab::Branches, 'm') => self.git_merge_selected(),
+            (GitTab::Branches, 'f') => self.git_remote(crate::git::Remote::Fetch),
+            (GitTab::Branches, 'l') => self.git_remote(crate::git::Remote::Pull),
+            (GitTab::Branches, 'p') => self.git_remote(crate::git::Remote::Push),
+
+            (GitTab::Stashes, 'o') => self.git_stash_pop(),
+            (GitTab::Stashes, 'd') => self.git_ask_about_dropping_a_stash(),
+            _ => {}
+        }
+    }
+
+    /// Enter: the obvious thing for whichever list is in front of you.
+    fn git_enter(&mut self) {
+        let Some(tab) = self.git_panel.as_ref().map(|p| p.tab) else { return };
+        match tab {
+            GitTab::Status | GitTab::Branches => self.git_open_or_switch(),
+            GitTab::Graph => self.git_show_commit(),
+            // Apply and not pop, because apply is the one that can be tried again. A stash that
+            // does not go back cleanly is exactly when you want it still to be there.
+            GitTab::Stashes => self.git_stash_apply(),
+            GitTab::Diff => {}
+        }
+    }
+
+    fn handle_git_detail_key(&mut self, key: KeyEvent) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(detail) = panel.detail.as_mut() else { return };
+        let last = detail.lines.as_ref().and_then(|l| l.as_ref().ok()).map_or(0, |l| l.len());
+        let max = last.saturating_sub(1) as isize;
+        let step = |at: usize, delta: isize| (at as isize + delta).clamp(0, max) as usize;
+        match key.code {
+            KeyCode::Esc => panel.detail = None,
+            KeyCode::Down => detail.scroll = step(detail.scroll, 1),
+            KeyCode::Up => detail.scroll = step(detail.scroll, -1),
+            KeyCode::PageDown => detail.scroll = step(detail.scroll, panel.body_rows as isize),
+            KeyCode::PageUp => detail.scroll = step(detail.scroll, -(panel.body_rows as isize)),
+            KeyCode::Home => detail.scroll = 0,
+            KeyCode::End => detail.scroll = max.max(0) as usize,
             _ => {}
         }
     }
@@ -2661,42 +3301,102 @@ impl App {
         // middle of a shorter one.
         panel.scroll = 0;
         panel.selected = 0;
+        panel.clamp_to_list();
     }
 
-    /// The two questions the panel asks. Everything not spelled out here says no — which is the
-    /// safe answer to one of them and a harmless one to the other.
+    /// The boxes the panel puts up. Everything not spelled out here says no — which is the safe
+    /// answer to the questions that destroy something and a harmless one to the rest.
     fn handle_git_prompt_key(&mut self, key: KeyEvent) {
         let lang = self.settings.lang;
         let Some(panel) = self.git_panel.as_mut() else { return };
         match panel.prompt.as_mut() {
-            Some(GitPrompt::Commit(message)) => match key.code {
+            Some(GitPrompt::Text { kind, typed }) => match key.code {
                 KeyCode::Esc => panel.prompt = None,
                 KeyCode::Backspace => {
-                    message.pop();
+                    typed.pop();
                 }
-                KeyCode::Char(c) => message.push(c),
+                // The modifiers are checked, and that is not pedantry: without it `Ctrl+V` puts a
+                // `v` in the commit message, which is what a person pressing it least wants and
+                // has no way to tell has happened until the commit is made.
+                KeyCode::Char(c)
+                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    typed.push(c)
+                }
                 KeyCode::Enter => {
-                    let message = message.clone();
+                    let typed = typed.clone();
+                    let kind = std::mem::replace(kind, GitText::Commit);
                     panel.prompt = None;
-                    self.git_write(move |root| crate::git::commit(root, &message));
+                    self.run_git_text(kind, typed);
                 }
                 _ => {}
             },
-            Some(GitPrompt::Discard(change)) => {
+            Some(GitPrompt::Confirm(confirm)) => {
                 // Only the one letter, and only the one the question was asked in. Every other
                 // key means no — including the ones that do something on the list underneath,
                 // which is the whole point of asking.
                 let yes = key.code == KeyCode::Char(i18n::yes_key(lang))
                     || key.code == KeyCode::Char(i18n::yes_key(lang).to_ascii_uppercase());
-                let change = change.clone();
-                let top = panel.snap.as_ref().and_then(|s| s.top.clone());
+                let confirm = std::mem::replace(
+                    confirm,
+                    GitConfirm::DeleteBranch(String::new()),
+                );
                 panel.prompt = None;
-                if yes && let Some(top) = top {
-                    let absolute = crate::git::Change { path: top.join(&change.path), ..change };
-                    self.git_write(move |root| crate::git::discard(root, &absolute));
+                if yes {
+                    self.run_git_confirm(confirm);
                 }
             }
             None => {}
+        }
+    }
+
+    /// What a typed box does once it is answered.
+    fn run_git_text(&mut self, kind: GitText, typed: String) {
+        let lang = self.settings.lang;
+        // A name that is only spaces would become a branch git refuses and a tag it accepts,
+        // which are two bad answers to one slip.
+        let typed = typed.trim().to_string();
+        match kind {
+            GitText::Commit => self.git_write(move |root| crate::git::commit(root, &typed)),
+            GitText::Amend => self.git_write(move |root| crate::git::amend(root, &typed)),
+            GitText::Branch { at } => {
+                if typed.is_empty() {
+                    self.git_say(i18n::msg_git_needs_a_name(lang).to_string(), true);
+                    return;
+                }
+                self.git_write(move |root| crate::git::create_branch(root, &typed, at.as_deref()));
+            }
+            GitText::Tag { at } => {
+                if typed.is_empty() {
+                    self.git_say(i18n::msg_git_needs_a_name(lang).to_string(), true);
+                    return;
+                }
+                self.git_write(move |root| crate::git::tag(root, &typed, &at));
+            }
+            // An unnamed stash is fine: git writes "WIP on main: …" itself, and it is a better
+            // sentence than most of the ones a person types into that box.
+            GitText::Stash => self.git_write(move |root| crate::git::stash_push(root, &typed)),
+        }
+    }
+
+    /// What a one-letter question does once it is agreed to.
+    fn run_git_confirm(&mut self, confirm: GitConfirm) {
+        match confirm {
+            GitConfirm::Discard(change) => {
+                let top = self.git_panel.as_ref().and_then(|p| p.snap.as_ref()).and_then(|s| s.top.clone());
+                let Some(top) = top else { return };
+                let absolute = crate::git::Change { path: top.join(&change.path), ..change };
+                self.git_write(move |root| crate::git::discard(root, &absolute));
+            }
+            GitConfirm::DeleteBranch(name) => {
+                self.git_write(move |root| crate::git::delete_branch(root, &name))
+            }
+            GitConfirm::ResetHard { hash, .. } => {
+                self.git_write(move |root| crate::git::reset_hard(root, &hash))
+            }
+            GitConfirm::DropStash(name) => {
+                self.git_write(move |root| crate::git::stash_drop(root, &name))
+            }
         }
     }
 
@@ -2729,7 +3429,7 @@ impl App {
             panel.notice = Some((i18n::msg_git_nothing_staged(lang).to_string(), true));
             return;
         }
-        panel.prompt = Some(GitPrompt::Commit(String::new()));
+        panel.prompt = Some(GitPrompt::Text { kind: GitText::Commit, typed: String::new() });
     }
 
     fn git_ask_about_discarding(&mut self) {
@@ -2744,7 +3444,403 @@ impl App {
             }
             return;
         }
-        panel.prompt = Some(GitPrompt::Discard(change));
+        panel.prompt = Some(GitPrompt::Confirm(GitConfirm::Discard(change)));
+    }
+
+    /// Says something in the panel's own notice line without going near git.
+    ///
+    /// The refusals belong here rather than in `git.rs`: "there is nothing staged" is a fact
+    /// about what the panel is showing, and answering it by running a command that fails would
+    /// be asking git to write the message.
+    fn git_say(&mut self, text: String, complaint: bool) {
+        if let Some(panel) = self.git_panel.as_mut() {
+            panel.notice = Some((text, complaint));
+        }
+    }
+
+    /// Replaces the last commit. Opens holding the message that commit already has.
+    fn git_ask_to_amend(&mut self) {
+        let lang = self.settings.lang;
+        let root = self.root.clone();
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        if panel.tab != GitTab::Status {
+            return;
+        }
+        // Read here rather than on a thread: it is one `git log -1` on a commit that is already
+        // in memory on any repository, and a box that opened empty and filled in a frame later
+        // is a box you have started typing into by then.
+        let Some(message) = crate::git::head_message(&root) else {
+            panel.notice = Some((i18n::msg_git_nothing_to_amend(lang).to_string(), true));
+            return;
+        };
+        panel.prompt = Some(GitPrompt::Text { kind: GitText::Amend, typed: message });
+    }
+
+    fn git_ask_for_a_stash(&mut self) {
+        let lang = self.settings.lang;
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        // Nothing to put away is worth saying rather than letting git say "No local changes to
+        // save", which reads as a failure when it is the tree being clean.
+        if panel.snap.as_ref().is_some_and(|s| s.changes.iter().all(crate::git::Change::untracked)) {
+            panel.notice = Some((i18n::msg_git_nothing_to_stash(lang).to_string(), true));
+            return;
+        }
+        panel.prompt = Some(GitPrompt::Text { kind: GitText::Stash, typed: String::new() });
+    }
+
+    /// A new branch. From the graph it starts at the commit under the cursor; from the branch
+    /// list it starts where you are.
+    fn git_ask_for_a_branch(&mut self, from_graph: bool) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let at = if from_graph {
+            let Some(commit) = panel.selected_commit() else { return };
+            Some(commit.hash.clone())
+        } else {
+            None
+        };
+        panel.prompt = Some(GitPrompt::Text { kind: GitText::Branch { at }, typed: String::new() });
+    }
+
+    fn git_ask_for_a_tag(&mut self) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(commit) = panel.selected_commit() else { return };
+        let at = commit.hash.clone();
+        panel.prompt = Some(GitPrompt::Text { kind: GitText::Tag { at }, typed: String::new() });
+    }
+
+    /// Copies the commit under the cursor onto the branch you are on.
+    ///
+    /// No question in front of it, deliberately. It makes a commit and takes nothing away, and
+    /// if it stops on a conflict the way out is the same `Q` that gets out of a merge — which is
+    /// why that key is offered from every tab rather than from the one that started it.
+    fn git_cherry_pick(&mut self) {
+        let Some(commit) = self.git_panel.as_ref().and_then(GitPanel::selected_commit) else {
+            return;
+        };
+        let hash = commit.hash.clone();
+        self.git_write(move |root| crate::git::cherry_pick(root, &hash));
+    }
+
+    /// Makes a new commit that undoes an old one. The commit being undone stays exactly where it
+    /// is, which is why this needs no question either.
+    fn git_revert(&mut self) {
+        let Some(commit) = self.git_panel.as_ref().and_then(GitPanel::selected_commit) else {
+            return;
+        };
+        let hash = commit.hash.clone();
+        self.git_write(move |root| crate::git::revert(root, &hash));
+    }
+
+    fn git_ask_about_resetting(&mut self) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(commit) = panel.selected_commit() else { return };
+        let hash = commit.hash.clone();
+        let subject = commit.subject.clone();
+        panel.prompt = Some(GitPrompt::Confirm(GitConfirm::ResetHard { hash, subject }));
+    }
+
+    fn git_ask_about_deleting_a_branch(&mut self) {
+        let lang = self.settings.lang;
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(branch) = panel.selected_branch() else { return };
+        // The branch you are standing on cannot be deleted, and git's refusal names the branch
+        // rather than the reason. Said before the question, for the same reason discarding an
+        // untracked file is: finding out by agreeing to something is finding out too late.
+        if branch.current {
+            let name = branch.name.clone();
+            panel.notice = Some((i18n::msg_git_branch_is_current(lang, &name), true));
+            return;
+        }
+        let name = branch.name.clone();
+        panel.prompt = Some(GitPrompt::Confirm(GitConfirm::DeleteBranch(name)));
+    }
+
+    /// Merges the branch under the cursor into the one you are on.
+    fn git_merge_selected(&mut self) {
+        let lang = self.settings.lang;
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(branch) = panel.selected_branch() else { return };
+        if branch.current {
+            panel.notice = Some((i18n::msg_git_merge_into_itself(lang).to_string(), true));
+            return;
+        }
+        let name = branch.name.clone();
+        self.git_write(move |root| crate::git::merge(root, &name));
+    }
+
+    fn git_stash_apply(&mut self) {
+        let Some(stash) = self.git_panel.as_ref().and_then(GitPanel::selected_stash) else {
+            return;
+        };
+        let name = stash.name.clone();
+        self.git_write(move |root| crate::git::stash_apply(root, &name));
+    }
+
+    fn git_stash_pop(&mut self) {
+        let Some(stash) = self.git_panel.as_ref().and_then(GitPanel::selected_stash) else {
+            return;
+        };
+        let name = stash.name.clone();
+        self.git_write(move |root| crate::git::stash_pop(root, &name));
+    }
+
+    fn git_ask_about_dropping_a_stash(&mut self) {
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(stash) = panel.selected_stash() else { return };
+        let name = stash.name.clone();
+        panel.prompt = Some(GitPrompt::Confirm(GitConfirm::DropStash(name)));
+    }
+
+    /// Opens the commit under the cursor in full.
+    ///
+    /// On a thread, because `git show` on a commit that touched two hundred files is not
+    /// instant, and the reader opens straight away saying so rather than after it.
+    fn git_show_commit(&mut self) {
+        let Some(commit) = self.git_panel.as_ref().and_then(GitPanel::selected_commit) else {
+            return;
+        };
+        let hash = commit.hash.clone();
+        let subject = commit.subject.clone();
+        if let Some(panel) = self.git_panel.as_mut() {
+            panel.detail =
+                Some(GitDetail { hash: hash.clone(), subject, lines: None, scroll: 0 });
+        }
+        let root = self.root.clone();
+        let tx = self.git_panel_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(GitMessage::Detail(hash.clone(), crate::git::show(&root, &hash)));
+        });
+    }
+
+    /// Puts back whatever a half-finished merge, pick, revert or rebase was in the middle of.
+    fn git_abort(&mut self) {
+        let lang = self.settings.lang;
+        let unfinished = self.git_panel.as_ref().and_then(|p| p.snap.as_ref()).and_then(|s| s.unfinished);
+        let Some(unfinished) = unfinished else {
+            // Nothing to get out of. Said rather than ignored: a key that does nothing and says
+            // nothing is a key you press again harder.
+            self.git_say(i18n::msg_git_nothing_to_abort(lang).to_string(), false);
+            return;
+        };
+        self.git_write(move |root| crate::git::abort(root, unfinished));
+    }
+
+    /// Whether git has anything to say about the file the tree has selected.
+    ///
+    /// Read off the map the sidebar's own dots are drawn from, so the menu and the mark beside
+    /// the name always agree — a row with a dot offers the git items and a row without does not,
+    /// which is a rule you can see rather than one you have to learn. A file git has never been
+    /// told about counts: it has a dot too, and staging it is the obvious thing to want.
+    fn selected_file_is_versioned(&self) -> bool {
+        self.file_tree
+            .selected_path()
+            .is_some_and(|path| self.git_status.contains_key(&path) && path.is_file())
+    }
+
+    /// Stage or unstage the file the tree has selected, without going near the panel.
+    ///
+    /// Both are commands that change nothing you cannot change back, which is the whole reason
+    /// they can happen straight from a right-click. The answer lands in the status bar rather
+    /// than in the panel's notice line, because the panel is very likely not open.
+    fn git_file_action(&mut self, stage: bool) {
+        let lang = self.settings.lang;
+        let Some(path) = self.file_tree.selected_path() else { return };
+        let root = self.root.clone();
+        // On the frame thread: `git add` on one path is a few milliseconds, and unlike a commit
+        // it runs no hooks. The panel's own writes go to a thread because a pre-commit hook can
+        // run a test suite; nothing here can.
+        let outcome = if stage {
+            crate::git::stage(&root, &path)
+        } else {
+            crate::git::unstage(&root, &path)
+        };
+        self.status_message = match outcome {
+            Ok(said) if said.is_empty() => i18n::msg_git_done(lang).to_string(),
+            Ok(said) => said,
+            Err(complaint) => complaint,
+        };
+        // The dot beside the name is the thing that just changed, so it is asked again now
+        // rather than at the next sweep 700 ms away.
+        spawn_git_status_refresh(
+            self.root.clone(),
+            self.git_status_tx.clone(),
+            self.git_status_pending.clone(),
+        );
+        if self.git_panel.is_some() {
+            self.refresh_git_panel();
+        }
+    }
+
+    /// Opens the panel on the diff of the file the tree has selected.
+    fn git_show_file_in_panel(&mut self) {
+        self.open_git_panel_on(GitTab::Diff);
+    }
+
+    /// Opens the panel on the file the tree has selected, with the discard question already up.
+    ///
+    /// The question is not re-asked out here, and that is deliberate. Its rules — one letter,
+    /// every other key a no, and a flat refusal for a file git has never been told about — are
+    /// the most carefully written thing in the panel and the only ones guarding an action
+    /// nothing undoes. A second copy of them on the right-click would be a second copy to keep
+    /// right, and the one that went wrong would be the one nobody was watching.
+    ///
+    /// The panel may still be waiting on git when this runs, so the file is remembered and the
+    /// question goes up when the answer arrives.
+    fn git_ask_to_discard_the_tree_selection(&mut self) {
+        let Some(path) = self.file_tree.selected_path() else { return };
+        self.open_git_panel_on(GitTab::Status);
+        self.git_wanted = Some(GitWanted::Discard(path));
+        self.git_put_up_the_wanted_question();
+    }
+
+    /// Opens the panel on Status with the commit box up — the end of the sentence that starts by
+    /// staging a file from the same pop-up.
+    fn git_ask_for_a_message_in_the_panel(&mut self) {
+        self.open_git_panel_on(GitTab::Status);
+        self.git_wanted = Some(GitWanted::Commit);
+        self.git_put_up_the_wanted_question();
+    }
+
+    /// Moves the cursor to the file a right-click asked about and puts its question up.
+    ///
+    /// Does nothing until the snapshot is in: the list it has to find the file in does not exist
+    /// before then. Called both when the request is made and when the snapshot lands, so it
+    /// happens on whichever comes second.
+    fn git_put_up_the_wanted_question(&mut self) {
+        let lang = self.settings.lang;
+        let Some(wanted) = self.git_wanted.clone() else { return };
+        let Some(panel) = self.git_panel.as_mut() else {
+            self.git_wanted = None;
+            return;
+        };
+        if panel.snap.is_none() {
+            return;
+        }
+        let wanted = match wanted {
+            GitWanted::Commit => {
+                self.git_wanted = None;
+                self.git_ask_for_a_message();
+                return;
+            }
+            GitWanted::Discard(path) => path,
+        };
+        let Some(panel) = self.git_panel.as_mut() else { return };
+        let Some(snap) = panel.snap.as_ref() else { return };
+        let Some(top) = snap.top.clone() else {
+            self.git_wanted = None;
+            return;
+        };
+        let found = snap
+            .changes
+            .iter()
+            .position(|c| top.join(&c.path) == wanted)
+            .map(|at| (at, snap.changes[at].clone()));
+        self.git_wanted = None;
+        let Some((at, change)) = found else {
+            // Nothing to throw away. Said rather than opening a question about a file that is
+            // already what the last commit says it is.
+            panel.notice = Some((i18n::msg_git_file_unchanged(lang).to_string(), false));
+            return;
+        };
+        panel.selected = at;
+        panel.reveal();
+        if change.untracked() {
+            // The same refusal the panel gives, given here for the same reason: there is no
+            // earlier version to go back to, and finding that out by agreeing is too late.
+            if let Err(why) = crate::git::discard(std::path::Path::new("."), &change) {
+                panel.notice = Some((why, true));
+            }
+            return;
+        }
+        panel.prompt = Some(GitPrompt::Confirm(GitConfirm::Discard(change)));
+    }
+
+    /// Opens the panel already on a tab, which is how the Git menu reaches all five of them.
+    ///
+    /// Which tab you want is the question you arrive with — "what have I changed", "where am I"
+    /// — so answering it from the menu is better than opening on Status and asking you to press
+    /// Tab three times to get to the one you meant.
+    fn open_git_panel_on(&mut self, tab: GitTab) {
+        if self.git_panel.is_none() {
+            self.toggle_git_panel();
+        }
+        if let Some(panel) = self.git_panel.as_mut() {
+            panel.tab = tab;
+            panel.scroll = 0;
+            panel.selected = 0;
+            panel.detail = None;
+            panel.clamp_to_list();
+        }
+    }
+
+    /// Fetch, pull and push — the three that talk to another machine, and the reason they were
+    /// out of this panel for three releases.
+    ///
+    /// They are typed into a shell rather than run behind the panel, and that *is* the feature.
+    /// Any of them can stop to ask for a passphrase, a two-factor code or a host key, and a
+    /// modal box has nowhere to put such a question: run from here they would hang with it on a
+    /// pipe nobody can see, which is exactly the failure the original decision was avoiding.
+    /// A terminal is the thing that can ask it, and CleeCode has real ones a keypress away.
+    ///
+    /// So the panel closes and the shell takes the focus. Watching git talk to a server is
+    /// watching a terminal, and doing it from behind a box that covers the window is not
+    /// watching it at all.
+    fn git_remote(&mut self, op: crate::git::Remote) {
+        let lang = self.settings.lang;
+        // Asked of git rather than read off the panel's snapshot, and reachable with no panel
+        // open at all — the Git menu offers these three whether or not you have been in it. The
+        // snapshot would be free and can be wrong by the time it is used: the shell next door
+        // can change branch, and a push built on a stale answer pushes a different one.
+        let (branch, upstream) = crate::git::head_branch(&self.root);
+        let command = crate::git::remote_command(op, branch.as_deref(), upstream);
+        self.git_panel = None;
+        self.type_into_a_shell(&command);
+        self.status_message = i18n::msg_git_in_terminal(lang, &command);
+    }
+
+    /// Types a command at a shell prompt and puts the focus there.
+    ///
+    fn type_into_a_shell(&mut self, command: &str) {
+        let Some(at) = self.a_shell_to_type_into() else { return };
+        if let Some(term) = self.window_tab_mut(at) {
+            term.type_line(command);
+        }
+        self.active_terminal = at;
+        self.settings.show_terminal = true;
+        self.focus = Focus::Terminal;
+    }
+
+    /// A pane a shell command can be typed into, opening one if there is none free.
+    ///
+    /// Free means free, not merely quiet. A prompt with something running under it takes a typed
+    /// line as *input to that thing*, and when the thing is an interpreter the line lands in the
+    /// user's own transcript as their own mistake:
+    ///
+    ///     >>> python3 /home/ada/hello.py
+    ///     NameError: name 'python3' is not defined
+    ///
+    /// which is what pressing Run with a Python prompt open used to do. The rule that produced
+    /// it read "if every shell is busy, use the one you were last in, which is at least the one
+    /// you are looking at" — and the one you were last in is precisely the interpreter you were
+    /// working in. It is the third outing of the same mistake: `octave-cli-11.3.0` in 0.9.1 and
+    /// a capital `Python` in the 0.10 audit were both this, wearing a different hat.
+    ///
+    /// So when nothing is free a new terminal is opened instead. Run has to run, and a command
+    /// typed where it cannot run is worse than a pane nobody asked for. `None` only when a
+    /// terminal could not be started at all, and `new_terminal` has already said why.
+    fn a_shell_to_type_into(&mut self) -> Option<usize> {
+        if self.terminals.is_empty() {
+            self.new_terminal();
+        }
+        let free = self.terminals.iter().position(|w| {
+            w.active_tab().child_pid().map(|pid| !dnd::shell_is_busy(pid)).unwrap_or(false)
+        });
+        if free.is_some() {
+            return free;
+        }
+        let before = self.terminals.len();
+        self.new_terminal();
+        (self.terminals.len() > before).then(|| self.terminals.len() - 1)
     }
 
     /// Enter, which means the obvious thing for whichever list is in front of you: open the file,
@@ -2951,6 +4047,15 @@ impl App {
         let idx = self.pane_editor_index(self.editor_pane_focus);
         let Some(preview) = self.editors[idx].preview.as_mut() else { return };
         match control {
+            // The figure's own controls go to the session, not to the picture. Handled before
+            // everything else because a live figure tab is a preview *and* a figure, and on one
+            // the arrows mean the plot rather than the page.
+            ui::NavControl::FigLeft => return self.figure_nav_click(KeyCode::Left),
+            ui::NavControl::FigRight => return self.figure_nav_click(KeyCode::Right),
+            ui::NavControl::FigUp => return self.figure_nav_click(KeyCode::Up),
+            ui::NavControl::FigDown => return self.figure_nav_click(KeyCode::Down),
+            ui::NavControl::FigReset => return self.figure_nav_click(KeyCode::Char('r')),
+            ui::NavControl::FigExport => return self.figure_nav_click(KeyCode::Char('e')),
             ui::NavControl::PageBack => return self.turn_page(-1),
             ui::NavControl::PageForward => return self.turn_page(1),
             ui::NavControl::GoToPage => return self.begin_goto_page(),
@@ -5033,29 +6138,40 @@ impl App {
         if self.terminals.is_empty() {
             self.new_terminal();
         }
-        // A `.m` file when an Octave prompt is already open in one of the terminals: hand the
-        // script to that interpreter with `run(...)`. Starting a second Octave would be slow,
-        // would lose the session's variables, and (with --persist) would leave two sets of
-        // plot windows around. Typing the shell command at an Octave prompt is also just a
-        // syntax error, which is what used to happen.
+        // A file of a language whose prompt is already open in one of the panes: hand the script
+        // to *that* session — `run(...)` in Octave, `exec(open(...).read())` in Python, both of
+        // which run in the prompt's own namespace. Starting a second interpreter would be slow
+        // and would lose everything the session is holding.
         //
-        // Only Octave, deliberately, even though the machinery underneath now knows about
-        // Python too. An Octave prompt is nearly always *the* place the work is happening; a
-        // Python REPL open in a side terminal while you edit a web application is not where
-        // `manage.py` should run. Sending a whole file into a live Python session is a change
-        // of behaviour, so it belongs to the feature that asks for it — running a selection —
-        // rather than arriving unannounced under a button that already meant something else.
+        // Octave has worked this way since 0.9. Python deliberately did not, and the reason
+        // written here was that a Python REPL open in a side terminal while you edit a web
+        // application is not where `manage.py` should run. That reasoning describes a real
+        // session and misses the one CleeCode ships a preset for. In `clee -w pylab` the prompt
+        // *is* where the work is happening, and Run there did the only thing worse than running
+        // in the wrong place: it ran in a fresh shell that exited immediately, so the variables
+        // were gone before the panel could see them and the figures were drawn by a process that
+        // no longer existed. Three symptoms — no plot, no variables, an empty panel — one cause,
+        // and none of them said so.
+        //
+        // The narrow reading is still available and is the one that asks for it: Ctrl+Shift+X
+        // sends a cell or a selection and nothing else.
         let program = template.split_once(' ').map(|(p, _)| p).unwrap_or(&template);
-        let octave = crate::session::Language::Octave;
-        if octave.is_interpreter(program) {
+        // Absolute, because the session's own working directory is not necessarily the one the
+        // project was opened in — a `cd` at the prompt is an ordinary thing to have typed.
+        let named = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        for language in [crate::session::Language::Octave, crate::session::Language::Python] {
+            if !self.settings.run_in_session || !language.is_interpreter(program) {
+                continue;
+            }
             // Only the on-screen tab of each window is a candidate: running a script in a hidden
             // tab would be invisible and confusing.
             let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
-            if let Some(idx) = dnd::shell_running(octave, &pids) {
-                let command = octave.run_file(&path.to_string_lossy());
+            if let Some(idx) = dnd::shell_running(language, &pids) {
+                let command = language.run_file(&named.to_string_lossy());
                 if let Some(term) = self.window_tab_mut(idx) {
                     term.type_line(&command);
                 }
+                self.active_terminal = idx;
                 self.status_message = i18n::msg_run_started(lang, idx, &command);
                 return;
             }
@@ -5073,15 +6189,14 @@ impl App {
             venved
         };
         let command = expand_placeholders(&template, &path);
-        let idx = self
-            .terminals
-            .iter()
-            .position(|w| w.active_tab().child_pid().map(|pid| !dnd::shell_is_busy(pid)).unwrap_or(false))
-            .unwrap_or(self.active_terminal.min(self.terminals.len().saturating_sub(1)));
-
+        // Into a shell, and a new one if every pane is an interpreter's prompt. See
+        // `a_shell_to_type_into`: typing `python3 hello.py` at a `>>>` is a NameError with the
+        // user's name on it, and it is what this did.
+        let Some(idx) = self.a_shell_to_type_into() else { return };
         if let Some(term) = self.window_tab_mut(idx) {
             term.type_line(&command);
         }
+        self.active_terminal = idx;
         self.status_message = i18n::msg_run_started(lang, idx, &command);
     }
 
@@ -5169,8 +6284,28 @@ impl App {
             &self.settings.registered_venvs,
             &self.settings.run_commands,
             &self.project_settings.run_commands,
+            self.run_session_target(&menu.ext),
             self.settings.lang,
         )
+    }
+
+    /// Whether a file of this extension could run in a session, and whether one is open.
+    ///
+    /// The process table is read here rather than in `run_rows`, which is a pure layout function
+    /// with tests that would otherwise need a running interpreter. It is read once, when the
+    /// drop-down opens, which is the same cost Run itself pays.
+    fn run_session_target(&self, ext: &str) -> SessionTarget {
+        let Some(language) = crate::session::Language::of_path(std::path::Path::new(&format!("x.{ext}")))
+        else {
+            return SessionTarget::default();
+        };
+        let pids: Vec<Option<u32>> =
+            self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+        SessionTarget {
+            possible: true,
+            open: dnd::shell_running(language, &pids).is_some(),
+            wanted: self.settings.run_in_session,
+        }
     }
 
     fn handle_run_menu_key(&mut self, key: KeyEvent) {
@@ -5202,7 +6337,18 @@ impl App {
             return;
         }
         match rows.swap_remove(index).action {
-            RunRowAction::SelectVenv(venv) => self.select_venv(venv),
+            RunRowAction::UseSession => {
+                self.settings.run_in_session = true;
+                self.status_message = i18n::msg_run_session_chosen(self.settings.lang).to_string();
+                let _ = self.settings.save();
+            }
+            RunRowAction::SelectVenv(venv) => {
+                // Choosing an interpreter is choosing *not* to use the session: they are two
+                // answers to the same question, and a list where both look chosen answers
+                // neither.
+                self.settings.run_in_session = false;
+                self.select_venv(venv);
+            }
             RunRowAction::Browse => self.begin_venv_browse(),
             RunRowAction::Register => self.begin_venv_register(),
             RunRowAction::EditCommand(scope) => self.begin_run_command_edit(ext, scope),
@@ -5442,15 +6588,38 @@ impl App {
         self.focus = order[new_pos];
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) {
-        if self.show_splash {
-            self.show_splash = false;
-            return;
-        }
-        if self.show_about {
-            self.show_about = false;
-            return;
-        }
+    /// Whether a box is up that owns the keyboard.
+    ///
+    /// The gate in front of [`Self::dispatch_modal_key`], and the same question a paste has to
+    /// ask: see the comment at its one use in [`Self::handle_key`] for why they are one function
+    /// and not two lists.
+    fn a_modal_owns_the_keyboard(&self) -> bool {
+        self.context_menu.is_some()
+            || self.unsaved_prompt.is_some()
+            || self.show_save_as
+            || self.run_menu.is_some()
+            || self.venv_register.is_some()
+            || self.run_command_edit.is_some()
+            || self.picker.is_some()
+            || self.find.is_some()
+            || self.show_goto
+            || self.show_search
+            || self.show_new_entry
+            || self.show_delete_confirm
+            || self.show_rename
+            || self.show_terminal_rename
+            || self.show_workspace_save
+            || self.git_panel.is_some()
+            || self.inspector.is_some()
+            || self.manual.is_some()
+            || self.resize_mode
+            || self.show_settings
+            || self.menu.active
+    }
+
+    /// Hands the key to whichever box is up. In the order the boxes can appear over one another,
+    /// which is why it is a chain and not a match.
+    fn dispatch_modal_key(&mut self, key: KeyEvent) {
         // The context menu grabs keys ahead of everything else while it's up.
         if self.context_menu.is_some() {
             self.handle_context_menu_key(key);
@@ -5536,6 +6705,34 @@ impl App {
         }
         if self.menu.active {
             self.handle_menu_key(key);
+            return;
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.show_splash {
+            self.show_splash = false;
+            return;
+        }
+        if self.show_about {
+            self.show_about = false;
+            return;
+        }
+        // Every box that owns the keyboard, behind one question.
+        //
+        // The chain is the dispatch and this is the gate in front of it, rather than the chain
+        // being both. Two things need this answer — a key goes to the box, and so does a
+        // *paste*, which is keys arriving by another route — and while they worked it out
+        // separately the paste knew about four boxes out of twenty: pasting a commit message
+        // into the git panel typed it into the file behind the panel instead, silently, with the
+        // box still sitting there asking for one.
+        //
+        // Making it the gate is what keeps them in step from here on. A box added to the chain
+        // and not to the predicate never gets a key at all; one added to the predicate and not
+        // to the chain swallows every key. Either way it is wrong the first time it is opened,
+        // rather than wrong only for a paste, which is the failure that lasted.
+        if self.a_modal_owns_the_keyboard() {
+            self.dispatch_modal_key(key);
             return;
         }
 
@@ -5643,6 +6840,18 @@ impl App {
             }
             KeyCode::Char('g') | KeyCode::Char('G') if ctrl && shift => {
                 self.open_context_menu_for_focus();
+                return;
+            }
+            // J and L, next to each other, for a pair that is used as one: go and come back.
+            // Neither is a letter anyone would guess, and neither had a better claim — the
+            // mnemonic keys are spent, and F12 is not available here for the reason no feature
+            // in CleeCode uses a function key.
+            KeyCode::Char('j') | KeyCode::Char('J') if ctrl && shift => {
+                self.lsp_go_to_definition();
+                return;
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') if ctrl && shift => {
+                self.lsp_jump_back();
                 return;
             }
             KeyCode::Char('d') | KeyCode::Char('D') if ctrl && shift => {
@@ -5915,6 +7124,21 @@ impl App {
             MenuAction::GotoLine => self.open_goto(),
             MenuAction::SearchProject => self.begin_project_search(),
             MenuAction::ToggleGitPanel => self.toggle_git_panel(),
+            MenuAction::GitStatus => self.open_git_panel_on(GitTab::Status),
+            MenuAction::GitChanges => self.open_git_panel_on(GitTab::Diff),
+            MenuAction::GitHistory => self.open_git_panel_on(GitTab::Graph),
+            MenuAction::GitBranches => self.open_git_panel_on(GitTab::Branches),
+            MenuAction::GitStashes => self.open_git_panel_on(GitTab::Stashes),
+            MenuAction::GitFetch => self.git_remote(crate::git::Remote::Fetch),
+            MenuAction::GitPull => self.git_remote(crate::git::Remote::Pull),
+            MenuAction::GitPush => self.git_remote(crate::git::Remote::Push),
+            MenuAction::GitStageFile => self.git_file_action(true),
+            MenuAction::GitUnstageFile => self.git_file_action(false),
+            MenuAction::GitFileDiff => self.git_show_file_in_panel(),
+            MenuAction::GitDiscardFile => self.git_ask_to_discard_the_tree_selection(),
+            MenuAction::GitCommit => self.git_ask_for_a_message_in_the_panel(),
+            MenuAction::GoToDefinition => self.lsp_go_to_definition(),
+            MenuAction::JumpBack => self.lsp_jump_back(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
             MenuAction::Rename => self.start_rename(),
@@ -7656,7 +8880,8 @@ impl App {
             }
             Focus::Editor => (ContextTarget::Editor, areas.editor),
         };
-        self.context_menu = Some(ContextMenu::new(target, (rect.x + 2, rect.y + 1)));
+        let versioned = self.selected_file_is_versioned();
+        self.context_menu = Some(ContextMenu::new(target, (rect.x + 2, rect.y + 1), versioned));
     }
 
     /// Right-click: focus the frame under the pointer (selecting the clicked tree row first, so
@@ -7672,20 +8897,26 @@ impl App {
                         self.file_tree.selected = idx;
                     }
                 }
-                self.context_menu = Some(ContextMenu::new(ContextTarget::Sidebar, (col, row)));
+                // Asked after the row under the pointer has been selected, above: the git
+                // half of the menu is about *that* file, and asking first would answer for
+                // whichever row the cursor happened to be on before the click.
+                let versioned = self.selected_file_is_versioned();
+                self.context_menu =
+                    Some(ContextMenu::new(ContextTarget::Sidebar, (col, row), versioned));
                 return;
             }
         }
         if within(areas.editor, col, row) {
             self.focus = Focus::Editor;
-            self.context_menu = Some(ContextMenu::new(ContextTarget::Editor, (col, row)));
+            self.context_menu = Some(ContextMenu::new(ContextTarget::Editor, (col, row), false));
             return;
         }
         if let Some(term_areas) = &areas.terminals {
             if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {
                 self.focus = Focus::Terminal;
                 self.active_terminal = i;
-                self.context_menu = Some(ContextMenu::new(ContextTarget::Terminal, (col, row)));
+                self.context_menu =
+                    Some(ContextMenu::new(ContextTarget::Terminal, (col, row), false));
             }
         }
     }
@@ -7711,7 +8942,9 @@ impl App {
                     display_row += 1;
                 }
                 if display_row == target {
-                    return Some(item.action);
+                    // A caption is a row you can click on and nothing happens, which is what it
+                    // looks like: no highlight follows the pointer over one either.
+                    return (!item.header).then_some(item.action);
                 }
                 display_row += 1;
             }
@@ -7929,21 +9162,78 @@ mod tests {
         assert_eq!(workspace_after_root_change(Some("default")), None);
     }
 
-    /// Three tabs on one key: Tab has to come back round in both directions, or the last tab is
-    /// reachable only by passing through the other two.
+    /// Five tabs on one key: Tab has to come back round in both directions, or the last tab is
+    /// reachable only by passing through all the others.
     #[test]
     fn the_git_panel_tabs_cycle_both_ways() {
         assert_eq!(GitTab::Status.cycle(1), GitTab::Diff);
-        assert_eq!(GitTab::Diff.cycle(1), GitTab::Log);
-        assert_eq!(GitTab::Log.cycle(1), GitTab::Branches);
-        assert_eq!(GitTab::Branches.cycle(1), GitTab::Status, "round, not stuck at the end");
-        assert_eq!(GitTab::Status.cycle(-1), GitTab::Branches, "and round the other way");
-        assert_eq!(GitTab::Log.cycle(-1), GitTab::Diff);
+        assert_eq!(GitTab::Diff.cycle(1), GitTab::Graph);
+        assert_eq!(GitTab::Graph.cycle(1), GitTab::Branches);
+        assert_eq!(GitTab::Branches.cycle(1), GitTab::Stashes);
+        assert_eq!(GitTab::Stashes.cycle(1), GitTab::Status, "round, not stuck at the end");
+        assert_eq!(GitTab::Status.cycle(-1), GitTab::Stashes, "and round the other way");
+        assert_eq!(GitTab::Graph.cycle(-1), GitTab::Diff);
 
-        // Only the two lists whose rows can be acted on carry a cursor. A highlight on a diff
-        // line would be a promise the panel does not keep.
-        assert!(GitTab::Status.picks_a_row() && GitTab::Branches.picks_a_row());
-        assert!(!GitTab::Diff.picks_a_row() && !GitTab::Log.picks_a_row());
+        // Every list whose rows can be acted on carries a cursor, and the diff — which is text
+        // rather than a list of things — does not. A highlight on a diff line would be a promise
+        // the panel does not keep.
+        for tab in GitTab::ALL {
+            assert_eq!(tab.picks_a_row(), tab != GitTab::Diff, "{tab:?}");
+        }
+    }
+
+    /// The cursor lands on commits and never on the `|/` between them, in both directions and at
+    /// both ends. A highlight on a piece of the drawing would be offering an action on a line.
+    #[test]
+    fn the_graph_cursor_steps_over_the_rows_that_are_only_lines() {
+        use crate::git::GraphCommit;
+        let commit = |hash: &str, parents: &[&str]| GraphCommit {
+            hash: hash.to_string(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            refs: Vec::new(),
+            author: String::new(),
+            when: String::new(),
+            subject: String::new(),
+        };
+        // The shape with a link row at both ends of the middle: a merge, a branch, and the join.
+        let graph = vec![
+            commit("m", &["a", "b"]),
+            commit("a", &["c"]),
+            commit("b", &["c"]),
+            commit("c", &[]),
+        ];
+        let rows = crate::git_graph::lay_out(&graph);
+        let art: Vec<String> = rows.iter().map(crate::git_graph::Row::art).collect();
+        assert_eq!(art, vec!["*", "|\\", "* |", "| *", "|/", "*"], "the shape this is checked on");
+
+        let mut panel = GitPanel {
+            tab: GitTab::Graph,
+            scroll: 0,
+            selected: 0,
+            snap: None,
+            rows,
+            detail: None,
+            prompt: None,
+            busy: false,
+            notice: None,
+            body_rows: 10,
+        };
+        // Down from the merge skips the `|\` and lands on the next commit.
+        panel.move_by(1);
+        assert_eq!(panel.selected, 2);
+        panel.move_by(1);
+        assert_eq!(panel.selected, 3);
+        // Down again crosses the `|/` to the root.
+        panel.move_by(1);
+        assert_eq!(panel.selected, 5);
+        // Past the bottom it stays on the last commit rather than sliding off it.
+        panel.move_by(1);
+        assert_eq!(panel.selected, 5);
+        // And back up, over the same link row.
+        panel.move_by(-1);
+        assert_eq!(panel.selected, 3);
+        panel.move_by(-10);
+        assert_eq!(panel.selected, 0, "the top is a commit, not the row above one");
     }
 
     #[test]
@@ -8247,6 +9537,7 @@ mod tests {
             &registered,
             &commands,
             &none,
+            SessionTarget::default(),
             Lang::En,
         );
 
@@ -8270,7 +9561,7 @@ mod tests {
         assert!(!rows[0].active && !rows[1].active && !rows[3].active && !rows[4].active);
 
         // With no venv selected, the marker moves to the first row.
-        let rows = run_rows("py", None, &available, &registered, &commands, &none, Lang::En);
+        let rows = run_rows("py", None, &available, &registered, &commands, &none, SessionTarget::default(), Lang::En);
         assert!(rows[0].active);
     }
 
@@ -8283,14 +9574,14 @@ mod tests {
 
         // A venv means nothing to pdflatex, so the venv list stays out of the way entirely and
         // the two command rows are the whole of what decides how a .tex file runs.
-        let rows = run_rows("tex", Some(".venv"), &available, &[], &commands, &none, Lang::En);
+        let rows = run_rows("tex", Some(".venv"), &available, &[], &commands, &none, SessionTarget::default(), Lang::En);
         assert_eq!(rows.len(), 2);
         assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
         assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
         assert!(matches!(rows[1].action, RunRowAction::EditCommand(RunScope::Project)));
 
         // An extension with no command still gets both rows — that is how one is set.
-        let rows = run_rows("md", None, &available, &[], &commands, &none, Lang::En);
+        let rows = run_rows("md", None, &available, &[], &commands, &none, SessionTarget::default(), Lang::En);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].detail, None);
         assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
@@ -8298,6 +9589,51 @@ mod tests {
 
     /// The marker is the only thing in the menu that answers "which of these two wins", and
     /// getting it wrong is how you typeset the wrong master file and blame the editor.
+    /// The session row, and the one thing about it that is easy to get wrong: the tick means
+    /// "what Run would do right now", so wanting the session and not having one leaves the tick
+    /// on the interpreter Run will actually start.
+    #[test]
+    fn the_session_row_is_ticked_only_when_there_is_a_session() {
+        let commands = std::collections::HashMap::from([("py".to_string(), "python3 {file}".to_string())]);
+        let none = std::collections::HashMap::new();
+        let available = vec![".venv".to_string()];
+        let rows = |session: SessionTarget| {
+            run_rows("py", Some(".venv"), &available, &[], &commands, &none, session, Lang::En)
+        };
+
+        // A language with no session at all — LaTeX — does not get the row.
+        let tex = run_rows("tex", None, &[], &[], &none, &none, SessionTarget::default(), Lang::En);
+        assert!(!matches!(tex[0].action, RunRowAction::UseSession));
+
+        // Wanted and open: the session is what Run would use, and nothing else is ticked.
+        let ticked = rows(SessionTarget { possible: true, open: true, wanted: true });
+        assert!(matches!(ticked[0].action, RunRowAction::UseSession));
+        assert!(ticked[0].active);
+        // Counted over the interpreter rows alone. The two command rows below carry a tick of
+        // their own for a different question — which of the two files the command comes from —
+        // and one answer each is exactly right.
+        let interpreters = |rows: &[RunRow]| {
+            rows.iter()
+                .filter(|r| matches!(r.action, RunRowAction::UseSession | RunRowAction::SelectVenv(_)))
+                .filter(|r| r.active)
+                .count()
+        };
+        assert_eq!(interpreters(&ticked), 1, "one answer, not two");
+
+        // Wanted and none open: Run falls back to the chosen venv, so the tick goes there.
+        let fallen = rows(SessionTarget { possible: true, open: true, wanted: false });
+        assert!(!fallen[0].active);
+        assert!(fallen.iter().any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_)))));
+        assert_eq!(interpreters(&fallen), 1);
+        let no_prompt = rows(SessionTarget { possible: true, open: false, wanted: true });
+        assert!(!no_prompt[0].active, "there is nothing to hand the file to");
+        assert!(no_prompt.iter().any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_)))));
+
+        assert_eq!(interpreters(&no_prompt), 1);
+        // And it says which of the two it is, because the row means different things either way.
+        assert_ne!(no_prompt[0].detail, ticked[0].detail);
+    }
+
     #[test]
     fn the_marker_follows_the_command_that_would_actually_run() {
         let global =
@@ -8307,20 +9643,20 @@ mod tests {
         let none = std::collections::HashMap::new();
 
         // No override: the shared command is in force.
-        let rows = run_rows("tex", None, &[], &[], &global, &none, Lang::En);
+        let rows = run_rows("tex", None, &[], &[], &global, &none, SessionTarget::default(), Lang::En);
         assert!(rows[0].active && !rows[1].active);
         assert_eq!(rows[1].detail, None, "nothing to show for a project that overrides nothing");
 
         // Overridden: the marker moves, and both commands stay visible so the one being
         // shadowed is not a mystery.
-        let rows = run_rows("tex", None, &[], &[], &global, &overridden, Lang::En);
+        let rows = run_rows("tex", None, &[], &[], &global, &overridden, SessionTarget::default(), Lang::En);
         assert!(!rows[0].active && rows[1].active);
         assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
         assert_eq!(rows[1].detail.as_deref(), Some("latexmk main.tex"));
 
         // An override with no global command behind it still wins, and nothing is marked as
         // shared because there is nothing shared to mark.
-        let rows = run_rows("tex", None, &[], &[], &none, &overridden, Lang::En);
+        let rows = run_rows("tex", None, &[], &[], &none, &overridden, SessionTarget::default(), Lang::En);
         assert!(!rows[0].active && rows[1].active);
     }
 
