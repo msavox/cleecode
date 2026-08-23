@@ -1,4 +1,4 @@
-% Sample script for the Run button. `octave --persist` keeps the interpreter (and any
+% Sample script for the Run button. `octave --no-gui --persist` keeps the interpreter (and any
 % plot windows) alive after it finishes, so the session stays inspectable.
 printf("Hello from CleeCode\n");
 printf("octave:  %s\n", version());

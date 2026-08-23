@@ -1480,3 +1480,20 @@ dentro — cosa che altrimenti si legge nel grigetto in fondo alla barra. Una fu
 il nome, perché a chiederlo sono in tre — il disegno, il click e il mnemonico — e "Ottavio" è una
 colonna più corto di "CleeCode": una larghezza diversa fra disegno e hit-test manderebbe ogni
 click sul menu sbagliato, e solo a chi usa un preset.
+
+## 0.11.2 — chi ha chiamato octave-gui (2026-08-23)
+
+L'utente: «ho visto crashare octave-gui — lo hai chiamato tu?». Sì, indirettamente, e questa è
+quasi certamente la causa vera dei due grafici, più ancora del `figure(n)` della 0.11.1.
+
+Il **preset** avvia `octave --no-gui --persist`. Il comando di default del **pulsante Run** era
+`octave --persist {file}`, senza `--no-gui`, e i due non sono andati d'accordo per tutto il tempo
+in cui sono esistiti entrambi. Su una macchina con uno schermo, `octave` liscio avvia l'Octave
+**grafico**: un IDE intero in una finestra sua, col suo editor e le sue finestre di figure. Quindi
+premere Run su un `.m` senza una sessione aperta apriva un secondo IDE accanto a questo, il
+grafico finiva nella sua finestra invece che nella scheda, e su questo Mac `octave-gui` è caduto.
+
+Adesso il default dice `--no-gui`, e — la metà che conta — **la stringa vecchia viene riscritta**
+in `settings.toml`: chi ha eseguito un `.m` anche una volta ce l'ha salvata, e correggere solo il
+default avrebbe corretto solo le installazioni nuove. Riconosciuta alla lettera e solo fra le
+stringhe che CleeCode ha scritto: un comando modificato dall'utente è suo, qualunque cosa dica.

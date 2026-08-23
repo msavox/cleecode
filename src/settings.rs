@@ -204,7 +204,16 @@ fn default_terminal_scrollback() -> usize {
 /// On Windows plain `octave` is the GUI launcher, which would detach from the embedded
 /// terminal; `octave-cli` is the console interpreter that runs the script in place.
 fn default_octave_command() -> &'static str {
-    if cfg!(windows) { "octave-cli --persist {file}" } else { "octave --persist {file}" }
+    // `--no-gui`, and it is not decoration. On a machine with a display `octave` starts the
+    // *graphical* Octave — a whole IDE in a window of its own, with its own editor and its own
+    // figure windows — because that is what plain `octave` means there. Run on a `.m` file
+    // therefore opened a second IDE beside this one, drew the plot in its window rather than in
+    // the tab, and on this Mac fell over: `octave-gui` crashed. The preset has always said
+    // `--no-gui`; the Run button never did, and the two disagreed for as long as both existed.
+    //
+    // `octave-cli` on Windows for the same reason and by another name: there is no `--no-gui`
+    // wrapper there to ask.
+    if cfg!(windows) { "octave-cli --persist {file}" } else { "octave --no-gui --persist {file}" }
 }
 
 fn default_run_commands() -> std::collections::HashMap<String, String> {
@@ -334,9 +343,21 @@ impl Settings {
         for (ext, command) in default_run_commands() {
             self.run_commands.entry(ext).or_insert(command);
         }
-        // The pre-`--persist` Octave commands closed every plot the moment a script ended.
-        // Nobody would pick that deliberately, so upgrade those exact entries in place.
-        let stale = matches!(self.run_commands.get("m").map(String::as_str), Some("octave {file}" | "octave-cli {file}"));
+        // Octave commands nobody would have chosen deliberately, upgraded in place.
+        //
+        // The first two are from before `--persist`, and closed every plot the moment a script
+        // ended. The third is the one that shipped as a default until 0.11.1: without
+        // `--no-gui`, `octave` starts the graphical Octave, so Run opened a second IDE in its
+        // own window — and that is where the plot went instead of into the tab. Anybody who ran
+        // a `.m` file has that string saved in their settings.toml, so leaving it would leave
+        // the bug fixed only for new installs.
+        //
+        // Matched exactly, and only against the strings CleeCode itself wrote. A command the
+        // user has edited is theirs, whatever it says.
+        let stale = matches!(
+            self.run_commands.get("m").map(String::as_str),
+            Some("octave {file}" | "octave-cli {file}" | "octave --persist {file}")
+        );
         if stale {
             self.run_commands.insert("m".to_string(), default_octave_command().to_string());
         }
@@ -423,6 +444,32 @@ mod tests {
     /// which is a different way of working and not a feature being switched off. Where the
     /// choice is not the user's, the row says which way it went and why — a switch that reads
     /// "off" while the tabs keep arriving is a broken switch.
+    /// Run must not start the *graphical* Octave.
+    ///
+    /// Plain `octave` on a machine with a display is a whole IDE in a window of its own, with
+    /// its own editor and its own figure windows — so Run opened a second one beside this, the
+    /// plot went there instead of into the tab, and on one Mac `octave-gui` crashed outright.
+    /// The preset always said `--no-gui`; the button did not.
+    #[test]
+    fn run_never_asks_for_the_graphical_octave() {
+        let default = default_octave_command();
+        assert!(default.contains("--no-gui") || default.starts_with("octave-cli"), "{default}");
+
+        // And the string that shipped as the default until 0.11.1 is upgraded in place: anybody
+        // who ran a .m file has it saved, so fixing only the default fixes only new installs.
+        let mut settings = Settings::default();
+        settings.run_commands.insert("m".to_string(), "octave --persist {file}".to_string());
+        settings.merge_run_command_defaults();
+        assert_eq!(settings.run_commands.get("m").map(String::as_str), Some(default));
+
+        // A command the user wrote is theirs, whatever it says.
+        let mine = "octave --persist --eval \"disp(1)\" {file}".to_string();
+        let mut settings = Settings::default();
+        settings.run_commands.insert("m".to_string(), mine.clone());
+        settings.merge_run_command_defaults();
+        assert_eq!(settings.run_commands.get("m"), Some(&mine));
+    }
+
     #[test]
     fn the_plot_row_says_when_the_choice_is_not_the_users_to_make() {
         use i18n::Lang;
