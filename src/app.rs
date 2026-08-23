@@ -5999,9 +5999,14 @@ impl App {
     /// shell for everything else.
     fn run_as_preview(&mut self) -> bool {
         let idx = self.pane_editor_index(self.editor_pane_focus);
-        // Already a preview: ▶ means refresh. A rendered tab re-reads its buffer, a document
-        // re-rasterises the page in front of you.
-        if let Some(preview) = self.editors[idx].preview.as_ref().filter(|p| p.refreshable()) {
+        // Indexed through `get`, because with every tab closed there is no buffer to index and
+        // `pane_editor_index` answers 0 for an empty list — which is the honest answer to "which
+        // tab is active" and a panic to `editors[0]`. Run with no tab open did exactly that:
+        // caught by the shield, so the session survived with a line in the status bar, but ▶ on
+        // an empty window is an ordinary thing to press and it must simply say there is nothing
+        // to run. `editor()` has taken this care since the last tab became closeable.
+        let Some(editor) = self.editors.get(idx) else { return false };
+        if let Some(preview) = editor.preview.as_ref().filter(|p| p.refreshable()) {
             let page = preview.page();
             let rendered = preview.source.is_some();
             let path = self.editors[idx].path.clone();

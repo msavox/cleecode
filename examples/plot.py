@@ -1,4 +1,4 @@
-"""Prova dei plot dal lato Python — l'equivalente di plot.m per pylab.
+"""Prova dei plot dal lato Python — l'equivalente di grafico.m per pylab.
 
 Si può usare in tre modi, ed è scritto per provarli tutti e tre:
 
