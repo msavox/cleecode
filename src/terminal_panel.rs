@@ -112,13 +112,16 @@ pub struct TerminalPanel {
     /// Set once the shell's end of the pty closes (process exited, whether via `exit`,
     /// Ctrl+D, a command that dies on Ctrl+C, a crash, or an ssh disconnect).
     pub exited: Arc<AtomicBool>,
-    /// Raised when the pane is torn down, so the reader thread stops at its next wakeup.
+    /// Raised when the pane is torn down, so the reader thread mutes: it keeps draining the
+    /// master and throws the bytes away instead of parsing them into a screen that will never
+    /// be drawn again.
     ///
-    /// Killing the shell is normally enough: the last slave fd closes and the read returns EOF.
-    /// A grandchild that inherited the pty and outlived the hangup keeps that end open, though,
-    /// and then the read blocks with nobody left to care about the answer. The flag turns the
-    /// next byte — or the eventual EOF — into an exit instead of another parse into a screen
-    /// that will never be drawn again.
+    /// Draining, not stopping, is the load-bearing half. A dying shell can have output still in
+    /// the pty — fish repaints its prompt on the way out — and the kernel will not let its exit
+    /// finish until someone reads it; a reader that stopped early left `shutdown`'s `wait()`
+    /// parked on a process forever stuck mid-exit, which was the editor frozen at quit. The
+    /// thread ends at EOF, when the last slave fd is truly gone — the way a real terminal reads
+    /// until hangup.
     stop: Arc<AtomicBool>,
     /// Counts the times the reader thread has fed the parser. Shared with that thread the same
     /// way the stop flag is, and only ever compared with its own previous value: what it answers
@@ -577,11 +580,17 @@ impl TerminalPanel {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        // Checked here rather than only at the top: the pane can be closed while
-                        // this thread sits inside `read`, and whatever came back then belongs to
-                        // a terminal nobody is looking at any more.
+                        // A closed pane's output is discarded, never left unread. Stopping the
+                        // thread here instead — which is what this used to do — deadlocked the
+                        // quit: a shell dying with output still in the pty (fish repaints its
+                        // prompt on the way out; /bin/sh dies silently, which is why no test
+                        // saw it) sits in the kernel's tty drain waiting for a reader, `exit`
+                        // never finishes, and the `wait()` in shutdown parks forever. So the
+                        // flag mutes the parser and the replies, and only EOF — the far end
+                        // truly gone — ends the thread, the way a real terminal reads until
+                        // hangup.
                         if stop_clone.load(Ordering::Relaxed) {
-                            break;
+                            continue;
                         }
                         let data = &buf[..n];
                         {
@@ -831,12 +840,32 @@ impl TerminalPanel {
     /// died an hour ago must go through it as quietly as one that is still running.
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // A shell that has already exited needs no signal; it only needs collecting. Asking
-        // first also skips the grace period `kill` would otherwise spend waiting for a process
-        // that is already a zombie.
+        // A shell that has already exited needs no signal; it only needs collecting.
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             self.hangup_foreground_group();
+            // portable-pty's `kill` is not a kill: on unix it sends SIGHUP ("instead of trying
+            // to kill the process", in its own words) and nothing ever escalates. /bin/sh dies
+            // to that; an interactive fish does not, and `wait()` below on a shell that ignored
+            // the hangup is the whole editor frozen at quit, teardown never reached, terminal
+            // left on the alternate screen. So the hangup is the offer, and SIGKILL is the
+            // deadline: a short grace for the shell to leave on its own terms, then the signal
+            // no process can decline — which is what makes the wait below finite.
             let _ = self.child.kill();
+            let mut grace = 6u8;
+            while grace > 0 && matches!(self.child.try_wait(), Ok(None)) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                grace -= 1;
+            }
+            #[cfg(unix)]
+            if matches!(self.child.try_wait(), Ok(None)) {
+                if let Some(pid) = self.child.process_id() {
+                    // SAFETY: signalling a pid this pane spawned and has not yet waited, so it
+                    // cannot have been recycled.
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
         }
         let _ = self.child.wait();
     }
@@ -1279,6 +1308,55 @@ mod tests {
         panel.flush_pending();
         assert_eq!(panel.pending_command.as_deref(), Some("echo hello"), "not before the prompt");
         assert!(!panel.cleared);
+    }
+
+    /// A pane whose shell ignores the hangup still closes, and in bounded time.
+    ///
+    /// This is the fish-at-quit freeze: portable-pty's `kill` only ever sends SIGHUP, /bin/sh
+    /// dies to it so every other lifecycle test passed, and an interactive fish shrugged it off
+    /// — leaving `wait()` in the panel's Drop parked forever, the quit never finishing, and the
+    /// terminal stranded on the alternate screen. The pane here execs a shell that traps HUP
+    /// away, which is the same situation made deliberate; the drop must still return, because
+    /// the shutdown escalates to the signal no process can decline.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_ignores_the_hangup_cannot_hold_the_pane_open() {
+        let mut panel = TerminalPanel::with_startup(
+            24,
+            80,
+            Path::new("/"),
+            // `exec` keeps the pid the panel will wait on; single quotes read the same to fish
+            // and to sh, so the line survives whatever $SHELL the tests run under.
+            Some("exec sh -c 'trap \"\" HUP; echo clee-hup-ignored; sleep 300'"),
+        )
+        .expect("a shell must be spawnable");
+        let pid = panel.child_pid().expect("a spawned shell has a pid");
+
+        // Wait until the trap is provably in place — the echo runs after it — otherwise the
+        // drop below races the exec and can pass by hanging up the original, un-trapped shell.
+        let deadline = Instant::now() + STARTUP_MAX + Duration::from_secs(8);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            panel.flush_pending();
+            screen = lock_poisoned(&panel.parser).screen().contents();
+            if screen.lines().any(|l| l.trim() == "clee-hup-ignored") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            screen.lines().any(|l| l.trim() == "clee-hup-ignored"),
+            "the trap never ran; the shell's screen was:\n{screen}"
+        );
+
+        let closing = Instant::now();
+        drop(panel);
+        assert!(
+            closing.elapsed() < Duration::from_secs(5),
+            "dropping the pane took {:?}: the wait is unbounded again",
+            closing.elapsed()
+        );
+        assert!(!alive(pid), "the HUP-proof shell outlived its pane");
     }
 
     /// And the whole of it against a real shell, because the failure lived in the line editor
