@@ -1766,3 +1766,199 @@ prima di riprovarci: una Linux con il display inoltrato via ssh, che è esattame
 configurazione che si è rotta.
 
 Il transcript è dell'utente. Un frame rate non vale una riga scritta lì dentro.
+
+---
+
+# L'ASTICELLA (2026-08-24) — da progetto serio a IDE quotidiano
+
+> Scritta dopo una review completa del codice (sei passate indipendenti, finding verificati
+> riga per riga) e dopo la campagna di correzioni che ne è seguita — sei ondate, dalla perdita
+> di dati all'emulazione dei terminali. Questa sezione guarda avanti: cosa manca perché un
+> programmatore C, C++, Rust, TypeScript o Java possa *viverci dentro* una giornata di lavoro,
+> e in che ordine costruirlo. Octave e pylab restano il capitolo che nessun altro ha — il
+> differenziatore, non l'identità.
+
+## Il posizionamento, prima delle release
+
+CleeCode non vince contro Zed o VS Code sul loro terreno, e non deve provarci. Il terreno suo
+è un altro: **l'IDE che funziona via ssh a configurazione zero**. Un binario, batterie incluse,
+il mouse funziona, l'output del compilatore si clicca. Contro VS Code Remote (che vuole il suo
+server sulla macchina in fondo) e contro Neovim (che è un progetto di configurazione prima che
+un editor), quella frase regge già oggi. Le release qui sotto servono a renderla vera per una
+giornata intera, non solo per la prima ora.
+
+Tre vincoli che non cambiano, qualunque release: niente dipendenze C (la lezione di git2);
+un solo modello di concorrenza — thread, `mpsc`, `poll_*` nel ciclo dei frame — niente tokio;
+e ogni funzionalità verificata guidando il binario vero, con controlli che dimostrano di
+guardare nel posto giusto (la lezione pagata tre volte fra 0.9.1 e 0.10).
+
+## 0.13 — Il debito ripagato ← *il lavoro c'è, va cotto*
+
+Le sei ondate della review: le quattro strade che perdevano modifiche non salvate, le
+scritture atomiche ovunque, il Drop dei terminali (SIGHUP al gruppo, kill, wait), lo stack
+overflow del walk, l'evidenziazione incrementale, il ciclo eventi che disegna solo quando
+serve, le posizioni LSP nelle unità giuste, il server che riparte, il pannello Git sul
+repository appena nato, bracketed paste e mouse dentro i pane, il paste in tutte le caselle.
+
+**Quello che la 0.13 chiede prima di uscire non è codice: è uso.** Una-due settimane di lavoro
+vero, incluso il ramo che ha trovato i bug di ogni release passata — la sessione ssh su Linux.
+Le modifiche al ciclo eventi e al writer dei pty sono profonde e i test unitari non bastano a
+battezzarle: la roadmap di questo stesso file insegna che i bug veri arrivano dall'uso, non da
+`cargo test`.
+
+E due cose piccole che la review ha segnato:
+- **i driver pty entrano in CI** (`scripts/drive_*.py`). Girano su ubuntu-latest contro il
+  binario vero; sono l'unica verifica dell'interfaccia interattiva e oggi girano solo a mano.
+- **il guard tag↔versione nella release**: una riga che confronta il tag con `Cargo.toml`
+  prima di pubblicare binari che direbbero una versione sbagliata.
+
+## 0.14 — L'editor con un agente dentro
+
+Deciso il 2026-08-24, su indicazione dell'utente: prima dei temi e prima dell'LSP completo,
+perché nel 2026 è la prima domanda che un utente nuovo fa a un editor — e perché qui la
+risposta costa poco. **Claude Code, opencode e codex sono programmi da terminale, e CleeCode
+ospita terminali veri.** Nessun editor GUI parte da questa posizione: loro devono *incorporare*
+un agente, noi dobbiamo solo presentargli bene la casa. Le ondate della review hanno appena
+reso vero il prerequisito senza saperlo: mouse reporting, bracketed paste, tasti funzione e
+glifi wide dentro i pane sono esattamente ciò che serve a una TUI come Claude Code per essere
+usabile in un riquadro.
+
+L'integrazione è in quattro pezzi, dal più economico al più profondo:
+
+**1. I preset.** `clee -w claude`, `clee -w opencode`, `clee -w codex`: editor a sinistra,
+l'agente in una scheda del terminale, una shell semplice nell'altra — la stessa macchina dei
+preset octave/pylab, che esiste apposta. Un preset è una promessa su cosa compare quando scrivi
+il suo nome, e i driver la verificano scrivendolo.
+
+**2. Un seam solo, N agenti.** La lezione dell'handoff numerico — *una funzionalità con due
+backend, non due lavori* — vale identica: un adattatore `Agent` accanto a `Language` in
+`session.rs` che risponde alle stesse domande (quali nomi di programma sono quell'agente, come
+si nomina un file al suo prompt, come gli si consegna un blocco di testo senza incollarlo riga
+per riga). Su quel seam: **mandare contesto con un tasto** — il file corrente, la selezione,
+o il diagnostico sotto il cursore — scritto al prompt dell'agente come riferimento
+`percorso:riga`, via file d'appoggio dove serve, con la stessa disciplina di `Ctrl+Shift+X`.
+Il ritorno esiste già ed è gratis: gli agenti stampano `file:riga` di continuo, e il doppio
+click di `locate.rs` li apre da sempre.
+
+**3. I file che l'agente tocca si vedono da soli.** Un agente edita su disco; dalla 0.13 le
+modifiche esterne si rilevano su *tutti* i buffer, non solo quello a fuoco — un file aperto si
+aggiorna mentre Claude ci lavora, e uno sporco avvisa invece di farsi sovrascrivere. Il
+pannello Git è la review: lo stato mostra cosa ha toccato la sessione, il diff mostra cosa ha
+scritto, e scartare un file è già una domanda in rosso. Da valutare in corsa: una vista "cosa è
+cambiato dall'ultimo prompt", se l'uso la chiede.
+
+**4. Il canale profondo: un server MCP, non tre integrazioni.** Tutti e tre gli agenti parlano
+MCP; CleeCode può *essere* un server MCP su stdio — `clee --mcp` — che espone quello che solo
+l'editor sa: i file aperti e quello attivo, la selezione, i diagnostici del language server,
+e un piccolo set di azioni (apri questo file a questa riga). Una implementazione, tre
+consumatori; la configurazione per-agente è una riga nel suo config, documentata nel manuale.
+È JSON-RPC su stdio, cioè esattamente la macchina già scritta due volte (client LSP, stub dei
+test) — niente tokio, niente dipendenze nuove, il modello thread+mpsc+poll che c'è già.
+Stessa regola del pannello Git per le azioni: leggere ha rischio zero e si espone largo,
+scrivere passa dal consenso dell'utente.
+
+**Cosa deliberatamente NON si fa:** nessuna chat ricostruita dentro l'editor, nessuna chiave
+API custodita da CleeCode, nessun agente reimplementato. Gli agenti esistono, sono bravi, e
+sono TUI: il valore di CleeCode è essere il posto migliore dove farli girare — con l'editor,
+il compilatore cliccabile e il pannello Git attorno — non una copia peggiore di uno di loro.
+Chi ha l'agente ce l'ha già; chi non ce l'ha ha un editor completo senza.
+
+## 0.15 — Presentabile a un estraneo
+
+Le due cose che ogni nuovo utente incontra nei primi cinque minuti, nell'ordine in cui le
+incontra.
+
+**I temi.** Oggi ogni colore è cablato per un fondo quasi nero: su un terminale chiaro la barra
+di stato e l'albero sono ai limiti dell'illeggibile, ed è la prima impressione. Il lavoro è in
+due metà che vanno insieme: i colori della UI raccolti in una palette (una struct, non un file
+di configurazione — prima si separa, poi eventualmente si espone), e il tema syntect scelto di
+conseguenza — quelli chiari sono già compilati nel binario, `base16-ocean.light` non costa un
+byte. Un'impostazione a tre valori: scuro, chiaro, auto. L'auto legge il terminale dove si può
+(OSC 11 con timeout, come già si interrogano device attributes e kitty) e ripiega su scuro.
+
+**I keybinding rimappabili.** I vincoli di questo progetto — niente F-key, niente Alt+lettera,
+niente Ctrl+freccia — sono sacrosanti *per un layout italiano su macOS* e arbitrari per
+chiunque altro. La forma: una tabella `[keys]` in `settings.toml`, azione = corda, che
+sovrascrive i default uno alla volta; i default non si toccano. Il test del manuale
+(`every_advertised_key_is_written_down`) deve imparare che una scorciatoia pubblicizzata può
+essere stata rimappata — il manuale mostra quella effettiva. Non è un sistema di keymap alla
+vim: è la possibilità di spostare una corda che sul tuo layout non esiste.
+
+## 0.16 — Il refactoring quotidiano
+
+La release che decide se un professionista ci resta. Due fronti, entrambi già appoggiati su
+seam esistenti.
+
+**Il language server per intero.** Diagnostici, definizione, hover e completamento sono il 60%;
+il 40% che manca è quello che si usa ogni ora:
+- *references* (`Ctrl+Shift+?` da decidere sulla tabella delle lettere libere) in un picker,
+  come i risultati di ricerca;
+- *rename* — il primo comando LSP che **scrive**, e la disciplina è quella del pannello Git:
+  anteprima di cosa cambia e dove, applicazione atomica file per file (le scritture atomiche
+  della 0.13 sono il prerequisito, ed è per questo che il rename arriva dopo di loro), un solo
+  passo di undo per i buffer aperti, rifiuto onesto per i file fuori dai buffer che il server
+  vuole toccare e non stanno in nessuna tab;
+- *format* on demand (non on-save: on-save è una politica, e le politiche arrivano dopo i
+  meccanismi) via `textDocument/formatting`, applicato come un edit unico;
+- *document symbols* in un picker — l'outline è una tendina, non un pannello;
+- *trigger characters*: il popup che si apre su `.` e `::` è esattamente il punto in cui la
+  sorgente LSP supera le parole del buffer, e oggi non scatta;
+- la *lista dei diagnostici* di progetto, un `PickerKind` in più sui dati che già arrivano.
+
+**Sostituisci nel progetto.** La ricerca c'è; manca la metà che scrive. Stessa disciplina del
+rename perché *è* lo stesso problema: anteprima raggruppata per file, `find::compile` resta
+l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale ancora),
+applicazione atomica, buffer aperti aggiornati in un passo di undo ciascuno, file su disco
+riscritti con la strada temp+rename.
+
+## 0.17 — La potenza sotto le dita
+
+- **La selezione a colonna scrive su ogni riga.** È il multi-cursor nella forma che il progetto
+  ha già mezzo costruito: digitare con un blocco attivo inserisce su tutte le righe del blocco,
+  Backspace idem. Il multi-cursor arbitrario (Ctrl+D "prossima occorrenza") viene dopo, se
+  viene: la colonna copre l'80% dei casi con il 20% della macchina.
+- **Autosave dei buffer sporchi.** Lo scudo tiene vivo il processo, ma un SIGKILL o uno stack
+  overflow perdono ancora tutto quello che non era salvato. Una copia dei dirty ogni pochi
+  secondi in una cartella di recovery, offerta al riavvio se più recente del file. Chiude per
+  davvero la promessa scritta nel README: *it does not close on you* — e quando succede lo
+  stesso, non ti è costato niente.
+- **La barra di stato dice cosa stai editando**: encoding ed EOL accanto a riga:colonna, con
+  la conversione CRLF↔LF a un comando. Piccolo, ma è il genere di assenza che un utente Windows
+  o un file legacy trasformano in sfiducia.
+- **Un modo large-file dichiarato**: sopra una soglia (50 MB?) niente highlighting, niente
+  indice del completamento, undo a profondità ridotta — e la barra che lo dice. Meglio un
+  editor che dichiara i suoi limiti di uno che li scopre congelandosi.
+
+## 1.0 — la definizione, non una data
+
+La 1.0 non è una release di funzionalità: è un elenco di frasi che devono essere vere.
+
+1. Una giornata di lavoro C/Rust/TS — edit, build, test, commit, refactor — senza uscire
+   dall'editor e senza incontrare un limite non dichiarato.
+2. Le stesse cose, via ssh su una Ubuntu, con la stessa esperienza.
+3. Un utente su layout tedesco con terminale chiaro non deve toccare il TOML per avere colori
+   leggibili e scorciatoie raggiungibili.
+4. Un crash — di qualunque tipo, scudo o non scudo — non costa più di qualche secondo di
+   lavoro.
+5. I driver pty girano in CI su ogni push, e nessun controllo "guarda nel posto sbagliato".
+6. `clee -w claude` (o opencode, o codex) apre un posto di lavoro completo: l'agente in un
+   pane usabile, il contesto dell'editor a un tasto, i suoi edit visibili nei buffer e nel
+   pannello Git senza toccare niente.
+
+## Cosa resta fuori, e perché è una decisione
+
+- **Il debugging DAP** (gdb/lldb per C e Rust). La risposta dichiarata resta: il debugger gira
+  nel terminale accanto, che è vero e onesto per il pubblico ssh. DAP è una release intera a
+  sé — protocollo, UI dei frame, watch — e farla a metà produrrebbe la cosa peggiore: un
+  debugger che sembra esserci. Il giorno che si fa, il pannello del workspace numerico è il
+  precedente da seguire (breakpoint nel gutter, frame nel pannello — la forma c'è già).
+- **Tree-sitter.** syntect con la scala di stati incrementale della 0.13 basta per
+  l'evidenziazione; tree-sitter porterebbe una dipendenza C per grammatica e un secondo
+  modello del testo da tenere in pari con la rope. Se ne riparla solo se il folding semantico
+  o la selezione strutturale diventano priorità — non prima.
+- **Un sistema di plugin.** Le due tabelle (`run_commands`, `language_servers`) più il
+  contratto file del workspace (versionato, documentato in `docs/design/`) sono già
+  un'estensibilità in embrione. Formalizzarla è lavoro da dopo-1.0: un'API si può aggiungere,
+  una sbagliata non si può togliere.
+- **tokio, git2, e ogni seconda copia di un modello che c'è già.** Le ragioni scritte nella
+  valutazione del 2026-08-17 non sono invecchiate di un giorno.
