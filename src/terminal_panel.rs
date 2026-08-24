@@ -3,6 +3,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,20 @@ fn next_pane_id() -> u64 {
 /// cells at the pane's full width, so the cost is rows x columns x 32 bytes per shell — 16 MB
 /// for 2000 lines across a wide 250-column pane, and every tab pays it separately.
 pub const DEFAULT_SCROLLBACK: usize = 2000;
+
+/// How much input a pane will hold on the way to its shell before it starts throwing writes
+/// away.
+///
+/// There has to be a limit, because a pty stops accepting bytes as soon as nobody is reading the
+/// other end — a job suspended with Ctrl+Z, a program wedged on something else — and a write into
+/// a full one blocks until that changes, which may be never. Doing that on the UI thread froze
+/// the whole editor, every pane in it, over one paste into one dead shell.
+///
+/// 256 messages is far more than a session ever queues while a shell is alive: keystrokes are one
+/// message each and a paste is one message however long it is, and a reading shell drains them as
+/// fast as they arrive. Reaching the cap therefore means the shell is not reading, and the honest
+/// answer then is to lose the input rather than the editor.
+const WRITE_QUEUE: usize = 256;
 
 pub fn set_scrollback_len(lines: usize) {
     SCROLLBACK_LEN.store(lines, Ordering::Relaxed);
@@ -84,9 +99,12 @@ pub fn lock_poisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct TerminalPanel {
     master: Box<dyn MasterPty + Send>,
-    /// Shared with the reader thread so it can answer terminal queries (DSR/DA) inline,
-    /// while the main thread still uses it for user keystrokes.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// The way in to the shell. Everything CleeCode sends — keystrokes, pastes, mouse reports,
+    /// the startup command, and the reader thread's answers to terminal queries — is handed to
+    /// this queue and written by a thread of this pane's own. Nobody else ever touches the pty's
+    /// write end, which is what keeps a shell that has stopped reading from taking the editor
+    /// down with it. See `WRITE_QUEUE` and `write_input`.
+    input: SyncSender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub rows: u16,
@@ -210,30 +228,61 @@ fn typed_line(command: &str) -> Vec<u8> {
     bytes
 }
 
-/// A wheel notch written the way the program asked to receive it.
+/// What the pointer just did, in the only three shapes the mouse protocols have a word for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseAction {
+    Press,
+    Release,
+    /// The pointer moved into another cell with a button held down.
+    Drag,
+}
+
+/// Button numbers as the protocols count them: left is 0, middle 1, right 2, and the wheel is
+/// numbered from 64 as if it were two more buttons that can only ever be pressed.
+pub const BUTTON_LEFT: u16 = 0;
+pub const BUTTON_MIDDLE: u16 = 1;
+pub const BUTTON_RIGHT: u16 = 2;
+const BUTTON_WHEEL_UP: u16 = 64;
+const BUTTON_WHEEL_DOWN: u16 = 65;
+
+/// A crossterm button as the mouse protocols number it.
+pub fn mouse_button_code(button: crossterm::event::MouseButton) -> u16 {
+    use crossterm::event::MouseButton;
+    match button {
+        MouseButton::Left => BUTTON_LEFT,
+        MouseButton::Middle => BUTTON_MIDDLE,
+        MouseButton::Right => BUTTON_RIGHT,
+    }
+}
+
+/// One mouse event written the way the program asked to receive it.
 ///
-/// Wheel up is button 64 and wheel down 65, and both are reported as presses with no release —
-/// there is no such thing as letting go of a wheel. Coordinates are one-based, counted from the
-/// top-left of the pane rather than of the window, since the pane is the whole world as far as
-/// the program inside it knows.
+/// Coordinates are one-based, counted from the top-left of the pane rather than of the window,
+/// since the pane is the whole world as far as the program inside it knows. Motion is not a code
+/// of its own but a flag on the button being held, which is what the extra 32 is.
 ///
-/// The two older encodings pack each number into one byte with an offset of 32, which is why
-/// they cannot describe anything past column 223; a program that asked for one of them gets the
-/// events it can express and none of the ones it cannot, rather than a byte that would land it
-/// somewhere else entirely. SGR has no such limit and is what anything modern asks for.
-fn encode_wheel(
+/// The two encodings that predate SGR pack each number into one byte with an offset of 32, which
+/// is why they cannot describe anything past column 223; a program that asked for one of them
+/// gets the events it can express and none of the ones it cannot, rather than a byte that would
+/// land it somewhere else entirely. They also have a single code for "a button was released" and
+/// never say which one it was — only SGR carries that, in the final character. SGR has neither
+/// limit and is what anything modern asks for.
+fn encode_mouse(
     encoding: vt100::MouseProtocolEncoding,
-    up: bool,
+    button: u16,
+    action: MouseAction,
     row: u16,
     col: u16,
 ) -> Vec<u8> {
-    let button: u16 = if up { 64 } else { 65 };
+    let held = button + if action == MouseAction::Drag { 32 } else { 0 };
     let (row, col) = (row.saturating_add(1), col.saturating_add(1));
     match encoding {
         vt100::MouseProtocolEncoding::Sgr => {
-            format!("\x1b[<{button};{col};{row}M").into_bytes()
+            let end = if action == MouseAction::Release { 'm' } else { 'M' };
+            format!("\x1b[<{held};{col};{row}{end}").into_bytes()
         }
         vt100::MouseProtocolEncoding::Utf8 => {
+            let code = if action == MouseAction::Release { 3 } else { held };
             let mut out = b"\x1b[M".to_vec();
             let mut push = |n: u32| {
                 let mut buf = [0u8; 4];
@@ -241,16 +290,72 @@ fn encode_wheel(
                     char::from_u32(n + 32).unwrap_or(' ').encode_utf8(&mut buf).as_bytes(),
                 );
             };
-            push(u32::from(button));
+            push(u32::from(code));
             push(u32::from(col));
             push(u32::from(row));
             out
         }
         vt100::MouseProtocolEncoding::Default => {
+            let code = if action == MouseAction::Release { 3 } else { held };
             let byte = |n: u16| u8::try_from(n + 32).unwrap_or(u8::MAX);
-            vec![0x1b, b'[', b'M', byte(button), byte(col.min(223)), byte(row.min(223))]
+            vec![0x1b, b'[', b'M', byte(code), byte(col.min(223)), byte(row.min(223))]
         }
     }
+}
+
+/// A wheel notch. Both directions are reported as presses with no release — there is no such
+/// thing as letting go of a wheel.
+fn encode_wheel(
+    encoding: vt100::MouseProtocolEncoding,
+    up: bool,
+    row: u16,
+    col: u16,
+) -> Vec<u8> {
+    let button = if up { BUTTON_WHEEL_UP } else { BUTTON_WHEEL_DOWN };
+    encode_mouse(encoding, button, MouseAction::Press, row, col)
+}
+
+/// Whether a program in this mode wants to hear about this kind of event.
+///
+/// The modes are a ladder, and a program that asked for a rung near the bottom means it: X10 mode
+/// asks for presses and nothing else, and sending it releases it never asked for is how a program
+/// ends up acting on a click twice.
+fn mode_reports(mode: vt100::MouseProtocolMode, action: MouseAction) -> bool {
+    use vt100::MouseProtocolMode as Mode;
+    match mode {
+        Mode::None => false,
+        Mode::Press => action == MouseAction::Press,
+        Mode::PressRelease => action != MouseAction::Drag,
+        Mode::ButtonMotion | Mode::AnyMotion => true,
+    }
+}
+
+/// What closes a bracketed paste. Also what has to be taken *out* of anything pasted: a clipboard
+/// carrying this sequence would otherwise end the bracket early and leave the rest of its payload
+/// arriving as ordinary typing — which, at a shell prompt, means running whatever came after it.
+/// That is the whole attack bracketed paste exists to prevent, so the guard is stripped rather
+/// than escaped.
+const PASTE_END: &str = "\x1b[201~";
+const PASTE_START: &str = "\x1b[200~";
+
+/// Pasted text as the program in the pane should receive it.
+///
+/// When the program has turned bracketed paste on it is asking to be told that what follows was
+/// pasted rather than typed, and every program that asks does something with the answer: a shell
+/// holds a multi-line paste on the edit line instead of running each line the moment its newline
+/// arrives, and vim stops re-indenting. Sending the text bare — which is what happened here —
+/// makes a paste indistinguishable from typing, so a copied block of commands executes itself.
+///
+/// A program that never asked gets exactly what it used to, because to one of those the brackets
+/// are not markers, they are six characters of input.
+pub fn bracketed_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut out = PASTE_START.as_bytes().to_vec();
+    out.extend_from_slice(text.replace(PASTE_END, "").as_bytes());
+    out.extend_from_slice(PASTE_END.as_bytes());
+    out
 }
 
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
@@ -422,7 +527,31 @@ impl TerminalPanel {
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
-        let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
+
+        // The pty's write end belongs to a thread of its own from here on.
+        //
+        // Writing into a pty blocks whenever the far end has stopped reading, and that is an
+        // ordinary state for a shell to be in — a job suspended, a program waiting on something
+        // else — not a fault. Done from the UI thread it stopped the whole editor: one paste into
+        // one such pane and every other pane, the file tree and the keyboard went with it. Done
+        // from the reader thread, which used to answer terminal queries while holding the writer's
+        // mutex, it wedged that lock and took the UI thread down the next time it typed.
+        //
+        // So there is no shared writer any more, and no lock. Senders queue bytes and this thread
+        // is the only thing that ever blocks on them. It ends when the last sender goes: the
+        // panel's on `Drop`, the reader thread's when it stops.
+        let mut pty_writer = pair.master.take_writer()?;
+        let (input, outbox) = sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        std::thread::spawn(move || {
+            while let Ok(chunk) = outbox.recv() {
+                // A write that fails means the far end is gone for good, unlike one that merely
+                // blocks, so there is nothing left for this thread to do.
+                if pty_writer.write_all(&chunk).is_err() {
+                    break;
+                }
+                let _ = pty_writer.flush();
+            }
+        });
 
         let parser =
             Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LEN.load(Ordering::Relaxed))));
@@ -439,7 +568,7 @@ impl TerminalPanel {
         let produced_output = Arc::new(AtomicBool::new(false));
         let last_output_clone = Arc::clone(&last_output_ms);
         let produced_clone = Arc::clone(&produced_output);
-        let writer_clone = Arc::clone(&writer);
+        let input_clone = input.clone();
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -474,13 +603,16 @@ impl TerminalPanel {
                                 let p = lock_poisoned(&parser_clone);
                                 p.screen().cursor_position()
                             };
-                            if let Ok(mut w) = writer_clone.lock() {
-                                for q in &queries {
-                                    let resp = q.response(crow, ccol);
-                                    let _ = w.write_all(&resp);
-                                }
-                                let _ = w.flush();
+                            // Queued like anything else the pane sends, and queued as one
+                            // message so a burst of queries cannot fill the channel on its own.
+                            // `try_send` because this thread must keep draining the shell's
+                            // output whatever the state of the write side: blocking here would
+                            // freeze the pane's display as well as its input.
+                            let mut reply = Vec::new();
+                            for q in &queries {
+                                reply.extend_from_slice(&q.response(crow, ccol));
                             }
+                            let _ = input_clone.try_send(reply);
                         }
                     }
                     Err(_) => break,
@@ -491,7 +623,7 @@ impl TerminalPanel {
 
         Ok(TerminalPanel {
             master: pair.master,
-            writer,
+            input,
             child,
             parser,
             rows,
@@ -645,11 +777,22 @@ impl TerminalPanel {
         !self.revealed
     }
 
-    pub fn write_input(&mut self, bytes: &[u8]) {
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
-        }
+    /// Hands input to the shell, without ever waiting for it to be taken.
+    ///
+    /// `false` says the write was dropped: the queue was full, which means the shell has not read
+    /// a byte for a long time, or its end of the pty is gone. Losing a paste is a bad outcome and
+    /// the caller is welcome to say so; the outcome it replaces is worse, because the alternative
+    /// to dropping is blocking, and this is called from the thread that draws every frame and
+    /// reads every key. One unreadable pane used to stop all of them.
+    pub fn write_input(&mut self, bytes: &[u8]) -> bool {
+        self.input.try_send(bytes.to_vec()).is_ok()
+    }
+
+    /// Pasted text, bracketed when the program in this pane asked for that. See
+    /// [`bracketed_paste`].
+    pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        let bracketed = lock_poisoned(&self.parser).screen().bracketed_paste();
+        bracketed_paste(text, bracketed)
     }
 
     /// How many times output has been fed to this pane's screen. Only differences matter.
@@ -665,10 +808,14 @@ impl TerminalPanel {
     /// Ends the shell in this pane and collects it.
     ///
     /// Dropping the panel closes nothing on its own: the reader thread holds a dup of the pty
-    /// master and an `Arc` of the writer, so both ends stay open and the shell never notices
-    /// that its window is gone. A tab closed that way left a shell — and the `npm run dev`
-    /// inside it — running invisibly for the rest of the session, holding its port, and left a
-    /// thread parsing its output into a screen nobody would ever draw again.
+    /// master and the writer thread holds its write end, so both stay open and the shell never
+    /// notices that its window is gone. A tab closed that way left a shell — and the
+    /// `npm run dev` inside it — running invisibly for the rest of the session, holding its port,
+    /// and left a thread parsing its output into a screen nobody would ever draw again.
+    ///
+    /// The two threads need no signal of their own. The reader stops at the flag or at EOF, and
+    /// when it does it drops the last copy of the input queue's sender — which is what ends the
+    /// writer, since a channel with no senders left cannot be waited on.
     ///
     /// What a real terminal does when its window closes is hang up: the kernel sends SIGHUP to
     /// the foreground process group of the controlling tty. That is done here by hand, because
@@ -850,6 +997,31 @@ impl TerminalPanel {
         Some(encode_wheel(screen.mouse_protocol_encoding(), up, row, col))
     }
 
+    /// A button event as the program in this pane asked to be told about it, at cell `(row, col)`
+    /// counted from the pane's top-left. `None` when it never asked, or asked for a mode that has
+    /// no word for this kind of event.
+    ///
+    /// The wheel already reached these programs; buttons did not, so htop's function-key bar,
+    /// lazygit's panels and a mouse-mode vim's cursor could all be *seen* but not clicked, and
+    /// the click silently became the start of a CleeCode text selection instead. Which is still
+    /// what it is with Shift held — that is the caller's half of this, and it is the escape hatch
+    /// every terminal emulator provides, because a program that has grabbed the mouse otherwise
+    /// leaves no way at all to copy text off its screen.
+    pub fn mouse_report(
+        &self,
+        button: u16,
+        action: MouseAction,
+        row: u16,
+        col: u16,
+    ) -> Option<Vec<u8>> {
+        let parser = lock_poisoned(&self.parser);
+        let screen = parser.screen();
+        if !mode_reports(screen.mouse_protocol_mode(), action) {
+            return None;
+        }
+        Some(encode_mouse(screen.mouse_protocol_encoding(), button, action, row, col))
+    }
+
     /// Keeps a cell inside the screen, so a drag that leaves the pane still selects up to the
     /// edge instead of being ignored.
     fn clamp_cell(&self, (row, col): (u16, u16)) -> (u16, u16) {
@@ -910,6 +1082,13 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
             if ctrl {
+                // Ctrl+Space is NUL, and has been since the control codes were laid out around
+                // the letters: `@` is 0x40, so Ctrl+@ is 0, and space shares that seat on every
+                // keyboard. Falling through to the byte below sent a plain 0x20 instead, which is
+                // why tmux's alternate prefix and emacs' set-mark did nothing inside a pane.
+                if c == ' ' {
+                    return meta(vec![0x00]);
+                }
                 let upper = c.to_ascii_uppercase();
                 if upper.is_ascii_alphabetic() {
                     let byte = (upper as u8) - b'A' + 1;
@@ -935,6 +1114,30 @@ pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
         KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
         KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
         KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
+        KeyCode::Insert => vec![0x1b, b'[', b'2', b'~'],
+        KeyCode::F(n) => function_key(n),
+        _ => Vec::new(),
+    }
+}
+
+/// What xterm sends for F1-F12, and therefore what every terminfo entry expects.
+///
+/// These were missing entirely, and the reason is worth writing down so it is not undone: CleeCode
+/// binds nothing of its own to a function key, because an Italian keyboard makes them awkward to
+/// reach. That is a rule about *our* shortcuts, and it had quietly become a rule about the pty as
+/// well — so the program in the pane never heard F1-F12 either, which is htop's entire bottom bar,
+/// mc's, and half of what a curses program offers a user.
+///
+/// The first four are the VT100 keypad sequences (`\x1bOP`..`\x1bOS`); the rest are numbered CSI
+/// sequences, and the numbering skips 22 for reasons that are now only historical. Anything past
+/// F12 is left alone rather than guessed at.
+fn function_key(n: u8) -> Vec<u8> {
+    match n {
+        1..=4 => vec![0x1b, b'O', b'P' + (n - 1)],
+        5 => b"\x1b[15~".to_vec(),
+        6..=10 => format!("\x1b[{}~", 11 + u16::from(n)).into_bytes(),
+        11 => b"\x1b[23~".to_vec(),
+        12 => b"\x1b[24~".to_vec(),
         _ => Vec::new(),
     }
 }
@@ -1215,6 +1418,124 @@ mod tests {
         assert_eq!(encode_wheel(Utf8, true, 0, 0), b"\x1b[M`!!".to_vec());
     }
 
+    /// What a program that asked for the mouse expects a *button* to look like — the half that
+    /// was missing, so htop's bottom bar and lazygit's panels could be seen but never clicked.
+    #[test]
+    fn a_button_is_reported_the_way_the_program_asked() {
+        use vt100::MouseProtocolEncoding::{Default, Sgr};
+        use MouseAction::{Drag, Press, Release};
+
+        // SGR: the button number, one-based coordinates, and a final letter that says which way
+        // it went — the only encoding that can tell a release from a press at all.
+        assert_eq!(encode_mouse(Sgr, BUTTON_LEFT, Press, 4, 9), b"\x1b[<0;10;5M".to_vec());
+        assert_eq!(encode_mouse(Sgr, BUTTON_LEFT, Release, 4, 9), b"\x1b[<0;10;5m".to_vec());
+        assert_eq!(encode_mouse(Sgr, BUTTON_MIDDLE, Press, 0, 0), b"\x1b[<1;1;1M".to_vec());
+        assert_eq!(encode_mouse(Sgr, BUTTON_RIGHT, Press, 0, 0), b"\x1b[<2;1;1M".to_vec());
+        // Motion is the button plus 32, not a code of its own.
+        assert_eq!(encode_mouse(Sgr, BUTTON_LEFT, Drag, 1, 2), b"\x1b[<32;3;2M".to_vec());
+        assert_eq!(encode_mouse(Sgr, BUTTON_RIGHT, Drag, 1, 2), b"\x1b[<34;3;2M".to_vec());
+
+        // The old encoding offsets every number by 32, and has one code for "something was
+        // released" that never says what.
+        assert_eq!(encode_mouse(Default, BUTTON_LEFT, Press, 0, 0), vec![0x1b, b'[', b'M', 32, 33, 33]);
+        assert_eq!(encode_mouse(Default, BUTTON_RIGHT, Press, 0, 0), vec![0x1b, b'[', b'M', 34, 33, 33]);
+        let released = vec![0x1b, b'[', b'M', 35, 33, 33];
+        assert_eq!(encode_mouse(Default, BUTTON_LEFT, Release, 0, 0), released);
+        assert_eq!(encode_mouse(Default, BUTTON_RIGHT, Release, 0, 0), released);
+        assert_eq!(encode_mouse(Default, BUTTON_LEFT, Drag, 0, 0), vec![0x1b, b'[', b'M', 64, 33, 33]);
+    }
+
+    /// A program gets the kinds of event it asked for and no others. X10 mode wants presses
+    /// alone, and a release it never asked for is how a menu ends up opening twice.
+    #[test]
+    fn a_program_hears_only_the_events_its_mode_has_a_word_for() {
+        use vt100::MouseProtocolMode as Mode;
+        use MouseAction::{Drag, Press, Release};
+        for action in [Press, Release, Drag] {
+            assert!(!mode_reports(Mode::None, action), "nothing asked for the mouse");
+        }
+        assert!(mode_reports(Mode::Press, Press));
+        assert!(!mode_reports(Mode::Press, Release) && !mode_reports(Mode::Press, Drag));
+        assert!(mode_reports(Mode::PressRelease, Release));
+        assert!(!mode_reports(Mode::PressRelease, Drag), "no motion without asking for it");
+        assert!(mode_reports(Mode::ButtonMotion, Drag) && mode_reports(Mode::AnyMotion, Drag));
+    }
+
+    /// The regression, against a real parser: a click had nowhere to go. The wheel already
+    /// reached a program that asked for the mouse; the buttons were dropped on the floor and
+    /// quietly became the start of a CleeCode text selection instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_asked_for_the_mouse_gets_the_buttons() {
+        let mut panel = TerminalPanel::with_startup(
+            10,
+            40,
+            Path::new("/"),
+            // Alternate screen, mouse reporting with motion, SGR encoding — what lazygit or a
+            // mouse-mode vim turns on. `sleep` holds it there while this looks at it.
+            Some("printf '\\033[?1049h\\033[?1002h\\033[?1006h' && sleep 30"),
+        )
+        .expect("a shell must be spawnable to test one");
+
+        let deadline = Instant::now() + STARTUP_MAX;
+        while Instant::now() < deadline {
+            panel.flush_pending();
+            if panel.mouse_report(BUTTON_LEFT, MouseAction::Press, 0, 0).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            panel.mouse_report(BUTTON_LEFT, MouseAction::Press, 4, 9).as_deref(),
+            Some(&b"\x1b[<0;10;5M"[..]),
+            "a press must be handed to a program that asked for it"
+        );
+        assert_eq!(
+            panel.mouse_report(BUTTON_LEFT, MouseAction::Release, 4, 9).as_deref(),
+            Some(&b"\x1b[<0;10;5m"[..])
+        );
+        assert_eq!(
+            panel.mouse_report(BUTTON_LEFT, MouseAction::Drag, 4, 9).as_deref(),
+            Some(&b"\x1b[<32;10;5M"[..])
+        );
+    }
+
+    /// A pasted block of shell commands must arrive as a paste, not as typing. Bare, every
+    /// newline in it submits a line the moment it lands — which is a copied web page running
+    /// itself at your prompt.
+    #[test]
+    fn a_paste_is_bracketed_only_for_a_program_that_asked_for_it() {
+        let text = "cd /tmp\nrm -rf junk\n";
+        assert_eq!(
+            bracketed_paste(text, true),
+            format!("\x1b[200~{text}\x1b[201~").into_bytes(),
+            "a program that turned the mode on has to be told where the paste ends"
+        );
+        // Off, it gets exactly what it used to: to a program that never asked, the guards are
+        // not markers, they are six characters of input.
+        assert_eq!(bracketed_paste(text, false), text.as_bytes().to_vec());
+
+        // A clipboard carrying the end guard cannot use it to break out of the bracket and have
+        // the rest of itself read as typing — which is the attack the mode exists to stop.
+        let hostile = "harmless\x1b[201~\nrm -rf ~\n";
+        let wrapped = String::from_utf8(bracketed_paste(hostile, true)).unwrap();
+        assert_eq!(wrapped.matches("\x1b[201~").count(), 1, "one end, and it is ours");
+        assert!(wrapped.ends_with("\x1b[201~"));
+        assert!(wrapped.contains("harmless\nrm -rf ~\n"), "the text itself survives: {wrapped:?}");
+    }
+
+    /// The other regression the parser can be asked about directly: a pane only brackets a paste
+    /// while the program in it has the mode on.
+    #[test]
+    fn the_parser_decides_whether_a_paste_is_bracketed() {
+        let mut parser = vt100::Parser::new(4, 20, 0);
+        assert!(!parser.screen().bracketed_paste());
+        parser.process(b"\x1b[?2004h");
+        assert!(parser.screen().bracketed_paste(), "the mode a shell turns on at its prompt");
+        parser.process(b"\x1b[?2004l");
+        assert!(!parser.screen().bracketed_paste());
+    }
+
     /// The regression: a program that turns mouse reporting on scrolls a view of its own — the
     /// wheel has to reach it. It did not, so anything on the alternate screen (Claude Code,
     /// htop, a mouse-mode vim) could not be scrolled at all: our own history is empty there, and
@@ -1270,6 +1591,60 @@ mod tests {
         // Plain text is untouched.
         assert_eq!(press(KeyCode::Char('d'), KeyModifiers::NONE), vec![b'd']);
         assert_eq!(press(KeyCode::Char('è'), KeyModifiers::NONE), "è".as_bytes().to_vec());
+
+        // Ctrl+Space is NUL, not a space with a modifier nobody can see. tmux's alternate prefix
+        // and emacs' set-mark both live here, and both used to do nothing at all in a pane.
+        assert_eq!(press(KeyCode::Char(' '), KeyModifiers::CONTROL), vec![0x00]);
+        assert_eq!(press(KeyCode::Char(' '), KeyModifiers::NONE), vec![b' ']);
+
+        // The function keys, which the pty never saw because CleeCode binds none of its own —
+        // a rule about our shortcuts that had become a rule about the shell's input. F1-F4 are
+        // the VT100 keypad sequences; the rest are numbered, and the numbering skips 22.
+        assert_eq!(press(KeyCode::F(1), KeyModifiers::NONE), b"\x1bOP".to_vec());
+        assert_eq!(press(KeyCode::F(4), KeyModifiers::NONE), b"\x1bOS".to_vec());
+        assert_eq!(press(KeyCode::F(5), KeyModifiers::NONE), b"\x1b[15~".to_vec());
+        assert_eq!(press(KeyCode::F(6), KeyModifiers::NONE), b"\x1b[17~".to_vec());
+        assert_eq!(press(KeyCode::F(8), KeyModifiers::NONE), b"\x1b[19~".to_vec());
+        assert_eq!(press(KeyCode::F(9), KeyModifiers::NONE), b"\x1b[20~".to_vec());
+        assert_eq!(press(KeyCode::F(10), KeyModifiers::NONE), b"\x1b[21~".to_vec());
+        assert_eq!(press(KeyCode::F(11), KeyModifiers::NONE), b"\x1b[23~".to_vec());
+        assert_eq!(press(KeyCode::F(12), KeyModifiers::NONE), b"\x1b[24~".to_vec());
+        // Every one of them distinct, which is the whole point of htop's bottom bar.
+        let sent: std::collections::HashSet<Vec<u8>> =
+            (1..=12).map(|n| press(KeyCode::F(n), KeyModifiers::NONE)).collect();
+        assert_eq!(sent.len(), 12);
+        // Past F12 nothing is guessed at.
+        assert!(press(KeyCode::F(13), KeyModifiers::NONE).is_empty());
+
+        // Insert, which readline and every editor bind and which was also being swallowed.
+        assert_eq!(press(KeyCode::Insert, KeyModifiers::NONE), b"\x1b[2~".to_vec());
+    }
+
+    /// A pane must survive a shell that has stopped reading its input.
+    ///
+    /// This used to be a freeze of the whole editor: the write was done on the UI thread, a pty
+    /// whose far end is not reading stops accepting bytes, and `write_all` then waits for a
+    /// change that may never come. Here the shell is suspended, so nothing will ever drain the
+    /// tty — and the test is simply that these calls return.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_has_stopped_reading_cannot_freeze_the_pane() {
+        let mut panel =
+            TerminalPanel::new(24, 80, Path::new("/")).expect("a shell must be spawnable");
+        let pid = panel.child_pid().expect("a spawned shell has a pid") as i32;
+        // SAFETY: a signal to this pane's own child, which is alive for the whole test.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+
+        // Far more than a pty buffer holds, and far more than the queue: the point is that the
+        // caller comes back either way, having dropped what it could not deliver.
+        let paste = vec![b'x'; 64 * 1024];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for _ in 0..WRITE_QUEUE * 4 {
+            panel.write_input(&paste);
+        }
+        assert!(Instant::now() < deadline, "writing into a stopped shell blocked the caller");
+
+        unsafe { libc::kill(pid, libc::SIGCONT) };
     }
 
     #[test]

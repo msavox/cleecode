@@ -6,7 +6,7 @@ use crate::highlight::Highlighter;
 use crate::i18n::{self, Key, Lang};
 use crate::menu::{ContextMenu, ContextTarget, MenuAction, MenuBar};
 use crate::settings::{self, Settings};
-use crate::terminal_panel::{key_to_bytes, TerminalPanel, TerminalWindow};
+use crate::terminal_panel::{self, key_to_bytes, MouseAction, TerminalPanel, TerminalWindow};
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -1335,6 +1335,10 @@ pub enum DragTarget {
     TextSelection,
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
+    /// A button held down over a pane whose program asked for the mouse: the pane's index and the
+    /// button number it was told about, so the drag and the release it eventually gets are
+    /// reported as the same button in the same pane the press happened in.
+    TerminalMouse(usize, u16),
     /// Dragging a scrollbar's thumb along its track.
     Scrollbar(ScrollbarId),
 }
@@ -2186,7 +2190,11 @@ impl App {
             self.status_message = i18n::msg_scp_confirm(lang, paths.len(), &target);
             self.pending_upload = Some(PendingUpload { target, paths });
         } else if let Some(term) = self.focused_panel_mut() {
-            term.write_input(text.as_bytes());
+            // Wrapped as a paste when the program asked for that, and only here: the upload
+            // question above is answered with a keystroke and never reaches the pty at all, so
+            // the brackets belong to the text being written and to nothing else.
+            let bytes = term.paste_bytes(text);
+            term.write_input(&bytes);
         }
     }
 
@@ -7798,7 +7806,8 @@ impl App {
                     let text = self.clipboard.get();
                     if !text.is_empty() {
                         if let Some(term) = self.focused_panel_mut() {
-                            term.write_input(text.as_bytes());
+                            let bytes = term.paste_bytes(&text);
+                            term.write_input(&bytes);
                         }
                     }
                 } else {
@@ -8416,6 +8425,7 @@ impl App {
             // All handled where the drag happens, against the frame it started in.
             Some(DragTarget::TextSelection)
             | Some(DragTarget::TerminalSelection(_))
+            | Some(DragTarget::TerminalMouse(..))
             | Some(DragTarget::Scrollbar(_))
             | None => {}
         }
@@ -9319,6 +9329,17 @@ impl App {
                     }
                     return;
                 }
+                // A program that asked for the mouse gets the click, which is the whole point of
+                // it having asked. Shift keeps it for us — see `terminal_takes_press`.
+                if self.terminal_takes_press(
+                    terminal_panel::BUTTON_LEFT,
+                    col,
+                    row,
+                    mouse.modifiers,
+                    areas,
+                ) {
+                    return;
+                }
                 if let Some(term_areas) = &areas.terminals {
                     // Title-bar controls were already handled above; here a click inside a pane
                     // focuses it and starts a text selection.
@@ -9357,7 +9378,27 @@ impl App {
                 {
                     return;
                 }
+                // Over a pane that asked for the mouse, the right button is the program's too —
+                // lazygit and mc both use it — and Shift is still the way to our own menu.
+                if self.terminal_takes_press(
+                    terminal_panel::BUTTON_RIGHT,
+                    col,
+                    row,
+                    mouse.modifiers,
+                    areas,
+                ) {
+                    return;
+                }
                 self.open_context_menu_at(col, row, areas);
+            }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                self.terminal_takes_press(
+                    terminal_panel::BUTTON_MIDDLE,
+                    col,
+                    row,
+                    mouse.modifiers,
+                    areas,
+                );
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.dragging {
                 Some(DragTarget::Sidebar)
@@ -9390,16 +9431,35 @@ impl App {
                         }
                     }
                 }
+                Some(DragTarget::TerminalMouse(index, button)) => {
+                    self.terminal_mouse_drag(index, button, MouseAction::Drag, col, row, areas);
+                }
                 None => {}
             },
-            MouseEventKind::Up(MouseButton::Left) => {
+            MouseEventKind::Up(button) => {
                 // Completing a selection puts it on the clipboard straight away: there is no
                 // spare key combination in a terminal pane for an explicit copy (Ctrl+C has to
                 // reach the shell as an interrupt).
-                if let Some(DragTarget::TerminalSelection(index)) = self.dragging {
-                    self.finish_terminal_selection(index);
+                match self.dragging {
+                    Some(DragTarget::TerminalSelection(index))
+                        if button == MouseButton::Left =>
+                    {
+                        self.finish_terminal_selection(index);
+                        self.dragging = None;
+                    }
+                    // The program was told the button went down and has to be told it came back
+                    // up, or it stays convinced something is still being held. Which button is
+                    // checked, because a right-click while the left one is down is not the left
+                    // one being let go of.
+                    Some(DragTarget::TerminalMouse(index, held))
+                        if held == terminal_panel::mouse_button_code(button) =>
+                    {
+                        self.terminal_mouse_drag(index, held, MouseAction::Release, col, row, areas);
+                        self.dragging = None;
+                    }
+                    _ if button == MouseButton::Left => self.dragging = None,
+                    _ => {}
                 }
-                self.dragging = None;
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
@@ -9466,6 +9526,74 @@ impl App {
                 self.wheel_over_terminal(i, delta, cell);
             }
         }
+    }
+
+    /// Offers a button press to the program running in the pane under the pointer.
+    ///
+    /// `true` means it took it, and the click is then none of CleeCode's business — no selection
+    /// anchor, no context menu. Shift is the way out and is checked first: holding it keeps the
+    /// button for our own selection, which is what every terminal emulator does and the only way
+    /// to copy text off the screen of a program that has grabbed the mouse.
+    ///
+    /// The press is remembered as a drag so the movement and the release that follow reach the
+    /// same program, as the same button, in the pane it started in.
+    fn terminal_takes_press(
+        &mut self,
+        button: u16,
+        col: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+        areas: &ui::Areas,
+    ) -> bool {
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            return false;
+        }
+        let Some(term_areas) = &areas.terminals else { return false };
+        let Some(index) = term_areas.iter().position(|r| within(*r, col, row)) else { return false };
+        let Some(cell) = cell_at(ui::terminal_content_rect(term_areas[index]), col, row) else {
+            return false;
+        };
+        if !self.report_terminal_mouse(index, cell, button, MouseAction::Press) {
+            return false;
+        }
+        self.focus = Focus::Terminal;
+        self.active_terminal = index;
+        self.dragging = Some(DragTarget::TerminalMouse(index, button));
+        true
+    }
+
+    /// Reports a movement or a release to the pane a press was already handed to. The cell is
+    /// taken from that pane whatever the pointer is over now — `cell_at` clamps — because a drag
+    /// that wanders outside is still a drag the program is tracking.
+    fn terminal_mouse_drag(
+        &mut self,
+        index: usize,
+        button: u16,
+        action: MouseAction,
+        col: u16,
+        row: u16,
+        areas: &ui::Areas,
+    ) {
+        let Some(rect) = areas.terminals.as_ref().and_then(|t| t.get(index)).copied() else {
+            return;
+        };
+        if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {
+            self.report_terminal_mouse(index, cell, button, action);
+        }
+    }
+
+    /// Writes one mouse report into pane `index`, if the program there wants that kind of event.
+    fn report_terminal_mouse(
+        &mut self,
+        index: usize,
+        cell: (u16, u16),
+        button: u16,
+        action: MouseAction,
+    ) -> bool {
+        let Some(term) = self.window_tab_mut(index) else { return false };
+        let Some(report) = term.mouse_report(button, action, cell.0, cell.1) else { return false };
+        term.write_input(&report);
+        true
     }
 
     /// Spends a wheel notch on the pane it is over: on the program running there if it asked to
