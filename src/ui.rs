@@ -1,7 +1,7 @@
 use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
 use crate::menu::{self, ContextMenu, MenuBar};
-use crate::terminal_panel::TerminalWindow;
+use crate::terminal_panel::{TermSelection, TerminalWindow};
 use crate::settings;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -3821,8 +3821,37 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     let selection = terminal.selection;
     let parser = crate::terminal_panel::lock_poisoned(&terminal.parser);
     let screen = parser.screen();
-    let (screen_rows, screen_cols) = screen.size();
 
+    let lines = terminal_lines(screen, selection);
+
+    let cursor_pos = if focused && !screen.hide_cursor() {
+        Some(screen.cursor_position())
+    } else {
+        None
+    };
+
+    // The border was already drawn; the terminal grid fills the content area below the strip.
+    f.render_widget(Paragraph::new(lines), content);
+
+    if let Some((cy, cx)) = cursor_pos {
+        f.set_cursor_position((content.x + cx, content.y + cy));
+    }
+}
+
+/// A parser's screen as rows of styled text, ready to be handed to ratatui.
+///
+/// Split out from the drawing so it can be checked against a real parser: what it gets wrong is
+/// invisible in the geometry and only shows up in the characters that come out.
+///
+/// The wide-character rule is the one that was missing. vt100 stores a two-column glyph in two
+/// cells — the glyph in the first, a marked continuation in the second — and that second cell
+/// reports no contents, which used to make it a space. So a CJK glyph or an emoji was drawn as
+/// two columns of glyph plus one of padding, and everything to its right on that row sat one
+/// column further along than the program had put it: a line of Japanese drifted steadily off the
+/// end, and any box drawing next to one came apart. ratatui measures the glyph as the two columns
+/// it is, so dropping the continuation is all that is needed for the row to add up again.
+fn terminal_lines(screen: &vt100::Screen, selection: Option<TermSelection>) -> Vec<Line<'static>> {
+    let (screen_rows, screen_cols) = screen.size();
     let mut lines: Vec<Line> = Vec::new();
     for row in 0..screen_rows {
         let mut spans: Vec<Span> = Vec::new();
@@ -3832,6 +3861,9 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
         for col in 0..screen_cols {
             let cell = screen.cell(row, col);
+            if cell.is_some_and(vt100::Cell::is_wide_continuation) {
+                continue;
+            }
             let (contents, style) = match cell {
                 Some(c) if c.has_contents() => {
                     let mut style = Style::default();
@@ -3884,19 +3916,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
         }
         lines.push(Line::from(spans));
     }
-
-    let cursor_pos = if focused && !screen.hide_cursor() {
-        Some(screen.cursor_position())
-    } else {
-        None
-    };
-
-    // The border was already drawn; the terminal grid fills the content area below the strip.
-    f.render_widget(Paragraph::new(lines), content);
-
-    if let Some((cy, cx)) = cursor_pos {
-        f.set_cursor_position((content.x + cx, content.y + cy));
-    }
+    lines
 }
 
 /// A colour as a style. One line, and it exists so the diagnostic and the hover go through the
@@ -4090,6 +4110,34 @@ mod tests {
 
     /// Rendered into a buffer and read back, because everything above this only checks where the
     /// box goes — not that the words ever reach the screen.
+    /// The regression: a two-column glyph took three columns on screen, so everything to its
+    /// right on the row sat one place further along than the program had put it — a line of
+    /// Japanese drifted off the end, and a box drawn beside one came apart.
+    ///
+    /// Driven through the real parser, because the bug is in what vt100 stores: a wide glyph
+    /// occupies two cells, and the second reports no contents, which is indistinguishable from a
+    /// blank unless `is_wide_continuation` is asked.
+    #[test]
+    fn a_wide_glyph_takes_the_two_columns_it_has_and_not_three() {
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        parser.process("日本ab".as_bytes());
+
+        let lines = terminal_lines(parser.screen(), None);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("日本ab"), "the row reads wrong: {text:?}");
+        // Four glyphs and the four blank columns left over, not six and four: the continuations
+        // are gone rather than standing in as spaces.
+        assert_eq!(text.chars().count(), 4 + 4, "the row is {text:?}");
+        // And the row is exactly as wide as the screen it came from, which is the thing that was
+        // actually broken — ratatui measures the wide glyph as the two columns it occupies.
+        assert_eq!(lines[0].width(), 10);
+
+        // A row of nothing but wide glyphs is the same claim at the limit.
+        let mut full = vt100::Parser::new(2, 10, 0);
+        full.process("日本語テキ".as_bytes());
+        assert_eq!(terminal_lines(full.screen(), None)[0].width(), 10);
+    }
+
     #[test]
     fn the_completion_list_draws_the_words_it_was_given() {
         use crate::complete::{Candidate, Popup, Source};
