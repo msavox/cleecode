@@ -24,6 +24,7 @@ pub struct Settings {
     pub show_whitespace: bool,
     pub auto_indent: bool,
     pub mouse_enabled: bool,
+    #[serde(default, deserialize_with = "lang_however_it_is_spelled")]
     pub lang: Lang,
     // Layout: persisted alongside the rest so a preferred workspace shape survives restarts.
     pub show_sidebar: bool,
@@ -198,6 +199,25 @@ impl RegisteredVenv {
     }
 }
 
+/// Reads the language the way a person writes it by hand: `it`, `It` and `IT` all mean Italian.
+///
+/// serde matches enum variants by their exact Rust spelling, so `lang = "it"` — the obvious
+/// thing to type, and the spelling every other program uses — failed to parse. It did not fail
+/// alone: one unparsable key sinks the whole file, so every other preference in it was replaced
+/// by a default and then written back over the original on exit. The tolerance costs a function;
+/// the strictness cost the file.
+fn lang_however_it_is_spelled<'de, D>(deserializer: D) -> Result<Lang, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let written = String::deserialize(deserializer)?;
+    match written.trim().to_ascii_lowercase().as_str() {
+        "en" => Ok(Lang::En),
+        "it" => Ok(Lang::It),
+        other => Err(serde::de::Error::custom(format!("unknown language {other:?}"))),
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -338,16 +358,94 @@ fn config_path() -> Option<std::path::PathBuf> {
     config_dir().map(|d| d.join("settings.toml"))
 }
 
+/// Where a write to `path` actually belongs, following a symlink to the thing it points at.
+///
+/// Config files and source files alike are routinely symlinks into a dotfiles repository or a
+/// shared checkout, and such a link is meant to be written *through*. Renaming onto the link
+/// itself would replace it with an ordinary file and quietly detach it from the place the user
+/// arranged for it to live — which they would only discover much later, when the repository
+/// stopped seeing their edits.
+fn resolve_link(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    // A link whose target does not exist yet still says where the write belongs.
+    match std::fs::read_link(path) {
+        Ok(dest) if dest.is_absolute() => dest,
+        Ok(dest) => path.parent().map(|parent| parent.join(&dest)).unwrap_or(dest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// Writes `contents` to `path` so that the file on disk is either wholly the old content or
+/// wholly the new one, never a truncated mixture.
+///
+/// A plain `fs::write` opens the target and truncates it before the first byte is written, so a
+/// crash, a kill, or a full disk in the middle of a save leaves the user with a half a file and
+/// no copy of the other half. Writing a sibling temp file and renaming it into place makes the
+/// swap a single filesystem operation: readers see one version or the other.
+///
+/// The temp file must be a *sibling*, because rename is only atomic within one filesystem and
+/// the system temp directory is routinely a different one. Its name carries the pid so two
+/// CleeCode instances saving the same file cannot land on the same scratch file and interleave.
+///
+/// Permissions are copied from the file being replaced rather than left to the umask: a script
+/// that was executable has to stay executable, and a private file must not come back
+/// world-readable.
+pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let target = resolve_link(path);
+    let dir = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = dir.join(format!(".{name}.clee{}.tmp", std::process::id()));
+
+    let existing = std::fs::metadata(&target).ok();
+    let written = std::fs::write(&temp, contents)
+        .and_then(|()| match &existing {
+            Some(meta) => std::fs::set_permissions(&temp, meta.permissions()),
+            None => Ok(()),
+        })
+        .and_then(|()| std::fs::rename(&temp, &target));
+    if written.is_err() {
+        // Nothing else will ever look at it, and a scratch file left beside somebody's source
+        // is litter that outlives the failure that made it.
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
 impl Settings {
     /// Loads persisted settings from disk, falling back to defaults if there's nothing
     /// saved yet or the file can't be read/parsed.
     pub fn load() -> Self {
-        let mut settings: Settings = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut settings = match config_path() {
+            Some(path) => Self::read_or_set_aside(&path),
+            None => Settings::default(),
+        };
         settings.merge_run_command_defaults();
         settings
+    }
+
+    /// Reads the settings file, and when it exists but cannot be parsed, moves it aside to
+    /// `settings.toml.broken` before starting from the defaults.
+    ///
+    /// Falling back to defaults is not on its own enough, and used to be actively destructive:
+    /// the settings are written back out on exit, so a single typo in a hand-edited file cost the
+    /// entire file — parsed as nothing, started from defaults, saved over the evidence before the
+    /// user had any idea something was wrong. Keeping their own text where they can look at it
+    /// and fix it turns that into a recoverable mistake. A previous `.broken` is worth less than
+    /// the file that just failed, so it is overwritten rather than left to accumulate.
+    fn read_or_set_aside(path: &std::path::Path) -> Settings {
+        let Ok(text) = std::fs::read_to_string(path) else { return Settings::default() };
+        match toml::from_str(&text) {
+            Ok(settings) => settings,
+            Err(_) => {
+                let _ = std::fs::rename(path, path.with_extension("toml.broken"));
+                Settings::default()
+            }
+        }
     }
 
     /// Fills in run commands for extensions a saved file doesn't mention, so defaults added in
@@ -387,7 +485,7 @@ impl Settings {
             }
         }
         if let Ok(text) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            let _ = write_atomic(&path, text.as_bytes());
         }
     }
 
@@ -445,7 +543,7 @@ impl ProjectSettings {
             return;
         }
         if let Ok(text) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            let _ = write_atomic(&path, text.as_bytes());
         }
     }
 }
@@ -648,6 +746,116 @@ mod tests {
         // Emptied of its last override, the file is removed rather than left as a stub.
         ProjectSettings::default().save(&dir);
         assert!(!path.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every key that has no default of its own, with values chosen to differ from the defaults
+    /// so a test can tell "the file was read" from "the file was thrown away".
+    const HAND_WRITTEN: &str = "show_line_numbers = false\nsyntax_highlighting = true\n\
+        word_wrap = true\ntab_size = 3\ninsert_spaces = false\nshow_whitespace = true\n\
+        auto_indent = true\nmouse_enabled = false\nshow_sidebar = true\nshow_terminal = true\n\
+        sidebar_width = 42\nterminal_pct = 41\nterminal_on_right = true\n";
+
+    /// `lang = "it"` is the obvious thing to type and the spelling every other program uses, and
+    /// it used to sink the whole file: one unparsable key means no settings at all, so every
+    /// other preference reverted to a default and was written back over the original on exit.
+    /// The tolerance is only worth having if the rest of the file survives with it, so that is
+    /// what is checked.
+    #[test]
+    fn a_hand_written_language_parses_however_it_was_typed_and_costs_nothing_else() {
+        for (written, expected) in
+            [("it", Lang::It), ("It", Lang::It), ("IT", Lang::It), ("en", Lang::En), ("EN", Lang::En)]
+        {
+            let text = format!("{HAND_WRITTEN}lang = \"{written}\"\n");
+            let s: Settings = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("lang = \"{written}\" must parse: {e}"));
+            assert_eq!(s.lang, expected);
+            assert_eq!(s.tab_size, 3);
+            assert_eq!(s.sidebar_width, 42);
+            assert_eq!(s.terminal_pct, 41);
+            assert!(s.word_wrap && s.show_whitespace && s.terminal_on_right);
+            assert!(!s.show_line_numbers && !s.insert_spaces && !s.mouse_enabled);
+        }
+
+        // A language nobody speaks is still an error rather than a silent English: the file is
+        // then set aside intact, which is a question the user can answer.
+        assert!(toml::from_str::<Settings>(&format!("{HAND_WRITTEN}lang = \"martian\"\n")).is_err());
+        // Absent entirely it simply falls back, the way every other optional key does.
+        let s: Settings = toml::from_str(HAND_WRITTEN).expect("a file with no language must load");
+        assert_eq!(s.lang, Lang::default());
+    }
+
+    /// The old fallback-to-defaults was quietly destructive: settings are written back out on
+    /// exit, so a typo in a hand-edited file cost the whole file before anyone noticed anything
+    /// was wrong. The defaults still come back — the app has to start — but the user's own text
+    /// is kept where they can read it.
+    #[test]
+    fn a_broken_settings_file_is_set_aside_rather_than_written_over() {
+        let dir = std::env::temp_dir().join(format!("clee_broken_settings_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        let broken = dir.join("settings.toml.broken");
+
+        // A file that parses is read, and nothing is moved anywhere.
+        std::fs::write(&path, HAND_WRITTEN).unwrap();
+        assert_eq!(Settings::read_or_set_aside(&path).tab_size, 3);
+        assert!(path.exists() && !broken.exists());
+
+        let mangled = format!("{HAND_WRITTEN}this is not toml {{{{{{\n");
+        std::fs::write(&path, &mangled).unwrap();
+        assert_eq!(Settings::read_or_set_aside(&path).tab_size, Settings::default().tab_size);
+        assert!(!path.exists(), "the unparsable file moves aside instead of waiting to be overwritten");
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), mangled);
+
+        // A second failure replaces the first one: the file that just broke is the interesting
+        // one, and a directory of numbered wreckage helps nobody.
+        std::fs::write(&path, "@@@\n").unwrap();
+        Settings::read_or_set_aside(&path);
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), "@@@\n");
+
+        // Nothing on disk at all is not a breakage, and leaves no .broken behind.
+        std::fs::remove_file(&broken).unwrap();
+        assert_eq!(Settings::read_or_set_aside(&path).tab_size, Settings::default().tab_size);
+        assert!(!broken.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Config files live in dotfiles repositories as often as not, reached through a symlink.
+    /// Renaming onto the link would replace it with an ordinary file and detach it from the
+    /// repository — silently, and for good.
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_write_goes_through_a_symlink_rather_than_over_it() {
+        let dir = std::env::temp_dir().join(format!("clee_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.toml");
+        let link = dir.join("link.toml");
+        std::fs::write(&real, "old\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, b"new\n").expect("writing through a link must work");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the link is still a link"
+        );
+
+        // A file that does not exist yet is created just as readily, and neither path leaves a
+        // scratch file beside its target.
+        let fresh = dir.join("fresh.toml");
+        write_atomic(&fresh, b"hello\n").expect("a new file must be created");
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "hello\n");
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["fresh.toml".to_string(), "link.toml".to_string(), "real.toml".to_string()]);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

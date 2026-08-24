@@ -234,6 +234,19 @@ pub enum UnsavedPrompt {
     CloseTab(usize),
 }
 
+/// Files a paste into an ssh session offered to upload, held until the question on the status
+/// line is answered.
+///
+/// Held rather than sent, because the pane cannot tell a drag from a paste and the two mean
+/// opposite things. Dragging a file onto a terminal that is logged into a server is a request to
+/// put it there; pasting the *text* of a path — which is what you do while looking for a file, a
+/// key among them — is not a request for anything, and it used to send it anyway.
+pub struct PendingUpload {
+    /// The ssh destination as it was typed at the shell, handed to `scp` verbatim.
+    pub target: String,
+    pub paths: Vec<PathBuf>,
+}
+
 /// The turtle from the splash tagline, out for a walk along the status line. Clicking the logo
 /// in the menu bar sets it off; clicking again while it walks hurries it, which is the joke —
 /// the tagline has been saying "chi va piano va lontano" since the first launch, and this is
@@ -420,6 +433,8 @@ pub struct App {
     save_as_then: Option<UnsavedPrompt>,
     /// When set, an unsaved-changes prompt is up, holding back the given action.
     pub unsaved_prompt: Option<UnsavedPrompt>,
+    /// When set, an upload is waiting on a yes from the status line. See [`PendingUpload`].
+    pub pending_upload: Option<PendingUpload>,
     /// In-file find / find-and-replace overlay state, when open.
     pub find: Option<crate::find::FindState>,
     /// Command palette / file quick-open overlay, when open.
@@ -1648,6 +1663,7 @@ impl App {
             save_as_target: None,
             save_as_then: None,
             unsaved_prompt: None,
+            pending_upload: None,
             find: None,
             picker: None,
             completion: None,
@@ -1946,8 +1962,22 @@ impl App {
         typed.push_str(&text.replace(['\n', '\r'], " "));
     }
 
+    /// A paste into a terminal, which is nearly always just typing — and once in a while is a
+    /// file dragged onto a pane logged into somewhere else.
+    ///
+    /// Two things stand between the two readings, because the cost of confusing them is a file
+    /// leaving the machine. The first is shape: a drag arrives as rooted paths and nothing else,
+    /// which is what [`dnd::looks_like_dropped_paths`] recognises — a sentence with a path in the
+    /// middle of it is prose, and prose is typed. Checking only that the tokens exist on disk was
+    /// not enough; `~/.ssh/id_ed25519` exists, and pasting it into a command you were composing
+    /// is not an instruction to upload it.
+    ///
+    /// The second is the question. Even a real drag is answered before anything moves: an upload
+    /// cannot be taken back once the file is on the other machine, and there is nothing on screen
+    /// afterwards to say it happened.
     fn handle_terminal_paste(&mut self, text: &str) {
-        let paths = dnd::parse_dropped_paths(text);
+        let lang = self.settings.lang;
+        let paths = dnd::upload_candidates(text);
         let ssh_target = if paths.is_empty() {
             None
         } else {
@@ -1956,9 +1986,25 @@ impl App {
                 .and_then(dnd::detect_ssh_target)
         };
         if let Some(target) = ssh_target {
-            self.scp_paths_background(target, paths);
+            self.status_message = i18n::msg_scp_confirm(lang, paths.len(), &target);
+            self.pending_upload = Some(PendingUpload { target, paths });
         } else if let Some(term) = self.focused_panel_mut() {
             term.write_input(text.as_bytes());
+        }
+    }
+
+    /// The one letter that sends the files, in the language the question was asked in. Every
+    /// other key is no — including the ones that would do something in the pane underneath,
+    /// which is the whole point of asking first.
+    fn handle_upload_prompt_key(&mut self, key: KeyEvent) {
+        let lang = self.settings.lang;
+        let Some(upload) = self.pending_upload.take() else { return };
+        let yes = key.code == KeyCode::Char(i18n::yes_key(lang))
+            || key.code == KeyCode::Char(i18n::yes_key(lang).to_ascii_uppercase());
+        if yes {
+            self.scp_paths_background(upload.target, upload.paths);
+        } else {
+            self.status_message = i18n::msg_scp_cancelled(lang);
         }
     }
 
@@ -6879,6 +6925,7 @@ impl App {
     fn a_modal_owns_the_keyboard(&self) -> bool {
         self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
+            || self.pending_upload.is_some()
             || self.show_save_as
             || self.run_menu.is_some()
             || self.venv_register.is_some()
@@ -6910,6 +6957,12 @@ impl App {
         }
         if self.unsaved_prompt.is_some() {
             self.handle_unsaved_prompt_key(key);
+            return;
+        }
+        // Before the pane it was pasted into gets the key back: the question is about that pane,
+        // and the next thing typed there is the answer to it and not a command.
+        if self.pending_upload.is_some() {
+            self.handle_upload_prompt_key(key);
             return;
         }
         // Ahead of the other modals: it can be opened *by* the unsaved-changes prompt, and

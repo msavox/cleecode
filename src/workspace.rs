@@ -265,7 +265,10 @@ pub fn save_in(dir: &Path, ws: &Workspace) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = toml::to_string_pretty(ws).map_err(|e| e.to_string())?;
     let path = file_in(dir, &ws.name);
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    // Saving over a workspace is the moment its previous version stops existing, so the swap has
+    // to be one step: a truncating write interrupted halfway leaves a layout that neither opens
+    // nor can be got back. See `settings::write_atomic`.
+    crate::settings::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -424,6 +427,25 @@ mod tests {
         assert!(!delete_in(&dir, "middle"), "deleting twice reports failure rather than pretending");
         let names: Vec<String> = list_in(&dir).into_iter().map(|w| w.name).collect();
         assert_eq!(names, vec!["Alpha".to_string(), "zeta".to_string()]);
+    }
+
+    /// A hand-edited file with a typo is skipped — and, the part worth pinning, left exactly
+    /// where it is. Someone's saved layout is theirs: the cost of a typo is that one workspace
+    /// not appearing until it is fixed, never the file being quietly repaired away.
+    #[test]
+    fn a_broken_workspace_file_is_skipped_but_never_touched() {
+        let dir = temp_dir("broken");
+        save_in(&dir, &sample("good")).unwrap();
+        let broken = dir.join("bad.toml");
+        let text = "name = \nroot = oops\n";
+        std::fs::write(&broken, text).unwrap();
+
+        let names: Vec<String> = list_in(&dir).into_iter().map(|w| w.name).collect();
+        assert_eq!(names, vec!["good".to_string()]);
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), text);
+
+        assert!(load_in(&dir, "bad").is_none());
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), text);
     }
 
     #[test]
