@@ -1,3 +1,18 @@
+## What's new in 0.12.5
+
+**The Octave frame speedup from 0.12.3 is reverted.** It wrote gnuplot's own chatter into the
+transcript of a session over ssh — `multiplot> set style increment default; line 0: warning:
+deprecated command`, once per frame of an animation — and, on that machine, a figure window
+where there should have been a tab. `drawnow (TERM, FILE)` draws through the figure's *live*
+gnuplot stream, whose stderr is the shell's and whose terminal is whatever the display offers;
+`print` runs a gnuplot of its own and says nothing. On the machine it was developed on that
+stream never opened at all, which is precisely why every measurement looked clean.
+
+Frames are back to where they were before 0.12.3 — slower, quiet, and windowless. The route is
+not wrong in principle and the note in `cleecode_figs.m` records what it cost and what would have
+to be proved before it comes back: a Linux box with a display forwarded over ssh, which is the
+case that broke.
+
 ## What's new in 0.12.4
 
 **Where plots go now takes effect without restarting CleeCode.** Reported as "the switch is

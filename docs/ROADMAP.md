@@ -1742,3 +1742,27 @@ risponde "Panning — the session is redrawing it".
 **E la barra si lascia colpire.** Nessun pulsante è più stretto di cinque celle — `+` ne aveva tre,
 un bersaglio grande come un punto fermo — e la colonna di spazio fra due pulsanti adesso appartiene
 a uno dei due invece che a nessuno. Sullo schermo non si è mosso niente: sono cresciuti i bersagli.
+
+
+## 0.12.5 — la velocizzazione tolta il giorno stesso (2026-08-24)
+
+La strada `drawnow` della 0.12.3 è tornata indietro. Su una sessione Linux via ssh scriveva nel
+transcript dell'utente la chiacchiera di gnuplot — `multiplot> set style increment default;` e
+`line 0: warning: deprecated command`, una volta per fotogramma di animazione — e su quella
+macchina una finestra al posto della scheda.
+
+Il perché è istruttivo e va scritto, perché la misura era giusta e la conclusione no. `drawnow`
+disegna attraverso lo stream *vivo* di gnuplot della figura: il suo stderr è quello della shell, e
+il suo terminale è quello che il display offre. `print` invece lancia un gnuplot suo, gli passa uno
+script e non dice niente a nessuno. Sulla macchina di sviluppo — un Mac, dove il toolkit vero è qt
+e quello stream non si è mai nemmeno aperto: `numel (get (f, "__plot_stream__")) == 0` — la
+differenza non poteva manifestarsi. Tutti i controlli passavano: PNG veri, dimensione esatta,
+linea, superficie con colorbar e immagine indistinguibili dalle stampate.
+
+Quindi non è "print è lento" a essere sbagliato — quello resta vero e misurato, 243 ms contro 55
+attraverso l'hook. È sbagliato aver considerato sufficiente una verifica fatta dove il caso
+critico non esiste. La nota in `cleecode_figs.m` dice cosa è costata e cosa andrebbe dimostrato
+prima di riprovarci: una Linux con il display inoltrato via ssh, che è esattamente la
+configurazione che si è rotta.
+
+Il transcript è dell'utente. Un frame rate non vale una riga scritta lì dentro.
