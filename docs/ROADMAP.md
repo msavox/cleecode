@@ -1840,12 +1840,26 @@ o il diagnostico sotto il cursore — scritto al prompt dell'agente come riferim
 Il ritorno esiste già ed è gratis: gli agenti stampano `file:riga` di continuo, e il doppio
 click di `locate.rs` li apre da sempre.
 
-**3. I file che l'agente tocca si vedono da soli.** Un agente edita su disco; dalla 0.13 le
-modifiche esterne si rilevano su *tutti* i buffer, non solo quello a fuoco — un file aperto si
-aggiorna mentre Claude ci lavora, e uno sporco avvisa invece di farsi sovrascrivere. Il
-pannello Git è la review: lo stato mostra cosa ha toccato la sessione, il diff mostra cosa ha
-scritto, e scartare un file è già una domanda in rosso. Da valutare in corsa: una vista "cosa è
-cambiato dall'ultimo prompt", se l'uso la chiede.
+**3. I file sotto le mani dell'agente, in diretta.** Il punto di partenza è capire cosa fa
+davvero un agente: non digita — **scrive il file intero a ogni edit**. Quindi "live" non è
+streaming, è reagire bene a una sequenza di scritture atomiche, che è ciò che un editor sa
+osservare. Dalla 0.13 le modifiche esterne si rilevano su *tutti* i buffer: un file aperto si
+aggiorna già da solo mentre l'agente ci lavora. Sopra quella base, tre pezzi:
+- *le righe cambiate si vedono*: al reload il rope vecchio è ancora in mano — un diff di
+  righe (funzione pura) e le righe nuove si accendono nel gutter, che già disegna breakpoint
+  e diagnostici, finché un tasto non le spegne;
+- *il modo segui*, spento di default: i file che l'agente tocca e che non hai aperto si
+  aprono **a fianco, senza prendere la tastiera** — la regola delle figure della 0.9, "mostra
+  senza prendere". E il rilevamento non vuole un watcher nuovo: `git status` gira già ogni
+  700 ms, e la differenza fra due snapshot consecutivi *è* la lista dei file toccati — gratis
+  e agnostica sull'agente (vale per Claude, codex, opencode e per un sed in una shell). Fuori
+  da un repo git il modo segui semplicemente non c'è, e lo dice;
+- *la regola di sicurezza che c'è già*: un buffer sporco non si auto-ricarica mai — il lavoro
+  dell'utente vince su quello dell'agente, sempre.
+Il pannello Git resta la review: lo stato mostra cosa ha toccato la sessione, il diff cosa ha
+scritto, scartare è già una domanda in rosso. Raffinamento opzionale, se l'uso lo chiede: un
+hook PostToolUse di Claude Code che scrive il percorso toccato in un file di contratto (il
+pattern wsnap) — zucchero per-agente sopra un meccanismo che regge senza.
 
 **4. Il canale profondo: un server MCP, non tre integrazioni.** Tutti e tre gli agenti parlano
 MCP; CleeCode può *essere* un server MCP su stdio — `clee --mcp` — che espone quello che solo
