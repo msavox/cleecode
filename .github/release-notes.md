@@ -1,3 +1,28 @@
+## What's new in 0.12.3
+
+**Octave animations are four to five times faster.** Reported from a session over ssh, where
+Python animated smoothly and Octave crawled — and it was not ssh, and not the toolkit. It was
+`print`: measured at 155 ms a frame for a 500-point line at 800x600, and 150 ms at 400x300, and
+159 ms at half the resolution. The cost is not in the pixels, it is print's own machinery, which
+copies the figure into a hidden one and takes the toolkit right round again every frame.
+matplotlib's `savefig` does the same job in 11 ms.
+
+Under gnuplot — which is what a session with no display gets, so every ssh session — there is a
+way round it: `drawnow (TERM, FILE)` hands the figure to the toolkit's png terminal with none of
+that in between. Through the real hook, on the same machine and the same figures:
+
+| | before | now |
+|---|---|---|
+| animated line, 800x600 | 243 ms/frame | 55 ms/frame |
+| 3-D surface with a colorbar, 640x480 | 345 ms | 74 ms |
+| image, 500x400 | 233 ms | 47 ms |
+
+The picture is the same picture: the grid is still drawn by CleeCode as real line objects, so it
+survives the change of route. Only under gnuplot, and only when what lands on disk is the PNG
+that was asked for — under qt the terminal argument is ignored and the file written is PostScript
+with a `.png` name, so the magic bytes and the width and height are read back before the file is
+accepted. Either check failing is a `print`, exactly as before.
+
 ## What's new in 0.12.2
 
 **A markdown file with a picture in it becomes a document again.** Reported as "the README of

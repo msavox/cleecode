@@ -95,7 +95,7 @@ function figs = cleecode_figs (dir, dpi)
         ## read the picture, about a file that is perfectly good a millisecond later. A rename
         ## within a directory is atomic: the watcher sees the old picture or the new one.
         part = [png ".part.png"];
-        print (f, "-dpng", sprintf ("-r%d", dpi), part);
+        cleecode_render (f, part, W, H, dpi);
         ## `rename` and not `movefile`: movefile shells out to `mv` for anything it does not
         ## recognise as trivial, and a fork per frame is a third of an animation's budget —
         ## measured here, it halved the frame rate. This is one call into the C library.
@@ -113,6 +113,67 @@ function figs = cleecode_figs (dir, dpi)
       ## A figure that will not print is not worth taking the session's panel down for.
     end_try_catch
   endfor
+endfunction
+
+function cleecode_render (f, part, W, H, dpi)
+  ## Write the figure to `part` as a PNG W by H pixels, by the cheapest route that gets there.
+  ##
+  ## `print` is the route that works everywhere and it is expensive: measured on this machine at
+  ## 155 ms a frame for a 500-point line at 800x600, and — the part that matters — 150 ms at
+  ## 400x300 and 159 ms at half the resolution. The cost is not in drawing the pixels, it is
+  ## print's own machinery: it copies the figure into a hidden one and takes the toolkit right
+  ## round again for every frame. matplotlib's savefig does the same job in 11 ms, which is what
+  ## an animation in Python against one in Octave looks like, and it was reported as exactly
+  ## that.
+  ##
+  ## Under gnuplot there is a way round it. `drawnow (TERM, FILE)` hands the figure to the
+  ## toolkit's own png terminal with none of that in between: measured 47 ms for the same frame,
+  ## a little over three times faster, and it honours `linewidth`, which print through the eps
+  ## path does not. The grid is still ours (see cleecode_grid, called before this): those are
+  ## real line objects in the figure, so they are drawn whichever route the picture takes, and
+  ## the picture is the same one it was — only sooner.
+  ##
+  ## Only under gnuplot, and only when what lands on disk really is the PNG that was asked for.
+  ## Under qt the terminal argument is ignored and the file written is PostScript with a .png
+  ## name — checked here on the first four bytes, because a tab handed PostScript says it cannot
+  ## read the picture and there is nothing on screen to say why. The size is checked too: `print`
+  ## is told the size through paperposition and this is not, so a figure whose position is
+  ## smaller than the floor the caller applies would come out at the wrong number of pixels, and
+  ## every mouse coordinate mapped onto it would be quietly wrong. Either check failing is not an
+  ## error — it is a print, exactly as before.
+  if (strcmp (get (f, "__graphics_toolkit__"), "gnuplot"))
+    try
+      drawnow ("png", part);
+      [ok, w, h] = cleecode_png_size (part);
+      if (ok && w == W && h == H)
+        return;
+      endif
+    catch
+      ## An Octave that does not take a terminal here, or a figure it will not draw that way.
+    end_try_catch
+  endif
+  print (f, "-dpng", sprintf ("-r%d", dpi), part);
+endfunction
+
+function [ok, w, h] = cleecode_png_size (path)
+  ## The magic number and the size out of a PNG's header, without decoding it.
+  ##
+  ## A PNG opens with eight fixed bytes and then IHDR, whose first two fields are the width and
+  ## the height as big-endian 32-bit integers — bytes 17 to 24 of the file. Reading them costs
+  ## one open and 24 bytes, against decoding a picture to ask how big it is.
+  ok = false; w = 0; h = 0;
+  fid = fopen (path, "rb");
+  if (fid < 0)
+    return;
+  endif
+  head = fread (fid, 24, "uint8")';
+  fclose (fid);
+  if (numel (head) < 24 || ! isequal (head(1:4), [137 80 78 71]))
+    return;
+  endif
+  w = head(17)*2^24 + head(18)*2^16 + head(19)*2^8 + head(20);
+  h = head(21)*2^24 + head(22)*2^16 + head(23)*2^8 + head(24);
+  ok = true;
 endfunction
 
 function s = fingerprint (f)
