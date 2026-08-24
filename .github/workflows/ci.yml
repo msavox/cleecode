@@ -58,6 +58,53 @@ jobs:
           "$bin" --version
           "$bin" --help
 
+  # The pty drivers are the only exercise of the interactive surface — everything else here
+  # checks that the binary starts, not that it behaves once a key is pressed. They have only
+  # ever run on the author's Mac, so continue-on-error stays on until the job is seen green on
+  # both runners; promoting it to a gate is a deliberate decision, same stance as lints below.
+  drivers:
+    name: Pty drivers (${{ matrix.os }})
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      # Debug, not release: the drivers spawn target/debug/clee by default, and there is no
+      # reason to pay for a release build just to drive keystrokes at it.
+      - run: cargo build --locked
+      # Ubuntu's system python refuses a bare pip install (PEP 668); the runner is
+      # single-purpose and thrown away after the job, so there is no environment to protect.
+      - run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pip3 install --user --break-system-packages pyte
+          else
+            pip3 install --user pyte
+          fi
+      # drive_git.py makes real commits in a throwaway repo it creates; git refuses to commit
+      # without an identity, and a fixed default branch name keeps its output stable across
+      # whatever the runner image's global default happens to be.
+      - run: |
+          git config --global user.email ci@cleecode.invalid
+          git config --global user.name "CleeCode CI"
+          git config --global init.defaultBranch master
+      # These four are the deterministic subset: no Octave, no matplotlib, no display. The rest
+      # (drive_cells, drive_workspace, drive_figures, drive_presets, drive_inspect, drive_debug,
+      # drive_python) need real interpreters and stay manual for now — each is its own step so a
+      # failure names itself rather than hiding in a combined log.
+      - run: python3 scripts/drive_ui.py target/debug/clee
+      - run: python3 scripts/drive_jump.py target/debug/clee
+      - run: python3 scripts/drive_git.py target/debug/clee
+      - run: python3 scripts/drive_lsp.py target/debug/clee
+
   # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
   # Adopting either is a repo-wide change, so it stays a deliberate decision.
   lints:

@@ -21,8 +21,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Tagging v0.13.0 with Cargo.toml still at 0.12.5 would happily build and publish binaries
+  # that report the wrong version — the formula's assert would only catch it at install time,
+  # after the release is already out. Fail here instead, before anything is built. A grep keeps
+  # this job seconds long; there is no reason to stand up a Rust toolchain just to read a line
+  # out of Cargo.toml.
+  guard:
+    name: Tag matches Cargo.toml version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "v${version}" != "$tag" ]; then
+            echo "Tag ${tag} does not match Cargo.toml version ${version} (expected v${version})." >&2
+            exit 1
+          fi
+
   build:
     name: ${{ matrix.label }}
+    needs: guard
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
