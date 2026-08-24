@@ -61,6 +61,20 @@ pub struct FindState {
     pub error: Option<String>,
     /// The compiled query, kept so a replacement can refer to its capture groups.
     compiled: Option<Regex>,
+    /// The text the matches were found in, and where each of them sits in it in bytes — the
+    /// ranges above are in chars, because that is what the rope counts in, and the engine counts
+    /// in bytes.
+    ///
+    /// Kept because a replacement's capture groups can only be resolved *where the match was*.
+    /// `foo(?=bar)` matches `foo` in `foobar`, and asking the same pattern about `foo` on its own
+    /// finds nothing at all — so a replacement worked out from the excised match comes back
+    /// unchanged, and Replace visibly does nothing. Anchors are the same story: `(?m)^` holds at
+    /// a line start in the buffer and nowhere in the three characters it matched next to.
+    ///
+    /// Only a pattern search keeps them: a literal query has no groups to resolve, so it has no
+    /// reason to hold a second copy of the buffer.
+    haystack: Option<String>,
+    byte_matches: Vec<(usize, usize)>,
 }
 
 impl FindState {
@@ -75,6 +89,8 @@ impl FindState {
             case_sensitive: false,
             error: None,
             compiled: None,
+            haystack: None,
+            byte_matches: Vec::new(),
         }
     }
 
@@ -82,6 +98,8 @@ impl FindState {
     /// biases which match becomes current: the first match at or after that char index.
     pub fn recompute(&mut self, text: &str, from: usize) {
         self.matches.clear();
+        self.byte_matches.clear();
+        self.haystack = None;
         self.current = 0;
         self.error = None;
         self.compiled = None;
@@ -117,6 +135,7 @@ impl FindState {
             let start_char = chars_at + text[byte..m.start()].chars().count();
             let end_char = start_char + text[m.start()..m.end()].chars().count();
             self.matches.push((start_char, end_char));
+            self.byte_matches.push((m.start(), m.end()));
 
             // An empty match — `a*` against "bbb", or `^` — matches at every position without
             // consuming anything, so the walk has to be moved on by hand or it never ends.
@@ -133,6 +152,9 @@ impl FindState {
         }
 
         self.compiled = Some(compiled);
+        if self.regex && !self.matches.is_empty() {
+            self.haystack = Some(text.to_string());
+        }
         self.current = self
             .matches
             .iter()
@@ -144,9 +166,33 @@ impl FindState {
     /// What `matched` becomes when replaced. A pattern's replacement may refer to its capture
     /// groups (`$1`, `${name}`); a literal search has no groups to refer to, so there a `$` is
     /// just a dollar and is left alone.
+    ///
+    /// The groups are resolved by running the pattern again *where the match was found*, in the
+    /// text it was found in, rather than against the matched text on its own. That distinction is
+    /// the difference between working and quietly doing nothing: `foo(?=bar)` matches `foo` in
+    /// `foobar`, and the same pattern asked about `foo` alone matches nothing, so the replacement
+    /// would hand back the text unchanged and Replace would look broken. Lookaround is the reason
+    /// this project uses fancy-regex at all, so it has to survive the replacement too.
     pub fn replacement_for(&self, matched: &str) -> String {
-        match (self.regex, &self.compiled) {
-            (true, Some(re)) => re.replace(matched, self.replace.as_str()).into_owned(),
+        let (Some(re), Some(text)) = (&self.compiled, &self.haystack) else {
+            return self.replace.clone();
+        };
+        // Which match this is: the caller has the text a match covered, not where it was, and
+        // where it was is the one thing the groups need. Two matches covering the same text
+        // resolve the same way, so the first of them is the right answer for either.
+        let Some(&(at, _)) =
+            self.byte_matches.iter().find(|&&(s, e)| text.get(s..e) == Some(matched))
+        else {
+            return self.replace.clone();
+        };
+        match re.captures_from_pos(text, at) {
+            Ok(Some(caps)) => {
+                let mut out = String::new();
+                caps.expand(&self.replace, &mut out);
+                out
+            }
+            // The pattern gave up, or the text has moved on since it was scanned. The template
+            // written out as it stands is a poor answer, and it is a better one than nothing.
             _ => self.replace.clone(),
         }
     }
@@ -336,6 +382,56 @@ mod tests {
         let across = f.preview("one\ntwo\tthree", 60).unwrap();
         assert!(!across.contains('\n') && !across.contains('\t'), "{across} would break the row");
         assert!(across.starts_with("one two three"));
+    }
+
+    /// Lookaround is the reason this project uses fancy-regex rather than `regex`, and a
+    /// replacement worked out from the matched text on its own throws it away: `foo(?=bar)`
+    /// matched `foo`, and the same pattern asked about `foo` alone matches nothing — so Replace
+    /// used to hand back the text it was given and look like a key that does nothing.
+    #[test]
+    fn a_replacement_keeps_the_context_the_match_was_found_in() {
+        let mut f = FindState::new();
+        f.regex = true;
+        f.case_sensitive = true;
+        f.query = "foo(?=bar)".to_string();
+        f.replace = "X".to_string();
+        f.recompute("foobar", 0);
+        assert_eq!(f.matches, vec![(0, 3)]);
+        assert_eq!(f.replacement_for("foo"), "X");
+        assert_eq!(f.preview("foo", 60).unwrap(), "foo → X");
+
+        // An anchor holds in the buffer and not in the three characters next to it. Each line
+        // start is a different match, and each one keeps its own group.
+        let mut f = FindState::new();
+        f.regex = true;
+        f.case_sensitive = true;
+        f.query = r"(?m)^(\w+)".to_string();
+        f.replace = "[$1]".to_string();
+        f.recompute("uno\ndue\ntre", 0);
+        assert_eq!(f.matches, vec![(0, 3), (4, 7), (8, 11)]);
+        assert_eq!(f.replacement_for("due"), "[due]", "the second line, matched mid-buffer");
+        assert_eq!(f.replacement_for("tre"), "[tre]");
+    }
+
+    /// The engine counts in bytes and the rope counts in chars, and an accent is where the two
+    /// come apart. Both the ranges handed back and the text the groups are cut out of have to
+    /// land on the same characters.
+    #[test]
+    fn groups_land_on_the_right_characters_in_an_accented_buffer() {
+        let mut f = FindState::new();
+        f.regex = true;
+        f.case_sensitive = true;
+        f.query = r"(città) (\w+)".to_string();
+        f.replace = "$2 $1".to_string();
+        let text = "una città bellissima e una città grande";
+        f.recompute(text, 0);
+        assert_eq!(f.matches, vec![(4, 20), (27, 39)]);
+        // The char ranges say what the replacement is worked out from, so they have to agree.
+        let first: String = text.chars().take(20).skip(4).collect();
+        assert_eq!(first, "città bellissima");
+        assert_eq!(f.replacement_for(&first), "bellissima città");
+        let second: String = text.chars().take(39).skip(27).collect();
+        assert_eq!(f.replacement_for(&second), "grande città");
     }
 
     /// A pattern is typed one character at a time, so it spends most of its life invalid. That

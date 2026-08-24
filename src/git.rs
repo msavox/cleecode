@@ -19,12 +19,28 @@
 //! where a terminal editor earns its keep. The newer commands are nicer to read and would fail
 //! in the one place this has to work.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Fields are separated by U+001F (unit separator): it cannot appear in a branch name, a commit
 /// subject or a path, so nothing has to be escaped or guessed at.
 const SEP: char = '\u{1f}';
+
+/// What every diff asked for here carries.
+///
+/// Colour and the external tool are both things the user's own `~/.gitconfig` can turn on for
+/// every diff git produces — `color.diff = always` and `diff.external` are settings people
+/// really do have. Either one lands in the panel: escape sequences shown as the letters that
+/// spell them, or the output of a program that was written to draw on a terminal of its own.
+/// The panel wants the patch itself, so it says so rather than inheriting an answer meant for
+/// somewhere else.
+const DIFF_FLAGS: [&str; 2] = ["--no-color", "--no-ext-diff"];
+
+/// The hash of the empty tree — what `git hash-object -t tree /dev/null` prints, and the same
+/// number in every repository on earth, since a hash of nothing is a hash of nothing. It is the
+/// thing to diff the index against when there is no commit yet to diff it against.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 pub struct Branch {
     pub name: String,
@@ -97,7 +113,13 @@ pub struct Snapshot {
     pub error: Option<String>,
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+/// Runs git and gives back what it wrote.
+///
+/// The arguments are `OsStr` rather than `&str`, which is what lets a path be passed as it is
+/// rather than as text: a filename on macOS or Linux is bytes, not necessarily UTF-8, and
+/// `to_string_lossy` turns the bytes it cannot read into `U+FFFD`. Handed to git that is a
+/// pathspec matching nothing, so staging such a file would answer that it does not exist.
+fn git<S: AsRef<OsStr>>(root: &Path, args: &[S]) -> Result<String, String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -139,20 +161,8 @@ pub fn snapshot(root: &Path, file: Option<PathBuf>) -> Snapshot {
         return snap;
     }
 
-    // Against HEAD rather than the index, so staged and unstaged changes are both in the
-    // picture: the question the panel answers is "what have I changed", and half an answer
-    // depending on whether something was added is worse than none.
-    let mut diff_args = vec!["diff", "HEAD", "--"];
-    let file_arg;
-    if let Some(path) = &file {
-        file_arg = path.to_string_lossy().into_owned();
-        diff_args.push(&file_arg);
-        snap.diff_of = file.clone();
-    }
-    match git(root, &diff_args) {
-        Ok(text) => snap.diff = text.lines().map(str::to_string).collect(),
-        Err(e) => snap.error = Some(e),
-    }
+    snap.diff_of = file.clone();
+    snap.diff = diff(root, file.as_deref());
 
     if let Ok(text) = git(root, &["status", "--porcelain", "-z"]) {
         snap.changes = parse_changes(&text);
@@ -169,6 +179,44 @@ pub fn snapshot(root: &Path, file: Option<PathBuf>) -> Snapshot {
     snap.stashes = stashes(root);
     snap.unfinished = unfinished(root);
     snap
+}
+
+/// What has changed, as a patch, narrowed to `file` when there is one open.
+///
+/// Against `HEAD` rather than against the index, so staged and unstaged changes are both in the
+/// picture: the question the panel answers is "what have I changed", and half an answer depending
+/// on whether something was added is worse than none.
+///
+/// Except that there is not always a HEAD. A repository that has just been `git init`-ed has an
+/// unborn branch and no commit for `HEAD` to name, and `git diff HEAD` there fails outright —
+/// which is the first five minutes of every new project, and exactly when someone learning this
+/// most needs the panel to work. So the same question is asked the long way round: the index
+/// against the empty tree, and the working tree against the index. Together they say what
+/// `diff HEAD` says once there is a HEAD to say it against.
+///
+/// A diff that fails for any other reason comes back empty rather than as an error, the way the
+/// rest of the snapshot does. [`Snapshot::error`] means there is nothing to show at all, and a
+/// repository with a status, branches and a history is not that.
+fn diff(root: &Path, file: Option<&Path>) -> Vec<String> {
+    // Asked outright rather than read off the failed diff's stderr: what git says about an unborn
+    // branch is prose, it has been reworded between versions, and it is translated.
+    let born = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
+    let against: &[&[&str]] =
+        if born { &[&["HEAD"]] } else { &[&["--cached", EMPTY_TREE], &[]] };
+    let mut out = Vec::new();
+    for part in against {
+        let mut args: Vec<&OsStr> = vec![OsStr::new("diff")];
+        args.extend(DIFF_FLAGS.iter().map(OsStr::new));
+        args.extend(part.iter().map(OsStr::new));
+        args.push(OsStr::new("--"));
+        if let Some(path) = file {
+            args.push(path.as_os_str());
+        }
+        if let Ok(text) = git(root, &args) {
+            out.extend(text.lines().map(str::to_string));
+        }
+    }
+    out
 }
 
 /// The files out of `git status --porcelain -z`.
@@ -223,19 +271,28 @@ fn parse_branch(line: &str) -> Option<Branch> {
 /// how many lines changed, and that sentence is the confirmation the action happened. An error
 /// comes back as git wrote it, for the same reason — "pathspec did not match any files" is a
 /// better message than anything this could invent from an exit code.
-fn write(root: &Path, args: &[&str]) -> Result<String, String> {
+fn write<S: AsRef<OsStr>>(root: &Path, args: &[S]) -> Result<String, String> {
     git(root, args).map(|out| out.trim().to_string())
 }
 
 /// Puts a file in the index. Works the same for one git has never seen: `add` is how a file
 /// becomes tracked, so the panel needs no separate action for it.
 pub fn stage(root: &Path, path: &Path) -> Result<String, String> {
-    write(root, &["add", "--", &path.to_string_lossy()])
+    write(root, &[OsStr::new("add"), OsStr::new("--"), path.as_os_str()])
 }
 
 /// Takes a file back out of the index, leaving the file itself exactly as it is.
 pub fn unstage(root: &Path, path: &Path) -> Result<String, String> {
-    write(root, &["reset", "-q", "HEAD", "--", &path.to_string_lossy()])
+    write(
+        root,
+        &[
+            OsStr::new("reset"),
+            OsStr::new("-q"),
+            OsStr::new("HEAD"),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+    )
 }
 
 /// Everything, deletions and new files included — which is what `-A` means and `.` does not.
@@ -267,7 +324,16 @@ pub fn discard(root: &Path, change: &Change) -> Result<String, String> {
         return Err("git has never been told about this file — there is nothing to go back to"
             .to_string());
     }
-    write(root, &["checkout", "-q", "HEAD", "--", &change.path.to_string_lossy()])
+    write(
+        root,
+        &[
+            OsStr::new("checkout"),
+            OsStr::new("-q"),
+            OsStr::new("HEAD"),
+            OsStr::new("--"),
+            change.path.as_os_str(),
+        ],
+    )
 }
 
 /// Moves to another branch. Refused by git itself when it would write over uncommitted work,
@@ -440,23 +506,50 @@ pub fn parse_refs(decoration: &str, remotes: &[String]) -> Vec<RefName> {
         .collect()
 }
 
-/// The branch that is checked out and whether it has an upstream, asked of git rather than read
+/// Where a push from here would go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushTo {
+    /// Whether the current branch already has an upstream. With one, `git push` on its own is the
+    /// whole command, and naming a remote would only be a way of naming the wrong one.
+    pub upstream: bool,
+    /// The remote a first push should set, when the repository has one at all.
+    pub remote: Option<String>,
+}
+
+/// Which remote a first push should name.
+///
+/// `origin` when it is there, since a repository with several remotes and an `origin` among them
+/// was cloned from that one. Otherwise the only remote there is, whatever it is called — the
+/// case this exists for is the fork workflow, where the single remote is `upstream` and a push
+/// to `origin` fails naming something that does not exist. With several remotes and no `origin`
+/// the first is a guess, and a wrong guess is a refusal from git rather than a wrong push.
+pub fn push_remote(remotes: &[String]) -> Option<&str> {
+    remotes
+        .iter()
+        .find(|r| r.as_str() == "origin")
+        .or_else(|| remotes.first())
+        .map(String::as_str)
+}
+
+/// The branch that is checked out and where a push of it would go, asked of git rather than read
 /// off the panel's snapshot.
 ///
-/// The snapshot would be free and is not always true: the shell next door can change branch, and
-/// a push built on a stale answer pushes the wrong one. Two `rev-parse` calls cost a couple of
-/// milliseconds on any repository, which is what the frame loop can afford and what being right
-/// costs here.
+/// The snapshot would be free and is not always true: the shell next door can change branch, add
+/// a remote or set an upstream, and a push built on a stale answer pushes the wrong thing to the
+/// wrong place. Three cheap queries cost a couple of milliseconds on any repository, which is
+/// what the frame loop can afford and what being right costs here.
 ///
-/// A detached HEAD gives `None`: `rev-parse --abbrev-ref` answers "HEAD", which is the one
-/// branch name that names nothing.
-pub fn head_branch(root: &Path) -> (Option<String>, bool) {
+/// A detached HEAD gives `None` for the branch: `rev-parse --abbrev-ref` answers "HEAD", which is
+/// the one branch name that names nothing.
+pub fn head_branch(root: &Path) -> (Option<String>, PushTo) {
     let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "HEAD");
     let upstream = git(root, &["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
-    (branch, upstream)
+    let found = remotes(root);
+    let remote = push_remote(&found).map(str::to_string);
+    (branch, PushTo { upstream, remote })
 }
 
 /// The remotes by name, which is what tells a remote-tracking branch from a local one with a
@@ -488,7 +581,12 @@ pub fn show(root: &Path, hash: &str) -> Result<Vec<String>, String> {
     // but asking for `--stat` *replaces* it with the summary rather than adding one, so the
     // obvious pair of flags gives a reader with the file names in it and no diff under them.
     // Nothing says so: the box opens, it has content, and the patch is simply not there.
-    git(root, &["show", "--no-color", "--stat", "--patch", "--cc", hash])
+    // The same two flags every other patch here asks for: `color.diff = always` and an external
+    // diff tool in the user's config would otherwise reach this one too.
+    let mut args: Vec<&str> = vec!["show"];
+    args.extend(DIFF_FLAGS);
+    args.extend(["--stat", "--patch", "--cc", hash]);
+    git(root, &args)
         .map(|text| text.lines().map(str::to_string).collect())
 }
 
@@ -614,14 +712,18 @@ pub enum Remote {
 ///
 /// `-u` on the first push of a branch with no upstream, because the alternative is git printing
 /// the same suggestion and doing nothing.
-pub fn remote_command(op: Remote, branch: Option<&str>, has_upstream: bool) -> String {
+///
+/// The remote it names is the repository's own rather than `origin` on principle — see
+/// [`push_remote`]. With no remote at all there is nothing to name, and plain `git push` says so
+/// in git's words, which are better than a command built around a name that is not there.
+pub fn remote_command(op: Remote, branch: Option<&str>, to: PushTo) -> String {
     match op {
         // `--prune`, so a branch deleted on the other side stops being drawn here. Without it a
         // graph accumulates remote branches that no longer exist, and there is no hint which.
         Remote::Fetch => "git fetch --all --prune".to_string(),
         Remote::Pull => "git pull".to_string(),
-        Remote::Push => match (has_upstream, branch) {
-            (false, Some(branch)) => format!("git push -u origin {branch}"),
+        Remote::Push => match (to.upstream, branch, to.remote.as_deref()) {
+            (false, Some(branch), Some(remote)) => format!("git push -u {remote} {branch}"),
             _ => "git push".to_string(),
         },
     }
@@ -743,16 +845,52 @@ mod tests {
         assert!(parse_stash("no separator here").is_none());
     }
 
+    fn push_to(remote: Option<&str>, upstream: bool) -> PushTo {
+        PushTo { upstream, remote: remote.map(str::to_string) }
+    }
+
     /// The first push of a branch nobody has pushed carries `-u`, because the alternative is git
     /// printing that exact suggestion and doing nothing.
     #[test]
     fn a_first_push_sets_the_upstream_rather_than_advising_it() {
-        assert_eq!(remote_command(Remote::Push, Some("spike"), false), "git push -u origin spike");
-        assert_eq!(remote_command(Remote::Push, Some("main"), true), "git push");
+        let first = push_to(Some("origin"), false);
+        assert_eq!(remote_command(Remote::Push, Some("spike"), first), "git push -u origin spike");
+        let pushed = push_to(Some("origin"), true);
+        assert_eq!(remote_command(Remote::Push, Some("main"), pushed), "git push");
         // With no branch — a detached HEAD — there is no name to set an upstream to, and git's
         // own refusal is a better message than a guess.
-        assert_eq!(remote_command(Remote::Push, None, false), "git push");
-        assert_eq!(remote_command(Remote::Fetch, Some("main"), true), "git fetch --all --prune");
+        assert_eq!(remote_command(Remote::Push, None, push_to(Some("origin"), false)), "git push");
+        assert_eq!(
+            remote_command(Remote::Fetch, Some("main"), push_to(Some("origin"), true)),
+            "git fetch --all --prune"
+        );
+    }
+
+    /// The fork workflow: cloned from someone else's repository, the one remote is `upstream`,
+    /// and a first push to `origin` names something that is not there.
+    #[test]
+    fn a_first_push_goes_to_the_remote_the_repository_actually_has() {
+        let only = vec!["upstream".to_string()];
+        assert_eq!(push_remote(&only), Some("upstream"));
+        assert_eq!(
+            remote_command(Remote::Push, Some("spike"), push_to(push_remote(&only), false)),
+            "git push -u upstream spike"
+        );
+
+        // With several, `origin` is the one that was cloned from, wherever it sits in the list.
+        let several =
+            vec!["upstream".to_string(), "origin".to_string(), "fork".to_string()];
+        assert_eq!(push_remote(&several), Some("origin"));
+
+        // Several and no `origin` is a guess either way, and the first is the one git itself
+        // lists first.
+        let neither = vec!["alice".to_string(), "bob".to_string()];
+        assert_eq!(push_remote(&neither), Some("alice"));
+
+        // No remote at all: nothing to name, and git's own "no configured push destination" says
+        // more than a command built around a name that does not exist.
+        assert_eq!(push_remote(&[]), None);
+        assert_eq!(remote_command(Remote::Push, Some("spike"), push_to(None, false)), "git push");
     }
 
     #[test]
@@ -771,6 +909,61 @@ mod tests {
         assert!(!b.current);
         assert_eq!(b.name, "spike");
         assert!(b.upstream.is_none() && b.track.is_none());
+    }
+
+    /// A repository of its own, made from nothing and thrown away after. What is being checked
+    /// is what git does, and a stub that agreed with this module would only be checking that the
+    /// module agrees with itself.
+    ///
+    /// `None` when there is no git to run: this whole file is a wrapper around a program that may
+    /// not be installed, and everywhere else it says so rather than falling over.
+    fn throwaway_repo(name: &str) -> Option<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("cleecode_git_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        git(&dir, &["init", "-q"]).ok()?;
+        // The identity, the signature and the hooks come from the user's own configuration —
+        // which is the point of shelling out, and exactly what a test cannot depend on. A commit
+        // here has to go through on a machine that signs everything and on one that has never
+        // been told a name. The hooks path names a directory that is not there, which is how git
+        // is told to run none.
+        for (key, value) in [
+            ("user.email", "test@cleecode.invalid"),
+            ("user.name", "CleeCode Test"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "hooks-that-do-not-exist"),
+        ] {
+            git(&dir, &["config", key, value]).ok()?;
+        }
+        Some(dir)
+    }
+
+    /// The first five minutes of a new project: `git init` and nothing committed yet, so there is
+    /// no HEAD for a diff to be against. The panel has to work there of all places — it is where
+    /// the first commit gets made from, and an error page instead would put it out of reach.
+    #[test]
+    fn a_repository_with_no_commits_yet_still_shows_what_is_in_it() {
+        let Some(dir) = throwaway_repo("unborn") else { return };
+
+        std::fs::write(dir.join("modificato.txt"), "prima riga\n").unwrap();
+        stage(&dir, Path::new("modificato.txt")).unwrap();
+        std::fs::write(dir.join("modificato.txt"), "prima riga\nseconda riga\n").unwrap();
+        std::fs::write(dir.join("aggiunto.txt"), "nuovo\n").unwrap();
+        stage(&dir, Path::new("aggiunto.txt")).unwrap();
+
+        let snap = snapshot(&dir, None);
+        assert!(snap.error.is_none(), "a repository, however new: {:?}", snap.error);
+        assert_eq!(snap.changes.len(), 2, "both files are listed: {:?}", snap.changes);
+        let diff = snap.diff.join("\n");
+        assert!(diff.contains("aggiunto.txt"), "what is staged is in the patch: {diff}");
+        assert!(diff.contains("+seconda riga"), "and so is what is not: {diff}");
+
+        // And the way out of the state works from inside it.
+        commit(&dir, "primo commit").expect("the first commit goes through");
+        let after = snapshot(&dir, None);
+        assert!(after.error.is_none());
+        assert!(after.changes.iter().all(|c| !c.staged()), "{:?}", after.changes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Somewhere that is not a repository has to say so. Three empty lists would read as a
