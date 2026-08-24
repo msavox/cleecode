@@ -117,11 +117,6 @@ impl Picker {
         self.refilter();
     }
 
-    pub fn pop_char(&mut self) {
-        self.query.pop();
-        self.refilter();
-    }
-
     pub fn selected_action(&self) -> Option<&PickAction> {
         self.filtered.get(self.selected).and_then(|&i| self.items.get(i)).map(|it| &it.action)
     }

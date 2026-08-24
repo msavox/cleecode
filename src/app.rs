@@ -1212,10 +1212,10 @@ pub fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, sho
 
 /// What the quick-open box calls itself. It says so when the list is only part of the project:
 /// otherwise a name that is simply past the cap looks exactly like a name that is not there.
-fn file_picker_title(truncated: bool) -> &'static str {
+fn file_picker_title(lang: Lang, truncated: bool) -> &'static str {
     match truncated {
-        true => "Open file (first 8000 only — type / or ~ to browse)",
-        false => "Open file (type / or ~ to browse)",
+        true => i18n::t(lang, Key::PickerOpenFileCapped),
+        false => i18n::t(lang, Key::PickerOpenFile),
     }
 }
 
@@ -1729,6 +1729,86 @@ fn is_ctrl_shift(key: KeyEvent, letter: char) -> bool {
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&letter))
 }
 
+/// Whether `key` carries a character the user meant to *type*, as opposed to a chord.
+///
+/// crossterm reports Ctrl+A as `Char('a')` with CONTROL set, so a box that matches on the code
+/// alone puts an `a` in the field every time a chord is pressed over it — Ctrl+V being the one
+/// that hurts, because the letter lands where the paste was supposed to and nothing says so.
+/// Alt and the Command key are refused on the same grounds: none of these boxes gives an Alt
+/// chord a meaning, so any of them arriving here is a shortcut aimed at something else.
+fn is_a_typed_character(key: KeyEvent) -> bool {
+    !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+/// Removes the last user-perceived character from `s`.
+///
+/// `String::pop` removes one Unicode scalar, which is not what a person means by "the last
+/// character": `é` written as `e` + U+0301 loses its accent and leaves the letter, and an emoji
+/// built from several scalars comes apart into pieces that are themselves emoji. Backspace
+/// pressed once has to undo one keystroke's worth of text.
+///
+/// Full grapheme segmentation needs the Unicode tables, which this program does not carry, so
+/// this is the pragmatic reading of the rule: a scalar takes with it any combining marks and
+/// variation selectors sitting on it, and a scalar joined to what precedes it by a zero-width
+/// joiner takes the joiner and its left-hand side too. That covers accents, keycaps (`1` +
+/// U+FE0F + U+20E3) and the ZWJ families and professions, which is what people actually type.
+/// It does not cover regional-indicator pairs: a flag is two scalars with nothing marking them
+/// as one, and deleting one of them leaves the other as a lone letter — the same as everywhere
+/// else that lacks the tables, and better than guessing.
+fn pop_grapheme(s: &mut String) {
+    const ZWJ: char = '\u{200d}';
+    loop {
+        let Some(c) = s.pop() else { return };
+        if is_attached_to_what_precedes_it(c) {
+            continue;
+        }
+        // A base character was removed. If it was joined to the one before it, that one is part
+        // of the same picture and goes as well.
+        if s.ends_with(ZWJ) {
+            s.pop();
+            continue;
+        }
+        return;
+    }
+}
+
+/// The scalars that are drawn on top of the character before them rather than beside it: the
+/// four combining blocks, the combining half marks, and the variation selectors that choose how
+/// the base is rendered. Deleting one on its own would change how a character looks without
+/// removing anything the user can see.
+fn is_attached_to_what_precedes_it(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F      // combining diacritical marks
+        | 0x1AB0..=0x1AFF    // …extended
+        | 0x1DC0..=0x1DFF    // …supplement
+        | 0x20D0..=0x20FF    // …for symbols, including the enclosing keycap
+        | 0xFE00..=0xFE0F    // variation selectors
+        | 0xFE20..=0xFE2F)   // combining half marks
+}
+
+/// Which single-line box is taking typing right now.
+///
+/// The boxes that own the keyboard are listed in [`App::a_modal_owns_the_keyboard`] and given
+/// their keys in [`App::dispatch_modal_key`]; this names the subset of them that holds text, so
+/// a paste can be put where the typing goes. Most of the rest are lists or one-letter questions,
+/// which have nothing to do with a sentence arriving all at once.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ModalTextField {
+    SaveAs,
+    VenvRegister,
+    RunCommand,
+    PickerQuery,
+    FindQuery,
+    FindReplace,
+    GotoLine,
+    ProjectSearch,
+    NewEntry,
+    Rename,
+    TerminalRename,
+    WorkspaceSave,
+    GitPrompt,
+}
+
 /// How much of a variable is asked for at a time. A screenful and a little, so paging by a
 /// screen never leaves a gap, and small enough that the question is cheap to answer.
 const INSPECT_ROWS: usize = 40;
@@ -2119,10 +2199,10 @@ impl App {
         if self.show_about {
             return;
         }
-        // A paste is keys, and while a box is up the keys are its. Into the one kind of box that
-        // takes text it arrives as text; over any other it does nothing at all — which is the
-        // point, because doing nothing is what a box that has no use for it should do, and
-        // falling through to the editor underneath is what it used to do instead.
+        // A paste is keys, and while a box is up the keys are its. Into a box that takes text it
+        // arrives as text; over any other it does nothing at all — which is the point, because
+        // doing nothing is what a box that has no use for it should do, and falling through to
+        // the editor underneath is what it used to do instead.
         if self.a_modal_owns_the_keyboard() {
             self.paste_into_a_modal(&text);
             return;
@@ -2147,20 +2227,128 @@ impl App {
 
     /// A paste while a box is up.
     ///
-    /// Only the boxes that take typing take it, and today that is the git panel's. The rest
-    /// ignore it rather than passing it on: a paste over a question that wants one letter is not
-    /// an answer to it, and a paste over a list is not anything.
+    /// Every box that takes typing takes it. The rest ignore it rather than passing it on: a
+    /// paste over a question that wants one letter is not an answer to it, and a paste over a
+    /// list is not anything.
     ///
     /// Newlines become spaces because every one of these boxes is a single line. A pasted commit
     /// message with a blank line in it would otherwise arrive as a message with two invisible
     /// characters in the middle of it.
+    ///
+    /// Where the text lands is decided by [`Self::modal_text_field`] rather than here, so the
+    /// paste and the keyboard cannot disagree about which box is in front. What each field does
+    /// *after* the text arrives still has to match its `Char` arm: a query that filters a list
+    /// as you type has to filter it once the paste is in, or the box says one thing and shows
+    /// another.
     fn paste_into_a_modal(&mut self, text: &str) {
-        let Some(GitPrompt::Text { typed, .. }) =
-            self.git_panel.as_mut().and_then(|p| p.prompt.as_mut())
-        else {
-            return;
-        };
-        typed.push_str(&text.replace(['\n', '\r'], " "));
+        let Some(field) = self.modal_text_field() else { return };
+        let text = text.replace(['\n', '\r'], " ");
+        match field {
+            ModalTextField::SaveAs => self.save_as_input.push_str(&text),
+            ModalTextField::VenvRegister => self.venv_register_input.push_str(&text),
+            ModalTextField::RunCommand => self.run_command_input.push_str(&text),
+            ModalTextField::PickerQuery => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.query.push_str(&text);
+                    p.refilter();
+                }
+                self.refresh_picker();
+            }
+            ModalTextField::FindQuery => {
+                if let Some(f) = self.find.as_mut() {
+                    f.query.push_str(&text);
+                }
+                self.recompute_find();
+            }
+            ModalTextField::FindReplace => {
+                if let Some(f) = self.find.as_mut() {
+                    f.replace.push_str(&text);
+                }
+            }
+            // The only box that refuses most of what it is given: it holds a line number, its
+            // keyboard accepts digits and nothing else, and a pasted path or word would sit
+            // there unparseable with no hint of why.
+            ModalTextField::GotoLine => {
+                self.goto_input.extend(text.chars().filter(char::is_ascii_digit))
+            }
+            ModalTextField::ProjectSearch => self.search_input.push_str(&text),
+            ModalTextField::NewEntry => self.new_entry_input.push_str(&text),
+            ModalTextField::Rename => self.rename_input.push_str(&text),
+            ModalTextField::TerminalRename => self.terminal_field_mut().push_str(&text),
+            ModalTextField::WorkspaceSave => self.workspace_save_input.push_str(&text),
+            ModalTextField::GitPrompt => {
+                if let Some(GitPrompt::Text { typed, .. }) =
+                    self.git_panel.as_mut().and_then(|p| p.prompt.as_mut())
+                {
+                    typed.push_str(&text);
+                }
+            }
+        }
+    }
+
+    /// Which box is taking typing, if the one in front takes any.
+    ///
+    /// The chain is [`Self::dispatch_modal_key`]'s, in the same order and for the same reason:
+    /// these boxes can appear over one another, and the one in front is the one holding the
+    /// cursor. Kept as a separate list only because most of what that chain dispatches to is a
+    /// menu or a yes/no, which has no field to put text in — the two must be changed together,
+    /// and a box added to one and not the other takes keys but not pastes.
+    fn modal_text_field(&self) -> Option<ModalTextField> {
+        // These three are in front of everything and none of them is a text box: a menu, a
+        // question about unsaved work, and a question about sending files to another machine.
+        if self.context_menu.is_some() || self.unsaved_prompt.is_some() || self.pending_upload.is_some() {
+            return None;
+        }
+        if self.show_save_as {
+            return Some(ModalTextField::SaveAs);
+        }
+        if self.run_menu.is_some() {
+            return None;
+        }
+        if self.venv_register.is_some() {
+            return Some(ModalTextField::VenvRegister);
+        }
+        if self.run_command_edit.is_some() {
+            return Some(ModalTextField::RunCommand);
+        }
+        if self.picker.is_some() {
+            return Some(ModalTextField::PickerQuery);
+        }
+        if let Some(find) = self.find.as_ref() {
+            return Some(match find.focus_replace {
+                true => ModalTextField::FindReplace,
+                false => ModalTextField::FindQuery,
+            });
+        }
+        if self.show_goto {
+            return Some(ModalTextField::GotoLine);
+        }
+        if self.show_search {
+            return Some(ModalTextField::ProjectSearch);
+        }
+        if self.show_new_entry {
+            return Some(ModalTextField::NewEntry);
+        }
+        if self.show_delete_confirm {
+            return None;
+        }
+        if self.show_rename {
+            return Some(ModalTextField::Rename);
+        }
+        if self.show_terminal_rename {
+            return Some(ModalTextField::TerminalRename);
+        }
+        if self.show_workspace_save {
+            return Some(ModalTextField::WorkspaceSave);
+        }
+        // The git panel's own boxes: a message or a name takes the text, and the one-letter
+        // questions and the lists behind them take nothing.
+        if let Some(panel) = self.git_panel.as_ref() {
+            return matches!(panel.prompt, Some(GitPrompt::Text { .. })).then_some(ModalTextField::GitPrompt);
+        }
+        // The inspector, the manual, resize mode, the settings page and the menu bar all read
+        // keys as commands. There is nowhere for a sentence to go in any of them.
+        None
     }
 
     /// A paste into a terminal, which is nearly always just typing — and once in a while is a
@@ -2444,10 +2632,8 @@ impl App {
             // of keys, wherever a query is typed.
             KeyCode::Char('u') if ctrl => self.search_case_sensitive = !self.search_case_sensitive,
             KeyCode::Char('n') if ctrl => self.search_regex = !self.search_regex,
-            KeyCode::Backspace => {
-                self.search_input.pop();
-            }
-            KeyCode::Char(c) if !ctrl => self.search_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.search_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.search_input.push(c),
             _ => {}
         }
     }
@@ -2600,7 +2786,7 @@ impl App {
             })
             .collect();
         self.picker = Some(crate::picker::Picker::new(
-            "Variables",
+            i18n::t(lang, Key::PickerVariables),
             crate::picker::PickerKind::Variables,
             items,
         ));
@@ -3609,7 +3795,7 @@ impl App {
                 })
                 .collect();
             self.picker = Some(crate::picker::Picker::new(
-                "Search results",
+                i18n::t(lang, Key::PickerSearchResults),
                 crate::picker::PickerKind::SearchResults,
                 items,
             ));
@@ -3859,7 +4045,13 @@ impl App {
             KeyCode::PageDown => detail.scroll = step(detail.scroll, panel.body_rows as isize),
             KeyCode::PageUp => detail.scroll = step(detail.scroll, -(panel.body_rows as isize)),
             KeyCode::Home => detail.scroll = 0,
-            KeyCode::End => detail.scroll = max.max(0) as usize,
+            // The end of a commit is the last *screenful* of it, not the last line sitting alone
+            // at the top of an empty reader. Scrolling to the bottom of a document is how you
+            // read the end of it, and there is nothing to read below the final line.
+            KeyCode::End => {
+                let screenful = panel.body_rows.max(1) as isize - 1;
+                detail.scroll = (max - screenful).clamp(0, max.max(0)) as usize;
+            }
             _ => {}
         }
     }
@@ -3882,17 +4074,11 @@ impl App {
         match panel.prompt.as_mut() {
             Some(GitPrompt::Text { kind, typed }) => match key.code {
                 KeyCode::Esc => panel.prompt = None,
-                KeyCode::Backspace => {
-                    typed.pop();
-                }
+                KeyCode::Backspace => pop_grapheme(typed),
                 // The modifiers are checked, and that is not pedantry: without it `Ctrl+V` puts a
                 // `v` in the commit message, which is what a person pressing it least wants and
                 // has no way to tell has happened until the commit is made.
-                KeyCode::Char(c)
-                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    typed.push(c)
-                }
+                KeyCode::Char(c) if is_a_typed_character(key) => typed.push(c),
                 KeyCode::Enter => {
                     let typed = typed.clone();
                     let kind = std::mem::replace(kind, GitText::Commit);
@@ -3927,6 +4113,12 @@ impl App {
         // which are two bad answers to one slip.
         let typed = typed.trim().to_string();
         match kind {
+            // Asked here rather than left to git, which refuses an empty message too but says so
+            // in a paragraph about the commit template — a wall of text about a box the user has
+            // just seen, in place of the one sentence that says what to do about it.
+            GitText::Commit | GitText::Amend if typed.is_empty() => {
+                self.git_say(i18n::msg_git_needs_a_message(lang).to_string(), true)
+            }
             GitText::Commit => self.git_write(move |root| crate::git::commit(root, &typed)),
             GitText::Amend => self.git_write(move |root| crate::git::amend(root, &typed)),
             GitText::Branch { at } => {
@@ -5332,14 +5524,14 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(f) = self.find.as_mut() {
                     if f.focus_replace {
-                        f.replace.pop();
+                        pop_grapheme(&mut f.replace);
                     } else {
-                        f.query.pop();
+                        pop_grapheme(&mut f.query);
                     }
                 }
                 self.recompute_find();
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if is_a_typed_character(key) => {
                 let mut changed_query = false;
                 if let Some(f) = self.find.as_mut() {
                     if f.focus_replace {
@@ -5382,10 +5574,10 @@ impl App {
                 }
                 self.show_goto = false;
             }
-            KeyCode::Backspace => {
-                self.goto_input.pop();
+            KeyCode::Backspace => pop_grapheme(&mut self.goto_input),
+            KeyCode::Char(c) if c.is_ascii_digit() && is_a_typed_character(key) => {
+                self.goto_input.push(c)
             }
-            KeyCode::Char(c) if c.is_ascii_digit() => self.goto_input.push(c),
             _ => {}
         }
     }
@@ -5407,10 +5599,8 @@ impl App {
                 self.confirm_new_entry();
                 self.show_new_entry = false;
             }
-            KeyCode::Backspace => {
-                self.new_entry_input.pop();
-            }
-            KeyCode::Char(c) => self.new_entry_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.new_entry_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.new_entry_input.push(c),
             _ => {}
         }
     }
@@ -5462,13 +5652,14 @@ impl App {
                 action: crate::picker::PickAction::Command(it.action),
             })
             .collect();
-        self.picker = Some(crate::picker::Picker::new("Command palette", crate::picker::PickerKind::Commands, items));
+        let title = i18n::t(lang, Key::PickerCommands);
+        self.picker = Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Commands, items));
     }
 
     fn open_file_picker(&mut self) {
         let (items, truncated) = self.project_file_items();
-        self.picker =
-            Some(crate::picker::Picker::new(file_picker_title(truncated), crate::picker::PickerKind::Files, items));
+        let title = file_picker_title(self.settings.lang, truncated);
+        self.picker = Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Files, items));
     }
 
     /// Every file under the project root, the quick-open default: type a few characters to jump
@@ -5540,10 +5731,11 @@ impl App {
                 // since walking the tree on every keystroke would be wasteful.
                 if self.picker.as_ref().is_some_and(|p| p.path_mode) {
                     let (items, truncated) = self.project_file_items();
+                    let title = file_picker_title(self.settings.lang, truncated);
                     if let Some(picker) = self.picker.as_mut() {
                         picker.path_mode = false;
                         picker.filter_override = None;
-                        picker.title = file_picker_title(truncated);
+                        picker.title = title;
                         picker.set_items(items);
                     }
                 }
@@ -5552,7 +5744,6 @@ impl App {
     }
 
     fn handle_picker_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => self.picker = None,
             KeyCode::Up => {
@@ -5568,11 +5759,12 @@ impl App {
             KeyCode::Enter => self.execute_picker_selection(),
             KeyCode::Backspace => {
                 if let Some(p) = self.picker.as_mut() {
-                    p.pop_char();
+                    pop_grapheme(&mut p.query);
+                    p.refilter();
                 }
                 self.refresh_picker();
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if is_a_typed_character(key) => {
                 if let Some(p) = self.picker.as_mut() {
                     p.push_char(c);
                 }
@@ -5752,10 +5944,8 @@ impl App {
         match key.code {
             KeyCode::Enter => self.confirm_save_as(),
             KeyCode::Esc => self.cancel_save_as(),
-            KeyCode::Backspace => {
-                self.save_as_input.pop();
-            }
-            KeyCode::Char(c) => self.save_as_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.save_as_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.save_as_input.push(c),
             _ => {}
         }
     }
@@ -6112,10 +6302,8 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
                 self.terminal_rename_field = self.terminal_rename_field.other();
             }
-            KeyCode::Backspace => {
-                self.terminal_field_mut().pop();
-            }
-            KeyCode::Char(c) => self.terminal_field_mut().push(c),
+            KeyCode::Backspace => pop_grapheme(self.terminal_field_mut()),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.terminal_field_mut().push(c),
             _ => {}
         }
     }
@@ -6192,10 +6380,8 @@ impl App {
         match key.code {
             KeyCode::Enter => self.confirm_save_workspace(),
             KeyCode::Esc => self.cancel_save_workspace(),
-            KeyCode::Backspace => {
-                self.workspace_save_input.pop();
-            }
-            KeyCode::Char(c) => self.workspace_save_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.workspace_save_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.workspace_save_input.push(c),
             _ => {}
         }
     }
@@ -6393,9 +6579,6 @@ impl App {
         self.active_terminal = ws.active_terminal.min(self.terminals.len().saturating_sub(1));
     }
 
-    const WORKSPACE_OPEN_TITLE: &'static str = "Open workspace (Enter opens)";
-    const WORKSPACE_DELETE_TITLE: &'static str = "Delete workspace (Enter deletes)";
-
     /// The saved workspaces as picker rows, each with its project folder as the dimmed detail
     /// so two workspaces over different projects stay tellable apart.
     fn open_workspace_picker(&mut self, delete: bool) {
@@ -6432,10 +6615,11 @@ impl App {
                 label: ws.name,
             })
             .collect();
+        let lang = self.settings.lang;
         let (title, kind) = if delete {
-            (Self::WORKSPACE_DELETE_TITLE, crate::picker::PickerKind::WorkspaceDelete)
+            (i18n::t(lang, Key::PickerWorkspaceDelete), crate::picker::PickerKind::WorkspaceDelete)
         } else {
-            (Self::WORKSPACE_OPEN_TITLE, crate::picker::PickerKind::Workspaces)
+            (i18n::t(lang, Key::PickerWorkspaceOpen), crate::picker::PickerKind::Workspaces)
         };
         self.picker = Some(crate::picker::Picker::new(title, kind, items));
     }
@@ -7101,10 +7285,8 @@ impl App {
         match key.code {
             KeyCode::Enter => self.confirm_run_command_edit(),
             KeyCode::Esc => self.cancel_run_command_edit(),
-            KeyCode::Backspace => {
-                self.run_command_input.pop();
-            }
-            KeyCode::Char(c) => self.run_command_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.run_command_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.run_command_input.push(c),
             _ => {}
         }
     }
@@ -7164,7 +7346,7 @@ impl App {
     /// `/` or `~` walks off elsewhere just as it does there.
     fn begin_venv_browse(&mut self) {
         let mut picker = crate::picker::Picker::new(
-            "Browse for a venv (type / or ~ to go elsewhere)",
+            i18n::t(self.settings.lang, Key::PickerVenvBrowse),
             crate::picker::PickerKind::VenvBrowse,
             Vec::new(),
         );
@@ -7226,10 +7408,8 @@ impl App {
         match key.code {
             KeyCode::Enter => self.confirm_venv_register(),
             KeyCode::Esc => self.cancel_venv_register(),
-            KeyCode::Backspace => {
-                self.venv_register_input.pop();
-            }
-            KeyCode::Char(c) => self.venv_register_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.venv_register_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.venv_register_input.push(c),
             _ => {}
         }
     }
@@ -8519,10 +8699,8 @@ impl App {
                 self.rename_target = None;
                 self.rename_input.clear();
             }
-            KeyCode::Backspace => {
-                self.rename_input.pop();
-            }
-            KeyCode::Char(c) => self.rename_input.push(c),
+            KeyCode::Backspace => pop_grapheme(&mut self.rename_input),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.rename_input.push(c),
             _ => {}
         }
     }
@@ -10810,5 +10988,82 @@ mod tests {
         assert_eq!(rest, "{file}");
         // The space in the directory name must survive as one argument for the shell.
         assert_eq!(shell_words::split(program).unwrap(), vec![exe.to_string_lossy().into_owned()]);
+    }
+
+    /// One press of backspace undoes one character as the person who typed it counts them, not
+    /// one scalar as Rust counts them. The decomposed forms are the ones that come out of a
+    /// macOS filename or a paste from a browser, so a rename box gets them without asking.
+    #[test]
+    fn backspace_takes_a_letter_and_the_accent_drawn_on_it_together() {
+        let mut typed = String::from("caffe\u{301}");
+        pop_grapheme(&mut typed);
+        assert_eq!(typed, "caff", "the accent and the e it sits on are one keystroke");
+
+        // Several marks on one base, which is how Vietnamese and transliterated Greek arrive.
+        let mut stacked = String::from("a\u{0323}\u{0302}");
+        pop_grapheme(&mut stacked);
+        assert_eq!(stacked, "");
+
+        // A precomposed accent is a single scalar and needs none of this.
+        let mut precomposed = String::from("caffè");
+        pop_grapheme(&mut precomposed);
+        assert_eq!(precomposed, "caff");
+    }
+
+    /// An emoji built out of several scalars comes back off as one picture. Deleting a piece of
+    /// it is worse than doing nothing: the leftovers are themselves emoji, so the box shows a
+    /// different picture rather than a shorter word.
+    #[test]
+    fn backspace_takes_a_joined_emoji_sequence_in_one_go() {
+        // Family: man ZWJ woman ZWJ girl. Three presses would leave two people standing there.
+        let mut family = String::from("hi \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
+        pop_grapheme(&mut family);
+        assert_eq!(family, "hi ");
+
+        // A keycap is a digit, a variation selector and an enclosing mark.
+        let mut keycap = String::from("press 1\u{fe0f}\u{20e3}");
+        pop_grapheme(&mut keycap);
+        assert_eq!(keycap, "press ");
+
+        // A profession: a person, the joiner, and the thing they are holding.
+        let mut chef = String::from("\u{1f9d1}\u{200d}\u{1f373}");
+        pop_grapheme(&mut chef);
+        assert_eq!(chef, "");
+    }
+
+    /// The plain cases, including the one that has to stay a no-op: backspace on an empty box is
+    /// pressed all the time and must not be a panic.
+    #[test]
+    fn backspace_on_an_ordinary_string_takes_exactly_one_character() {
+        let mut empty = String::new();
+        pop_grapheme(&mut empty);
+        assert_eq!(empty, "");
+
+        let mut word = String::from("src/main.rs");
+        pop_grapheme(&mut word);
+        assert_eq!(word, "src/main.r");
+
+        // A lone emoji with nothing attached to it is one scalar and goes on its own.
+        let mut single = String::from("ok \u{1f600}");
+        pop_grapheme(&mut single);
+        assert_eq!(single, "ok ");
+    }
+
+    /// A chord is not typing. crossterm reports Ctrl+V as the letter `v` with a modifier set,
+    /// and every box that reads the letter without the modifier fills up with the shortcuts
+    /// pressed over it.
+    #[test]
+    fn a_character_carrying_a_command_modifier_is_not_typing() {
+        let plain = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(is_a_typed_character(plain));
+        // Shift is part of typing: it is how a capital letter is made.
+        assert!(is_a_typed_character(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)));
+
+        for chord in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+            assert!(
+                !is_a_typed_character(KeyEvent::new(KeyCode::Char('v'), chord)),
+                "{chord:?}+V is a shortcut, not a `v`"
+            );
+        }
     }
 }
