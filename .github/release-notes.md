@@ -1,3 +1,27 @@
+## What's new in 0.12.4
+
+**Where plots go now takes effect without restarting CleeCode.** Reported as "the switch is
+ignored unless I restart clee", and it was half true: a shell opened *after* the toggle did get
+the new answer — but a shell that was already open could not, because a process's environment is
+a copy taken when it started and nothing outside can change it. So the `octave` or `python3` you
+typed next, at the prompt you had been working in all day, went on doing what the old setting
+said. CleeCode now also writes the answer to a file both hooks read *as the interpreter starts*,
+so the next one honours the switch wherever it is started from. A session already running keeps
+what it was born with, which is not a policy but a fact about processes — and the status line now
+says "from the next Octave or Python you start" rather than the vaguer "next session".
+
+**A figure's buttons say when they cannot work.** The six on the left of a figure's bar — pan,
+rotate, reset, save — do not touch the picture: they ask the session that drew it to redraw. With
+that session gone, which is the normal state of a figure that came from `▶ Run`, they could do
+nothing, and they were drawn exactly like the buttons that still worked. Their refusal was a line
+in the status bar, the easiest thing on screen to miss. They are now dimmed when there is no
+interpreter behind the figure.
+
+**And the bar is easier to hit.** No button is narrower than five cells — `+` was three, which is
+a target the size of a full stop — and the single column of space between two buttons now belongs
+to one of them instead of to neither, so a click a column wide of the mark still lands. Nothing
+moved on screen; the targets grew.
+
 ## What's new in 0.12.3
 
 **Octave animations are four to five times faster.** Reported from a session over ssh, where

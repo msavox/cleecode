@@ -1589,17 +1589,17 @@ pub fn msg_opaque_background(lang: Lang, on: bool) -> String {
 /// could have happened.
 pub fn msg_plots_in_tabs(lang: Lang, in_tabs: bool, can_open_a_window: bool) -> String {
     match (lang, in_tabs, can_open_a_window) {
-        (Lang::En, true, _) => "Plots open as tabs — from the next session".to_string(),
+        (Lang::En, true, _) => "Plots open as tabs — from the next Octave or Python you start".to_string(),
         (Lang::En, false, true) => {
-            "Plots open in the interpreter's own windows — from the next session".to_string()
+            "Plots open in the interpreter's own windows — from the next one you start".to_string()
         }
         (Lang::En, false, false) => {
             "No display here, so plots stay as tabs — a window would have nowhere to open"
                 .to_string()
         }
-        (Lang::It, true, _) => "I grafici si aprono nelle tab — dalla prossima sessione".to_string(),
+        (Lang::It, true, _) => "I grafici si aprono nelle tab — dal prossimo Octave o Python che avvii".to_string(),
         (Lang::It, false, true) => {
-            "I grafici si aprono nelle finestre dell'interprete — dalla prossima sessione".to_string()
+            "I grafici si aprono nelle finestre dell'interprete — dal prossimo che avvii".to_string()
         }
         (Lang::It, false, false) => {
             "Qui non c'è un display: i grafici restano nelle tab, una finestra non avrebbe dove aprirsi"

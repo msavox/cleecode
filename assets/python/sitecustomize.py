@@ -25,6 +25,10 @@ if os.environ.get("CLEECODE_PY_FIGS"):
     try:
         import cleecode_pyws as _cleecode_pyws
 
+        # First, and before anything can import matplotlib: where the plots of *this*
+        # interpreter go, read from the file rather than from the variable this shell was
+        # started with. See `cleecode_pyws.sync_plots`.
+        _cleecode_pyws.sync_plots()
         _cleecode_pyws.capture_on_exit()
     except Exception:  # noqa: BLE001 — a hook that fails must not take the interpreter with it
         pass

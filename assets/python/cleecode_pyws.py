@@ -86,6 +86,42 @@ class _Prompt:
         return self._text
 
 
+def sync_plots():
+    """Bring this interpreter's idea of where plots go up to date, before matplotlib is imported.
+
+    `CLEECODE_PLOTS` and `MPLBACKEND` are copies taken when the *shell* started, and a shell's
+    environment cannot be changed from outside afterwards. So a prompt opened before the
+    preference was flipped went on doing what it had always done, and the only cure anybody found
+    was to restart the editor — which is how it was reported. CleeCode also writes the answer to
+    the file named by `CLEECODE_PLOTS_FILE`, and that is read here, at interpreter start.
+
+    matplotlib picks its backend when it is first imported and never looks at the variable again,
+    so this has to run before anything the user wrote. sitecustomize is exactly that moment.
+
+    Only ever swaps CleeCode's own backend in and out: a user who set MPLBACKEND themselves has
+    said what they want, and this is not the place to argue.
+    """
+    ours = "module://cleecode_mpl"
+    path = os.environ.get("CLEECODE_PLOTS_FILE")
+    said = None
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                word = handle.read().strip()
+            if word in ("tabs", "windows"):
+                said = word
+        except OSError:
+            said = None                      # unreadable is the same as absent
+    if said is None:
+        return                               # the environment already answered
+    os.environ["CLEECODE_PLOTS"] = said
+    if said == "windows":
+        if os.environ.get("MPLBACKEND") == ours:
+            del os.environ["MPLBACKEND"]     # back to whatever matplotlib would pick on its own
+    elif not os.environ.get("MPLBACKEND"):
+        os.environ["MPLBACKEND"] = ours
+
+
 def _slice_watcher(state):
     """A daemon thread that answers the inspector while the prompt sits idle.
 
