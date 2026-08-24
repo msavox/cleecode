@@ -12,11 +12,18 @@ pub struct FileNode {
 
 impl FileNode {
     fn new(path: PathBuf) -> Self {
+        let is_dir = path.is_dir();
+        Self::of_kind(path, is_dir)
+    }
+
+    /// The same node, built where the caller has already been told what the path is. A listing
+    /// knows that from the directory entry, and asking the disk again per node is a stat the
+    /// answer to which is already in hand.
+    fn of_kind(path: PathBuf, is_dir: bool) -> Self {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        let is_dir = path.is_dir();
         FileNode {
             path,
             name,
@@ -27,26 +34,38 @@ impl FileNode {
         }
     }
 
-    fn read_sorted_entries(dir: &std::path::Path) -> Vec<PathBuf> {
-        let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
+    /// A directory's entries, folders first and then by name, with each entry's kind carried
+    /// alongside it.
+    ///
+    /// The kind is read once per entry, off the listing, rather than asked of the disk from
+    /// inside the comparator. A comparator runs O(n log n) times, so a directory of a thousand
+    /// files used to cost ten thousand stats to put in order — and it is sorted again on every
+    /// refresh, twice a second, for every folder left open.
+    fn read_sorted_entries(dir: &std::path::Path) -> Vec<(PathBuf, bool)> {
+        // The name it sorts under is folded once per entry too, for the same reason.
+        let mut entries: Vec<(PathBuf, bool, String)> = match fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    // `file_type` comes off the directory entry, so it is not another look at the
+                    // disk — but it describes the link rather than its target, and a link to a
+                    // folder should still open like one. Only then is the target asked about.
+                    let is_dir = match e.file_type() {
+                        Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+                        _ => e.path().is_dir(),
+                    };
+                    let key = e.file_name().to_string_lossy().to_lowercase();
+                    (e.path(), is_dir, key)
+                })
+                .collect(),
             Err(_) => Vec::new(),
         };
-        entries.sort_by(|a, b| {
-            let a_dir = a.is_dir();
-            let b_dir = b.is_dir();
-            match (a_dir, b_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&b.file_name().unwrap_or_default().to_string_lossy().to_lowercase()),
-            }
+        entries.sort_by(|(_, a_dir, a_key), (_, b_dir, b_key)| match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a_key.cmp(b_key),
         });
-        entries
+        entries.into_iter().map(|(path, is_dir, _)| (path, is_dir)).collect()
     }
 
     fn load_children(&mut self) {
@@ -54,7 +73,10 @@ impl FileNode {
             return;
         }
         self.loaded = true;
-        self.children = Self::read_sorted_entries(&self.path).into_iter().map(FileNode::new).collect();
+        self.children = Self::read_sorted_entries(&self.path)
+            .into_iter()
+            .map(|(path, is_dir)| FileNode::of_kind(path, is_dir))
+            .collect();
     }
 
     /// Expands the node (loading its children on first use). No-op if already expanded.
@@ -77,7 +99,7 @@ impl FileNode {
         let entries = Self::read_sorted_entries(&self.path);
         let mut old_children = std::mem::take(&mut self.children);
         let mut new_children = Vec::with_capacity(entries.len());
-        for path in entries {
+        for (path, is_dir) in entries {
             if let Some(pos) = old_children.iter().position(|c| c.path == path) {
                 let mut kept = old_children.remove(pos);
                 if kept.expanded {
@@ -85,7 +107,7 @@ impl FileNode {
                 }
                 new_children.push(kept);
             } else {
-                new_children.push(FileNode::new(path));
+                new_children.push(FileNode::of_kind(path, is_dir));
             }
         }
         self.children = new_children;

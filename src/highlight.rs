@@ -1,12 +1,80 @@
 use ratatui::style::{Color, Modifier, Style};
+use ropey::Rope;
+use std::borrow::Cow;
 use std::path::Path;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::highlighting::{
+    FontStyle, HighlightIterator, HighlightState, Highlighter as ThemeHighlighter, Theme, ThemeSet,
+};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+
+/// How often a resumable state is kept, in lines.
+///
+/// One per line would be two heap allocations per line of the file, held for the lifetime of the
+/// buffer, to save work that is cheap to redo: an edit resumes from the rung at or below it and
+/// replays at most `STRIDE - 1` lines to reach the edit. Sixty-four lines is well under a
+/// screenful of replay and a sixty-fourth of the memory.
+const STRIDE: usize = 64;
 
 pub struct Highlighter {
     syntax_set: SyntaxSet,
     theme: Theme,
+}
+
+/// A line's worth of resumable state: what the grammar was in the middle of, and what the theme
+/// had made of it, as of the moment before that line is read.
+///
+/// Highlighting a file is a fold over its lines — line n's colours depend on every line above it,
+/// which is why an editor that keeps no state has to re-read the file from the top after every
+/// keystroke. Keeping the fold's accumulator is what lets it be resumed instead.
+#[derive(Clone)]
+struct LineState {
+    parse: ParseState,
+    theme: HighlightState,
+}
+
+/// How far one buffer's highlighting has got, and what it would need to carry on.
+///
+/// The spans themselves live beside this in the editor, and the pair is one cache in two pieces:
+/// the first `valid` lines are done and the rest are not *stale*, they are simply not computed —
+/// they are made when the view reaches them. An edit drops the watermark back to the edited line
+/// instead of throwing the file away, so typing costs the lines after the cursor rather than all
+/// of them.
+#[derive(Default)]
+pub struct LineCache {
+    /// The language the cached spans were made with. A file renamed into another language has to
+    /// start over, and this is what notices.
+    syntax: Option<String>,
+    /// `ladder[k]` is the state entering line `k * STRIDE`.
+    ladder: Vec<LineState>,
+    /// The state entering line `valid`, so carrying on from the watermark costs nothing.
+    next: Option<LineState>,
+    valid: usize,
+}
+
+impl LineCache {
+    /// Forgets the lot: a different language, or a buffer replaced wholesale.
+    pub fn clear(&mut self) {
+        *self = LineCache::default();
+    }
+
+    /// Drops the watermark to take in an edit on `line`, and answers how many lines of spans
+    /// survive it. Nothing above the edited line can be affected: the state a line is read in is
+    /// settled before that line is looked at.
+    pub fn invalidate_from(&mut self, line: usize) -> usize {
+        if line >= self.valid {
+            return self.valid;
+        }
+        let rung = line / STRIDE;
+        self.valid = rung * STRIDE;
+        self.ladder.truncate(rung + 1);
+        self.next = self.ladder.last().cloned();
+        self.valid
+    }
+
+    /// How many leading lines are highlighted.
+    pub fn valid_lines(&self) -> usize {
+        self.valid
+    }
 }
 
 impl Highlighter {
@@ -55,31 +123,76 @@ impl Highlighter {
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
     }
 
-    /// Highlight the whole buffer, returning one Vec of (style, text) runs per line.
-    pub fn highlight(&self, path: Option<&Path>, text: &str) -> Vec<Vec<(Style, String)>> {
-        let syntax = self.syntax_for(path, text);
-        let mut h = HighlightLines::new(syntax, &self.theme);
-        let mut out = Vec::new();
-
-        for line in text.split_inclusive('\n') {
-            let ranges = h
-                .highlight_line(line, &self.syntax_set)
-                .unwrap_or_else(|_| vec![(syntect::highlighting::Style::default(), line)]);
-            let mut spans: Vec<(Style, String)> = Vec::new();
-            for (sstyle, text_part) in ranges {
-                let trimmed = text_part.trim_end_matches('\n');
-                if trimmed.is_empty() {
-                    continue;
-                }
-                spans.push((convert_style(sstyle), trimmed.to_string()));
+    /// Brings `spans` up to and including line `through`, carrying on from wherever the last call
+    /// left off. `cache` and `spans` are the two halves of one cache: pass the same pair every
+    /// time, for the same buffer.
+    ///
+    /// The buffer is read a line at a time straight from the rope. Copying it into one String
+    /// first — which is what a whole-file highlight has to do — is a full copy of the file per
+    /// keystroke, before a single line has been parsed.
+    pub fn extend_to(
+        &self,
+        path: Option<&Path>,
+        rope: &Rope,
+        through: usize,
+        cache: &mut LineCache,
+        spans: &mut Vec<Vec<(Style, String)>>,
+    ) {
+        let first_line: Cow<str> = rope.line(0).into();
+        let syntax = self.syntax_for(path, &first_line);
+        // Either half without the other is not a cache at all, and neither is one made with a
+        // grammar the file is no longer being read with.
+        if spans.len() != cache.valid || cache.syntax.as_deref() != Some(syntax.name.as_str()) {
+            cache.clear();
+            spans.clear();
+            cache.syntax = Some(syntax.name.clone());
+        }
+        let through = through.min(rope.len_lines().saturating_sub(1));
+        if cache.valid > through {
+            return;
+        }
+        // Built per call rather than kept: it borrows the theme, and a struct holding both would
+        // have to borrow from itself. It is one walk over the theme's scopes, once a frame.
+        let theme = ThemeHighlighter::new(&self.theme);
+        let mut state = cache.next.clone().unwrap_or_else(|| LineState {
+            parse: ParseState::new(syntax),
+            theme: HighlightState::new(&theme, ScopeStack::new()),
+        });
+        while cache.valid <= through {
+            if cache.valid.is_multiple_of(STRIDE) && cache.ladder.len() == cache.valid / STRIDE {
+                cache.ladder.push(state.clone());
             }
-            out.push(spans);
+            let line: Cow<str> = rope.line(cache.valid).into();
+            spans.push(highlight_one(&mut state, &line, &self.syntax_set, &theme));
+            cache.valid += 1;
         }
-        if text.is_empty() {
-            out.push(Vec::new());
-        }
-        out
+        cache.next = Some(state);
     }
+}
+
+/// One line, coloured in the state the line above it left behind.
+///
+/// The line terminator is trimmed off and empty runs dropped: the renderer draws lines, not the
+/// breaks between them, and a span holding only a newline would take a cell that isn't there.
+fn highlight_one(
+    state: &mut LineState,
+    line: &str,
+    syntax_set: &SyntaxSet,
+    theme: &ThemeHighlighter,
+) -> Vec<(Style, String)> {
+    let ranges = match state.parse.parse_line(line, syntax_set) {
+        Ok(ops) => HighlightIterator::new(&mut state.theme, &ops, line, theme).collect::<Vec<_>>(),
+        Err(_) => vec![(syntect::highlighting::Style::default(), line)],
+    };
+    let mut spans: Vec<(Style, String)> = Vec::new();
+    for (sstyle, text_part) in ranges {
+        let trimmed = text_part.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            continue;
+        }
+        spans.push((convert_style(sstyle), trimmed.to_string()));
+    }
+    spans
 }
 
 /// An extension or file name the grammars don't know, mapped onto one they do.
@@ -134,6 +247,82 @@ mod tests {
 
     fn syntax_name(file: &str, text: &str) -> String {
         Highlighter::new().syntax_for(Some(Path::new(file)), text).name.clone()
+    }
+
+    /// A file long enough to span several rungs of the ladder, with one line of the caller's
+    /// choosing in the middle of it.
+    fn sample(at: usize, line: &str) -> Rope {
+        let text: Vec<String> = (0..130)
+            .map(|i| {
+                if i == at {
+                    line.to_string()
+                } else {
+                    format!("fn f{i}() {{ let v = {i}; }}")
+                }
+            })
+            .collect();
+        Rope::from_str(&text.join("\n"))
+    }
+
+    fn from_scratch(hl: &Highlighter, rope: &Rope) -> Vec<Vec<(Style, String)>> {
+        let mut cache = LineCache::default();
+        let mut spans = Vec::new();
+        hl.extend_to(Some(Path::new("sample.rs")), rope, usize::MAX, &mut cache, &mut spans);
+        spans
+    }
+
+    /// The one that matters: resuming must be indistinguishable from starting over. The edit
+    /// opens a block comment, so every line below it changes colour — a resumed pass that
+    /// quietly kept what it had would be caught here rather than on screen.
+    #[test]
+    fn an_edited_line_re_highlights_to_the_same_spans_as_a_fresh_pass() {
+        let hl = Highlighter::new();
+        let path = Some(Path::new("sample.rs"));
+        let before = sample(70, "fn f70() { let v = 70; }");
+        let after = sample(70, "/* f70 is out of service");
+
+        let mut cache = LineCache::default();
+        let mut spans = Vec::new();
+        hl.extend_to(path, &before, usize::MAX, &mut cache, &mut spans);
+        assert_eq!(cache.valid_lines(), before.len_lines());
+
+        spans.truncate(cache.invalidate_from(70));
+        assert_eq!(cache.valid_lines(), 64, "resumed from the rung below the edit, not from the top");
+        hl.extend_to(path, &after, usize::MAX, &mut cache, &mut spans);
+
+        assert_eq!(spans, from_scratch(&hl, &after));
+    }
+
+    /// A keystroke pays for the screen it happens on, not for the file it happens in.
+    #[test]
+    fn lines_below_the_one_asked_for_are_left_for_later() {
+        let hl = Highlighter::new();
+        let path = Some(Path::new("sample.rs"));
+        let rope = sample(0, "fn f0() {}");
+        let mut cache = LineCache::default();
+        let mut spans = Vec::new();
+
+        hl.extend_to(path, &rope, 9, &mut cache, &mut spans);
+        assert_eq!(spans.len(), 10);
+        hl.extend_to(path, &rope, 19, &mut cache, &mut spans);
+        assert_eq!(spans.len(), 20, "the rest arrives as the view reaches it");
+        assert_eq!(spans[..10], from_scratch(&hl, &rope)[..10]);
+    }
+
+    /// Save As renames a buffer into another language; the spans it already has were made with
+    /// the wrong grammar and none of them survive.
+    #[test]
+    fn a_buffer_read_as_another_language_starts_over() {
+        let hl = Highlighter::new();
+        let rope = Rope::from_str("# heading\nfn f() {}\n");
+        let mut cache = LineCache::default();
+        let mut spans = Vec::new();
+        hl.extend_to(Some(Path::new("notes.md")), &rope, usize::MAX, &mut cache, &mut spans);
+        let as_markdown = spans.clone();
+
+        hl.extend_to(Some(Path::new("notes.rs")), &rope, usize::MAX, &mut cache, &mut spans);
+        assert_ne!(spans, as_markdown);
+        assert_eq!(spans, from_scratch(&hl, &rope));
     }
 
     /// The set the editor is expected to know. TypeScript in particular was plain text for as

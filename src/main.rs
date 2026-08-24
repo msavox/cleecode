@@ -164,6 +164,36 @@ fn draw_synchronised(terminal: &mut BufferedTerminal, app: &mut App) -> std::io:
     drawn
 }
 
+/// Applies one input event to the app.
+///
+/// Handling an event is where user input meets every subsystem, so it is the most likely place
+/// to hit a bug. Shielded, that costs a status line instead of the session — the shells in the
+/// panes keep running, untouched. The description of a caught panic comes back for the caller
+/// to put on the status line.
+///
+/// `size` is the window as it is right now rather than as it was when the batch started: a
+/// resize can arrive in the middle of one, and mouse coordinates are read against the layout.
+fn apply_event(app: &mut App, event: Event, size: ratatui::layout::Size) -> Result<(), String> {
+    shielded(AssertUnwindSafe(|| match event {
+        Event::Key(key) => {
+            if key.kind == event::KeyEventKind::Press {
+                app.handle_key(key);
+            }
+        }
+        Event::Mouse(mouse) => {
+            let full = Rect::new(0, 0, size.width, size.height);
+            let params = ui::LayoutParams::from_app(app);
+            let areas = ui::compute_layout(full, &params);
+            app.handle_mouse(mouse, &areas, full);
+        }
+        Event::Paste(text) => app.handle_paste(text),
+        // Nothing to do: the next frame is drawn against the new size, and one is always drawn
+        // after an event.
+        Event::Resize(_, _) => {}
+        _ => {}
+    }))
+}
+
 /// A terminal whose writes go through a large buffer. See where it is built for why.
 type BufferedTerminal =
     ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
@@ -465,14 +495,43 @@ fn run(
     // from; a run of them means the screen can't be painted at all, and something has to give.
     let mut failed_draws = 0u8;
 
+    // When the last frame went up. A frame is owed at least this often whatever else happens:
+    // several things on screen are drawn from the clock rather than from state — a scrollbar that
+    // fades out after a couple of seconds, a pane revealed once its shell has been quiet for a
+    // moment — and none of them can raise a flag when their moment arrives. A second late is
+    // imperceptible on all of them; never is not.
+    const REDRAW_AT_LEAST: Duration = Duration::from_secs(1);
+    // Everything is still settling in the first moments: shells are starting, the splash is up,
+    // the workspace is being applied. Cheaper to draw through it than to reason about it.
+    const ALWAYS_DRAW_FOR: Duration = Duration::from_secs(3);
+    // How many queued events are handled before the screen is brought up to date regardless. A
+    // mouse drag arrives as hundreds of moves and each one used to buy a full layout and repaint,
+    // which is how dragging a seam fell behind the mouse. Bounded so that a program flooding the
+    // input can still not stop the frame from being drawn.
+    const DRAIN_LIMIT: usize = 200;
+    let started = Instant::now();
+    let mut last_draw = Instant::now();
+
     loop {
-        match shielded(AssertUnwindSafe(|| draw_synchronised(terminal, &mut app))) {
+        let owed = app.take_redraw()
+            || started.elapsed() < ALWAYS_DRAW_FOR
+            || last_draw.elapsed() >= REDRAW_AT_LEAST;
+        match shielded(AssertUnwindSafe(|| {
+            if !owed {
+                return Ok(());
+            }
+            last_draw = Instant::now();
+            draw_synchronised(terminal, &mut app)
+        })) {
             Ok(drawn) => {
                 drawn?;
                 failed_draws = 0;
             }
             Err(text) => {
                 failed_draws += 1;
+                // The frame that was owed never went up, and the complaint about it has to. Both
+                // are reasons to come straight back rather than to wait for the next second.
+                app.mark_dirty();
                 // Drawing is dominated by the terminal panes, so a pane is the likely culprit,
                 // and a broken terminal should cost you that terminal and nothing else. Each
                 // step here gives up strictly less than closing the editor did: the pane, then
@@ -498,29 +557,22 @@ fn run(
         }
 
         if event::poll(Duration::from_millis(33))? {
-            let event = event::read()?;
-            let size = terminal.size()?;
-            // Handling an event is where user input meets every subsystem, so it is the most
-            // likely place to hit a bug. Shielded, that costs a status line instead of the
-            // session — the shells in the panes keep running, untouched.
-            let outcome = shielded(AssertUnwindSafe(|| match event {
-                Event::Key(key) => {
-                    if key.kind == event::KeyEventKind::Press {
-                        app.handle_key(key);
-                    }
+            // Everything already queued is handled before the screen is touched. The events in a
+            // burst nearly always describe one gesture — a drag, a wheel spun, a paste arriving
+            // as keystrokes — and only where it ended is worth drawing.
+            let mut handled = 0usize;
+            loop {
+                let event = event::read()?;
+                if let Err(text) = apply_event(&mut app, event, terminal.size()?) {
+                    app.status_message = i18n::msg_internal_error(app.settings.lang, &text);
                 }
-                Event::Mouse(mouse) => {
-                    let full = Rect::new(0, 0, size.width, size.height);
-                    let params = ui::LayoutParams::from_app(&app);
-                    let areas = ui::compute_layout(full, &params);
-                    app.handle_mouse(mouse, &areas, full);
+                // Anything the user did can change the screen, resizes included, and working out
+                // what exactly would cost more than the frame it saves.
+                app.mark_dirty();
+                handled += 1;
+                if handled >= DRAIN_LIMIT || !event::poll(Duration::ZERO)? {
+                    break;
                 }
-                Event::Paste(text) => app.handle_paste(text),
-                Event::Resize(_, _) => {}
-                _ => {}
-            }));
-            if let Err(text) = outcome {
-                app.status_message = i18n::msg_internal_error(app.settings.lang, &text);
             }
         }
 
@@ -542,6 +594,7 @@ fn run(
             app.poll_figures();
             app.poll_run_watch();
             app.poll_inspector();
+            app.poll_terminal_output();
         }));
         if let Err(text) = polled {
             app.status_message = i18n::msg_internal_error(app.settings.lang, &text);

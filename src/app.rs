@@ -346,6 +346,15 @@ const RUN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 /// starting up and attributing its figures to nobody.
 const RUN_WATCH_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A buffer's text as the Find box last flattened it, and enough about where it came from to
+/// tell whether it still describes that buffer. Compared, never interpreted.
+struct FindText {
+    editor: usize,
+    revision: u64,
+    chars: usize,
+    text: String,
+}
+
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
@@ -374,6 +383,16 @@ pub struct App {
     pub active_terminal: usize,
     pub focus: Focus,
     pub should_quit: bool,
+    /// Set when something that can change what is on screen has happened, and cleared by the
+    /// frame loop when it draws. A frame is a full layout plus a repaint of every pane, and an
+    /// editor left open with nothing happening in it was paying that thirty times a second to
+    /// produce the identical screen. Raised generously on purpose: a frame drawn for nothing
+    /// costs a few milliseconds, while a frame not drawn when it was needed is a screen that
+    /// disagrees with the file.
+    redraw: bool,
+    /// The sum of every pane's output counter as of the last look. A shell that printed since
+    /// then moves the sum; nothing else does.
+    terminal_generation: u64,
     pub status_message: String,
     pub editor_viewport: (usize, usize),
     /// Where the pointer last was. Only used to light up the scrollbar it is resting on, which
@@ -437,6 +456,13 @@ pub struct App {
     pub pending_upload: Option<PendingUpload>,
     /// In-file find / find-and-replace overlay state, when open.
     pub find: Option<crate::find::FindState>,
+    /// The buffer the Find box is scanning, flattened into a string, kept between keystrokes.
+    ///
+    /// The regex engine reads a `&str` and the buffer is a rope, so every rescan needs a copy of
+    /// the whole file. Made afresh for each character typed, that copy — not the scan — is what
+    /// a search box costs in a large file. It is only ever stale in one way, so remembering
+    /// which buffer it came from and at which revision is enough to know when to make it again.
+    find_text: Option<FindText>,
     /// Command palette / file quick-open overlay, when open.
     pub picker: Option<crate::picker::Picker>,
     /// The word-completion popup, when it is up. The one overlay in this list that does not take
@@ -1101,33 +1127,137 @@ fn expand_placeholders(template: &str, path: &std::path::Path) -> String {
         .replace("{stem}", &quote(path.file_stem().unwrap_or_default().to_string_lossy()))
 }
 
-/// Collects files under `root` for the quick-open picker, capped so a huge tree can't
-/// stall the UI. Always skips VCS/build dirs; skips dotfiles unless `show_hidden`.
-pub fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) {
-    const LIMIT: usize = 8000;
-    if out.len() >= LIMIT {
-        return;
+/// How many files the quick-open picker and the project search will look at. The list is built
+/// on the frame thread, so it has to end somewhere; past this a name is found by typing it into
+/// the search rather than by scrolling a list the length of a build tree.
+const PROJECT_FILE_LIMIT: usize = 8000;
+
+/// How deep the fallback walk goes before it stops descending.
+///
+/// Nothing anybody edits is thirty directories deep, so the cap only ever fires on a tree that
+/// contains a way back to itself. That case has to be caught rather than survived: a recursion
+/// deep enough to exhaust the stack does not panic, it aborts — the shield that keeps a bug
+/// from closing the window never sees it, and every shell in the session goes with it.
+const PROJECT_WALK_DEPTH: usize = 32;
+
+/// Names the project list never offers: the VCS's own store, and the two build outputs that are
+/// bigger than the source tree they sit in. Dotfiles join them unless they were asked for.
+fn skipped_component(name: &str, show_hidden: bool) -> bool {
+    name == ".git"
+        || name == "target"
+        || name == "node_modules"
+        || (!show_hidden && name.starts_with('.'))
+}
+
+/// Collects files under `root` for the quick-open picker and the project search, capped at
+/// `PROJECT_FILE_LIMIT`. Returns whether it stopped early — a list that quietly ends is one you
+/// will read "nothing here" off once too often, when the truth was "nothing in the part I got to".
+///
+/// In a git repository the list comes from git, which already knows what is generated and what
+/// is checked in: a project whose `.gitignore` mentions `build/` or `.venv` gets those left out
+/// here too, instead of drowning the picker in them and reaching the cap on artefacts. Shelling
+/// out is this project's idiom for asking git anything, and it is the reason no dependency here
+/// has to grow its own ignore-file dialect. Anything else — not a repo, no git installed, a git
+/// that failed — falls back to the walk.
+pub fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) -> bool {
+    if let Some(truncated) = git_project_files(root, out, show_hidden) {
+        return truncated;
     }
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    walk_project_files(root, out, show_hidden, 0)
+}
+
+/// What the quick-open box calls itself. It says so when the list is only part of the project:
+/// otherwise a name that is simply past the cap looks exactly like a name that is not there.
+fn file_picker_title(truncated: bool) -> &'static str {
+    match truncated {
+        true => "Open file (first 8000 only — type / or ~ to browse)",
+        false => "Open file (type / or ~ to browse)",
+    }
+}
+
+/// The file list as git sees it: everything tracked plus everything untracked that is not
+/// ignored. `None` when git could not answer, which is the caller's cue to walk the tree.
+fn git_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) -> Option<bool> {
+    let listed = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let room = PROJECT_FILE_LIMIT.saturating_sub(out.len());
+    let (names, truncated) = git_listed_names(&listed.stdout, show_hidden, room);
+    for name in names {
+        let path = root.join(name);
+        // The index still names a file deleted since the last commit, and names a submodule as
+        // if it were a file. Both would open as an empty buffer, so both are dropped here.
+        if path.is_file() {
+            out.push(path);
+        }
+    }
+    Some(truncated)
+}
+
+/// Splits what `git ls-files -z` printed into the paths worth offering.
+///
+/// NUL-separated on purpose: a file name may contain anything but a NUL — a space, a newline, a
+/// quote — and git's default output escapes non-ASCII names into C string literals, which is a
+/// spelling no path ever comes back from. Split on NUL there is nothing to unescape.
+fn git_listed_names(stdout: &[u8], show_hidden: bool, room: usize) -> (Vec<PathBuf>, bool) {
+    let mut names = Vec::new();
+    for raw in stdout.split(|&b| b == 0).filter(|s| !s.is_empty()) {
+        // git prints `/` on every platform, so this is the separator to split on whatever the
+        // host calls one. A name that is not UTF-8 is skipped rather than guessed at.
+        let Ok(name) = std::str::from_utf8(raw) else { continue };
+        if name.split('/').any(|part| skipped_component(part, show_hidden)) {
+            continue;
+        }
+        if names.len() >= room {
+            return (names, true);
+        }
+        names.push(PathBuf::from(name));
+    }
+    (names, false)
+}
+
+/// The walk used where git cannot answer. Returns whether it stopped early.
+fn walk_project_files(
+    root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    show_hidden: bool,
+    depth: usize,
+) -> bool {
+    if out.len() >= PROJECT_FILE_LIMIT || depth >= PROJECT_WALK_DEPTH {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else { return false };
+    let mut truncated = false;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name == ".git" || name == "target" || name == "node_modules" {
+        if skipped_component(&name, show_hidden) {
             continue;
         }
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
+        // The kind comes off the directory entry itself, so this is not a second look at the
+        // disk, and it describes the link rather than what the link points at — which is the
+        // whole point: a link is never descended into. `ln -s .. loop` inside a project makes a
+        // tree with no bottom, and the same file reached under two names is one file listed
+        // twice. A link *to* a file is still offered, since opening it opens what it names.
+        let Ok(kind) = entry.file_type() else { continue };
         let path = entry.path();
-        if path.is_dir() {
-            collect_project_files(&path, out, show_hidden);
-        } else if path.is_file() {
+        if kind.is_symlink() {
+            if path.is_file() {
+                out.push(path);
+            }
+        } else if kind.is_dir() {
+            truncated |= walk_project_files(&path, out, show_hidden, depth + 1);
+        } else if kind.is_file() {
             out.push(path);
         }
-        if out.len() >= LIMIT {
-            return;
+        if out.len() >= PROJECT_FILE_LIMIT {
+            return true;
         }
     }
+    truncated
 }
 
 /// Recursively copies `src` to `dest` (file, directory tree, or symlink target),
@@ -1634,6 +1764,8 @@ impl App {
             last_full: Rect::new(0, 0, 0, 0),
             focus: Focus::FileTree,
             should_quit: false,
+            redraw: true,
+            terminal_generation: 0,
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
             pointer: None,
@@ -1665,6 +1797,7 @@ impl App {
             unsaved_prompt: None,
             pending_upload: None,
             find: None,
+            find_text: None,
             picker: None,
             completion: None,
             completion_anchor: (0, 0),
@@ -1751,6 +1884,10 @@ impl App {
     }
 
     pub fn poll_turtle(&mut self) {
+        // The joke is an animation: while one is crossing the status line, every frame moves it.
+        if self.turtle.is_some() {
+            self.redraw = true;
+        }
         let width = self.last_full.width;
         if self.turtle.is_some() && self.turtle_at(width).is_none() {
             // Hand the status line back exactly as it was found — but only if the reply is still
@@ -1780,6 +1917,11 @@ impl App {
     }
 
     pub fn poll_splash(&mut self) {
+        // Kept redrawing for as long as it is up: the splash is the first thing on screen, and
+        // the frame that takes it away is one nobody else asks for.
+        if self.show_splash {
+            self.redraw = true;
+        }
         if self.show_splash && self.splash_started.elapsed() >= SPLASH_DURATION {
             self.show_splash = false;
         }
@@ -1788,6 +1930,7 @@ impl App {
     pub fn poll_background_messages(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             self.status_message = msg;
+            self.redraw = true;
         }
     }
 
@@ -1796,6 +1939,9 @@ impl App {
     /// would put a picture in somebody else's tab.
     pub fn poll_previews(&mut self) {
         while let Ok(done) = self.preview_rx.try_recv() {
+            // A reply is news whatever it says: a page to put up, a picture that failed, or a
+            // mark cleared on a tab that was waiting for it.
+            self.redraw = true;
             let Some(preview) = self.editors.iter_mut().find_map(|e| {
                 e.preview.as_mut().filter(|_| e.path.as_deref() == Some(done.path.as_path()))
             }) else {
@@ -1894,8 +2040,11 @@ impl App {
         }
         let before: usize = self.terminals.len();
         // Reap exited tabs within each window, then drop any window left with no tabs.
+        // A shell that has ended leaves no output behind it, so this is the one thing about a
+        // pane that the output counter cannot notice: the tab simply stops being there.
+        let mut reaped = false;
         for window in &mut self.terminals {
-            window.reap_exited();
+            reaped |= window.reap_exited();
         }
         self.terminals.retain(|w| !w.tabs.is_empty());
         // Never leave the workspace with no terminal at all.
@@ -1906,6 +2055,10 @@ impl App {
         }
         if self.terminals.len() != before {
             self.active_terminal = self.active_terminal.min(self.terminals.len().saturating_sub(1));
+            reaped = true;
+        }
+        if reaped {
+            self.redraw = true;
         }
     }
 
@@ -2143,9 +2296,61 @@ impl App {
         }
     }
 
+    /// Says the screen no longer matches the state. Cheap enough to call on a suspicion.
+    pub fn mark_dirty(&mut self) {
+        self.redraw = true;
+    }
+
+    /// Whether a frame is owed, clearing the debt. Asked once per turn of the loop.
+    pub fn take_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.redraw)
+    }
+
+    /// Notices output that has arrived in any pane since the last look.
+    ///
+    /// A sum rather than a per-pane comparison: the panes come and go, their order changes, and
+    /// no individual number means anything here — only that the total moved. Wrapping, because a
+    /// counter that has been running long enough to overflow is still only being compared with
+    /// itself, and a pane closing lowers the total exactly as legitimately as output raises it.
+    pub fn poll_terminal_output(&mut self) {
+        let now = self
+            .terminals
+            .iter()
+            .flat_map(|w| w.tabs.iter())
+            .fold(0u64, |total, tab| total.wrapping_add(tab.generation()));
+        if now != self.terminal_generation {
+            self.terminal_generation = now;
+            self.redraw = true;
+        }
+        // A pane that has not been revealed yet is waiting on a quiet moment rather than on
+        // anything that can raise a flag, so it is drawn towards.
+        if self.terminals.iter().flat_map(|w| w.tabs.iter()).any(|tab| tab.awaiting_reveal()) {
+            self.redraw = true;
+        }
+    }
+
     pub fn poll_external_changes(&mut self) {
+        // Files may have been reloaded, the tree re-read and the git dots refreshed underneath.
+        self.redraw = true;
         let lang = self.settings.lang;
-        if let Some(msg) = self.editor_mut().check_external_changes(lang) {
+        // Every buffer, not just the one in front of you. A tab in the background is still a
+        // file, and a branch switched or a formatter run under it used to leave it holding text
+        // that no longer existed anywhere — noticed only on saving over the newer version.
+        //
+        // Rendered views are skipped: their file is read by `reload_changed_previews`, which
+        // knows to leave the picture up while the new one is made. Reloading the same file here
+        // as well would blank the pane on its own rhythm.
+        //
+        // The message is the last one that had something to say, so a sweep that reloads three
+        // files in silence and finds a fourth with unsaved edits still reports the one that
+        // needs a decision.
+        let mut said = None;
+        for editor in self.editors.iter_mut().filter(|e| e.preview.is_none()) {
+            if let Some(msg) = editor.check_external_changes(lang) {
+                said = Some(msg);
+            }
+        }
+        if let Some(msg) = said {
             self.status_message = msg;
         }
         self.reload_changed_previews();
@@ -2156,6 +2361,7 @@ impl App {
     pub fn poll_git_status(&mut self) {
         while let Ok(status) = self.git_status_rx.try_recv() {
             self.git_status = status;
+            self.redraw = true;
         }
     }
 
@@ -2401,6 +2607,7 @@ impl App {
             && inspector.watch.poll()
         {
             inspector.asked = false;
+            self.redraw = true;
         }
     }
 
@@ -2527,6 +2734,9 @@ impl App {
             })
             .unwrap_or_default();
         if fresh {
+            // A new snapshot moves the workspace view, the variables pane and whatever the
+            // debugger is pointing at.
+            self.redraw = true;
             self.follow_stop(&debug);
         }
         for path in figures {
@@ -2561,8 +2771,12 @@ impl App {
                         continue;
                     }
                     self.reread_preview(idx, None);
+                    self.redraw = true;
                 }
-                None => self.open_figure_tab(path),
+                None => {
+                    self.open_figure_tab(path);
+                    self.redraw = true;
+                }
             }
         }
     }
@@ -2610,6 +2824,7 @@ impl App {
         let Some(watch) = self.run_watch.take() else { return };
         if !watch.opened.is_empty() {
             self.run_figures.insert(watch.file, watch.opened);
+            self.redraw = true;
         }
     }
 
@@ -2844,6 +3059,10 @@ impl App {
             while let Some(event) = client.try_recv() {
                 arrived.push((program.clone(), event));
             }
+        }
+        // Anything a server says lands on screen: a squiggle, a hover, a line in the status bar.
+        if !arrived.is_empty() {
+            self.redraw = true;
         }
         for (program, event) in arrived {
             match event {
@@ -3238,12 +3457,19 @@ impl App {
     pub fn poll_search(&mut self) {
         let lang = self.settings.lang;
         while let Ok(outcome) = self.search_rx.try_recv() {
+            self.redraw = true;
             if let Some(detail) = &outcome.error {
                 self.status_message = i18n::msg_find_pattern_error(lang, detail);
                 continue;
             }
             if outcome.hits.is_empty() {
-                self.status_message = i18n::msg_search_none(lang, &outcome.query, outcome.files_searched);
+                // "Nowhere in N files" is a claim about the project, and a search that stopped at
+                // a limit has not earned it: it only looked at part of the tree. Said the other
+                // way round — nothing found, and the search was cut short — it is the truth.
+                self.status_message = match outcome.truncated {
+                    true => i18n::msg_search_done(lang, 0, outcome.files_searched, true),
+                    false => i18n::msg_search_none(lang, &outcome.query, outcome.files_searched),
+                };
                 continue;
             }
             self.status_message = i18n::msg_search_done(
@@ -3311,6 +3537,7 @@ impl App {
     pub fn poll_git_panel(&mut self) {
         let lang = self.settings.lang;
         while let Ok(message) = self.git_panel_rx.try_recv() {
+            self.redraw = true;
             match message {
                 GitMessage::Snapshot(asked, snap) => {
                     // Anything but the answer to the latest ask is thrown away: it describes a
@@ -4838,6 +5065,23 @@ impl App {
         ed.rope.line_to_char(ed.cursor_line) + ed.cursor_col
     }
 
+    /// The active buffer as one string, made only when the last one no longer describes it.
+    ///
+    /// Keyed on which buffer it came from and how many times that buffer has changed; the
+    /// character count comes along because a buffer index is only a position in a list, and
+    /// closing a tab can slide a different file underneath it at the same revision.
+    fn find_text(&mut self) -> &str {
+        let editor = self.active_editor_index();
+        let revision = self.editor().revision();
+        let chars = self.editor().rope.len_chars();
+        let fresh = matches!(&self.find_text, Some(c) if (c.editor, c.revision, c.chars) == (editor, revision, chars));
+        if !fresh {
+            let text = self.editor().rope.to_string();
+            self.find_text = Some(FindText { editor, revision, chars, text });
+        }
+        self.find_text.as_ref().map(|c| c.text.as_str()).unwrap_or_default()
+    }
+
     fn open_find(&mut self, _replace: bool) {
         let mut fs = crate::find::FindState::new();
         // Seed the query from a single-line selection, the way most editors do.
@@ -4846,20 +5090,21 @@ impl App {
                 fs.query = sel;
             }
         }
-        let text = self.editor().rope.to_string();
         let from = self.editor_cursor_char_idx();
-        fs.recompute(&text, from);
+        fs.recompute(self.find_text(), from);
         self.find = Some(fs);
         self.apply_find_selection();
     }
 
     /// Recomputes matches after the query changed, biasing the current match to the cursor.
+    ///
+    /// The state is lifted out for the duration so the scan can borrow the buffer's text at the
+    /// same time; it goes back untouched.
     fn recompute_find(&mut self) {
-        let text = self.editor().rope.to_string();
         let from = self.editor_cursor_char_idx();
-        if let Some(f) = self.find.as_mut() {
-            f.recompute(&text, from);
-        }
+        let Some(mut f) = self.find.take() else { return };
+        f.recompute(self.find_text(), from);
+        self.find = Some(f);
         self.apply_find_selection();
     }
 
@@ -4888,16 +5133,29 @@ impl App {
         if f.query.is_empty() || f.matches.is_empty() {
             return;
         }
-        // Replace from the last match backwards so earlier char indices stay valid. Each
-        // replacement is worked out from the text it covers, since a pattern's groups differ
-        // from match to match.
+        // Replace All is one action, so it has to be one step to undo: replacing each match on
+        // its own put a whole copy of the file on the undo stack per match, and taking back a
+        // thousand-match run meant a thousand Ctrl+Z.
+        //
+        // So the run from the first match to the last is rebuilt in memory — replacements where
+        // the matches were, the text between them carried over verbatim — and written back in a
+        // single edit. Each replacement is still worked out from the text it covers, since a
+        // pattern's capture groups differ from match to match.
         let matches: Vec<(usize, usize)> = f.matches.clone();
         let count = matches.len();
-        for &(s, e) in matches.iter().rev() {
+        let (span_start, span_end) = (matches[0].0, matches[count - 1].1);
+        let mut rebuilt = String::new();
+        let mut carried = span_start;
+        for &(s, e) in &matches {
+            if s > carried {
+                rebuilt.push_str(&self.editor().rope.slice(carried..s).to_string());
+            }
             let matched = self.matched_text((s, e));
-            let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else { break };
-            self.editor_mut().replace_char_range(s, e, &replace);
+            let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else { return };
+            rebuilt.push_str(&replace);
+            carried = e;
         }
+        self.editor_mut().replace_char_range(span_start, span_end, &rebuilt);
         let lang = self.settings.lang;
         self.status_message = i18n::msg_replaced_all(lang, count);
         self.recompute_find();
@@ -4908,6 +5166,9 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.find = None;
+                // The copy of the file the box was scanning goes with it: nothing else reads it,
+                // and a closed search box has no business holding a whole buffer twice over.
+                self.find_text = None;
                 self.editor_mut().clear_selection();
             }
             KeyCode::Char('a') if ctrl => self.replace_all(),
@@ -5085,25 +5346,27 @@ impl App {
     }
 
     fn open_file_picker(&mut self) {
-        let items = self.project_file_items();
+        let (items, truncated) = self.project_file_items();
         self.picker =
-            Some(crate::picker::Picker::new("Open file (type / or ~ to browse)", crate::picker::PickerKind::Files, items));
+            Some(crate::picker::Picker::new(file_picker_title(truncated), crate::picker::PickerKind::Files, items));
     }
 
     /// Every file under the project root, the quick-open default: type a few characters to jump
-    /// to one without walking the tree.
-    fn project_file_items(&self) -> Vec<crate::picker::PickItem> {
+    /// to one without walking the tree. The flag says the list stopped at the cap, so a name
+    /// missing from it may still be in the project.
+    fn project_file_items(&self) -> (Vec<crate::picker::PickItem>, bool) {
         let mut files = Vec::new();
-        collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
+        let truncated = collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
         files.sort();
         let root = self.root.clone();
-        files
+        let items = files
             .into_iter()
             .map(|p| {
                 let label = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
                 crate::picker::PickItem { label, shortcut: None, action: crate::picker::PickAction::OpenFile(p) }
             })
-            .collect()
+            .collect();
+        (items, truncated)
     }
 
     /// Keeps the file picker's list in step with what has been typed. A query starting with `/`,
@@ -5156,10 +5419,11 @@ impl App {
                 // Back from browsing to searching the project. Rebuilt only on the transition,
                 // since walking the tree on every keystroke would be wasteful.
                 if self.picker.as_ref().is_some_and(|p| p.path_mode) {
-                    let items = self.project_file_items();
+                    let (items, truncated) = self.project_file_items();
                     if let Some(picker) = self.picker.as_mut() {
                         picker.path_mode = false;
                         picker.filter_override = None;
+                        picker.title = file_picker_title(truncated);
                         picker.set_items(items);
                     }
                 }
@@ -6258,6 +6522,7 @@ impl App {
                     preview.state = crate::preview::State::Rendered { lines, revision };
                     preview.shown_revision = revision;
                 }
+                self.redraw = true;
                 continue;
             }
             // Wait for the text to stop moving before spending half a second on it.
@@ -6301,6 +6566,9 @@ impl App {
                     preview.state = started;
                 }
             }
+            // Either the interim text went up or the pane went to "rendering": both are a
+            // different pane from the one drawn last frame.
+            self.redraw = true;
         }
     }
 
@@ -9479,6 +9747,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// git is asked in the form that survives a real project: names with spaces, names in other
+    /// alphabets, and a `.git` directory that is never a file to open.
+    #[test]
+    fn the_git_file_list_is_split_on_nul_and_drops_what_is_never_offered() {
+        let stdout = b"src/main.rs\0my notes.txt\0citt\xc3\xa0/relazione.tex\0.git/config\0\
+                       target/debug/clee\0node_modules/left-pad/index.js\0.env\0";
+        let (names, truncated) = git_listed_names(stdout, false, 100);
+        assert!(!truncated);
+        let shown: Vec<String> = names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+        assert_eq!(shown, vec!["src/main.rs", "my notes.txt", "città/relazione.tex"]);
+
+        // Asked for the hidden files, the dotfile comes back — but the VCS store and the build
+        // outputs never do, whatever was asked.
+        let (names, _) = git_listed_names(stdout, true, 100);
+        let shown: Vec<String> = names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+        assert_eq!(shown, vec!["src/main.rs", "my notes.txt", "città/relazione.tex", ".env"]);
+    }
+
+    /// Stopping is fine; stopping quietly is not. The flag is what lets "nothing found" be told
+    /// apart from "nothing found in the part I got to".
+    #[test]
+    fn the_git_file_list_says_when_it_stopped_at_the_limit() {
+        let stdout = b"a.rs\0b.rs\0c.rs\0";
+        let (names, truncated) = git_listed_names(stdout, false, 2);
+        assert_eq!(names.len(), 2);
+        assert!(truncated, "two of three is not the project");
+
+        let (names, truncated) = git_listed_names(stdout, false, 3);
+        assert_eq!(names.len(), 3);
+        assert!(!truncated, "all of it is all of it");
+    }
+
+    /// A link pointing back up its own tree makes a directory of infinite depth. Following it
+    /// exhausts the stack, and a stack overflow is not a panic to be caught: the process aborts,
+    /// taking every shell in the window with it. Reaching the end of this test at all is the
+    /// property being checked.
+    #[test]
+    #[cfg(unix)]
+    fn the_walk_never_follows_a_link_that_points_back_up_the_tree() {
+        let dir = setup_dir("symlink_loop");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("src/loop")).unwrap();
+        std::os::unix::fs::symlink(dir.join("src/main.rs"), dir.join("alias.rs")).unwrap();
+
+        let mut files = Vec::new();
+        let truncated = walk_project_files(&dir, &mut files, false, 0);
+        assert!(!truncated, "a small project is not a truncated one");
+
+        let mut names: Vec<String> =
+            files.iter().map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().to_string()).collect();
+        names.sort();
+        // The link to a *file* is still offered — opening it opens what it names — while the
+        // link to a directory is not descended into and the file behind it appears once.
+        assert_eq!(names, vec!["alias.rs", "src/main.rs"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A snapshot says which figures a session *holds*, and every tick lists all of them. Read

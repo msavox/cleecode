@@ -3112,9 +3112,17 @@ fn draw_preview_pane(
         Some(Preview::Rendered { lines, .. }) => {
             // Wrapped here rather than when the lines were made: they are logical lines, and
             // this is the only place that knows how wide the pane happens to be right now.
-            let scroll = top_line.min(lines.len().saturating_sub(1)) as u16;
-            let text = ratatui::text::Text::from(lines.clone());
-            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).scroll((scroll, 0)), inner);
+            //
+            // Only the lines that can reach the pane are handed over, because handing over all
+            // of them means copying every styled span of the whole document, every frame, to
+            // draw a screenful. How many wrapped rows a logical line becomes is not known until
+            // the paragraph lays it out, so the slice is deliberately generous: four rows of
+            // wrapping per line is far more than prose does, and taking too many costs a copy
+            // nobody sees while taking too few would clip the bottom of the page.
+            let scroll = top_line.min(lines.len().saturating_sub(1));
+            let reach = (inner.height as usize).saturating_mul(4).max(1);
+            let visible: Vec<Line> = lines.iter().skip(scroll).take(reach).cloned().collect();
+            f.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
         }
         None => {}
     }
@@ -3199,17 +3207,6 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     }
     app.editors[idx].follow_cursor(viewport_height, if app.settings.word_wrap { 0 } else { text_width });
 
-    if app.editors[idx].syntax_dirty {
-        if app.settings.syntax_highlighting {
-            let text = app.editors[idx].rope.to_string();
-            let path = app.editors[idx].path.clone();
-            app.editors[idx].highlighted = app.highlighter.highlight(path.as_deref(), &text);
-        } else {
-            app.editors[idx].highlighted.clear();
-        }
-        app.editors[idx].syntax_dirty = false;
-    }
-
     // Taken once, and cloned: the renderer holds the editors mutably while it draws, and the
     // marks live on the app beside them.
     let marks: Vec<crate::lsp::Mark> = app.marks_for(app.editors[idx].path.as_deref()).to_vec();
@@ -3229,6 +3226,22 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     let cursor_line = app.editors[idx].cursor_line;
     let visible_rows = app.editors[idx].visible_rows_from(top_line, viewport_height);
     let cursor_row = visible_rows.iter().position(|&l| l == cursor_line).unwrap_or(0);
+
+    // Only as far down as this frame can see, plus a screen for the scroll that follows.
+    //
+    // A line's colours depend on every line above it, so a buffer is coloured from the top down
+    // and an edit invalidates what follows it — but only what follows it, and only as far as
+    // anyone is looking. Colouring the whole file instead made a keystroke cost a full copy of
+    // the buffer plus a parse of every line in it, so typing in a long file got slower the
+    // longer the file was.
+    if app.settings.syntax_highlighting {
+        let through = visible_rows.last().copied().unwrap_or(0) + viewport_height;
+        let highlighter = &app.highlighter;
+        app.editors[idx].refresh_highlight(highlighter, through);
+    } else {
+        app.editors[idx].forget_highlight();
+    }
+
     let mut lines: Vec<Line> = Vec::new();
     for line_idx in visible_rows.iter().copied() {
         let mut spans: Vec<Span> = Vec::new();

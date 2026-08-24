@@ -1,7 +1,10 @@
+use crate::highlight::{Highlighter, LineCache};
 use crate::i18n::{self, Key, Lang};
 use anyhow::Result;
 use ratatui::style::Style;
 use ropey::Rope;
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -58,8 +61,22 @@ pub struct Editor {
     revision: u64,
     pub dirty: bool,
     pub disk_mtime: Option<SystemTime>,
+    /// Coloured spans for the first `syntax_cache.valid_lines()` lines of the buffer, and nothing
+    /// for the ones below: they are not stale, they are not made yet. The renderer asks for the
+    /// lines it is about to draw before it draws them.
     pub highlighted: Vec<Vec<(Style, String)>>,
+    /// Where `highlighted` has got to, and what it needs to carry on from there.
+    syntax_cache: LineCache,
+    /// Set when the whole of `highlighted` has to go: a language change, a settings change —
+    /// anything an edit's "from this line down" cannot describe.
     pub syntax_dirty: bool,
+    /// The line an edit in flight began on, noted when its undo checkpoint is taken.
+    ///
+    /// The cursor before an edit and the cursor after it bracket almost every edit there is, and
+    /// the earlier of the two is where re-highlighting must start. The few that reach further up
+    /// than either — indenting a selection from below its first line, replacing a range found
+    /// somewhere else — say so themselves.
+    pending_edit_line: Option<usize>,
     pub selection_anchor: Option<(usize, usize)>,
     /// Whether the selection is a rectangle rather than a run of text. A column selection has
     /// the same two endpoints; what changes is which cells between them count as inside.
@@ -77,7 +94,9 @@ pub struct Editor {
     /// pretending to hold lines. Every text operation already refuses on `read_only`, which
     /// such a tab always is, so this only has to change what gets drawn.
     pub preview: Option<crate::preview::Preview>,
-    undo_stack: Vec<Snapshot>,
+    /// Oldest snapshot first, so the eviction that keeps the history bounded drops one from the
+    /// front instead of shuffling five hundred of them down by one.
+    undo_stack: VecDeque<Snapshot>,
     redo_stack: Vec<Snapshot>,
     last_edit: EditKind,
     /// While set, nested mutations skip their own checkpoint so a compound edit (paste,
@@ -102,7 +121,9 @@ impl Editor {
             dirty: false,
             disk_mtime: None,
             highlighted: Vec::new(),
+            syntax_cache: LineCache::default(),
             syntax_dirty: true,
+            pending_edit_line: None,
             selection_anchor: None,
             selection_block: false,
             folds: Vec::new(),
@@ -110,7 +131,7 @@ impl Editor {
             final_newline: false,
             read_only: false,
             preview: None,
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::None,
             in_compound: false,
@@ -380,6 +401,9 @@ impl Editor {
     /// word undoes as one), while `Other` edits always start a new step. No-op inside a
     /// compound edit, which checkpoints once up front.
     fn checkpoint(&mut self, kind: EditKind) {
+        // Noted before the compound guard: a compound edit takes one checkpoint but marks the
+        // buffer at every step inside it, and the earliest line is what re-highlighting needs.
+        self.note_edit_line(self.cursor_line);
         if self.in_compound {
             return;
         }
@@ -387,9 +411,9 @@ impl Editor {
         let coalesce = kind != EditKind::Other && kind == self.last_edit && !self.undo_stack.is_empty();
         if !coalesce {
             const MAX_UNDO: usize = 500;
-            self.undo_stack.push(self.snapshot());
+            self.undo_stack.push_back(self.snapshot());
             if self.undo_stack.len() > MAX_UNDO {
-                self.undo_stack.remove(0);
+                self.undo_stack.pop_front();
             }
         }
         self.last_edit = kind;
@@ -400,13 +424,16 @@ impl Editor {
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor_line = snap.cursor_line.min(max_line);
         self.cursor_col = snap.cursor_col.min(self.line_char_len(self.cursor_line));
-        self.selection_anchor = None;
-        self.mark_edited();
+        // Both halves of the selection, not just the anchor: a rectangle left switched on
+        // outlives the selection it belonged to, and the next Shift+arrow draws one.
+        self.clear_selection();
+        // A snapshot replaces the whole text, so no line of it can be assumed to have survived.
+        self.mark_edited_from(0);
         self.folds.clear();
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo_stack.pop() else { return false };
+        let Some(prev) = self.undo_stack.pop_back() else { return false };
         let current = self.snapshot();
         self.redo_stack.push(current);
         self.restore(prev);
@@ -417,7 +444,7 @@ impl Editor {
     pub fn redo(&mut self) -> bool {
         let Some(next) = self.redo_stack.pop() else { return false };
         let current = self.snapshot();
-        self.undo_stack.push(current);
+        self.undo_stack.push_back(current);
         self.restore(next);
         self.last_edit = EditKind::None;
         true
@@ -513,7 +540,9 @@ impl Editor {
                 self.selection_anchor = Some((al, new_ac));
             }
         }
-        self.mark_edited();
+        // A selection can be dragged upwards, leaving the cursor on the last line of a range
+        // that starts well above it — so the range says where the change starts, not the cursor.
+        self.mark_edited_from(sl);
     }
 
     pub fn outdent_selection(&mut self, tab_size: usize) {
@@ -546,7 +575,7 @@ impl Editor {
         if let (Some((_, ac)), Some(len)) = (self.selection_anchor.as_mut(), anchor_len) {
             *ac = (*ac).min(len);
         }
-        self.mark_edited();
+        self.mark_edited_from(sl);
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -659,6 +688,11 @@ impl Editor {
         if self.read_only {
             return;
         }
+        // The one door every paste comes through, and the buffer behind it holds '\n' and
+        // nothing else — the file's own ending is put back on the way out to disk. Text copied
+        // from a Windows program still has its carriage returns, and splitting that on '\n'
+        // alone leaves one at the end of every line: invisible on screen, and saved as `\r\r\n`.
+        let text = normalize_newlines(text);
         self.checkpoint(EditKind::Other);
         self.in_compound = true;
         self.delete_selection_raw();
@@ -717,13 +751,18 @@ impl Editor {
                 return;
             }
         }
-        self.checkpoint(EditKind::Delete);
+        // The checkpoint is taken inside the branches that actually delete something. Taken up
+        // front it also fired at the very start of the buffer, where Backspace does nothing at
+        // all — and a checkpoint discards the redo stack, so a stray press at (0, 0) threw away
+        // a redo the user had not touched.
         if self.cursor_col > 0 {
+            self.checkpoint(EditKind::Delete);
             let idx = self.char_idx(self.cursor_line, self.cursor_col);
             self.rope.remove(idx - 1..idx);
             self.cursor_col -= 1;
             self.mark_edited();
         } else if self.cursor_line > 0 {
+            self.checkpoint(EditKind::Delete);
             let prev_len = self.line_char_len(self.cursor_line - 1);
             let idx = self.char_idx(self.cursor_line, 0);
             self.rope.remove(idx - 1..idx);
@@ -740,9 +779,10 @@ impl Editor {
         if self.delete_selection() {
             return;
         }
-        self.checkpoint(EditKind::Delete);
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
+        // As with Backspace: nothing to delete at the end of the buffer, so nothing to record.
         if idx < self.rope.len_chars() {
+            self.checkpoint(EditKind::Delete);
             self.rope.remove(idx..idx + 1);
             self.mark_edited();
         }
@@ -1134,7 +1174,7 @@ impl Editor {
             }
         }
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
-        self.mark_edited();
+        self.mark_edited_from(sl);
     }
 
     /// Moves the cursor to the start of `line_1based` (clamped to the document), clearing
@@ -1179,19 +1219,60 @@ impl Editor {
         self.rope.remove(start..end);
         self.rope.insert(start, text);
         self.selection_anchor = None;
+        // Replace-all works its way through the file without the cursor having been anywhere
+        // near the match, so the range's own first line is the only honest answer here.
+        let first_line = self.rope.char_to_line(start);
         self.set_cursor_char_idx(start + text.chars().count());
-        self.mark_edited();
+        self.mark_edited_from(first_line);
     }
 
-    /// Marks the buffer changed: unsaved, needing re-highlighting, and one revision newer.
+    /// Marks the buffer changed: unsaved, one revision newer, and coloured only down to where
+    /// the edit began.
     ///
-    /// One call rather than the three assignments it replaces, so an edit added later cannot
-    /// quietly forget one of them — which is how a live preview would end up showing text that
-    /// is no longer there.
+    /// One call rather than the assignments it replaces, so an edit added later cannot quietly
+    /// forget one of them — which is how a live preview would end up showing text that is no
+    /// longer there.
     fn mark_edited(&mut self) {
+        self.mark_edited_from(self.cursor_line);
+    }
+
+    /// As `mark_edited`, for an edit whose first changed line is known and lies above both ends
+    /// of the cursor's journey — indenting a selection from its last line, say.
+    fn mark_edited_from(&mut self, line: usize) {
+        self.note_edit_line(line);
+        let from = self.pending_edit_line.take().unwrap_or(line).min(self.cursor_line);
         self.dirty = true;
-        self.syntax_dirty = true;
         self.revision = self.revision.wrapping_add(1);
+        self.highlighted.truncate(self.syntax_cache.invalidate_from(from));
+    }
+
+    /// Remembers the earliest line any part of the edit in flight has touched.
+    fn note_edit_line(&mut self, line: usize) {
+        self.pending_edit_line = Some(self.pending_edit_line.map_or(line, |seen| seen.min(line)));
+    }
+
+    /// Colours the buffer down to line `through`, which is as far as the renderer is about to
+    /// look. Anything below that is left for the frame that scrolls to it.
+    pub fn refresh_highlight(&mut self, highlighter: &Highlighter, through: usize) {
+        if self.syntax_dirty {
+            self.syntax_dirty = false;
+            self.forget_highlight();
+        }
+        highlighter.extend_to(
+            self.path.as_deref(),
+            &self.rope,
+            through,
+            &mut self.syntax_cache,
+            &mut self.highlighted,
+        );
+    }
+
+    /// Throws the colours away, for a buffer that is not being highlighted at all.
+    pub fn forget_highlight(&mut self) {
+        if !self.highlighted.is_empty() || self.syntax_cache.valid_lines() != 0 {
+            self.highlighted.clear();
+            self.syntax_cache.clear();
+        }
     }
 
     /// How many times the text has changed. Compared, never interpreted.
@@ -1259,6 +1340,19 @@ impl Editor {
                 self.left_col = self.cursor_col + 1 - viewport_width;
             }
         }
+    }
+}
+
+/// Text with every line ending spelled as a bare '\n', the way the buffer holds them.
+///
+/// Both spellings a carriage return arrives in are line breaks: the Windows pair, and the lone
+/// '\r' of classic Mac text and of some terminals' bracketed paste. Borrowed unchanged when
+/// there is nothing to do, which is the usual case.
+fn normalize_newlines(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
     }
 }
 
@@ -1385,6 +1479,144 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
         assert!(!ed.dirty);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A buffer of `lines` lines of Rust, named so the highlighter reads it as Rust.
+    fn sample_buffer(lines: usize) -> Editor {
+        let text: Vec<String> = (0..lines).map(|i| format!("fn f{i}() {{ let v = {i}; }}")).collect();
+        let mut ed = Editor::empty();
+        ed.path = Some(PathBuf::from("sample.rs"));
+        ed.rope = Rope::from_str(&text.join("\n"));
+        ed
+    }
+
+    fn coloured_whole(rope: &Rope) -> Vec<Vec<(Style, String)>> {
+        let mut fresh = Editor::empty();
+        fresh.path = Some(PathBuf::from("sample.rs"));
+        fresh.rope = rope.clone();
+        fresh.refresh_highlight(&Highlighter::new(), usize::MAX);
+        fresh.highlighted
+    }
+
+    /// The colours above the line being typed on cannot have changed, so they are kept — that is
+    /// the whole reason for holding them per line. What is kept has to be indistinguishable from
+    /// what a fresh pass would have produced, which is what the second half checks.
+    #[test]
+    fn typing_keeps_the_colours_above_the_line_it_happens_on() {
+        let highlighter = Highlighter::new();
+        let mut ed = sample_buffer(200);
+        ed.refresh_highlight(&highlighter, 199);
+        assert_eq!(ed.highlighted.len(), 200);
+
+        ed.cursor_line = 150;
+        ed.cursor_col = 3;
+        ed.insert_char('x');
+        let kept = ed.highlighted.len();
+        assert!(kept > 100 && kept <= 150, "most of the file survives a keystroke in the middle of it");
+
+        ed.refresh_highlight(&highlighter, 199);
+        assert_eq!(ed.highlighted, coloured_whole(&ed.rope));
+    }
+
+    /// An edit can start above the cursor at either end of it: a selection dragged downwards and
+    /// indented leaves the cursor on its last line while the first line is what changed.
+    #[test]
+    fn indenting_a_selection_re_colours_from_its_first_line() {
+        let highlighter = Highlighter::new();
+        let mut ed = sample_buffer(200);
+        ed.refresh_highlight(&highlighter, 199);
+
+        ed.selection_anchor = Some((100, 0));
+        ed.cursor_line = 150;
+        ed.cursor_col = 0;
+        ed.indent_selection(4);
+        assert!(ed.highlighted.len() <= 100, "the first indented line is where the colours stop");
+
+        ed.refresh_highlight(&highlighter, 199);
+        assert_eq!(ed.highlighted, coloured_whole(&ed.rope));
+    }
+
+    /// An undo replaces the whole text, so no line of the old colouring can be assumed to have
+    /// survived it.
+    #[test]
+    fn an_undo_re_colours_the_whole_buffer() {
+        let highlighter = Highlighter::new();
+        let mut ed = sample_buffer(200);
+        ed.cursor_line = 150;
+        ed.insert_char('/');
+        ed.refresh_highlight(&highlighter, 199);
+        assert!(!ed.highlighted.is_empty());
+
+        assert!(ed.undo());
+        assert!(ed.highlighted.is_empty());
+        ed.refresh_highlight(&highlighter, 199);
+        assert_eq!(ed.highlighted, coloured_whole(&ed.rope));
+    }
+
+    /// A keypress that changes nothing is not an edit: Backspace at the very start of the buffer
+    /// used to take a checkpoint anyway, and a checkpoint drops the redo stack — so a stray press
+    /// threw away a redo the user had never asked to lose.
+    #[test]
+    fn a_backspace_that_deletes_nothing_leaves_the_history_alone() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abc");
+        assert!(ed.undo());
+        assert_eq!(ed.rope.to_string(), "");
+        assert_eq!(ed.redo_stack.len(), 1);
+
+        ed.cursor_line = 0;
+        ed.cursor_col = 0;
+        ed.backspace();
+        assert_eq!(ed.redo_stack.len(), 1, "the redo is still there to be redone");
+        assert!(ed.undo_stack.is_empty());
+        assert!(ed.redo());
+        assert_eq!(ed.rope.to_string(), "abc");
+    }
+
+    /// The same at the other end of the buffer, where Delete has nothing in front of it.
+    #[test]
+    fn a_delete_at_the_end_of_the_buffer_leaves_the_history_alone() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abc");
+        assert!(ed.undo());
+        assert_eq!(ed.redo_stack.len(), 1);
+
+        ed.delete_forward();
+        assert_eq!(ed.redo_stack.len(), 1);
+        assert!(ed.undo_stack.is_empty());
+    }
+
+    /// Undo ends the selection it lands in, rectangle and all. A block flag left switched on
+    /// outlives the selection it belonged to, and the next Shift+arrow draws a rectangle the
+    /// user never asked for.
+    #[test]
+    fn an_undo_ends_a_column_selection_as_well_as_an_ordinary_one() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef");
+        ed.insert_newline(false);
+        ed.insert_str("ghijkl");
+        ed.selection_block = true;
+        ed.selection_anchor = Some((0, 1));
+        ed.cursor_line = 1;
+        ed.cursor_col = 4;
+
+        assert!(ed.undo());
+        assert_eq!(ed.selection_anchor, None);
+        assert!(!ed.selection_block, "the rectangle goes with the selection");
+    }
+
+    /// Text copied out of a Windows program arrives with its carriage returns still on it. The
+    /// buffer holds '\n' alone — the file's own ending is put back when it is saved — so a '\r'
+    /// left in the text is an invisible character that turns into `\r\r\n` on the way to disk.
+    #[test]
+    fn a_pasted_line_ending_is_normalised_on_the_way_in() {
+        assert_eq!(normalize_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
+        assert!(matches!(normalize_newlines("nothing to do"), Cow::Borrowed(_)));
+
+        let mut ed = Editor::empty();
+        ed.insert_multiline("one\r\ntwo\r\n");
+        assert_eq!(ed.rope.to_string(), "one\ntwo\n");
+        assert!(!ed.rope.to_string().contains('\r'));
     }
 
     /// A rectangle over ragged text: the short line has nothing under the columns, and must
