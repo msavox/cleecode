@@ -80,6 +80,21 @@ fn unquote(line: &str) -> &str {
     line
 }
 
+/// The files a paste is offering to send somewhere, or nothing at all.
+///
+/// Both questions have to answer yes, and they are different questions. `parse_dropped_paths`
+/// asks whether the tokens name files that are here; `looks_like_dropped_paths` asks whether the
+/// paste is *made of* paths and nothing else. Only the first was ever asked, and a paste is not
+/// only ever a drag: a line being composed at a shell with `~/.ssh/id_ed25519` pasted into the
+/// middle of it names a file that exists, and sending it to the server was never what was meant.
+/// A drag has no prose in it, so requiring the shape as well costs a real drop nothing.
+pub fn upload_candidates(text: &str) -> Vec<PathBuf> {
+    if !looks_like_dropped_paths(text) {
+        return Vec::new();
+    }
+    parse_dropped_paths(text)
+}
+
 /// Whether a paste looks like a file drop whose files are somewhere else.
 ///
 /// `parse_dropped_paths` keeps only what exists on *this* machine, so dragging a file onto a
@@ -290,6 +305,30 @@ mod tests {
         assert!(quoted_tokens("   ").is_empty());
         // What the POSIX splitter does to the same line, and why it is not used there.
         assert_eq!(shell_words::split(r"C:\Users\me\notes.txt").unwrap(), vec!["C:Usersmenotes.txt"]);
+    }
+
+    /// What may be offered for upload, and what may not. The paths exist in both halves of this
+    /// — that is the point: existing on disk is what a path does, not what a drag does, and
+    /// sending a private key to a server because its name was pasted into a half-typed command
+    /// is the failure this rules out.
+    #[test]
+    fn only_a_paste_made_entirely_of_paths_is_a_drop() {
+        let dir = std::env::temp_dir().join(format!("clee_dnd_upload_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id_ed25519");
+        std::fs::write(&key, "x").unwrap();
+        let shown = key.display().to_string();
+
+        // Dragged: the paste is the path and nothing else, one file or several.
+        assert_eq!(upload_candidates(&shown), vec![key.clone()]);
+        assert_eq!(upload_candidates(&format!("{shown}\n{shown}")), vec![key.clone(), key.clone()]);
+
+        // Typed: the same real file, named inside a sentence or a command being composed.
+        assert!(upload_candidates(&format!("ssh-add {shown}")).is_empty());
+        assert!(upload_candidates(&format!("the key is at {shown}, have a look")).is_empty());
+        assert!(upload_candidates("git status").is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A path with spaces that arrived unquoted is one file, not several words. Only the disk

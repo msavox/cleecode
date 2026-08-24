@@ -1497,6 +1497,31 @@ pub fn msg_copy_failed(lang: Lang, dest: &str, err: &str) -> String {
     }
 }
 
+/// Asked before anything leaves this machine.
+///
+/// A paste into a pane that has an ssh session in it used to *upload* whatever paths it named,
+/// with no question and no undo — and a paste is not always a drag: the text of a path is a thing
+/// people copy, and the path of a private key is a thing people copy while looking for it. So the
+/// host is named, because it is the answer to "where would this go", and the count is named,
+/// because "3 items" is how you notice you selected a folder you did not mean to. Ends in the
+/// same two letters as every other one-letter question here, for the reason `yes_key` gives.
+pub fn msg_scp_confirm(lang: Lang, count: usize, target: &str) -> String {
+    let yes = yes_key(lang).to_ascii_uppercase();
+    match lang {
+        Lang::En => format!("Upload {count} item(s) to {target} with scp? They leave this machine.  {yes} / N"),
+        Lang::It => format!("Carico {count} elemento/i su {target} con scp? Escono da questa macchina.  {yes} / N"),
+    }
+}
+
+/// Said when the question is answered with anything but yes, so the paste visibly did nothing
+/// rather than invisibly doing something.
+pub fn msg_scp_cancelled(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Upload cancelled; nothing left this machine".to_string(),
+        Lang::It => "Upload annullato; non è uscito niente da questa macchina".to_string(),
+    }
+}
+
 pub fn msg_scp_started(lang: Lang, count: usize, target: &str) -> String {
     match lang {
         Lang::En => format!("Uploading {count} item(s) to {target} via scp…"),
@@ -2039,6 +2064,20 @@ mod tests {
                 "{lang:?}: {question:?} does not offer {key}"
             );
             assert!(question.contains("src/main.rs"), "{lang:?}: the file has to be named");
+        }
+    }
+
+    /// The same property for the upload question, which is asked on the status line rather than
+    /// in a box: there is even less room there for the reader to guess, and saying yes sends
+    /// files to another machine.
+    #[test]
+    fn the_upload_question_names_the_key_the_host_and_the_count() {
+        for lang in [Lang::En, Lang::It] {
+            let question = msg_scp_confirm(lang, 3, "build-box");
+            let key = yes_key(lang).to_ascii_uppercase();
+            assert!(question.contains(&format!("{key} / N")), "{lang:?}: {question:?} does not offer {key}");
+            assert!(question.contains("build-box"), "{lang:?}: the host has to be named");
+            assert!(question.contains('3'), "{lang:?}: how many files has to be said");
         }
     }
 

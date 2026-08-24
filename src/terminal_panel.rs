@@ -94,6 +94,14 @@ pub struct TerminalPanel {
     /// Set once the shell's end of the pty closes (process exited, whether via `exit`,
     /// Ctrl+D, a command that dies on Ctrl+C, a crash, or an ssh disconnect).
     pub exited: Arc<AtomicBool>,
+    /// Raised when the pane is torn down, so the reader thread stops at its next wakeup.
+    ///
+    /// Killing the shell is normally enough: the last slave fd closes and the read returns EOF.
+    /// A grandchild that inherited the pty and outlived the hangup keeps that end open, though,
+    /// and then the read blocks with nobody left to care about the answer. The flag turns the
+    /// next byte — or the eventual EOF — into an exit instead of another parse into a screen
+    /// that will never be drawn again.
+    stop: Arc<AtomicBool>,
     /// When the pane was spawned, and the last moment the shell produced output (millis
     /// since `spawn`, written by the reader thread). Used to hide the noisy startup banner
     /// until the shell settles at a clean prompt.
@@ -416,6 +424,8 @@ impl TerminalPanel {
         let parser_clone = Arc::clone(&parser);
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = Arc::clone(&exited);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
 
         let spawn = Instant::now();
         let last_output_ms = Arc::new(AtomicU64::new(0));
@@ -431,6 +441,12 @@ impl TerminalPanel {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        // Checked here rather than only at the top: the pane can be closed while
+                        // this thread sits inside `read`, and whatever came back then belongs to
+                        // a terminal nobody is looking at any more.
+                        if stop_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let data = &buf[..n];
                         {
                             let mut p = lock_poisoned(&parser_clone);
@@ -471,6 +487,7 @@ impl TerminalPanel {
             rows,
             cols,
             exited,
+            stop,
             spawn,
             last_output_ms,
             produced_output,
@@ -621,6 +638,67 @@ impl TerminalPanel {
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()
     }
+
+    /// Ends the shell in this pane and collects it.
+    ///
+    /// Dropping the panel closes nothing on its own: the reader thread holds a dup of the pty
+    /// master and an `Arc` of the writer, so both ends stay open and the shell never notices
+    /// that its window is gone. A tab closed that way left a shell — and the `npm run dev`
+    /// inside it — running invisibly for the rest of the session, holding its port, and left a
+    /// thread parsing its output into a screen nobody would ever draw again.
+    ///
+    /// What a real terminal does when its window closes is hang up: the kernel sends SIGHUP to
+    /// the foreground process group of the controlling tty. That is done here by hand, because
+    /// the dup keeps the kernel from doing it, and it is done to the *group* — signalling only
+    /// the shell leaves the job it was running in the foreground orphaned but alive, which is
+    /// the whole difference between closing a tab and closing a tab that was running something.
+    /// Then the shell itself, and then `wait`, which is what actually reaps it: portable-pty's
+    /// child on unix is a plain `std::process::Child`, and dropping one of those leaves a
+    /// zombie behind.
+    ///
+    /// Every step is best effort and every failure is ignored. This runs from `Drop`, including
+    /// while the process is on its way out with a dozen panes to close, and a pane whose shell
+    /// died an hour ago must go through it as quietly as one that is still running.
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // A shell that has already exited needs no signal; it only needs collecting. Asking
+        // first also skips the grace period `kill` would otherwise spend waiting for a process
+        // that is already a zombie.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.hangup_foreground_group();
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+
+    /// Sends SIGHUP to whichever process group has the pane's tty, the way a closing terminal
+    /// window does.
+    ///
+    /// The foreground group is asked of the tty rather than assumed: with `npm run dev` running,
+    /// it is the group of `npm`, and that is the one that has to hear about the window closing.
+    /// When the tty cannot say — it is being torn down, or the shell already left — the shell's
+    /// own pid stands in, which is its group's id since portable-pty gives each pane a session
+    /// of its own. Group ids of 0 and 1 are refused on the way past: 0 means "this process's
+    /// group", and signalling that would hang up CleeCode itself.
+    #[cfg(unix)]
+    fn hangup_foreground_group(&self) {
+        let group = self
+            .master
+            .process_group_leader()
+            .or_else(|| self.child.process_id().map(|pid| pid as libc::pid_t))
+            .filter(|pid| *pid > 1);
+        if let Some(group) = group {
+            // SAFETY: `killpg` only delivers a signal to a process group id, and the id here is
+            // one this pane owns — read from its own tty, or its own child's. A group that has
+            // already gone comes back as an error, which is exactly as good an answer.
+            unsafe {
+                libc::killpg(group, libc::SIGHUP);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn hangup_foreground_group(&self) {}
 
     /// Starts a selection at `cell`, discarding any previous one.
     pub fn begin_selection(&mut self, cell: (u16, u16)) {
@@ -778,6 +856,18 @@ impl TerminalPanel {
     }
 }
 
+/// Closing a pane ends what was running in it — by every route there is.
+///
+/// `Drop` rather than a call at each close site on purpose. A tab closed, a window closed, a
+/// workspace opened over the top of the old one, the whole application quitting: they are all
+/// just a `TerminalPanel` going out of scope, and each of them used to leak a shell. Anything
+/// added later that drops a panel is covered without knowing it has to be.
+impl Drop for TerminalPanel {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// Translate a crossterm key event into raw bytes to send to the pty.
 pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -881,7 +971,17 @@ impl TerminalWindow {
     /// Drops tabs whose shell has exited, keeping `active` in range. Returns whether any tab is
     /// left — an emptied window is removed by the caller.
     pub fn reap_exited(&mut self) -> bool {
-        self.tabs.retain(|t| !t.exited.load(Ordering::Relaxed));
+        // Collected here and not left to `Drop` alone, because this is the path a shell that
+        // ended on its own takes — `exit`, Ctrl+D, an ssh that dropped — and the name of the
+        // method is a promise about the process table. The reader has already seen EOF by the
+        // time the flag is set, so the wait returns at once.
+        self.tabs.retain_mut(|t| {
+            if !t.exited.load(Ordering::Relaxed) {
+                return true;
+            }
+            let _ = t.child.wait();
+            false
+        });
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         }
@@ -992,6 +1092,86 @@ mod tests {
             !screen.contains("clear"),
             "no `clear` should ever be typed into the shell; screen:\n{screen}"
         );
+    }
+
+    /// Whether a pid still names a process — a signal of 0 is delivered to nobody but is still
+    /// checked against the process table, which is the cheapest way to ask.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// The pids running directly under `parent`, read the same way the rest of the app reads the
+    /// process table.
+    #[cfg(unix)]
+    fn children_of(parent: u32) -> Vec<u32> {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        sys.processes()
+            .values()
+            .filter(|p| p.parent() == Some(sysinfo::Pid::from_u32(parent)))
+            .map(|p| p.pid().as_u32())
+            .collect()
+    }
+
+    /// Closing a pane has to end the shell in it. It used to end nothing at all: dropping the
+    /// panel closed neither end of the pty, because the reader thread holds a dup of the master,
+    /// so the shell went on running for the rest of the session with no window to appear in.
+    ///
+    /// Reaping is half the claim and it is why the pid is checked rather than the exit status: a
+    /// child that was signalled but never waited for is still in the process table as a zombie,
+    /// and portable-pty's unix child is a plain `std::process::Child`, which does not collect
+    /// one when it is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_pane_ends_the_shell_and_collects_it() {
+        let panel = TerminalPanel::new(24, 80, Path::new("/")).expect("a shell must be spawnable");
+        let pid = panel.child_pid().expect("a spawned shell has a pid");
+        assert!(alive(pid), "the shell should be running before the pane is closed");
+
+        drop(panel);
+
+        assert!(!alive(pid), "the shell outlived its pane, or was left behind as a zombie");
+    }
+
+    /// And the half that matters in practice: what the pane was *running*.
+    ///
+    /// A shell signalled on its own leaves its foreground job orphaned but alive — the pane
+    /// disappears and the dev server it was running keeps its port. A real terminal hangs up the
+    /// whole foreground process group when its window closes, and this pins that we do too.
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_pane_takes_down_what_was_running_in_it() {
+        let mut panel = TerminalPanel::with_startup(24, 80, Path::new("/"), Some("sleep 300"))
+            .expect("a shell must be spawnable");
+        let shell = panel.child_pid().expect("a spawned shell has a pid");
+
+        // As generous as the startup-command test next door, and for the same reason: the wait
+        // covers the shell's own rc, and it ends the moment the command is actually running.
+        let deadline = Instant::now() + STARTUP_MAX + Duration::from_secs(8);
+        let mut job = None;
+        while Instant::now() < deadline && job.is_none() {
+            panel.flush_pending();
+            job = children_of(shell).into_iter().next();
+            if job.is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let job = job.expect("the startup command never started running");
+
+        drop(panel);
+
+        // The hangup reaches the job through its process group, but the job is not our child, so
+        // its parent — init, once the shell is gone — does the collecting on its own schedule.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(job) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(job), "the command the pane was running kept going after the pane closed");
     }
 
     /// What a program that asked for the mouse expects a wheel notch to look like. Coordinates

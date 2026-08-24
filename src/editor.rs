@@ -206,7 +206,10 @@ impl Editor {
         if self.line_ending == LineEnding::Crlf {
             text = text.replace('\n', "\r\n");
         }
-        std::fs::write(&path, text)?;
+        // Written to a sibling temp file and renamed into place. A plain write truncates the
+        // user's file before the first byte lands, so a crash or a full disk halfway through a
+        // save destroyed the only copy of the work — the one thing a save must never do.
+        crate::settings::write_atomic(&path, text.as_bytes())?;
         self.dirty = false;
         self.disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         Ok(())
@@ -1875,5 +1878,44 @@ mod tests {
         quiet.dirty = true;
         quiet.observe_scroll();
         assert!(!quiet.scrolled_within(window));
+    }
+
+    /// A save must never be able to leave less on disk than it started with, and must not
+    /// quietly change what the file *is*: the new content arrives whole, and a mode the user set
+    /// deliberately — an executable script, a file only they can read — survives it. Writing
+    /// through a temp file gets the first for free and would lose the second, since a fresh file
+    /// is born from the umask rather than from the one it replaces.
+    #[test]
+    fn saving_replaces_the_file_whole_and_keeps_the_mode_it_had() {
+        let dir = std::env::temp_dir().join(format!("clee_save_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.sh");
+        std::fs::write(&path, "#!/bin/sh\necho old\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut ed = Editor::open(path.clone()).unwrap();
+        ed.rope = Rope::from_str("#!/bin/sh\necho new\n");
+        ed.dirty = true;
+        ed.save().expect("a writable file must save");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\necho new\n");
+        assert!(!ed.dirty);
+        // The scratch file is a means, not a leftover: nothing but the file itself remains.
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "an executable script is still executable after a save");
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
