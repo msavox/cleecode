@@ -623,10 +623,19 @@ mod tests {
             let before = settings.rows();
             settings.activate(idx);
             let after = settings.rows();
-            assert_ne!(
-                before[idx].value, after[idx].value,
-                "row {idx} ({}) did not change when it was picked", before[idx].label
-            );
+            // On a machine with no display, the plots row has one honest value regardless of
+            // what's asked for, and `activate` refuses to change it — a documented 0.12.1
+            // decision (an off that reads while tabs keep arriving is a broken switch), already
+            // pinned by `plots_value`'s own test above. The row says so itself, so skip the
+            // "it changed" assertion here rather than fail on a refusal that is the feature.
+            let plots_row_declares_nothing_to_choose =
+                before[idx].value == i18n::t(settings.lang, Key::SettingPlotsNoDisplay);
+            if !plots_row_declares_nothing_to_choose {
+                assert_ne!(
+                    before[idx].value, after[idx].value,
+                    "row {idx} ({}) did not change when it was picked", before[idx].label
+                );
+            }
             // The language row is the one exception, and not a leak: it repaints every other
             // row in the other language, which is the whole of what it does.
             if settings.lang == Settings::default().lang {

@@ -81,14 +81,11 @@ jobs:
       # Debug, not release: the drivers spawn target/debug/clee by default, and there is no
       # reason to pay for a release build just to drive keystrokes at it.
       - run: cargo build --locked
-      # Ubuntu's system python refuses a bare pip install (PEP 668); the runner is
-      # single-purpose and thrown away after the job, so there is no environment to protect.
-      - run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            pip3 install --user --break-system-packages pyte
-          else
-            pip3 install --user pyte
-          fi
+      # Which pip needs --break-system-packages (PEP 668) and which one has never heard of the
+      # flag varies by runner image and drifts over time, so asking is more reliable than
+      # hardcoding an OS guess: try the plain install first, and only add the flag if that
+      # install was the one refused.
+      - run: python3 -m pip install --user pyte || python3 -m pip install --user --break-system-packages pyte
       # drive_git.py makes real commits in a throwaway repo it creates; git refuses to commit
       # without an identity, and a fixed default branch name keeps its output stable across
       # whatever the runner image's global default happens to be.
