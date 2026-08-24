@@ -916,12 +916,30 @@ fn pdfinfo_pages(path: &Path) -> Option<usize> {
         .and_then(|n| n.trim().parse().ok())
 }
 
+/// Escapes a path for embedding inside a PostScript string literal, i.e. between the parens in
+/// `(...)  file`. PostScript strings are delimited by balanced, unescaped parentheses, with `\`
+/// as the escape character; a filename carrying any of those bytes would otherwise close the
+/// literal early and let the rest of the name run as PostScript of its own choosing — in the
+/// call below, PostScript with file access. Backslash is escaped first, or escaping the
+/// parentheses afterwards would double-escape the backslashes this just inserted.
+fn escape_postscript_string(path: &str) -> String {
+    path.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)")
+}
+
 /// Ghostscript has no flag for the count; this is the long-standing PostScript incantation for
 /// it, which prints the number and nothing else.
 fn ghostscript_pages(path: &Path) -> Option<usize> {
+    let literal = escape_postscript_string(&path.display().to_string());
     let out = std::process::Command::new(tool("gs")?)
-        .args(["-q", "-dNODISPLAY", "-dNOSAFER", "-c"])
-        .arg(format!("({}) (r) file runpdfbegin pdfpagecount = quit", path.display()))
+        .args(["-q", "-dNODISPLAY"])
+        // Ghostscript defaults to -dSAFER since 9.50, which is what we want here: the string
+        // below is untrusted, so the interpreter should not be able to touch anything beyond the
+        // one file it was asked to count. That file itself needs an explicit exception, since
+        // SAFER also blocks reads outside its normal search path — this argument carries the
+        // real path, as plain argv rather than PostScript, so it needs no escaping.
+        .arg(format!("--permit-file-read={}", path.display()))
+        .arg("-c")
+        .arg(format!("({literal}) (r) file runpdfbegin pdfpagecount = quit"))
         .output()
         .ok()?;
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
@@ -1207,6 +1225,22 @@ mod tests {
         let why = made.err().unwrap_or_default();
         std::fs::remove_dir_all(&dir).ok();
         assert!(ok, "a picture in a markdown file stopped it becoming a document: {why}");
+    }
+
+    /// A filename carrying parens or a backslash must not be able to close the PostScript
+    /// literal early or splice its own code into Ghostscript's page-count invocation; a plain
+    /// path must come through untouched, since that is by far the common case.
+    #[test]
+    fn a_path_with_parens_or_a_backslash_is_escaped_before_it_reaches_ghostscript() {
+        assert_eq!(escape_postscript_string("/tmp/plain.pdf"), "/tmp/plain.pdf");
+        assert_eq!(
+            escape_postscript_string("/tmp/evil(name).pdf"),
+            "/tmp/evil\\(name\\).pdf"
+        );
+        assert_eq!(escape_postscript_string(r"C:\docs\report.pdf"), r"C:\\docs\\report.pdf");
+        // Backslash must be escaped first: a name already ending in `\)` should come out with
+        // the backslash doubled and the paren escaped, not the other way around.
+        assert_eq!(escape_postscript_string(r"weird\).pdf"), r"weird\\\).pdf");
     }
 
     /// pandoc's last word is "Error producing PDF.", which was what the status line used to show:

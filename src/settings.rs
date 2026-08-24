@@ -505,7 +505,6 @@ mod tests {
 
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
-    #[test]
     /// The modal is sized from `SETTINGS_COUNT` and the cursor wraps on it, so a row past that
     /// number is drawn nowhere and reachable by nothing. This is how three settings — where
     /// plots open, the mouse, the language — went missing while the constant stayed at 9.
@@ -543,6 +542,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn settings_survive_a_toml_round_trip() {
         let mut settings = Settings::default();
         settings.registered_venvs = vec![
