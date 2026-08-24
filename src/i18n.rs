@@ -171,6 +171,45 @@ pub enum Key {
     ManualTitle,
     ManualHint,
     MsgNoWorkspaces,
+    PickerCommands,
+    PickerOpenFile,
+    PickerOpenFileCapped,
+    PickerSearchResults,
+    PickerVariables,
+    PickerVenvBrowse,
+    PickerWorkspaceOpen,
+    PickerWorkspaceDelete,
+    // The frames the modals hang in. A box whose title is in one language and whose prompt is
+    // in another reads as an unfinished translation, which is what it was.
+    ModalDelete,
+    ModalUnsaved,
+    ModalRename,
+    ModalTerminalForm,
+    ModalSearchProject,
+    ModalNewFolder,
+    ModalNewFile,
+    ModalSaveWorkspace,
+    ModalSaveAs,
+    ModalAddVenvPath,
+    ModalAddVenvNickname,
+    ModalFindReplace,
+    FindLabel,
+    ReplaceLabel,
+    FindNoMatches,
+    // The workspace viewer. It runs as its own process and draws its own table, but it is the
+    // same program and answers to the same language setting.
+    WsWaiting,
+    WsWaitingWhere,
+    WsWaitingQuiet,
+    WsEmpty,
+    WsRecent,
+    WsColName,
+    WsColSize,
+    WsColClass,
+    WsColMin,
+    WsColMax,
+    WsColMean,
+    WsColValue,
 }
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -600,6 +639,165 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, MsgNoWorkspaces) => "No saved workspaces yet — use Workspace ▸ Save workspace",
         (Lang::It, MsgNoWorkspaces) => "Nessun workspace salvato — usa Workspace ▸ Salva workspace",
+
+        // The line across the top of each overlay list. It is the only thing that says what
+        // Enter is about to do, and on the two workspace lists that is the difference between
+        // opening a workspace and deleting one, so both name their verb.
+        (Lang::En, PickerCommands) => "Command palette",
+        (Lang::It, PickerCommands) => "Palette dei comandi",
+
+        (Lang::En, PickerOpenFile) => "Open file (type / or ~ to browse)",
+        (Lang::It, PickerOpenFile) => "Apri file (digita / o ~ per sfogliare)",
+
+        (Lang::En, PickerOpenFileCapped) => "Open file (first 8000 only — type / or ~ to browse)",
+        (Lang::It, PickerOpenFileCapped) => "Apri file (solo i primi 8000 — digita / o ~ per sfogliare)",
+
+        (Lang::En, PickerSearchResults) => "Search results",
+        (Lang::It, PickerSearchResults) => "Risultati della ricerca",
+
+        (Lang::En, PickerVariables) => "Variables",
+        (Lang::It, PickerVariables) => "Variabili",
+
+        (Lang::En, PickerVenvBrowse) => "Browse for a venv (type / or ~ to go elsewhere)",
+        (Lang::It, PickerVenvBrowse) => "Cerca un venv (digita / o ~ per andare altrove)",
+
+        (Lang::En, PickerWorkspaceOpen) => "Open workspace (Enter opens)",
+        (Lang::It, PickerWorkspaceOpen) => "Apri workspace (Invio apre)",
+
+        (Lang::En, PickerWorkspaceDelete) => "Delete workspace (Enter deletes)",
+        (Lang::It, PickerWorkspaceDelete) => "Elimina workspace (Invio elimina)",
+
+        // Modal titles. Written without the spaces that pad them against the border: the border
+        // is the drawing's business, and a title with its padding baked in cannot be measured.
+        (Lang::En, ModalDelete) => "Delete?",
+        (Lang::It, ModalDelete) => "Eliminare?",
+
+        (Lang::En, ModalUnsaved) => "Unsaved changes",
+        (Lang::It, ModalUnsaved) => "Modifiche non salvate",
+
+        (Lang::En, ModalRename) => "Rename",
+        (Lang::It, ModalRename) => "Rinomina",
+
+        (Lang::En, ModalTerminalForm) => "Terminal name & startup command",
+        (Lang::It, ModalTerminalForm) => "Nome del terminale e comando di avvio",
+
+        (Lang::En, ModalSearchProject) => "Search in project",
+        (Lang::It, ModalSearchProject) => "Cerca nel progetto",
+
+        (Lang::En, ModalNewFolder) => "New folder",
+        (Lang::It, ModalNewFolder) => "Nuova cartella",
+
+        (Lang::En, ModalNewFile) => "New file",
+        (Lang::It, ModalNewFile) => "Nuovo file",
+
+        (Lang::En, ModalSaveWorkspace) => "Save workspace",
+        (Lang::It, ModalSaveWorkspace) => "Salva workspace",
+
+        (Lang::En, ModalSaveAs) => "Save as",
+        (Lang::It, ModalSaveAs) => "Salva come",
+
+        // The two steps are numbered so it is plain the box will be back with a second question.
+        (Lang::En, ModalAddVenvPath) => "Add venv (1/2)",
+        (Lang::It, ModalAddVenvPath) => "Aggiungi venv (1/2)",
+
+        (Lang::En, ModalAddVenvNickname) => "Add venv (2/2)",
+        (Lang::It, ModalAddVenvNickname) => "Aggiungi venv (2/2)",
+
+        (Lang::En, ModalFindReplace) => "Find / Replace",
+        (Lang::It, ModalFindReplace) => "Trova / Sostituisci",
+
+        // The two field labels of that box. The caret is placed from whichever is wider, so
+        // neither may carry padding of its own.
+        (Lang::En, FindLabel) => "Find:",
+        (Lang::It, FindLabel) => "Trova:",
+
+        (Lang::En, ReplaceLabel) => "Replace:",
+        (Lang::It, ReplaceLabel) => "Sostituisci:",
+
+        (Lang::En, FindNoMatches) => "(no matches)",
+        (Lang::It, FindNoMatches) => "(nessun risultato)",
+
+        // The viewer's first screen: it is on show for the whole of a session that never starts,
+        // so it says both what is missing and that nothing is expected of the prompt.
+        (Lang::En, WsWaiting) => "Waiting for a session…",
+        (Lang::It, WsWaiting) => "In attesa di una sessione…",
+
+        (Lang::En, WsWaitingWhere) => "Start an interpreter in one of the terminals and this fills in.",
+        (Lang::It, WsWaitingWhere) => "Avvia un interprete in uno dei terminali e questo si riempie.",
+
+        (Lang::En, WsWaitingQuiet) => "Nothing is typed at your prompt to ask it.",
+        (Lang::It, WsWaitingQuiet) => "Non viene digitato niente al tuo prompt per chiederlo.",
+
+        (Lang::En, WsEmpty) => "The workspace is empty.",
+        (Lang::It, WsEmpty) => "Il workspace è vuoto.",
+
+        (Lang::En, WsRecent) => "Recent",
+        (Lang::It, WsRecent) => "Recenti",
+
+        // Column headings, kept short: the viewer's pane is a window beside the editor, and a
+        // heading wider than its column would be cut in the middle of a word.
+        (Lang::En, WsColName) => "Name",
+        (Lang::It, WsColName) => "Nome",
+
+        (Lang::En, WsColSize) => "Size",
+        (Lang::It, WsColSize) => "Dim.",
+
+        (Lang::En, WsColClass) => "Class",
+        (Lang::It, WsColClass) => "Classe",
+
+        (Lang::En, WsColMin) => "Min",
+        (Lang::It, WsColMin) => "Min",
+
+        (Lang::En, WsColMax) => "Max",
+        (Lang::It, WsColMax) => "Max",
+
+        (Lang::En, WsColMean) => "Mean",
+        (Lang::It, WsColMean) => "Media",
+
+        (Lang::En, WsColValue) => "Value",
+        (Lang::It, WsColValue) => "Valore",
+    }
+}
+
+/// How many results a chooser is offering, on the line across its top.
+pub fn msg_picker_matches(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::En => format!("({count} matches)"),
+        Lang::It => format!("({count} risultati)"),
+    }
+}
+
+/// What the viewer could not fit, and what to do about it.
+///
+/// Two forms because the advice is worth a line only when the line has room for it: cut
+/// mid-word it reads like the bug it exists to prevent, so at the narrow end the count goes
+/// alone.
+pub fn msg_ws_more(lang: Lang, hidden: usize) -> String {
+    match lang {
+        Lang::En => format!("… {hidden} more — make this pane taller"),
+        Lang::It => format!("… altre {hidden} — allarga questo pannello in altezza"),
+    }
+}
+
+pub fn msg_ws_more_short(lang: Lang, hidden: usize) -> String {
+    match lang {
+        Lang::En => format!("… {hidden} more"),
+        Lang::It => format!("… altre {hidden}"),
+    }
+}
+
+/// Where the session is stopped, above the variables it is stopped among.
+pub fn msg_ws_stopped(lang: Lang, name: &str, line: usize) -> String {
+    match lang {
+        Lang::En => format!("stopped in {name} at line {line}"),
+        Lang::It => format!("fermo in {name} alla riga {line}"),
+    }
+}
+
+pub fn msg_ws_called_from(lang: Lang, name: &str, line: usize) -> String {
+    match lang {
+        Lang::En => format!("called from {name} at line {line}"),
+        Lang::It => format!("chiamato da {name} alla riga {line}"),
     }
 }
 
@@ -770,6 +968,16 @@ pub fn msg_git_needs_a_name(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "That needs a name",
         Lang::It => "Serve un nome",
+    }
+}
+
+/// Said in place of running `git commit` with nothing in the box. Git refuses it too, but its
+/// refusal is a paragraph about the commit template and the editor it would have opened, none of
+/// which is true here — the box was right there and empty.
+pub fn msg_git_needs_a_message(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That needs a message",
+        Lang::It => "Serve un messaggio",
     }
 }
 

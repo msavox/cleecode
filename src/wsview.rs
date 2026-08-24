@@ -12,6 +12,7 @@
 //! can be resized without the viewer having to care, and nothing has hijacked the terminal if it
 //! dies. It is a program printing a table, and that is the whole of it.
 
+use crate::i18n::{self, Key, Lang};
 use crate::wsnap::{ordered, Snapshot, Watch};
 use std::io::Write;
 use std::path::Path;
@@ -21,7 +22,21 @@ use std::path::Path;
 /// value appears as fast as a person can look up from the prompt.
 const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The three escapes every line here is painted with: the dim grey of everything that is
+/// commentary, the bold of a heading, and the reset that has to close each of them. Named once
+/// rather than handed from function to function, where they had grown into most of an argument
+/// list.
+const DIM: &str = "\x1b[90m";
+const OFF: &str = "\x1b[0m";
+const HEAD: &str = "\x1b[1m";
+
 pub fn watch(dir: &Path) -> std::io::Result<()> {
+    // The viewer is a second process, started by `--watch-workspace`, and nothing tells it what
+    // the editor beside it is set to — but it is the same binary reading the same settings file,
+    // and that is where the chosen language lives. Read once: a viewer that changed language
+    // under the user because a preference was saved elsewhere would be a stranger thing than one
+    // that waits to be restarted.
+    let lang = crate::settings::Settings::load().lang;
     let mut current: Option<Watch> = None;
     let mut shown: Option<(std::path::PathBuf, u64)> = None;
     let mut last_size = (0u16, 0u16);
@@ -52,7 +67,7 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
             // Home and clear-to-end rather than a full clear: the pane does not flash, and what
             // was there is overwritten row by row as the new table is written over it.
             write!(out, "\x1b[H\x1b[J")?;
-            for line in render(snapshot, cols, rows) {
+            for line in render(snapshot, cols, rows, lang) {
                 writeln!(out, "{line}\r")?;
             }
             out.flush()?;
@@ -63,22 +78,20 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
 
 /// The table, as coloured lines. Pure, so what it decides at a given width is testable without
 /// a terminal to look at.
-pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> {
+pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16, lang: Lang) -> Vec<String> {
     // A pane with no width can show nothing, and everything below assumes there is room for at
     // least one character — the text clipper answers "…" when asked for zero, which is one column
     // more than there is.
     if cols == 0 || rows == 0 {
         return Vec::new();
     }
-    let dim = "\x1b[90m";
-    let off = "\x1b[0m";
-    let head = "\x1b[1m";
+    let (dim, off, head) = (DIM, OFF, HEAD);
     let Some(snapshot) = snapshot else {
         return vec![
-            format!("{dim}Waiting for a session…{off}"),
+            format!("{dim}{}{off}", i18n::t(lang, Key::WsWaiting)),
             String::new(),
-            format!("{dim}Start an interpreter in one of the terminals and this fills in.{off}"),
-            format!("{dim}Nothing is typed at your prompt to ask it.{off}"),
+            format!("{dim}{}{off}", i18n::t(lang, Key::WsWaitingWhere)),
+            format!("{dim}{}{off}", i18n::t(lang, Key::WsWaitingQuiet)),
         ];
     };
     // A file written by a newer CleeCode is said to be one rather than half-read into a table
@@ -94,8 +107,8 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
     if snapshot.vars.is_empty() {
         let mut lines = vec![title(snapshot, cols, dim, off), String::new()];
         lines.extend(warning(snapshot, off));
-        lines.push(format!("{dim}The workspace is empty.{off}"));
-        return fit_to_pane(lines, cols, rows, dim, off)
+        lines.push(format!("{dim}{}{off}", i18n::t(lang, Key::WsEmpty)));
+        return fit_to_pane(lines, cols, rows, dim, off, lang)
             .iter()
             .map(|line| cut_to(line, cols))
             .collect();
@@ -104,14 +117,14 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
     let layout = Layout::for_width(cols, &snapshot.vars);
     let mut lines = vec![title(snapshot, cols, dim, off), String::new()];
     lines.extend(warning(snapshot, off));
-    lines.extend(stack(snapshot, cols, off));
-    lines.push(format!("{head}{}{off}", layout.header()));
+    lines.extend(stack(snapshot, cols, off, lang));
+    lines.push(format!("{head}{}{off}", layout.header(lang)));
     lines.push(format!("{dim}{}{off}", "─".repeat((cols as usize).min(layout.width()))));
     for var in ordered(&snapshot.vars) {
         lines.push(layout.row(var));
     }
-    lines.extend(history(snapshot, cols, rows, lines.len(), dim, off, head));
-    let lines = fit_to_pane(lines, cols, rows, dim, off);
+    lines.extend(history(snapshot, cols, rows, lines.len(), lang));
+    let lines = fit_to_pane(lines, cols, rows, dim, off, lang);
     lines.iter().map(|line| cut_to(line, cols)).collect()
 }
 
@@ -125,7 +138,7 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> 
 /// Cutting silently would be its own bug — a panel that shows nine of your twelve variables and
 /// looks complete is worse than one that shows eight and says so. The last line says how many
 /// are not shown, which is also the sentence that tells you to make the pane taller.
-fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &str) -> Vec<String> {
+fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &str, lang: Lang) -> Vec<String> {
     let rows = rows as usize;
     if lines.len() <= rows {
         return lines;
@@ -138,11 +151,11 @@ fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &st
     if let Some(last) = lines.last_mut() {
         // The advice is worth a line only if the line has room for it. Cut mid-word — "make
         // this pa" — it reads like the bug it is there to prevent, so the count goes alone.
-        let full = format!("… {hidden} more — make this pane taller");
+        let full = i18n::msg_ws_more(lang, hidden);
         let note = if full.chars().count() <= cols as usize {
             full
         } else {
-            format!("… {hidden} more")
+            i18n::msg_ws_more_short(lang, hidden)
         };
         *last = format!("{dim}{note}{off}");
     }
@@ -206,21 +219,20 @@ fn warning(snapshot: &Snapshot, off: &str) -> Vec<String> {
 /// Above the variables rather than below, because while stopped the variables *are* the frame's
 /// — the two are one thing, and reading them in the wrong order would mean reading the frame's
 /// locals as though they were the workspace.
-fn stack(snapshot: &Snapshot, cols: u16, off: &str) -> Vec<String> {
+fn stack(snapshot: &Snapshot, cols: u16, off: &str, lang: Lang) -> Vec<String> {
     if !snapshot.debug.stopped {
         return Vec::new();
     }
     let mark = "\x1b[33m";      // the same yellow the editor marks the stopped line with
     let mut out = vec![format!(
-        "{mark}stopped in {} at line {}{off}",
-        snapshot.debug.name, snapshot.debug.line
+        "{mark}{}{off}",
+        i18n::msg_ws_stopped(lang, &snapshot.debug.name, snapshot.debug.line)
     )];
     // The frames under it, oldest last, so the shape reads the way a backtrace does.
     for frame in snapshot.debug.stack.iter().skip(1) {
         out.push(format!(
-            "\x1b[90m  called from {} at line {}{off}",
-            clip(&frame.name, cols as usize / 2),
-            frame.line
+            "\x1b[90m  {}{off}",
+            i18n::msg_ws_called_from(lang, &clip(&frame.name, cols as usize / 2), frame.line)
         ));
     }
     out.push(String::new());
@@ -233,20 +245,13 @@ fn stack(snapshot: &Snapshot, cols: u16, off: &str) -> Vec<String> {
 /// happened — and it goes here rather than in a window of its own because it answers the
 /// question the variables raise: *what did I do to get this*. Dropped entirely when the pane is
 /// short, since a table of variables cut in half to make room for it would be a poor trade.
-fn history(
-    snapshot: &Snapshot,
-    cols: u16,
-    rows: u16,
-    used: usize,
-    dim: &str,
-    off: &str,
-    head: &str,
-) -> Vec<String> {
+fn history(snapshot: &Snapshot, cols: u16, rows: u16, used: usize, lang: Lang) -> Vec<String> {
+    let (dim, off, head) = (DIM, OFF, HEAD);
     let room = (rows as usize).saturating_sub(used + 3);
     if snapshot.history.is_empty() || room < 2 {
         return Vec::new();
     }
-    let mut out = vec![String::new(), format!("{head}Recent{off}")];
+    let mut out = vec![String::new(), format!("{head}{}{off}", i18n::t(lang, Key::WsRecent))];
     for command in snapshot.history.iter().rev().take(room).collect::<Vec<_>>().into_iter().rev() {
         out.push(format!("{dim}{}{off}", clip(command, cols as usize)));
     }
@@ -329,16 +334,26 @@ impl Layout {
             + self.preview
     }
 
-    fn header(&self) -> String {
-        let mut out = format!("{:<w$} {:<s$} ", "Name", "Size", w = self.name, s = self.shape);
+    /// Headings are clipped to their own column exactly as the rows below them are: a translated
+    /// word can be longer than the English one it replaces, and a heading that overflowed would
+    /// push the whole row past the pane and take the table's alignment with it.
+    fn header(&self, lang: Lang) -> String {
+        let name = clip(i18n::t(lang, Key::WsColName), self.name);
+        let size = clip(i18n::t(lang, Key::WsColSize), self.shape);
+        let mut out = format!("{name:<w$} {size:<s$} ", w = self.name, s = self.shape);
         if self.class > 0 {
-            out.push_str(&format!("{:<c$} ", "Class", c = self.class));
+            out.push_str(&format!("{:<c$} ", clip(i18n::t(lang, Key::WsColClass), self.class), c = self.class));
         }
         if self.stats {
-            out.push_str(&format!("{:>10} {:>10} {:>10} ", "Min", "Max", "Mean"));
+            out.push_str(&format!(
+                "{:>10} {:>10} {:>10} ",
+                clip(i18n::t(lang, Key::WsColMin), 10),
+                clip(i18n::t(lang, Key::WsColMax), 10),
+                clip(i18n::t(lang, Key::WsColMean), 10)
+            ));
         }
         if self.preview > 0 {
-            out.push_str("Value");
+            out.push_str(&clip(i18n::t(lang, Key::WsColValue), self.preview));
         }
         out
     }
@@ -470,6 +485,12 @@ mod tests {
 
     use super::*;
     use crate::wsnap::Var;
+
+    /// These tests are about what the viewer decides at a given size, not about which language
+    /// it says it in, so they read the English wording and leave the language out of every call.
+    fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16) -> Vec<String> {
+        super::render(snapshot, cols, rows, Lang::En)
+    }
 
     fn var(name: &str, class: &str, size: &[i64], bytes: i64) -> Var {
         Var {
