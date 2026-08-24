@@ -1671,3 +1671,42 @@ Windows, dove il primo argomento fra virgolette è il *titolo della finestra* e 
 il bug classico di quella funzione da tre righe, qui evitato e testato. Via ssh rifiuta e lo dice:
 l'apertura avverrebbe sulla macchina in fondo alla connessione, su un desktop dove non è seduto
 nessuno.
+
+
+## 0.12.3 — perché le animazioni Octave erano lente (2026-08-24)
+
+Segnalato da una sessione via ssh: "octave a fare animazioni è più lento rispetto a python".
+
+**Non era ssh e non era il toolkit.** Misurato qui, stessa figura (linea di 500 punti, 800×600 a
+96 dpi): `print` sotto gnuplot 155 ms a fotogramma, sotto qt 161 ms, `savefig` di matplotlib
+11 ms. Il PNG di Octave è pure il più piccolo — 7 kB contro 28 — quindi il trasferimento kitty
+sulla connessione lo favorisce, non lo penalizza. E il costo non è nei pixel: 150 ms a 400×300 e
+159 ms a metà risoluzione. È la macchina di `print`, che copia la figura in una nascosta e rifà
+tutto il giro del toolkit a ogni fotogramma.
+
+**La scorciatoia.** Sotto gnuplot `drawnow (TERM, FILE)` passa la figura al terminale png del
+toolkit senza niente in mezzo. Attraverso l'hook vero, con la griglia e tutto il resto al loro
+posto:
+
+| | prima | ora |
+|---|---|---|
+| linea animata 800×600 | 243 ms | 55 ms |
+| superficie 3-D con colorbar 640×480 | 345 ms | 74 ms |
+| immagine 500×400 | 233 ms | 47 ms |
+
+La figura resta la stessa: la griglia la disegna CleeCode come oggetti linea veri (vedi
+cleecode_grid), quindi sopravvive al cambio di strada. Confrontate le due immagini una accanto
+all'altra — linea, superficie, colorbar — non si distinguono.
+
+**Due controlli, perché la strada è stretta.** Sotto qt l'argomento del terminale viene ignorato e
+quello che finisce su disco è PostScript con estensione `.png` — verificato sui magic bytes
+(`%!PS-Ado`), ed è per questo che il file viene riletto invece che dato per buono. E la
+dimensione: `print` riceve la misura dalla paperposition, `drawnow` no, quindi una figura più
+piccola del pavimento che il chiamante applica uscirebbe con un numero di pixel diverso da quello
+che il pannello dichiara — e ogni coordinata del mouse mappata sopra sarebbe sbagliata in
+silenzio. Si leggono i primi 24 byte: firma, larghezza e altezza dall'IHDR. Se uno dei due
+controlli non torna, si stampa come prima.
+
+Nota di misura, per onestà: fuori dall'hook `drawnow` rispettava anche `linewidth`, che `print`
+attraverso il percorso eps ignora. Dentro l'hook — con paperposition impostata — quel guadagno
+non si vede: le due immagini hanno la stessa linea sottile. Resta la velocità, che era il punto.
