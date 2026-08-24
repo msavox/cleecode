@@ -17,8 +17,9 @@
 
 use lsp_types::{
     ClientCapabilities, CompletionClientCapabilities, CompletionItem, CompletionItemCapability,
-    Diagnostic, DiagnosticSeverity, InitializeParams, InsertTextFormat, PublishDiagnosticsParams,
-    TextDocumentClientCapabilities, Uri, WindowClientCapabilities,
+    Diagnostic, DiagnosticSeverity, GeneralClientCapabilities, InitializeParams, InsertTextFormat,
+    PositionEncodingKind, PublishDiagnosticsParams, TextDocumentClientCapabilities, Uri,
+    WindowClientCapabilities,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,6 +59,13 @@ pub enum Event {
     Definition { id: i64, target: Option<Jump> },
     /// What the thing under the cursor is, in one line. `None` when the server had nothing.
     Hover { id: i64, text: Option<String> },
+    /// A reply the server is owed, already written and waiting to be put on the wire.
+    ///
+    /// It travels this way round because the reader thread has no writer: the pipe into the
+    /// server belongs to the frame loop, and handing a second thread a handle on it would mean
+    /// two of them interleaving frames. So the thread that knows what to answer says what it is,
+    /// and the thread that owns the pipe sends it.
+    Answer { message: Value },
     /// The server stopped, with whatever it said on the way out. Everything keeps working; the
     /// underlines simply stop arriving.
     Stopped { detail: String },
@@ -254,6 +262,33 @@ pub fn chars_to_utf16(line: &str, col: usize) -> usize {
     line.chars().take(col).map(char::len_utf16).sum()
 }
 
+/// The same pair again for the servers that count in UTF-8 bytes: characters to bytes, for a
+/// column we are about to send.
+///
+/// A server that asked for UTF-8 is asking for byte offsets into the line, not for characters —
+/// they agree on ASCII, which is why sending the character column to one of them looks correct
+/// on every line until somebody writes `// città` and completion starts answering about the
+/// wrong word.
+pub fn chars_to_utf8(line: &str, col: usize) -> usize {
+    line.chars().take(col).map(char::len_utf8).sum()
+}
+
+/// Bytes to characters, for a column that arrived.
+///
+/// Rounds *left*: a byte offset that lands inside a character — which is a server being wrong,
+/// or a server describing a version of the line we no longer have — names the character it fell
+/// into rather than the one after it. Left is the direction that keeps a mark on the thing it is
+/// about; rounding right walks a squiggle off the end of a line of accented text.
+pub fn utf8_to_chars(line: &str, byte_col: usize) -> usize {
+    if byte_col >= line.len() {
+        // Past the end clamps rather than panicking: the server is describing text that has
+        // since been edited, and the end of the line is the nearest true thing.
+        return line.chars().count();
+    }
+    // Every character starting at or before the offset, less the one that starts *on* it.
+    line.char_indices().take_while(|(i, _)| *i <= byte_col).count().saturating_sub(1)
+}
+
 /// Turns the protocol's diagnostics for one file into marks against its text.
 ///
 /// `lines` is the file as the editor holds it. A diagnostic pointing past the end of the buffer
@@ -269,7 +304,7 @@ pub fn marks_from(diagnostics: &[Diagnostic], lines: &[String], utf16: bool) -> 
                 utf16_to_chars(text, col as usize)
             } else {
                 // Counted in UTF-8 bytes: walk to the character boundary at or before it.
-                text.char_indices().position(|(i, _)| i >= col as usize).unwrap_or(text.chars().count())
+                utf8_to_chars(text, col as usize)
             }
         };
         let start = column(d.range.start.character);
@@ -479,6 +514,9 @@ pub struct Client {
     /// Whether positions are counted in UTF-16. Settled during the handshake and remembered,
     /// because it decides how every column that arrives afterwards is read.
     utf16: bool,
+    /// Whether the handshake is finished. Until it is, the server is entitled to ignore every
+    /// notification and request sent to it, and the ones worth using do.
+    ready: bool,
     /// What each request still out was asking, shared with the reader thread. See [`Ask`].
     pending: Arc<Mutex<HashMap<i64, Ask>>>,
 }
@@ -512,6 +550,7 @@ impl Client {
             next_id: 1,
             open: Vec::new(),
             utf16: true,
+            ready: false,
             pending,
         };
         client.initialize(root)?;
@@ -539,6 +578,21 @@ impl Client {
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities::default()),
+                // Which units this client can count columns in, said out loud.
+                //
+                // A server may only choose from what the client offers, and a client that
+                // offers nothing has said "UTF-16 only" — so the UTF-8 arithmetic here could
+                // never be reached by a server that follows the specification, and was only
+                // ever exercised by the ones that do not. UTF-16 is written first because it
+                // is the order of preference: it is the encoding every server must support,
+                // and the one no server can decline.
+                general: Some(GeneralClientCapabilities {
+                    position_encodings: Some(vec![
+                        PositionEncodingKind::UTF16,
+                        PositionEncodingKind::UTF8,
+                    ]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -573,10 +627,43 @@ impl Client {
     pub fn confirm_ready(&mut self, utf16: bool) {
         self.utf16 = utf16;
         let _ = self.notify("initialized", json!({}));
+        self.ready = true;
+    }
+
+    /// Puts a reply to the server on the wire.
+    ///
+    /// The reader thread works out *what* to answer and this sends it, because the writer lives
+    /// here: one thread reads, the frame loop writes, and a second handle on the pipe would be
+    /// two threads interleaving half-written frames on the same stream.
+    pub fn answer(&mut self, message: Value) {
+        let _ = self.send(&message);
     }
 
     pub fn utf16(&self) -> bool {
         self.utf16
+    }
+
+    /// Whether the handshake is finished and the server will act on what it is told.
+    ///
+    /// Everything sent before `initialized` is the server's to ignore, and the ones that follow
+    /// the specification do exactly that — silently, which is the trouble: a `didOpen` dropped
+    /// this way costs the file its diagnostics for as long as it stays untouched.
+    pub fn ready(&self) -> bool {
+        self.ready
+    }
+
+    /// A column in the units this server settled on, from the character column the editor keeps.
+    ///
+    /// One function for every question that carries a position, because the two spellings of
+    /// this arithmetic drifted apart once already: completion converted and the definition and
+    /// hover requests sent the character column raw, which is right in English and wrong on
+    /// every line with an accent in it.
+    fn column_for(&self, line_text: &str, col: usize) -> usize {
+        if self.utf16 {
+            chars_to_utf16(line_text, col)
+        } else {
+            chars_to_utf8(line_text, col)
+        }
     }
 
     pub fn did_open(&mut self, path: &Path, text: &str) {
@@ -634,10 +721,7 @@ impl Client {
     /// then. That is the whole shape of this feature: the list is never empty while it waits.
     pub fn completion(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
         let uri = uri_for(path)?;
-        let character = if self.utf16 { chars_to_utf16(line_text, col) } else {
-            // Counted in UTF-8 bytes, which is what the server asked for when it declined UTF-16.
-            line_text.chars().take(col).map(char::len_utf8).sum()
-        };
+        let character = self.column_for(line_text, col);
         let id = self
             .request(
                 "textDocument/completion",
@@ -683,7 +767,7 @@ impl Client {
         col: usize,
     ) -> Option<i64> {
         let uri = uri_for(path)?;
-        let character = if self.utf16 { chars_to_utf16(line_text, col) } else { col };
+        let character = self.column_for(line_text, col);
         let params = json!({
             "textDocument": { "uri": uri.as_str() },
             "position": { "line": line, "character": character },
@@ -718,9 +802,45 @@ impl Drop for Client {
     }
 }
 
+/// What to call a file's language when announcing it.
+///
+/// Servers use this rather than the extension, and several of them use it to decide whether they
+/// are interested at all: pyright told a file is `plaintext` accepts it and reports nothing about
+/// it, which reads exactly like a server that is broken. Every extension the table above can
+/// start a server for has a name here, in the spelling the protocol's own list uses — the same
+/// one every other editor sends, which is what makes it the spelling servers match against.
 fn language_id(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("rs") => "rust",
+    let extension =
+        path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" => "typescript",
+        // The React dialects are languages of their own to a server: `.tsx` told it is plain
+        // TypeScript is a file whose every tag is a syntax error.
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "go" => "go",
+        // `.h` is C: it is a C++ header just as often, and clangd works that out from the
+        // compilation database rather than from what we call it, so the safe half of an
+        // ambiguity that only it can resolve.
+        "c" | "h" => "c",
+        "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => "cpp",
+        "m" => "objective-c",
+        "mm" => "objective-cpp",
+        "lua" => "lua",
+        "zig" => "zig",
+        "rb" => "ruby",
+        "sh" | "bash" => "shellscript",
+        "json" => "json",
+        "jsonc" => "jsonc",
+        "toml" => "toml",
+        "tex" | "latex" => "latex",
+        "bib" => "bibtex",
+        // A language nobody named — reachable through the user's own server table, which can
+        // point any extension at any program. Saying "plain text" is the honest answer: we do
+        // not know, and inventing a name would be a guess the server would act on.
         _ => "plaintext",
     }
 }
@@ -766,6 +886,52 @@ fn completion_words(result: Option<&Value>) -> Vec<String> {
     out
 }
 
+/// How to count columns, from what the server named in its handshake reply.
+///
+/// Only two answers are possible here, because only two were offered. `utf-32` is a real value in
+/// the specification and this client cannot count in it — nor did it ask to; a server naming it,
+/// or naming something a later version of the protocol invents, has answered a question it was
+/// not asked. UTF-16 is the reading for all of those: it is the mandatory encoding, the one every
+/// server must be able to speak, and therefore the only assumption that cannot leave the two ends
+/// counting in different units.
+pub fn negotiated_utf16(encoding: Option<&str>) -> bool {
+    encoding != Some("utf-8")
+}
+
+/// The answer owed to a message the server sent us, or `None` when none is.
+///
+/// A message carrying both an `id` and a `method` is a request, and JSON-RPC says a request is
+/// answered — a server left waiting on one may hold back the work behind it, and rust-analyzer's
+/// configuration request is the first thing it asks. Notifications carry no `id` and are the
+/// server talking to itself; nothing is owed for those.
+///
+/// The id is passed back exactly as it arrived, number or string, because it is the server's own
+/// bookkeeping and not ours to normalise.
+pub fn reply_to(message: &Value) -> Option<Value> {
+    let method = message.get("method")?.as_str()?;
+    let id = message.get("id")?.clone();
+    match method {
+        // "What are your settings for these scopes?" — answered with a null per item, which the
+        // protocol reads as "nothing configured, use your defaults". There is no user-facing
+        // setting to hand over yet, and an empty object would be a claim rather than an absence.
+        "workspace/configuration" => {
+            let items = message.pointer("/params/items").and_then(Value::as_array);
+            let result = match items {
+                Some(items) => Value::Array(vec![Value::Null; items.len()]),
+                None => Value::Null,
+            };
+            Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        }
+        // Everything else is work this client does not do — and says so, rather than leaving the
+        // server to time out or to wait forever. Refusing is the honest answer: we advertised no
+        // capability for any of it, so a request for one is a server asking anyway.
+        _ => {
+            let message = format!("{method} is not something this client does");
+            Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": message}}))
+        }
+    }
+}
+
 /// The reader thread. Everything the server says arrives here and leaves as an [`Event`].
 fn read_loop(
     mut reader: BufReader<impl Read>,
@@ -797,11 +963,15 @@ fn read_loop(
                 let Some(path) = path_for(&params.uri) else { continue };
                 let _ = tx.send(Event::Diagnostics { path, raw: params.diagnostics });
             }
-            // Anything else the server says on its own account — progress notes, log messages,
-            // and requests we never advertised a capability for. Dropped: this release draws
-            // squiggles, and a client that answered questions it had not been asked would be
-            // agreeing to work it does not do.
-            Some(_) => {}
+            // Anything else the server says on its own account. Progress notes and log messages
+            // are dropped — this release draws squiggles — but a *request* is answered even when
+            // the answer is a refusal: a server waiting on a reply that never comes is a server
+            // that may never get as far as the diagnostics.
+            Some(_) => {
+                if let Some(reply) = reply_to(&value) {
+                    let _ = tx.send(Event::Answer { message: reply });
+                }
+            }
             None => {
                 // A response, and the id says which question it answers. Asked first, so a
                 // completion reply is never mistaken for anything else — including on a server
@@ -827,12 +997,10 @@ fn read_loop(
                 // this point. It carries how the server wants positions counted.
                 if !handshook && value.get("id").is_some() && value.get("result").is_some() {
                     handshook = true;
-                    let utf16 = value
+                    let encoding = value
                         .pointer("/result/capabilities/positionEncoding")
-                        .and_then(Value::as_str)
-                        .unwrap_or("utf-16")
-                        != "utf-8";
-                    let _ = tx.send(Event::Ready { utf16 });
+                        .and_then(Value::as_str);
+                    let _ = tx.send(Event::Ready { utf16: negotiated_utf16(encoding) });
                 }
             }
         }
@@ -886,6 +1054,143 @@ mod tests {
         // And an accent, which is one of each — the case that makes the emoji look like an
         // exception rather than the rule it is.
         assert_eq!(chars_to_utf16("caffè", 5), 5);
+    }
+
+    /// The other pair, for the servers that count in bytes. The line is the one this whole
+    /// family of bugs is invisible without: ASCII counts the same in all three units, so a
+    /// conversion left out entirely passes every test written in English.
+    #[test]
+    fn columns_convert_back_and_forth_in_bytes_as_well() {
+        let plain = "let x = 1;";
+        for col in 0..=plain.chars().count() {
+            assert_eq!(chars_to_utf8(plain, col), col, "ASCII counts the same either way");
+            assert_eq!(utf8_to_chars(plain, col), col);
+        }
+        // `// città`: seven ASCII characters and an `à` that takes two bytes.
+        let line = "// città";
+        assert_eq!(chars_to_utf8(line, 7), 7, "up to the accent, bytes and characters agree");
+        assert_eq!(chars_to_utf8(line, 8), 9, "and the accent is two of them");
+        assert_eq!(utf8_to_chars(line, 7), 7);
+        assert_eq!(utf8_to_chars(line, 9), 8, "the end of the line, in either counting");
+        // An offset inside a character rounds left, onto the character it fell into — which is
+        // the one the server was talking about.
+        assert_eq!(utf8_to_chars(line, 8), 7);
+        // An emoji is four bytes and one character, so the drift is three columns per emoji.
+        let emoji = "a🦀bc";
+        assert_eq!(chars_to_utf8(emoji, 2), 5);
+        assert_eq!(utf8_to_chars(emoji, 5), 2);
+        assert_eq!(utf8_to_chars(emoji, 3), 1, "inside the emoji is still the emoji");
+        // Past the end clamps rather than panicking on a diagnostic about older text.
+        assert_eq!(utf8_to_chars("ab", 99), 2);
+        assert_eq!(utf8_to_chars("", 0), 0);
+    }
+
+    /// The same line, arriving as a diagnostic from a server counting in bytes. The columns are
+    /// the server's own and mean nothing to the buffer until this conversion happens.
+    #[test]
+    fn a_byte_column_becomes_a_character_column_on_the_way_in() {
+        let lines = vec!["let città = 1;".to_string()];
+        // Bytes 4 to 10 are `città`; characters 4 to 9 are the same five letters.
+        let marks = marks_from(&[diag(0, 4, 10, "unused variable")], &lines, false);
+        assert_eq!((marks[0].start, marks[0].end), (4, 9));
+        // And the same numbers read as UTF-16 would be five characters further along a line
+        // that is only fourteen long — which is what the old arithmetic did.
+        let utf16 = marks_from(&[diag(0, 4, 10, "unused variable")], &lines, true);
+        assert_eq!((utf16[0].start, utf16[0].end), (4, 10));
+    }
+
+    /// Only two answers are possible, because only two were offered. Everything else is a server
+    /// naming a unit this client never said it could count in.
+    #[test]
+    fn the_encoding_is_the_one_that_was_offered_or_the_mandatory_one() {
+        assert!(!negotiated_utf16(Some("utf-8")));
+        assert!(negotiated_utf16(Some("utf-16")));
+        // Real in the specification, never advertised by us, and not something this client can
+        // count in — read as the encoding every server must support.
+        assert!(negotiated_utf16(Some("utf-32")));
+        assert!(negotiated_utf16(Some("utf-7-and-a-half")));
+        // Said nothing at all, which the protocol defines as UTF-16.
+        assert!(negotiated_utf16(None));
+    }
+
+    /// A request is a message with both an id and a method, and it is owed an answer — a server
+    /// waiting on one may never get as far as the diagnostics.
+    #[test]
+    fn a_question_from_the_server_is_answered_and_a_remark_is_not() {
+        // Nothing is owed for a notification, however much it looks like a request otherwise.
+        assert_eq!(reply_to(&json!({"jsonrpc": "2.0", "method": "window/logMessage"})), None);
+        // Nor for a response, which has an id and no method.
+        assert_eq!(reply_to(&json!({"jsonrpc": "2.0", "id": 4, "result": null})), None);
+
+        // Configuration: a null per item, which reads as "nothing set, use your defaults".
+        let asked = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "workspace/configuration",
+            "params": {"items": [{"section": "rust-analyzer"}, {"section": "files"}]}
+        });
+        let reply = reply_to(&asked).unwrap();
+        assert_eq!(reply["id"], json!(3));
+        assert_eq!(reply["result"], json!([null, null]));
+
+        // Anything else is refused rather than left unanswered, and the id comes back in the
+        // shape it arrived in — a string id is the server's own bookkeeping.
+        let other = json!({"jsonrpc": "2.0", "id": "abc", "method": "client/registerCapability"});
+        let reply = reply_to(&other).unwrap();
+        assert_eq!(reply["id"], json!("abc"));
+        assert_eq!(reply["error"]["code"], json!(-32601));
+        assert!(reply.get("result").is_none(), "an error and a result are not both sent");
+    }
+
+    /// The reader thread has no writer, so the reply comes back out as an event for the frame
+    /// loop to send. This is the part that would otherwise be a second thread writing frames
+    /// into the same pipe.
+    #[test]
+    fn the_reply_travels_back_through_the_channel_that_owns_the_writer() {
+        let wire = frame(
+            r#"{"jsonrpc":"2.0","id":2,"method":"workspace/configuration",
+                "params":{"items":[{"section":"rust-analyzer"}]}}"#,
+        );
+        let (tx, rx) = mpsc::channel();
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending(&[]));
+        let events: Vec<Event> = rx.into_iter().collect();
+        match &events[0] {
+            Event::Answer { message } => {
+                assert_eq!(message["id"], json!(2));
+                assert_eq!(message["result"], json!([null]));
+            }
+            _ => panic!("the question has to come back out as an answer to send"),
+        }
+    }
+
+    /// A server told a `.py` is `plaintext` accepts it and then reports nothing about it, which
+    /// on screen is indistinguishable from a server that is broken.
+    #[test]
+    fn every_file_a_server_is_started_for_has_a_language_to_call_it() {
+        assert_eq!(language_id(Path::new("main.rs")), "rust");
+        assert_eq!(language_id(Path::new("app.py")), "python");
+        assert_eq!(language_id(Path::new("main.go")), "go");
+        assert_eq!(language_id(Path::new("main.lua")), "lua");
+        assert_eq!(language_id(Path::new("Cargo.toml")), "toml");
+        // The React dialects are languages of their own: `.tsx` called plain TypeScript is a
+        // file whose every tag is a syntax error.
+        assert_eq!(language_id(Path::new("app.ts")), "typescript");
+        assert_eq!(language_id(Path::new("app.tsx")), "typescriptreact");
+        assert_eq!(language_id(Path::new("app.jsx")), "javascriptreact");
+        assert_eq!(language_id(Path::new("app.mjs")), "javascript");
+        assert_eq!(language_id(Path::new("go.sh")), "shellscript");
+        assert_eq!(language_id(Path::new("paper.bib")), "bibtex");
+        // Case does not decide it, for the same reason it does not decide which server runs.
+        assert_eq!(language_id(Path::new("MAIN.RS")), "rust");
+        // Every extension the built-in table can start a server for has a name here; a language
+        // reached only through the user's own table may not, and says so honestly.
+        for (extensions, argv) in SERVERS {
+            for extension in *extensions {
+                let named = language_id(Path::new(&format!("file.{extension}")));
+                let program = argv[0];
+                assert_ne!(named, "plaintext", "{program} would be told {extension} is plain text");
+            }
+        }
+        assert_eq!(language_id(Path::new("notes.txt")), "plaintext");
+        assert_eq!(language_id(Path::new("Makefile")), "plaintext");
     }
 
     /// The popup types a word, so an item has to come down to one — brackets and all the rest of

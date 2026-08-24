@@ -297,6 +297,47 @@ struct PendingCompletion {
     start: usize,
 }
 
+/// How long a dead server is left alone before it is started again.
+///
+/// Long enough that a server dying at startup — a broken project file, a version of the program
+/// that will not run here — does not turn into a process started every frame, and short enough
+/// that somebody who watched rust-analyzer run out of memory once gets it back without knowing
+/// there was anything to get back.
+const LSP_RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many times a program may die and be started again in one session.
+///
+/// A crash is usually a once-off: rust-analyzer runs out of memory on a large project and the
+/// second one, started against the same files, is fine. A server that dies three times is not
+/// having a bad moment, it is refusing to run here, and starting it again would be a process
+/// spawned every ten seconds for as long as the editor is open.
+const LSP_RESTARTS: usize = 2;
+
+/// Why a program is not running, and whether it is worth trying again.
+struct LspTrouble {
+    /// What it said on the way out, kept for the same reason it always was: so the reason is
+    /// available and the spawn is not repeated to find it out again.
+    #[allow(dead_code)]
+    detail: String,
+    /// How many times it has started and then died. A program that never started at all stays
+    /// at zero and is never retried — it is not installed, and it will not become installed
+    /// while the editor is open.
+    deaths: usize,
+    /// When the last of those happened, so a restart waits rather than following it instantly.
+    when: Instant,
+    /// Whether starting it again is worth doing at all.
+    worth_retrying: bool,
+}
+
+impl LspTrouble {
+    /// Whether enough has passed, and few enough have gone wrong, to try again.
+    fn may_start_again(&self, now: Instant) -> bool {
+        self.worth_retrying
+            && self.deaths <= LSP_RESTARTS
+            && now.saturating_duration_since(self.when) >= LSP_RESTART_WAIT
+    }
+}
+
 /// A file handed to a live session, watched until the prompt comes back.
 ///
 /// What it is for: knowing which figures that run opened, so running the same file again can
@@ -481,11 +522,14 @@ pub struct App {
     /// language: `clangd` serves seven extensions, and one of it per extension would be seven
     /// clangds indexing the same project.
     lsp: std::collections::HashMap<String, crate::lsp::Client>,
-    /// Why there is no server, said once. Kept so the attempt is not repeated at every keystroke
-    /// — spawning a process that is not there, sixty times a second, is its own kind of bug.
-    /// Why a server did not start, by program name — so a machine with `gopls` and without
-    /// `clangd` still gets Go, and neither is tried twice.
-    lsp_error: std::collections::HashMap<String, String>,
+    /// Why a server is not running, by program name — so a machine with `gopls` and without
+    /// `clangd` still gets Go, and the missing one is not spawned again at every keystroke:
+    /// starting a process that is not there, sixty times a second, is its own kind of bug.
+    ///
+    /// Kept for programs that are running again, too. It is the record of what has already gone
+    /// wrong with each of them, and forgetting it on a successful restart is what would let a
+    /// server that dies every time it starts do so for the rest of the session.
+    lsp_error: std::collections::HashMap<String, LspTrouble>,
     /// What the server says about each file. Replaced wholesale per file, because that is what
     /// the protocol sends: a list, not a diff.
     pub diagnostics: std::collections::HashMap<PathBuf, Vec<crate::lsp::Mark>>,
@@ -3015,6 +3059,7 @@ impl App {
     /// has Python in it should not start pyright, and a project with both open ends up with both
     /// — each told only about the files it serves.
     fn lsp_start_if_wanted(&mut self) {
+        let now = Instant::now();
         let wanted: Vec<Vec<String>> = self
             .editors
             .iter()
@@ -3023,13 +3068,13 @@ impl App {
             .filter_map(|path| self.lsp_argv_for(path))
             .filter(|argv| {
                 argv.first().is_some_and(|program| {
-                    !self.lsp.contains_key(program) && !self.lsp_error.contains_key(program)
+                    !self.lsp.contains_key(program) && self.lsp_free_to_start(program, now)
                 })
             })
             .collect();
         for argv in wanted {
             let program = argv[0].clone();
-            if self.lsp.contains_key(&program) || self.lsp_error.contains_key(&program) {
+            if self.lsp.contains_key(&program) || !self.lsp_free_to_start(&program, now) {
                 continue;
             }
             let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -3043,9 +3088,25 @@ impl App {
                 // so a machine with gopls and without clangd still gets Go.
                 Err(detail) => {
                     self.status_message = i18n::msg_lsp_missing(self.settings.lang, &program);
-                    self.lsp_error.insert(program, detail);
+                    self.lsp_error.insert(
+                        program,
+                        LspTrouble { detail, deaths: 0, when: now, worth_retrying: false },
+                    );
                 }
             }
+        }
+    }
+
+    /// Whether a program that is not running may be started now.
+    ///
+    /// The record of what went wrong is kept even while a replacement is running, which is what
+    /// makes the count a count *per session* rather than per life: a server that dies, restarts
+    /// and dies again has died twice, and forgetting the first death on the restart would let it
+    /// flap for as long as the editor is open.
+    fn lsp_free_to_start(&self, program: &str, now: Instant) -> bool {
+        match self.lsp_error.get(program) {
+            None => true,
+            Some(trouble) => trouble.may_start_again(now),
         }
     }
 
@@ -3103,14 +3164,37 @@ impl App {
                 }
                 crate::lsp::Event::Definition { id, target } => self.lsp_go_there(id, target),
                 crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
+                crate::lsp::Event::Answer { message } => {
+                    // Straight back to the server that asked, on the thread that owns the pipe.
+                    if let Some(client) = self.lsp.get_mut(&program) {
+                        client.answer(message);
+                    }
+                }
                 crate::lsp::Event::Stopped { detail } => {
                     // Only this one. Another server that is still running goes on underlining
                     // its own files, and the marks that came from the one that died are the only
                     // ones that have to go.
                     self.lsp.remove(&program);
-                    self.lsp_error.insert(program.clone(), detail);
+                    // Counted, and timed. A server that has run and died may have hit something
+                    // once — rust-analyzer running out of memory on a big project is the usual
+                    // one — and the session that loses diagnostics for good over it is the whole
+                    // rest of the afternoon. So it is started again after a pause, a couple of
+                    // times, and then left alone: a program that dies every time it runs is not
+                    // having a bad moment, and starting it forever would be worse than nothing.
+                    let record = self.lsp_error.entry(program.clone()).or_insert(LspTrouble {
+                        detail: String::new(),
+                        deaths: 0,
+                        when: Instant::now(),
+                        worth_retrying: true,
+                    });
+                    record.detail = detail;
+                    record.deaths += 1;
+                    record.when = Instant::now();
+                    record.worth_retrying = true;
                     self.lsp_completion = None;
                     self.lsp_asked = None;
+                    // The files it was serving are forgotten too, so the ones still open are
+                    // announced again from scratch to whatever takes its place.
                     self.lsp_forget(&program);
                     self.status_message = i18n::msg_lsp_stopped(lang);
                 }
@@ -3181,6 +3265,12 @@ impl App {
         let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else { return };
         self.lsp_paths.insert(absolute.clone(), path.clone());
         let Some(client) = self.lsp_client_for(&path) else { return };
+        // Not before the handshake is finished: the file and the question would both be dropped
+        // at the far end, and the revision written down here as sent. The popup already has the
+        // words from the buffer, so this costs nothing anyone can see.
+        if !client.ready() {
+            return;
+        }
         client.did_change(&absolute, &text);
         let asked = client.completion(&absolute, line, &line_text, col);
         // Recorded as sent, so the debounce does not turn round and send the same revision again.
@@ -3252,9 +3342,21 @@ impl App {
         // Each file goes to the one server that serves it. A `.py` announced to rust-analyzer
         // is a file it will parse as Rust and report a page of errors about.
         for (absolute, held, text, revision) in to_send {
-            if let Some(client) = self.lsp_client_for(&held) {
-                client.did_open(&absolute, &text);
+            let Some(client) = self.lsp_client_for(&held) else { continue };
+            // Nothing goes out before the handshake is finished. A server is entitled to ignore
+            // everything sent before `initialized` and the good ones do — silently — so a
+            // `didOpen` that raced a slow `initialize` would be dropped at the far end while
+            // this side wrote the revision down as sent, and the file would sit there without a
+            // single diagnostic until somebody typed in it.
+            //
+            // Nothing is queued: the revision is simply not recorded, so the next frame finds
+            // the same file still unsent and offers it again. Waiting costs a frame, and the
+            // alternative — a queue of things to say once the server answers — is a second
+            // record of what is open, kept in step with this one by hand.
+            if !client.ready() {
+                continue;
             }
+            client.did_open(&absolute, &text);
             self.lsp_sent.insert(held, revision);
         }
         for path in gone {
@@ -3262,7 +3364,7 @@ impl App {
                 self.lsp_paths.iter().find(|(_, held)| held.as_path() == path.as_path())
             {
                 let absolute = absolute.clone();
-                if let Some(client) = self.lsp_client_for(&path) {
+                if let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) {
                     client.did_close(&absolute);
                 }
                 self.lsp_paths.remove(&absolute);
@@ -3292,7 +3394,10 @@ impl App {
         };
         self.lsp_paths.insert(absolute.clone(), path.clone());
         let from = (path.clone(), line, col);
-        let Some(client) = self.lsp_client_for(&path) else {
+        // A server whose handshake has not finished cannot answer this, and the same thing is
+        // true of it as of a file no server serves: there is nothing here to ask. It is a window
+        // of a second at most, and pressing the key again once the server has said hello works.
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
             self.status_message = i18n::msg_lsp_none_here(lang).to_string();
             return;
         };
@@ -3346,7 +3451,10 @@ impl App {
         let column = if utf16 {
             crate::lsp::utf16_to_chars(&line_text, target.column)
         } else {
-            target.column
+            // UTF-8 is not "the same number": it is a byte offset into the line, and a definition
+            // on a line with an accent or an emoji before it lands to the right of the name it
+            // was pointing at — further right the more of them there are.
+            crate::lsp::utf8_to_chars(&line_text, target.column)
         };
         // The protocol counts lines from zero and `goto_line` counts them the way a person does.
         self.editor_mut().goto_line(target.line + 1);
@@ -3425,7 +3533,11 @@ impl App {
         }
         self.lsp_hovered = Some(here.clone());
         self.lsp_what_it_is = None;
-        let Some(client) = self.lsp_client_for(&path) else { return };
+        // The check above already implies this — a file is only recorded as sent once the server
+        // was ready to be told about it — but the rule that nothing goes out before the handshake
+        // is worth being true at each of the places that send something, rather than by
+        // inference from another line twenty lines up.
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else { return };
         if let Some(id) = client.hover(&absolute, line, &line_text, col) {
             self.lsp_asked = Some(PendingAsk { id, from: here });
         }
