@@ -1767,6 +1767,32 @@ configurazione che si è rotta.
 
 Il transcript è dell'utente. Un frame rate non vale una riga scritta lì dentro.
 
+## 0.13.1 — il quit congelato, e il lettore che aveva smesso di leggere (2026-08-24)
+
+Segnalato dall'utente a minuti dalla 0.13.0: Quit — dal menu o con Ctrl+Q — congelava l'editor,
+terminale mai restituito. Due cause, una sopra l'altra, entrambe invisibili ai test perché i
+test muoiono con /bin/sh e il bug vuole una fish al prompt.
+
+**La prima: `kill` di portable-pty non uccide.** Su unix manda SIGHUP e basta — "instead of
+trying to kill the process", parole sue — e niente scala mai. /bin/sh a un SIGHUP muore, ed è
+per questo che ogni test del ciclo di vita passava; una fish interattiva lo ignora, e il
+`wait()` nel Drop aspettava un processo che non sarebbe morto mai. Ora la hangup è l'offerta e
+SIGKILL è la scadenza: sei decimi di grazia, poi il segnale che nessun processo può rifiutare.
+
+**La seconda, quella vera: il lettore usciva allo stop invece di drenare.** Con la escalation a
+posto il quit si bloccava ancora, e `ps` mostrava una fish in stato `E` — non viva, non zombie:
+*ferma a metà dell'exit*. Il kernel non lascia finire l'uscita di un processo finché l'output
+rimasto nel suo pty non viene letto, e fish morendo ridipinge il prompt; il nostro thread
+lettore, visto lo stop flag, era già uscito. Nessuno a leggere, exit mai completata, `wait4`
+parcheggiata per sempre: il flag adesso ammutolisce — i byte si drenano e si buttano — e il
+thread finisce all'EOF, come un terminale vero che legge fino all'hangup.
+
+Diagnosi fatta campionando il processo congelato dell'utente (lo stack diceva `Drop → wait4`) e
+poi con lldb su una riproduzione pilotata con fish nei pane. Il test nuovo fissa la metà
+fissabile — una shell che ignora SIGHUP non può tenere aperto il pane — e la nota qui fissa
+l'altra: un ciclo di vita dei pty non è provato finché non è provato con la shell che l'utente
+usa davvero.
+
 ---
 
 # L'ASTICELLA (2026-08-24) — da progetto serio a IDE quotidiano
