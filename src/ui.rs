@@ -2233,7 +2233,11 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
                 Style::default().fg(Color::Gray)
             };
             let mut label = cand.text.clone();
-            if label.chars().count() > text_width {
+            if text_width == 0 {
+                // No room even for a single ellipsis character: better to draw nothing than a
+                // truncated label that is itself wider than the space it is meant to fit in.
+                label.clear();
+            } else if label.chars().count() > text_width {
                 label = label.chars().take(text_width.saturating_sub(1)).collect::<String>() + "…";
             }
             // Bold the letters already typed — but only when they really are the opening of the
@@ -2246,7 +2250,10 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
             };
             let head: String = label.chars().take(lit).collect();
             let tail: String = label.chars().skip(lit).collect();
-            let pad = inner.width as usize - 2 - label.chars().count();
+            // Saturating: at very small popup widths (the modal squeezed against a window edge)
+            // the marker and label alone can already fill or exceed `inner.width`, and an
+            // unchecked subtraction there used to panic rather than simply draw no padding.
+            let pad = (inner.width as usize).saturating_sub(2 + label.chars().count());
             let mut spans = vec![Span::styled(if *selected { "▶ " } else { "  " }, base)];
             if !head.is_empty() {
                 spans.push(Span::styled(head, base.add_modifier(Modifier::BOLD)));

@@ -1043,6 +1043,22 @@ fn forget_buffer(tabs: &mut [Vec<usize>; 2], idx: usize) {
     }
 }
 
+/// Where the keyboard goes when the last tab closes and the editor can no longer hold it.
+///
+/// A free function because the rule is one an `App` cannot be built to test: whatever it lands
+/// on has to be *on screen*. A hidden terminal is still a running shell, so focusing one that is
+/// not drawn sends every keystroke to a command line nobody can read — the empty editor, which
+/// ignores keys, is the safer place for them to go nowhere.
+fn empty_state_focus(show_sidebar: bool, show_terminal: bool) -> Focus {
+    if show_sidebar {
+        Focus::FileTree
+    } else if show_terminal {
+        Focus::Terminal
+    } else {
+        Focus::Editor
+    }
+}
+
 /// A path's extension, lowercased — the key everything about running a file is looked up by.
 fn file_ext(path: &std::path::Path) -> String {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
@@ -2062,7 +2078,7 @@ impl App {
         // focus would swallow every keystroke into a buffer nobody can see.
         if self.focus == Focus::Editor {
             self.focus =
-                if self.settings.show_sidebar { Focus::FileTree } else { Focus::Terminal };
+                empty_state_focus(self.settings.show_sidebar, self.settings.show_terminal);
         }
     }
 
@@ -3069,9 +3085,12 @@ impl App {
         };
         // The protocol counts lines from zero and `goto_line` counts them the way a person does.
         self.editor_mut().goto_line(target.line + 1);
+        // The jump may have landed nowhere: opening the target file can fail and leave no tab
+        // at all, and then there is no buffer under this index to place a cursor in.
         let index = self.active_editor_index();
-        let len = self.editors[index].line_char_len(self.editors[index].cursor_line);
-        self.editors[index].cursor_col = column.min(len);
+        let Some(editor) = self.editors.get_mut(index) else { return };
+        let len = editor.line_char_len(editor.cursor_line);
+        editor.cursor_col = column.min(len);
         self.status_message = String::new();
     }
 
@@ -4086,9 +4105,13 @@ impl App {
         self.editor_mut().goto_line(line);
         // The column is clamped by the same rule as any other cursor move: a file edited since
         // the search ran may have a shorter line there now, or none.
+        //
+        // And the tab may not be there at all — an unreadable or vanished file leaves nothing
+        // open, so there is no buffer to put a cursor in.
         let idx = self.pane_editor_index(self.editor_pane_focus);
-        let len = self.editors[idx].line_char_len(self.editors[idx].cursor_line);
-        self.editors[idx].cursor_col = col.min(len);
+        let Some(editor) = self.editors.get_mut(idx) else { return };
+        let len = editor.line_char_len(editor.cursor_line);
+        editor.cursor_col = col.min(len);
     }
 
     pub fn open_file_in_tab(&mut self, path: PathBuf) {
@@ -4292,7 +4315,10 @@ impl App {
             return false;
         }
         let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
-        if self.editors[self.pane_editor_index(pane)].preview.is_none() {
+        // `get`, because the pointer can be over a pane with every tab closed: there is no
+        // buffer to ask about, and so nothing to zoom.
+        let idx = self.pane_editor_index(pane);
+        if self.editors.get(idx).map(|e| e.preview.is_none()).unwrap_or(true) {
             return false;
         }
         self.editor_pane_focus = pane;
@@ -4679,7 +4705,9 @@ impl App {
     }
 
     fn close_active_editor(&mut self) {
-        let idx = self.active_editor;
+        // The focused pane's tab, not the left pane's: in a split, Ctrl+W on the right half used
+        // to close a file on the left that the user was not even looking at.
+        let idx = self.active_editor_index();
         // Guard against silently dropping unsaved edits: prompt first if the tab is dirty.
         if self.editors.get(idx).map(|e| e.dirty).unwrap_or(false) {
             self.unsaved_prompt = Some(UnsavedPrompt::CloseTab(idx));
@@ -4702,6 +4730,7 @@ impl App {
     /// proceeds, anything else cancels.
     fn handle_unsaved_prompt_key(&mut self, key: KeyEvent) {
         let Some(action) = self.unsaved_prompt else { return };
+        let lang = self.settings.lang;
         match key.code {
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 self.unsaved_prompt = None;
@@ -4718,15 +4747,26 @@ impl App {
                     self.begin_save_as(idx, Some(action));
                     return;
                 }
-                match action {
+                // "Save, then go" only goes if the save happened. A read-only file, a full disk
+                // or a directory that vanished all end here, and quitting or closing on top of
+                // the failure would throw away the very work the prompt was protecting —
+                // silently, since the status line explaining it goes with the window.
+                let saved = match action {
                     UnsavedPrompt::Quit => self.save_all(),
-                    UnsavedPrompt::CloseTab(idx) => {
-                        if let Some(ed) = self.editors.get_mut(idx) {
-                            let _ = ed.save();
-                        }
-                    }
+                    UnsavedPrompt::CloseTab(idx) => match self.editors.get_mut(idx) {
+                        Some(ed) => match ed.save() {
+                            Ok(()) => true,
+                            Err(e) => {
+                                self.status_message = i18n::msg_save_error(lang, &e.to_string());
+                                false
+                            }
+                        },
+                        None => true,
+                    },
+                };
+                if saved {
+                    self.perform_unsaved_action(action);
                 }
-                self.perform_unsaved_action(action);
             }
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.unsaved_prompt = None;
@@ -5237,7 +5277,9 @@ impl App {
         }
     }
 
-    fn save_all(&mut self) {
+    /// Writes every named dirty buffer. Answers whether all of them landed, so an action that
+    /// was waiting on the save — a quit, a tab close — can hold back when one did not.
+    fn save_all(&mut self) -> bool {
         let lang = self.settings.lang;
         let mut saved = 0usize;
         let mut unnamed = 0usize;
@@ -5264,6 +5306,7 @@ impl App {
         } else {
             i18n::msg_saved_all(lang, saved)
         };
+        errors.is_empty()
     }
 
     /// Opens the Save As box for buffer `idx`. `then` carries an action that was waiting on
@@ -5349,7 +5392,11 @@ impl App {
                 self.begin_save_as(next, Some(action));
                 return;
             }
-            self.save_all();
+            // A failed write leaves the quit undone and the reason on screen, for the same
+            // reason the prompt exists at all.
+            if !self.save_all() {
+                return;
+            }
         }
         self.perform_unsaved_action(action);
     }
@@ -7297,7 +7344,9 @@ impl App {
             MenuAction::Save => self.save_active_file(),
             // Deliberately available for a named buffer too, to save a copy under a new name.
             MenuAction::SaveAs => self.begin_save_as(self.active_editor, None),
-            MenuAction::SaveAll => self.save_all(),
+            MenuAction::SaveAll => {
+                self.save_all();
+            }
             MenuAction::RunTarget => self.open_run_menu(self.editor_pane_focus),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
@@ -8047,6 +8096,13 @@ impl App {
         }
         let Some(parent) = old_path.parent() else { return };
         let new_path = parent.join(&new_name);
+        // `rename` clobbers the destination without a word, so a typed name that happens to be
+        // another file's would destroy it — and the tree would look like the rename had simply
+        // worked. Same refusal as Save As.
+        if new_path.exists() {
+            self.status_message = i18n::msg_save_as_exists(lang, &new_path.display().to_string());
+            return;
+        }
         match std::fs::rename(&old_path, &new_path) {
             Ok(()) => {
                 self.file_tree.refresh();
@@ -8948,24 +9004,24 @@ impl App {
                 return;
             }
             if within(content, col, row) {
-                // Scroll whichever pane the pointer is over, independent of focus.
-                let idx = if pane_idx == 0 { self.active_editor } else { self.active_editor_right };
+                // Scroll whichever pane the pointer is over, independent of focus. Asked through
+                // `pane_editor_index` rather than read raw, and taken with `get_mut`: with every
+                // tab closed the pane's index still points at a buffer that is no longer there,
+                // and a wheel notch over the empty frame must not be a panic.
+                let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+                let idx = self.pane_editor_index(pane);
                 // A rendered preview holds no rope, so its length comes from the lines drawn.
-                if let Some(len) = self.rendered_len(idx) {
-                    let top = &mut self.editors[idx].top_line;
-                    *top = if delta < 0 {
-                        top.saturating_sub((-delta) as usize)
-                    } else {
-                        (*top + delta as usize).min(len.saturating_sub(1))
-                    };
-                    return;
-                }
-                if delta < 0 {
-                    self.editors[idx].top_line = self.editors[idx].top_line.saturating_sub((-delta) as usize);
+                let rendered = self.rendered_len(idx);
+                let Some(editor) = self.editors.get_mut(idx) else { return };
+                let max_top = match rendered {
+                    Some(len) => len.saturating_sub(1),
+                    None => editor.rope.len_lines().saturating_sub(1),
+                };
+                editor.top_line = if delta < 0 {
+                    editor.top_line.saturating_sub((-delta) as usize)
                 } else {
-                    let max_top = self.editors[idx].rope.len_lines().saturating_sub(1);
-                    self.editors[idx].top_line = (self.editors[idx].top_line + delta as usize).min(max_top);
-                }
+                    (editor.top_line + delta as usize).min(max_top)
+                };
             }
             return;
         }
@@ -9025,7 +9081,14 @@ impl App {
             // pane, since the two halves hold different files.
             let Some(&editor_idx) = self.pane_tabs(pane).get(position) else { return };
             if rel_col >= layout.close.0 && rel_col < layout.close.1 {
-                self.close_editor_at(editor_idx);
+                // The ✕ is the same request as Ctrl+W and takes the same route through the
+                // prompt. Straight to `close_editor_at` it threw unsaved edits away on one
+                // click — the one click most likely to be a mis-aim at the tab next to it.
+                if self.editors.get(editor_idx).map(|e| e.dirty).unwrap_or(false) {
+                    self.unsaved_prompt = Some(UnsavedPrompt::CloseTab(editor_idx));
+                } else {
+                    self.close_editor_at(editor_idx);
+                }
             } else {
                 self.set_pane_editor(pane, editor_idx);
                 self.focus = Focus::Editor;
@@ -9386,6 +9449,18 @@ mod tests {
         // should: because the plot changed, not because the session still has it.
         assert!(redrawn(&mut seen, &one, later));
         assert!(!redrawn(&mut seen, &one, later));
+    }
+
+    /// Closing the last tab used to hand the keyboard to the terminal whether or not one was
+    /// drawn. With the terminal pane off, the shell is still alive: what you typed at an empty
+    /// window went to an invisible command line.
+    #[test]
+    fn the_empty_window_only_focuses_something_you_can_see() {
+        assert_eq!(empty_state_focus(true, true), Focus::FileTree, "the tree first when it is up");
+        assert_eq!(empty_state_focus(true, false), Focus::FileTree);
+        assert_eq!(empty_state_focus(false, true), Focus::Terminal, "then a terminal that is up");
+        // Nothing else on screen: keys go to the empty frame, which does nothing with them.
+        assert_eq!(empty_state_focus(false, false), Focus::Editor);
     }
 
     fn make_venv(root: &std::path::Path, name: &str) -> PathBuf {

@@ -431,6 +431,12 @@ impl Editor {
     /// Deletes the active selection, if any, moving the cursor to its start. Returns
     /// whether a selection was actually deleted (callers use this to short-circuit).
     pub fn delete_selection(&mut self) -> bool {
+        // A read-only buffer (binary/undecodable file, or a picture preview) has no business
+        // accepting a keystroke's worth of edit; every mutating entry point below checks this
+        // itself, since none of them route through a single shared chokepoint.
+        if self.read_only {
+            return false;
+        }
         if self.selection_range().is_none() && self.block_range().is_none() {
             return false;
         }
@@ -480,6 +486,9 @@ impl Editor {
     }
 
     pub fn indent_selection(&mut self, tab_size: usize) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Other);
         let (sl, end_line) = self.indent_range();
         let pad = " ".repeat(tab_size);
@@ -487,16 +496,27 @@ impl Editor {
             let idx = self.rope.line_to_char(line);
             self.rope.insert(idx, &pad);
         }
-        self.cursor_col += tab_size;
-        if let Some((al, ac)) = self.selection_anchor.as_mut() {
-            if (sl..=end_line).contains(&*al) {
-                *ac += tab_size;
+        // `indent_range` deliberately excludes a selection's last line when it ends at column
+        // 0 (nothing on that line was indented), so the cursor or anchor sitting on that line
+        // must not slide right along with the lines that actually gained a `pad`. And even on
+        // an indented line, clamping to its new length keeps a stale wide column from landing
+        // past end-of-line, which is what let the next edit index past `len_chars()`.
+        if (sl..=end_line).contains(&self.cursor_line) {
+            self.cursor_col = (self.cursor_col + tab_size).min(self.line_char_len(self.cursor_line));
+        }
+        if let Some((al, ac)) = self.selection_anchor {
+            if (sl..=end_line).contains(&al) {
+                let new_ac = (ac + tab_size).min(self.line_char_len(al));
+                self.selection_anchor = Some((al, new_ac));
             }
         }
         self.mark_edited();
     }
 
     pub fn outdent_selection(&mut self, tab_size: usize) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Other);
         let (sl, end_line) = self.indent_range();
         for line in sl..=end_line {
@@ -527,6 +547,9 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Insert);
         self.delete_selection_raw();
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
@@ -552,6 +575,9 @@ impl Editor {
     /// bracket inserts its partner and leaves the cursor between them; typing a closing
     /// bracket right before the matching one steps over it instead of inserting a duplicate.
     pub fn insert_char_pairs(&mut self, ch: char, auto_pairs: bool) {
+        if self.read_only {
+            return;
+        }
         if !auto_pairs || self.selection_range().is_some() {
             self.insert_char(ch);
             return;
@@ -585,6 +611,9 @@ impl Editor {
     /// three-line block with the middle line indented by `indent_unit` (like most editors
     /// do when you press Enter between `{` and `}`).
     pub fn newline_smart(&mut self, auto_indent: bool, auto_pairs: bool, indent_unit: &str) {
+        if self.read_only {
+            return;
+        }
         if auto_pairs {
             if let (Some(open), Some(close)) = (self.char_before_cursor(), self.char_at_cursor()) {
                 if close_partner(open) == Some(close) && open != '"' && open != '\'' && open != '`' {
@@ -610,6 +639,9 @@ impl Editor {
 
     /// Inserts a run of text with no newlines (used for space-expanded tabs).
     pub fn insert_str(&mut self, s: &str) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Insert);
         self.delete_selection_raw();
         let idx = self.char_idx(self.cursor_line, self.cursor_col);
@@ -621,6 +653,9 @@ impl Editor {
     /// Inserts possibly multi-line text (e.g. a clipboard paste), splitting on '\n'. The
     /// whole paste is one undo step (nested inserts skip their own checkpoint).
     pub fn insert_multiline(&mut self, text: &str) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Other);
         self.in_compound = true;
         self.delete_selection_raw();
@@ -637,6 +672,9 @@ impl Editor {
     }
 
     pub fn insert_newline(&mut self, auto_indent: bool) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Other);
         self.delete_selection_raw();
         let indent = if auto_indent {
@@ -658,6 +696,9 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
+        if self.read_only {
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -690,6 +731,9 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) {
+        if self.read_only {
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -941,6 +985,9 @@ impl Editor {
     }
 
     pub fn delete_word_left(&mut self) {
+        if self.read_only {
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -955,6 +1002,9 @@ impl Editor {
     }
 
     pub fn delete_word_right(&mut self) {
+        if self.read_only {
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -971,6 +1021,9 @@ impl Editor {
 
     /// Duplicates the current line onto the line below, keeping the cursor column.
     pub fn duplicate_line(&mut self) {
+        if self.read_only {
+            return;
+        }
         self.checkpoint(EditKind::Other);
         let line = self.cursor_line;
         let line_start = self.rope.line_to_char(line);
@@ -1016,7 +1069,7 @@ impl Editor {
     }
 
     pub fn move_line_up(&mut self) {
-        if self.cursor_line == 0 {
+        if self.read_only || self.cursor_line == 0 {
             return;
         }
         self.checkpoint(EditKind::Other);
@@ -1028,7 +1081,7 @@ impl Editor {
 
     pub fn move_line_down(&mut self) {
         let line = self.cursor_line;
-        if line + 1 >= self.rope.len_lines() {
+        if self.read_only || line + 1 >= self.rope.len_lines() {
             return;
         }
         self.checkpoint(EditKind::Other);
@@ -1040,6 +1093,9 @@ impl Editor {
     /// Toggles a line comment (`token`) on the current line or every line in the selection:
     /// uncomments if all non-blank lines are already commented, otherwise comments them.
     pub fn toggle_comment(&mut self, token: &str) {
+        if self.read_only {
+            return;
+        }
         let (sl, el) = self.indent_range();
         let mut any = false;
         let mut all_commented = true;
@@ -1107,6 +1163,9 @@ impl Editor {
     /// Replaces the absolute char range `[start, end)` with `text` as one undo step, leaving
     /// the cursor just after the inserted text. Used by find-and-replace.
     pub fn replace_char_range(&mut self, start: usize, end: usize, text: &str) {
+        if self.read_only {
+            return;
+        }
         let total = self.rope.len_chars();
         let start = start.min(total);
         let end = end.min(total);
@@ -1420,6 +1479,36 @@ mod tests {
         assert_eq!(ed.rope.to_string(), "  one\n  two");
     }
 
+    /// A selection ending exactly at column 0 hands `indent_range` a last line that never gets
+    /// a `pad` inserted into it (there is nothing on that line to indent). The cursor sitting on
+    /// that untouched line must not slide right along with the lines that did get indented —
+    /// it used to, landing past end-of-line on a short last line, and the next keystroke would
+    /// index ropey past `len_chars()` and panic.
+    #[test]
+    fn indenting_a_selection_ending_at_column_zero_leaves_the_cursor_where_it_was() {
+        let mut ed = Editor::empty();
+        ed.insert_str("aa");
+        ed.insert_newline(false);
+        ed.insert_str("bb");
+        ed.insert_newline(false);
+        ed.insert_str("c");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_line = 2;
+        ed.cursor_col = 0;
+
+        ed.indent_selection(4);
+        assert_eq!(ed.rope.to_string(), "    aa\n    bb\nc");
+        assert_eq!((ed.cursor_line, ed.cursor_col), (2, 0));
+
+        // The selection itself is still live — its anchor moved with the indented line 0, its
+        // end (the cursor) held still on the untouched line 2 — so typing replaces it, the same
+        // as typing over any other selection. What used to panic here was `delete_selection_raw`
+        // computing an end index from a cursor column (4) that no longer existed on a 1-char
+        // line: past `len_chars()`, and ropey's `remove` asserts on an out-of-range end.
+        ed.insert_char('x');
+        assert_eq!(ed.rope.to_string(), "    xc");
+    }
+
     #[test]
     fn brace_fold_collapses_and_expands() {
         let mut ed = Editor::empty();
@@ -1580,6 +1669,51 @@ mod tests {
         // Original bytes are untouched.
         assert_eq!(std::fs::read(&path).unwrap(), vec![0u8, 1, 2, 3, 0]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `read_only` is set on binary buffers and picture previews, neither of which has a
+    /// meaningful notion of "edit". Every mutating entry point is expected to check the flag
+    /// itself (there is no single chokepoint they all funnel through), so this drives a
+    /// representative sample of them and checks that none leaves a mark: not on the text, not
+    /// on the dirty bit, and not on the undo stack (an edit that quietly checkpointed but did
+    /// nothing would still be a bug — undo would then produce a no-op step).
+    #[test]
+    fn a_read_only_buffer_refuses_every_edit_entry_point() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abc");
+        ed.insert_newline(false);
+        ed.insert_str("def");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_line = 0;
+        ed.cursor_col = 2;
+        ed.read_only = true;
+
+        let text_before = ed.rope.to_string();
+        let dirty_before = ed.dirty;
+        let undo_depth_before = ed.undo_stack.len();
+
+        assert!(!ed.delete_selection());
+        ed.insert_char('z');
+        ed.insert_char_pairs('(', true);
+        ed.newline_smart(true, true, "    ");
+        ed.insert_str("more");
+        ed.insert_multiline("x\ny");
+        ed.insert_newline(true);
+        ed.backspace();
+        ed.delete_forward();
+        ed.delete_word_left();
+        ed.delete_word_right();
+        ed.indent_selection(4);
+        ed.outdent_selection(4);
+        ed.duplicate_line();
+        ed.move_line_up();
+        ed.move_line_down();
+        ed.toggle_comment("//");
+        ed.replace_char_range(0, 1, "Z");
+
+        assert_eq!(ed.rope.to_string(), text_before, "a read-only buffer must not be mutated");
+        assert_eq!(ed.dirty, dirty_before);
+        assert_eq!(ed.undo_stack.len(), undo_depth_before, "no checkpoint should have been pushed either");
     }
 
     #[test]
