@@ -83,11 +83,14 @@ fn run(root: &Path, query: String, regex: bool, case_sensitive: bool, show_hidde
     };
 
     let mut files = Vec::new();
-    crate::app::collect_project_files(root, &mut files, show_hidden);
+    // A file list that stopped at its own cap makes the search partial before it starts, and
+    // that is the same news as stopping at `HIT_LIMIT`: what came back is true, and what did not
+    // come back was never looked at.
+    let capped = crate::app::collect_project_files(root, &mut files, show_hidden);
 
     let mut hits = Vec::new();
     let mut files_searched = 0usize;
-    let mut truncated = false;
+    let mut truncated = capped;
     for path in &files {
         if hits.len() >= HIT_LIMIT {
             truncated = true;

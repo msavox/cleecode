@@ -102,6 +102,11 @@ pub struct TerminalPanel {
     /// next byte — or the eventual EOF — into an exit instead of another parse into a screen
     /// that will never be drawn again.
     stop: Arc<AtomicBool>,
+    /// Counts the times the reader thread has fed the parser. Shared with that thread the same
+    /// way the stop flag is, and only ever compared with its own previous value: what it answers
+    /// is "has this screen moved since you last looked", which is what lets the frame loop leave
+    /// the screen alone while every shell in the window is quiet.
+    generation: Arc<AtomicU64>,
     /// When the pane was spawned, and the last moment the shell produced output (millis
     /// since `spawn`, written by the reader thread). Used to hide the noisy startup banner
     /// until the shell settles at a clean prompt.
@@ -428,6 +433,8 @@ impl TerminalPanel {
         let stop_clone = Arc::clone(&stop);
 
         let spawn = Instant::now();
+        let generation = Arc::new(AtomicU64::new(0));
+        let generation_clone = Arc::clone(&generation);
         let last_output_ms = Arc::new(AtomicU64::new(0));
         let produced_output = Arc::new(AtomicBool::new(false));
         let last_output_clone = Arc::clone(&last_output_ms);
@@ -452,6 +459,9 @@ impl TerminalPanel {
                             let mut p = lock_poisoned(&parser_clone);
                             process_anchored(&mut p, data);
                         }
+                        // Raised after the parser has taken the bytes, so a reader that sees the
+                        // new number is looking at a screen that already holds them.
+                        generation_clone.fetch_add(1, Ordering::Release);
                         last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
                         produced_clone.store(true, Ordering::Relaxed);
 
@@ -488,6 +498,7 @@ impl TerminalPanel {
             cols,
             exited,
             stop,
+            generation,
             spawn,
             last_output_ms,
             produced_output,
@@ -627,11 +638,23 @@ impl TerminalPanel {
         self.revealed
     }
 
+    /// Whether this pane is still waiting to be shown. The moment it arrives is decided by the
+    /// clock — a quiet quarter second — and a clock cannot announce itself, so while any pane is
+    /// hidden the frame loop keeps drawing rather than letting a shell appear a second late.
+    pub fn awaiting_reveal(&self) -> bool {
+        !self.revealed
+    }
+
     pub fn write_input(&mut self, bytes: &[u8]) {
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
         }
+    }
+
+    /// How many times output has been fed to this pane's screen. Only differences matter.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// pid of the shell process running in this pane, used for best-effort ssh-session detection.
