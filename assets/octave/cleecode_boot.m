@@ -20,7 +20,7 @@ function cleecode_boot ()
   ## "windows" leaves Octave exactly as it is outside CleeCode — its own toolkit, its own
   ## figure windows, nothing captured. The workspace panel still fills in: variables are not
   ## plots, and nobody choosing where their figures appear asked to stop seeing those.
-  if (strcmp (getenv ("CLEECODE_PLOTS"), "windows"))
+  if (strcmp (cleecode_plots_destination (), "windows"))
     ## The tick prints figures to the directory this names; empty, cleecode_figs returns at
     ## its first line. Cleared here rather than left unset by CleeCode so that one variable
     ## holds the decision and this file is the only place that acts on it.
@@ -35,6 +35,37 @@ function cleecode_boot ()
   set (0, "defaultfigurevisible", "off");
   cleecode_toolkit ();
   cleecode_ws (ws);
+endfunction
+
+function where = cleecode_plots_destination ()
+  ## Where this session's plots should go: the file first, the variable second.
+  ##
+  ## Both say the same word. The variable is a copy taken when the *shell* started and cannot
+  ## change afterwards, so a prompt opened before the preference was flipped went on doing what
+  ## it had always done — and the only cure anybody found was to restart the editor, which is how
+  ## it was reported. The file is read here, as this interpreter starts, so the next `octave`
+  ## typed at a shell that has been open all day gets the current answer.
+  ##
+  ## The variable stays as the fallback: it is what a session outside CleeCode has, and what this
+  ## one has if the file could not be written.
+  where = getenv ("CLEECODE_PLOTS");
+  path = getenv ("CLEECODE_PLOTS_FILE");
+  if (isempty (path))
+    return;
+  endif
+  try
+    fid = fopen (path, "r");
+    if (fid < 0)
+      return;
+    endif
+    said = strtrim (fgetl (fid));
+    fclose (fid);
+    if (ischar (said) && any (strcmp (said, {"tabs", "windows"})))
+      where = said;
+    endif
+  catch
+    ## Unreadable is the same as absent: the variable already answered.
+  end_try_catch
 endfunction
 
 function cleecode_toolkit ()

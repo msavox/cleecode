@@ -1710,3 +1710,35 @@ controlli non torna, si stampa come prima.
 Nota di misura, per onestà: fuori dall'hook `drawnow` rispettava anche `linewidth`, che `print`
 attraverso il percorso eps ignora. Dentro l'hook — con paperposition impostata — quel guadagno
 non si vede: le due immagini hanno la stessa linea sottile. Resta la velocità, che era il punto.
+
+
+## 0.12.4 — l'interruttore che si sentiva solo dopo un riavvio (2026-08-24)
+
+Tre cose trovate usando l'editor, non leggendolo.
+
+**"Lo switch di preferenza non viene cagato se non riavvio clee".** Mezzo vero, ed è la metà
+interessante. Misurato pilotando il binario: una shell aperta *dopo* il toggle riceve già
+`CLEECODE_PLOTS=windows` senza riavviare niente. Quella che era già aperta no, e non può: l'ambiente
+di un processo è una copia fatta quando è partito, e da fuori non si cambia. Quindi l'`octave` che
+digiti dopo, al prompt in cui stavi lavorando da un'ora, continua a fare quello che diceva
+l'impostazione vecchia — e l'unico gesto che rimetteva tutto d'accordo era far ripartire l'editor.
+
+Adesso la risposta sta anche in un file, che i due hook leggono *quando parte l'interprete*:
+`cleecode_boot` prima di scegliere il toolkit, `sync_plots` in `sitecustomize` prima che qualcuno
+possa importare matplotlib — che il backend lo sceglie all'import e poi non riguarda più la
+variabile. La variabile resta come ripiego. Verificato nei due sensi su entrambi i linguaggi: con
+la variabile che dice `tabs` e il file `windows` Octave svuota `CLEECODE_OCTAVE_FIGS`, e Python in
+una shell mai riavviata passa da `tabs/module://cleecode_mpl` a `windows/None`. Una sessione già
+avviata tiene quello con cui è nata, che non è una politica ma un fatto sui processi — e il
+messaggio adesso lo dice: "dal prossimo Octave o Python che avvii".
+
+**I pulsanti della figura che non potevano funzionare sembravano funzionanti.** I sei di sinistra
+non toccano il quadro: chiedono alla sessione che l'ha disegnata di ridisegnare. Se quella non c'è
+più — ed è lo stato normale di una figura nata da `▶ Run`, la cui shell finisce con lo script —
+l'unica risposta era una riga nella barra di stato, la cosa più facile da non vedere. Ora sono
+spenti quando dietro non c'è nessun interprete. Con Octave vivo, verificato: il clic sulla freccia
+risponde "Panning — the session is redrawing it".
+
+**E la barra si lascia colpire.** Nessun pulsante è più stretto di cinque celle — `+` ne aveva tre,
+un bersaglio grande come un punto fermo — e la colonna di spazio fra due pulsanti adesso appartiene
+a uno dei due invece che a nessuno. Sullo schermo non si è mosso niente: sono cresciuti i bersagli.

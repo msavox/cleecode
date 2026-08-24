@@ -2807,6 +2807,35 @@ pub fn nav_bar_layout(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, Rec
     out
 }
 
+/// The same buttons, as the cells a click is allowed to land in.
+///
+/// Wider than what is drawn: the column of space each button is separated from the next by
+/// belongs to one of them rather than to nothing, and the two ends of the run reach the edge of
+/// the bar. On a row one cell tall, a gap that swallows a click is the difference between a
+/// button that feels reliable and one that has to be aimed at — and the pointer is often a
+/// trackpad. Nothing moves on screen; only the target grows.
+pub fn nav_bar_hit_zones(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, Rect)> {
+    hit_zones_from(&nav_bar_layout(app, idx, area))
+}
+
+/// The arithmetic of the above, away from the app the buttons came from.
+fn hit_zones_from(drawn: &[(NavControl, Rect)]) -> Vec<(NavControl, Rect)> {
+    let mut zones = Vec::with_capacity(drawn.len());
+    for (i, (control, rect)) in drawn.iter().enumerate() {
+        // Back to the previous button's right edge, forward to the next one's left — and at the
+        // ends, out to the bar itself.
+        let left = match i {
+            0 => rect.x.saturating_sub(1),
+            _ => drawn[i - 1].1.x + drawn[i - 1].1.width,
+        };
+        // The gap goes to the button *after* it, not to both: zones that touch exactly leave no
+        // dead column and no column that two buttons could claim.
+        let right = rect.x + rect.width;
+        zones.push((*control, Rect { x: left, y: rect.y, width: right.saturating_sub(left).max(1), height: 1 }));
+    }
+    zones
+}
+
 /// The row a preview's navigation bar sits on: the last line inside the frame.
 fn nav_bar_rect(area: Rect) -> Option<Rect> {
     let inner = inner_rect(area);
@@ -2845,15 +2874,23 @@ fn nav_label(control: NavControl, kind: crate::preview::Kind) -> (&'static str, 
     }
 }
 
+/// The narrowest a button is allowed to be, however short its label.
+///
+/// `+` names itself with its own key and came to three cells — a target one row tall and three
+/// columns wide, which is the size of a full stop on a big screen. Reported, in the same breath
+/// as the buttons that did nothing, as "davvero piccoli e difficili da cliccare".
+const NAV_MIN_WIDTH: u16 = 5;
+
 /// How many cells a button takes: a space, the name, the key, a space. The zoom buttons name
 /// themselves with their own key, so it is not written twice.
 fn nav_width(control: NavControl, kind: crate::preview::Kind) -> u16 {
     let (name, key) = nav_label(control, kind);
-    if name == key {
+    let natural = if name == key {
         name.chars().count() as u16 + 2
     } else {
         (name.chars().count() + key.chars().count()) as u16 + 3
-    }
+    };
+    natural.max(NAV_MIN_WIDTH)
 }
 
 /// The area a preview's picture gets, once the navigation bar has taken its row.
@@ -2876,10 +2913,28 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
         row,
     );
 
+    // A figure's six buttons do not touch the picture: they ask the session that drew it to
+    // redraw. With that session gone — a figure from Run, whose shell ends with the script —
+    // they cannot do anything, and drawn like the others they invited a click that answered only
+    // in the status line. Dimmed, they say so before the click.
+    let live = app.figure_has_a_session(idx);
     for (control, rect) in nav_bar_layout(app, idx, area) {
         // The key that does the same thing is written under the label, so the bar teaches the
         // keyboard rather than competing with it.
         let style = Style::default().fg(Color::Gray).bg(Color::Rgb(45, 45, 45));
+        let style = match control {
+            NavControl::FigLeft
+            | NavControl::FigRight
+            | NavControl::FigUp
+            | NavControl::FigDown
+            | NavControl::FigReset
+            | NavControl::FigExport
+                if !live =>
+            {
+                style.fg(Color::DarkGray)
+            }
+            _ => style,
+        };
         let style = match control {
             NavControl::FitWidth if preview.fit == crate::preview::Fit::Width => {
                 style.fg(Color::Black).bg(Color::Cyan)
@@ -2893,12 +2948,25 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
         };
         let (name, key) = nav_label(control, preview.kind());
         let dim = Style::default().fg(Color::DarkGray).bg(style.bg.unwrap_or(Color::Reset));
+        // Whatever the label came to, the button is at least `NAV_MIN_WIDTH` wide — so the
+        // padding has to carry the button's own background, or a wider target would read as a
+        // narrow button with a hole beside it.
+        let natural = if name == key {
+            name.chars().count() + 2
+        } else {
+            name.chars().count() + key.chars().count() + 3
+        };
+        let pad = (rect.width as usize).saturating_sub(natural);
+        let (before, after) = (pad / 2, pad - pad / 2);
         let line = if name == key {
-            Line::from(Span::styled(format!(" {name} "), style))
+            Line::from(Span::styled(
+                format!("{} {name} {}", " ".repeat(before), " ".repeat(after)),
+                style,
+            ))
         } else {
             Line::from(vec![
-                Span::styled(format!(" {name} "), style),
-                Span::styled(format!("{key} "), dim),
+                Span::styled(format!("{} {name} ", " ".repeat(before)), style),
+                Span::styled(format!("{key} {}", " ".repeat(after)), dim),
             ])
         };
         f.render_widget(Paragraph::new(line), rect);
@@ -3884,6 +3952,47 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bar is one row tall, so every column of it has to belong to a button: the single
+    /// space drawn between two of them used to belong to neither, and a click that landed there
+    /// did nothing at all — which, on a row of small targets, is most of what "the buttons do
+    /// not work" feels like.
+    #[test]
+    fn the_click_zones_leave_no_dead_column_between_buttons() {
+        // Built from the geometry alone: what matters is that consecutive zones touch, whatever
+        // the buttons happen to be.
+        let drawn = [
+            (NavControl::ZoomOut, Rect { x: 5, y: 9, width: 5, height: 1 }),
+            (NavControl::ZoomIn, Rect { x: 11, y: 9, width: 5, height: 1 }),
+            (NavControl::FitPage, Rect { x: 17, y: 9, width: 6, height: 1 }),
+        ];
+        let zones = hit_zones_from(&drawn);
+        assert_eq!(zones.len(), drawn.len());
+        for pair in zones.windows(2) {
+            assert_eq!(
+                pair[0].1.x + pair[0].1.width,
+                pair[1].1.x,
+                "a column between two buttons belongs to neither"
+            );
+        }
+        // Each zone still contains the button it is for, and the first reaches back over the
+        // space in front of it.
+        for (i, (control, zone)) in zones.iter().enumerate() {
+            assert_eq!(*control, drawn[i].0);
+            assert!(zone.x <= drawn[i].1.x && zone.x + zone.width >= drawn[i].1.x + drawn[i].1.width);
+        }
+        assert_eq!(zones[0].1.x, drawn[0].1.x - 1);
+    }
+
+    /// No button is ever three cells wide, whatever its label says.
+    #[test]
+    fn even_the_shortest_button_is_worth_aiming_at() {
+        for kind in [crate::preview::Kind::Picture, crate::preview::Kind::Document] {
+            for control in [NavControl::ZoomIn, NavControl::ZoomOut, NavControl::FigLeft] {
+                assert!(nav_width(control, kind) >= NAV_MIN_WIDTH, "{:?}", nav_width(control, kind));
+            }
+        }
+    }
     use super::*;
 
     /// Five tabs of 10 columns each.

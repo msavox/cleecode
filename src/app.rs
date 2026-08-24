@@ -6280,6 +6280,22 @@ impl App {
     /// Only the on-screen tab of each window is a candidate: sending something into a hidden tab
     /// would be invisible, and the whole point of talking to a session that is already open is
     /// that you can see what it says back.
+    /// Whether the figure in tab `idx` still has an interpreter behind it.
+    ///
+    /// Its six buttons do not touch the picture: they send a command to the session that drew it,
+    /// which redraws and writes a new PNG. With that session gone — a figure from `Run`, whose
+    /// shell ends with the script, or a prompt closed since — the command has nowhere to go, and
+    /// the bar used to go on offering the buttons as if it did. Reported as "clicking the
+    /// controls does nothing": the refusal was only ever a line in the status bar, which is the
+    /// easiest thing on screen to miss.
+    pub fn figure_has_a_session(&self, idx: usize) -> bool {
+        let path = self.editors.get(idx).and_then(|e| e.path.clone());
+        let Some((_, language)) = self.figure_for(path.as_deref()) else { return false };
+        let pids: Vec<Option<u32>> =
+            self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+        dnd::shell_running(language, &pids).is_some()
+    }
+
     fn send_to_session(&mut self, language: crate::session::Language, command: &str) -> Option<usize> {
         let pids: Vec<Option<u32>> =
             self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
@@ -8787,7 +8803,10 @@ impl App {
                     // A preview's controls sit inside its frame, so they are claimed before the
                     // click can reach the picture behind them.
                     let idx = self.pane_editor_index(self.editor_pane_focus);
-                    if let Some((control, _)) = ui::nav_bar_layout(self, idx, content)
+                    // The zones, not the buttons: the gap between two of them belongs to one of
+                    // them, so a click a column wide of the mark still lands. See
+                    // `ui::nav_bar_hit_zones`.
+                    if let Some((control, _)) = ui::nav_bar_hit_zones(self, idx, content)
                         .into_iter()
                         .find(|(_, r)| within(*r, col, row))
                     {

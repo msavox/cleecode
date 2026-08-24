@@ -429,6 +429,9 @@ static PLOTS_IN_TABS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 pub fn set_plots_in_tabs(on: bool) {
     PLOTS_IN_TABS.store(on, std::sync::atomic::Ordering::Relaxed);
+    // On disk as well as in memory: the atomic reaches the shells started from now on, the file
+    // reaches the interpreters started from now on — including in a shell that was already open.
+    write_plots_file();
 }
 
 /// Whether this machine can put a window on a screen at all.
@@ -461,6 +464,31 @@ fn plots_in_tabs() -> bool {
     PLOTS_IN_TABS.load(std::sync::atomic::Ordering::Relaxed) || !can_open_a_window()
 }
 
+/// The file both hooks read to find out where this session's plots should go.
+///
+/// The environment carries the same word, and cannot be changed once a shell is running: a shell
+/// is a process, its environment is a copy, and the preference is flipped in the editor long
+/// after. So a session opened before the switch went on capturing figures after it, and the only
+/// way anybody found to make it take was to restart CleeCode — reported as exactly that.
+///
+/// A file is read when an interpreter *starts*, which is the moment the answer is needed. The
+/// next `octave` or `python3` typed at a shell that has been open all day gets the current
+/// answer; a session already running keeps the one it was born with, which is not a policy but a
+/// fact about processes.
+pub fn plots_file() -> PathBuf {
+    snapshot_dir().join("plots")
+}
+
+/// Writes the current destination where the hooks will look for it. Best-effort: with no file
+/// they fall back to the environment, which is what they read before this existed.
+fn write_plots_file() {
+    let path = plots_file();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if plots_in_tabs() { "tabs" } else { "windows" });
+}
+
 /// The environment an interpreter needs to publish its workspace, for a shell that may end up
 /// running either language — or neither, in which case the hooks are inert and cost nothing.
 ///
@@ -486,6 +514,7 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
     let python_figures = dir.join("figs").join("python");
     let _ = std::fs::create_dir_all(&octave_figures);
     let _ = std::fs::create_dir_all(&python_figures);
+    write_plots_file();
     let in_tabs = plots_in_tabs();
     let mut env = vec![
         // Where this session's plots are meant to go, read by both languages' hooks. One name
@@ -495,6 +524,9 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
             "CLEECODE_PLOTS".to_string(),
             if in_tabs { "tabs" } else { "windows" }.to_string(),
         ),
+        // The same answer, somewhere it can still change. Read by both hooks in preference to
+        // the variable above, which is only ever as fresh as the shell that carries it.
+        ("CLEECODE_PLOTS_FILE".to_string(), plots_file().to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_WS".to_string(), snapshot.to_string_lossy().into_owned()),
         ("CLEECODE_OCTAVE_FIGS".to_string(), octave_figures.to_string_lossy().into_owned()),
         (
@@ -875,6 +907,12 @@ mod tests {
         // it is imported, long before anyone types `plot`, so the choice has to be in the
         // environment — and it is there exactly when the figures are meant to be captured.
         assert!(names.contains(&"CLEECODE_PLOTS"));
+        // The same answer in a file, which is the one an interpreter started later can still
+        // read: a shell's environment is a copy and cannot be changed once it is running.
+        assert!(names.contains(&"CLEECODE_PLOTS_FILE"));
+        assert_eq!(by("CLEECODE_PLOTS_FILE"), plots_file().to_string_lossy());
+        let on_disk = std::fs::read_to_string(plots_file()).expect("the file the hooks read");
+        assert_eq!(on_disk, by("CLEECODE_PLOTS"), "the file and the variable must not disagree");
         assert_eq!(names.contains(&"MPLBACKEND"), by("CLEECODE_PLOTS") == "tabs");
     }
 }
