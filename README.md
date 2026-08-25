@@ -147,6 +147,9 @@ pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 project-wide search, code folding, column selection, and a git panel that stages, commits and
 switches branch. Words already in your buffers are offered as you type — along with what a
 language server suggests, where one is installed, and its errors underlined where they are.
+Over a Markdown file, a one-row formatting bar: bold, headings, lists, links as buttons that
+toggle the syntax around your selection — each showing the characters it writes, so the bar
+teaches you not to need it, and View hides it once it has.
 
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named
