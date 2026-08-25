@@ -86,6 +86,19 @@ pub enum MenuAction {
     FocusFileTree,
     FocusEditor,
     FocusTerminal,
+    // The eleven markdown formatting actions, and the switch that hides the bar they also sit on.
+    MdBold,
+    MdItalic,
+    MdStrike,
+    MdCode,
+    MdHeading,
+    MdBullet,
+    MdNumbered,
+    MdTask,
+    MdLink,
+    MdQuote,
+    MdFence,
+    ToggleMdToolbar,
 }
 
 impl MenuAction {
@@ -179,6 +192,18 @@ impl MenuAction {
         MenuAction::FocusFileTree,
         MenuAction::FocusEditor,
         MenuAction::FocusTerminal,
+        MenuAction::MdBold,
+        MenuAction::MdItalic,
+        MenuAction::MdStrike,
+        MenuAction::MdCode,
+        MenuAction::MdHeading,
+        MenuAction::MdBullet,
+        MenuAction::MdNumbered,
+        MenuAction::MdTask,
+        MenuAction::MdLink,
+        MenuAction::MdQuote,
+        MenuAction::MdFence,
+        MenuAction::ToggleMdToolbar,
     ];
 }
 
@@ -219,6 +244,10 @@ pub struct MenuStates {
     /// setting: on a machine with no screen the setting may say windows while every plot still
     /// arrives as a tab, and the menu would then be reading out a preference nobody is honouring.
     pub plots_in_tabs: bool,
+    /// Whether the markdown formatting bar is wanted. The setting, not whether one is on screen
+    /// this instant: over a Rust file there is no bar either way, and the menu is answering "is
+    /// it switched on", which is the question you turn it off with.
+    pub md_toolbar: bool,
 }
 
 /// What `action` says about its state, in the column the shortcuts live in. `None` for the
@@ -229,6 +258,9 @@ pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<
             lang,
             if states.plots_in_tabs { Key::MenuValuePlotsTabs } else { Key::MenuValuePlotsWindows },
         )),
+        MenuAction::ToggleMdToolbar => {
+            Some(i18n::t(lang, if states.md_toolbar { Key::On } else { Key::Off }))
+        }
         _ => None,
     }
 }
@@ -238,10 +270,17 @@ pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<
 /// The widest of the values it can take, so the dropdown is the same size before and after a
 /// toggle: a menu that changed width under the cursor would move every other item's shortcut
 /// sideways at the moment of pressing Enter.
+///
+/// Every combination of states is tried rather than one field at a time: an item reads out one
+/// of them, but which one is `item_value`'s business, and a loop over a single field would stop
+/// measuring the moment a second switch was added — as one was.
 pub fn item_value_width(lang: Lang, action: MenuAction) -> usize {
     [true, false]
         .into_iter()
-        .filter_map(|plots_in_tabs| item_value(lang, action, MenuStates { plots_in_tabs }))
+        .flat_map(|plots_in_tabs| {
+            [true, false].into_iter().map(move |md_toolbar| MenuStates { plots_in_tabs, md_toolbar })
+        })
+        .filter_map(|states| item_value(lang, action, states))
         .map(|value| value.chars().count())
         .max()
         .unwrap_or(0)
@@ -321,6 +360,30 @@ pub fn menu_defs() -> Vec<MenuDef> {
             ],
         },
         MenuDef {
+            // Markdown formatting, and only markdown: everything here writes the syntax of one
+            // language, which is why it is not in Edit beside the operations that work on any
+            // file. The menu is offered whatever is open — an action that says which files it is
+            // for is discoverable, and one that appears and disappears with the tab is not.
+            //
+            // Nothing here has a shortcut. Five comfortable chords are left in the whole
+            // application and eleven actions would not fit in them; the bar and this menu are
+            // the surface, and the palette reaches both.
+            title_key: Key::MenuFormat,
+            items: vec![
+                item(Key::ItemMdBold, MenuAction::MdBold, None),
+                item(Key::ItemMdItalic, MenuAction::MdItalic, None),
+                item(Key::ItemMdStrike, MenuAction::MdStrike, None),
+                item(Key::ItemMdCode, MenuAction::MdCode, None),
+                group(Key::ItemMdHeading, MenuAction::MdHeading, None),
+                group(Key::ItemMdBullet, MenuAction::MdBullet, None),
+                item(Key::ItemMdNumbered, MenuAction::MdNumbered, None),
+                item(Key::ItemMdTask, MenuAction::MdTask, None),
+                group(Key::ItemMdLink, MenuAction::MdLink, None),
+                item(Key::ItemMdQuote, MenuAction::MdQuote, None),
+                item(Key::ItemMdFence, MenuAction::MdFence, None),
+            ],
+        },
+        MenuDef {
             title_key: Key::MenuView,
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
@@ -336,6 +399,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // that the screen has become hard to read — which is a bad moment to be asked
                 // to find a menu in it.
                 item(Key::ItemOpaqueBackground, MenuAction::ToggleOpaqueBackground, None),
+                // The bar teaches the syntax it writes, so it is meant to be switched off once
+                // it has: this row reads out which way it is set, because "is it me or is it
+                // this file" is the question somebody who cannot see it arrives with.
+                item(Key::ItemToggleMdToolbar, MenuAction::ToggleMdToolbar, None),
                 group(Key::ItemFocusFileTree, MenuAction::FocusFileTree, Some("Ctrl+Alt+←")),
                 item(Key::ItemFocusEditor, MenuAction::FocusEditor, Some("Ctrl+Tab")),
                 item(Key::ItemFocusTerminal, MenuAction::FocusTerminal, Some("Ctrl+Alt+↓")),
@@ -653,8 +720,10 @@ mod tests {
     #[test]
     fn the_plot_item_says_which_of_the_two_it_is() {
         for lang in [Lang::En, Lang::It] {
-            let tabs = item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true });
-            let windows = item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false });
+            let tabs =
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true });
+            let windows =
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true });
             assert!(tabs.is_some() && windows.is_some(), "{lang:?}");
             assert_ne!(tabs, windows, "{lang:?}: both states read the same");
             // Wide enough for either, so the dropdown does not resize under the cursor at the
@@ -673,7 +742,8 @@ mod tests {
             for item in def.items {
                 assert!(
                     item.shortcut.is_none()
-                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true }).is_none(),
+                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true })
+                            .is_none(),
                     "\"{}\" has both a shortcut and a state to read out",
                     i18n::t(Lang::En, item.label_key)
                 );

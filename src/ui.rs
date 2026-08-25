@@ -157,6 +157,32 @@ pub fn split_editor_area(area: Rect) -> (Rect, Rect) {
     (v[0], v[1])
 }
 
+/// The same split with a row for the markdown formatting bar between the tabs and the text:
+/// (tab bar, bar, content). The middle one is `None` when the bar is not up, and the other two
+/// are then exactly what [`split_editor_area`] gives.
+///
+/// The three always partition the area between them — no row belongs to two of them and none to
+/// nothing — because a click is placed by asking which of the three contains it.
+pub fn split_editor_area_v2(area: Rect, with_toolbar: bool) -> (Rect, Option<Rect>, Rect) {
+    let (tab_bar, rest) = split_editor_area(area);
+    // Never the last row: a bar with no text under it is a bar over nothing.
+    if !with_toolbar || rest.height <= 1 {
+        return (tab_bar, None, rest);
+    }
+    let toolbar = Rect { height: 1, ..rest };
+    let content = Rect { y: rest.y + 1, height: rest.height - 1, ..rest };
+    (tab_bar, Some(toolbar), content)
+}
+
+/// A pane's three rectangles, with the formatting bar in them exactly when it is on screen.
+///
+/// Every call site goes through here rather than deciding for itself, so the renderer and the
+/// mouse cannot come to different answers about which row a click landed on — the same rule the
+/// tab strip's layout and the preview's buttons already follow.
+pub fn pane_areas(app: &App, idx: usize, pane_rect: Rect) -> (Rect, Option<Rect>, Rect) {
+    split_editor_area_v2(pane_rect, md_toolbar_visible(app, idx, pane_rect))
+}
+
 pub struct TabLayout {
     /// Whole-tab range: clicking anywhere in it (outside `close`) switches to it.
     pub full: (u16, u16),
@@ -644,7 +670,7 @@ pub fn run_menu_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
     let panes = editor_pane_rects(editor_area, app.split_view, app.settings.split_pct);
     // A split closed while the menu was open leaves no right pane to hang from.
     let pane = panes.get(menu.pane.index()).or_else(|| panes.first()).copied()?;
-    let (tab_bar, _) = split_editor_area(pane);
+    let (tab_bar, _, _) = pane_areas(app, app.pane_editor_index(menu.pane), pane);
     if tab_bar.height == 0 {
         return None;
     }
@@ -2966,8 +2992,10 @@ pub fn nav_bar_hit_zones(app: &App, idx: usize, area: Rect) -> Vec<(NavControl, 
     hit_zones_from(&nav_bar_layout(app, idx, area))
 }
 
-/// The arithmetic of the above, away from the app the buttons came from.
-fn hit_zones_from(drawn: &[(NavControl, Rect)]) -> Vec<(NavControl, Rect)> {
+/// The arithmetic of the above, away from the app the buttons came from. Generic over what the
+/// buttons are: the markdown formatting bar is the same one-row run of small targets with the
+/// same gaps in it, and two copies of this would be two chances to get the ends wrong.
+fn hit_zones_from<T: Copy>(drawn: &[(T, Rect)]) -> Vec<(T, Rect)> {
     let mut zones = Vec::with_capacity(drawn.len());
     for (i, (control, rect)) in drawn.iter().enumerate() {
         // Back to the previous button's right edge, forward to the next one's left — and at the
@@ -3161,6 +3189,184 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))), rect);
 }
 
+// ---- The markdown formatting bar ----------------------------------------------------------
+
+/// One button on the markdown formatting bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MdTool {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Heading,
+    Bullet,
+    Numbered,
+    Task,
+    Link,
+    Quote,
+    Fence,
+}
+
+/// The buttons, left to right, with the group each belongs to. The groups are what the spaces
+/// in the run are for: four ways of marking a word, then headings, then the three kinds of list,
+/// then the three that make a shape out of a block.
+const MD_TOOLS: [(MdTool, u8); 11] = [
+    (MdTool::Bold, 0),
+    (MdTool::Italic, 0),
+    (MdTool::Strike, 0),
+    (MdTool::Code, 0),
+    (MdTool::Heading, 1),
+    (MdTool::Bullet, 2),
+    (MdTool::Numbered, 2),
+    (MdTool::Task, 2),
+    (MdTool::Link, 3),
+    (MdTool::Quote, 3),
+    (MdTool::Fence, 3),
+];
+
+/// A button's name, and the markdown it writes.
+///
+/// The syntax is the point of the second half: the bar is there to be outgrown, and somebody who
+/// has read `**` off the bold button a dozen times can type it and switch the bar off. ASCII
+/// throughout — an emoji is one character of two columns on some terminals and one on others,
+/// and every position on this row is arithmetic.
+fn md_tool_label(tool: MdTool) -> (&'static str, &'static str) {
+    match tool {
+        MdTool::Bold => ("B", "**"),
+        MdTool::Italic => ("I", "*"),
+        MdTool::Strike => ("S", "~~"),
+        MdTool::Code => ("C", "`"),
+        MdTool::Heading => ("H", "#"),
+        // Not `*`, which is what the bar's second button already means here, and not `-`, which
+        // is the hint beside it.
+        MdTool::Bullet => ("Li", "-"),
+        // These three name themselves in their own syntax, so nothing is written twice.
+        MdTool::Numbered => ("1.", ""),
+        MdTool::Task => ("[ ]", ""),
+        MdTool::Link => ("Ln", "[]()"),
+        MdTool::Quote => (">", ""),
+        MdTool::Fence => ("Cb", "```"),
+    }
+}
+
+/// How many cells a button takes: a space, the name, the syntax, a space — and never fewer than
+/// [`NAV_MIN_WIDTH`], for the reason recorded there.
+fn md_tool_width(tool: MdTool) -> u16 {
+    let (name, hint) = md_tool_label(tool);
+    let natural = if hint.is_empty() {
+        name.chars().count() as u16 + 2
+    } else {
+        (name.chars().count() + hint.chars().count()) as u16 + 3
+    };
+    natural.max(NAV_MIN_WIDTH)
+}
+
+/// The bar's buttons with the cells each occupies, left to right.
+///
+/// One function for the renderer and for hit testing, the same as the preview's bar: a button
+/// drawn where it cannot be clicked is the complaint that gave that bar its minimum width. What
+/// does not fit is dropped from the right rather than squeezed — a two-cell button is not a
+/// button — so a narrow pane keeps the ones nearest to hand.
+pub fn md_toolbar_layout(area: Rect) -> Vec<(MdTool, Rect)> {
+    if area.height == 0 {
+        return Vec::new();
+    }
+    let right = area.x.saturating_add(area.width);
+    let mut out = Vec::new();
+    let mut x = area.x.saturating_add(1);
+    let mut group = MD_TOOLS[0].1;
+    for (tool, tool_group) in MD_TOOLS {
+        // An extra column where the groups meet, so the run reads as four sets of buttons.
+        if tool_group != group {
+            x = x.saturating_add(1);
+            group = tool_group;
+        }
+        let width = md_tool_width(tool);
+        if x.saturating_add(width) > right {
+            break;
+        }
+        out.push((tool, Rect { x, y: area.y, width, height: 1 }));
+        x = x.saturating_add(width).saturating_add(1);
+    }
+    out
+}
+
+/// The same buttons, as the cells a click is allowed to land in — the gaps included, each going
+/// to the button after it. See [`hit_zones_from`].
+pub fn md_toolbar_hit_zones(area: Rect) -> Vec<(MdTool, Rect)> {
+    hit_zones_from(&md_toolbar_layout(area))
+}
+
+/// Whether buffer `idx` is a markdown file that can be typed into.
+///
+/// The one question both the bar and the eleven actions ask, so a button can never be offered
+/// over a buffer the action behind it would refuse. A rendered view and a read-only buffer are
+/// markdown you are looking at rather than markdown you are writing.
+pub fn md_formattable(app: &App, idx: usize) -> bool {
+    crate::preview::is_renderable(&app.editor_ext(idx))
+        && app.editors.get(idx).is_some_and(|e| e.preview.is_none() && !e.read_only)
+}
+
+/// The shortest pane the bar will appear over: the tab strip, the bar, the content frame's two
+/// border rows and two lines of the file under them.
+///
+/// Below that the bar would be taking the last of the room the text itself needs, and a pane
+/// showing one line of a document is not a pane anybody is reading. The setting is untouched —
+/// the bar comes back the moment the window does.
+const MD_TOOLBAR_MIN_HEIGHT: u16 = 6;
+
+/// Whether the formatting bar is on screen over a pane. The single source of truth: the
+/// renderer, the viewport arithmetic and mouse handling all ask this, so none of them can be
+/// drawing or clicking a row the others believe is text.
+pub fn md_toolbar_visible(app: &App, idx: usize, area: Rect) -> bool {
+    md_toolbar_shown(
+        app.settings.show_md_toolbar,
+        &app.editor_ext(idx),
+        app.editors.get(idx).is_some_and(|e| e.preview.is_none() && !e.read_only),
+        area,
+    )
+}
+
+/// The rule of the above, away from the app the four answers are read out of.
+fn md_toolbar_shown(wanted: bool, ext: &str, editable: bool, area: Rect) -> bool {
+    wanted && editable && crate::preview::is_renderable(ext) && area.height >= MD_TOOLBAR_MIN_HEIGHT
+}
+
+/// The formatting bar, drawn the way the preview's navigation bar is: a label, and the syntax it
+/// writes in a dimmer colour beside it.
+fn draw_md_toolbar(f: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+        area,
+    );
+    for (tool, rect) in md_toolbar_layout(area) {
+        let style = Style::default().fg(Color::Gray).bg(Color::Rgb(45, 45, 45));
+        let dim = Style::default().fg(Color::DarkGray).bg(Color::Rgb(45, 45, 45));
+        let (name, hint) = md_tool_label(tool);
+        // The padding carries the button's own background, or a target wider than its label
+        // would read as a narrow button with a hole beside it.
+        let natural = if hint.is_empty() {
+            name.chars().count() + 2
+        } else {
+            name.chars().count() + hint.chars().count() + 3
+        };
+        let pad = (rect.width as usize).saturating_sub(natural);
+        let (before, after) = (pad / 2, pad - pad / 2);
+        let line = if hint.is_empty() {
+            Line::from(Span::styled(format!("{} {name} {}", " ".repeat(before), " ".repeat(after)), style))
+        } else {
+            Line::from(vec![
+                Span::styled(format!("{} {name} ", " ".repeat(before)), style),
+                Span::styled(format!("{hint} {}", " ".repeat(after)), dim),
+            ])
+        };
+        f.render_widget(Paragraph::new(line), rect);
+    }
+}
+
 /// The box a pane's scrollbars ride: its contents, less any row another control has claimed.
 pub fn scrollbar_area(app: &App, idx: usize, area: Rect) -> Rect {
     if app.editors.get(idx).is_some_and(|e| e.preview.is_some()) {
@@ -3317,7 +3523,10 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         draw_no_file_open(f, app, area, focused);
         return;
     }
-    let (tab_bar_area, content_area) = split_editor_area(area);
+    let (tab_bar_area, toolbar_area, content_area) = pane_areas(app, idx, area);
+    if let Some(toolbar_area) = toolbar_area {
+        draw_md_toolbar(f, toolbar_area);
+    }
     if tab_bar_area.height > 0 {
         // Only acts when the active tab changed; a manual scroll survives untouched.
         app.reveal_active_tab(pane, tab_bar_area.width);
@@ -3533,7 +3742,7 @@ fn wrapped_cursor_offset(
 /// is describing without either having to remember what the other did — the same reason the tab
 /// strip's layout is a function rather than a stored rect.
 pub fn editor_viewport(app: &App, idx: usize, pane_rect: Rect) -> (Rect, usize, usize) {
-    let (_, content_area) = split_editor_area(pane_rect);
+    let (_, _, content_area) = pane_areas(app, idx, pane_rect);
     let inner = inner_rect(content_area);
     let gutter = gutter_width(app.editors[idx].rope.len_lines(), app.settings.show_line_numbers);
     (content_area, inner.height as usize, inner.width.saturating_sub(gutter) as usize)
@@ -4930,6 +5139,91 @@ mod tests {
             last_end = x + width;
             x += width + 1;
         }
+    }
+
+    /// The same rule for the formatting bar: what is drawn is what can be hit, and no two
+    /// buttons claim a column. A row of one-cell targets is what "the buttons do not work"
+    /// feels like on a trackpad, which is the complaint `NAV_MIN_WIDTH` was written for.
+    #[test]
+    fn every_formatting_button_drawn_is_one_that_can_be_clicked() {
+        // Wide enough for the whole run, so nothing is dropped from the right.
+        let row = Rect { x: 4, y: 7, width: 120, height: 1 };
+        let drawn = md_toolbar_layout(row);
+        assert_eq!(drawn.len(), MD_TOOLS.len(), "the whole bar should fit in 120 columns");
+        let zones = md_toolbar_hit_zones(row);
+        assert_eq!(zones.len(), drawn.len());
+        for (i, (tool, rect)) in drawn.iter().enumerate() {
+            assert!(rect.width >= 3, "{tool:?} is {} cells wide", rect.width);
+            assert!(rect.x >= row.x && rect.x + rect.width <= row.x + row.width, "{tool:?} runs off the bar");
+            let (name, _) = md_tool_label(*tool);
+            assert!(!name.is_empty(), "{tool:?} has no label");
+            // The zone contains the button it belongs to, and touches its neighbours exactly.
+            let zone = zones[i].1;
+            assert_eq!(zones[i].0, *tool);
+            assert!(zone.x <= rect.x && zone.x + zone.width >= rect.x + rect.width, "{tool:?}");
+            if i > 0 {
+                let before = zones[i - 1].1;
+                assert_eq!(before.x + before.width, zone.x, "{tool:?}: a column belongs to neither");
+            }
+        }
+    }
+
+    /// A pane too narrow for the whole run drops buttons from the right rather than squeezing
+    /// them, and never draws one that runs off the edge.
+    #[test]
+    fn a_narrow_pane_drops_formatting_buttons_instead_of_shrinking_them() {
+        let mut seen = 0;
+        for width in 0..120u16 {
+            let row = Rect { x: 0, y: 0, width, height: 1 };
+            let drawn = md_toolbar_layout(row);
+            for (tool, rect) in &drawn {
+                assert!(rect.x + rect.width <= width, "width {width}: {tool:?} runs off the bar");
+                assert_eq!(rect.width, md_tool_width(*tool), "width {width}: {tool:?} was squeezed");
+            }
+            assert!(drawn.len() >= seen, "width {width}: a wider bar lost a button");
+            seen = drawn.len();
+        }
+    }
+
+    /// The three rectangles have to partition the pane: a row belonging to two of them is drawn
+    /// over twice, and one belonging to none swallows every click that lands on it. And with the
+    /// bar off, the split has to be exactly the one every call site had before it existed.
+    #[test]
+    fn the_editor_split_partitions_the_pane_with_or_without_the_bar() {
+        for height in 0..12u16 {
+            let area = Rect { x: 3, y: 2, width: 40, height };
+            let (tab_bar, none, content) = split_editor_area_v2(area, false);
+            assert!(none.is_none(), "height {height}: a bar appeared unasked");
+            assert_eq!((tab_bar, content), split_editor_area(area), "height {height}");
+
+            let (tab_bar, toolbar, content) = split_editor_area_v2(area, true);
+            let rows = tab_bar.height + toolbar.map_or(0, |t| t.height) + content.height;
+            assert_eq!(rows, area.height, "height {height}: the rows do not add up");
+            if let Some(toolbar) = toolbar {
+                assert_eq!(toolbar.y, tab_bar.y + tab_bar.height, "height {height}");
+                assert_eq!(content.y, toolbar.y + toolbar.height, "height {height}");
+                assert!(content.height >= 1, "height {height}: a bar with no text under it");
+                assert_eq!((toolbar.x, toolbar.width), (area.x, area.width), "height {height}");
+            }
+        }
+    }
+
+    /// Four ways for the bar not to be there, and the setting is only one of them. Getting any
+    /// of the other three wrong draws a row of markdown buttons over a file they cannot act on
+    /// — or, on a short pane, over the last line of the file itself.
+    #[test]
+    fn the_formatting_bar_stays_away_from_everything_it_is_not_for() {
+        let tall = Rect { x: 0, y: 0, width: 80, height: 24 };
+        assert!(md_toolbar_shown(true, "md", true, tall), "a markdown buffer should have it");
+        assert!(!md_toolbar_shown(false, "md", true, tall), "switched off in the View menu");
+        assert!(!md_toolbar_shown(true, "rs", true, tall), "these actions write markdown");
+        assert!(!md_toolbar_shown(true, "", true, tall), "a buffer never saved has no syntax to write");
+        assert!(!md_toolbar_shown(true, "md", false, tall), "a read-only buffer refuses every edit");
+        for height in 0..MD_TOOLBAR_MIN_HEIGHT {
+            let short = Rect { height, ..tall };
+            assert!(!md_toolbar_shown(true, "md", true, short), "height {height} has no row to spare");
+        }
+        assert!(md_toolbar_shown(true, "md", true, Rect { height: MD_TOOLBAR_MIN_HEIGHT, ..tall }));
     }
 
     /// A picture's button says "invert" and a document's says "dark", because they are not the

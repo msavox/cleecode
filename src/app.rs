@@ -2041,6 +2041,7 @@ impl App {
     pub fn menu_states(&self) -> crate::menu::MenuStates {
         crate::menu::MenuStates {
             plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
+            md_toolbar: self.settings.show_md_toolbar,
         }
     }
 
@@ -4895,14 +4896,14 @@ impl App {
         else {
             return false;
         };
-        let (_, content) = ui::split_editor_area(*rect);
-        if !within(content, col, row) {
-            return false;
-        }
         let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
         // `get`, because the pointer can be over a pane with every tab closed: there is no
         // buffer to ask about, and so nothing to zoom.
         let idx = self.pane_editor_index(pane);
+        let (_, _, content) = ui::pane_areas(self, idx, *rect);
+        if !within(content, col, row) {
+            return false;
+        }
         if self.editors.get(idx).map(|e| e.preview.is_none()).unwrap_or(true) {
             return false;
         }
@@ -7954,6 +7955,22 @@ impl App {
                 self.status_message = i18n::msg_column_selection(lang, on);
             }
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
+            // Not saved here: the settings file is written on the way out, the same as every
+            // other switch on this menu.
+            MenuAction::ToggleMdToolbar => {
+                self.settings.show_md_toolbar = !self.settings.show_md_toolbar
+            }
+            MenuAction::MdBold => self.md_format(ui::MdTool::Bold),
+            MenuAction::MdItalic => self.md_format(ui::MdTool::Italic),
+            MenuAction::MdStrike => self.md_format(ui::MdTool::Strike),
+            MenuAction::MdCode => self.md_format(ui::MdTool::Code),
+            MenuAction::MdHeading => self.md_format(ui::MdTool::Heading),
+            MenuAction::MdBullet => self.md_format(ui::MdTool::Bullet),
+            MenuAction::MdNumbered => self.md_format(ui::MdTool::Numbered),
+            MenuAction::MdTask => self.md_format(ui::MdTool::Task),
+            MenuAction::MdLink => self.md_format(ui::MdTool::Link),
+            MenuAction::MdQuote => self.md_format(ui::MdTool::Quote),
+            MenuAction::MdFence => self.md_format(ui::MdTool::Fence),
             MenuAction::ToggleOpaqueBackground => self.toggle_opaque_background(),
             MenuAction::TogglePlotsInTabs => self.toggle_plots_in_tabs(),
             MenuAction::OpenSettings => self.show_settings = true,
@@ -8300,9 +8317,9 @@ impl App {
         let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
         for (i, pane_rect) in panes.iter().enumerate() {
             let pane = if i == 0 { EditorPane::Left } else { EditorPane::Right };
-            // The bars ride the *content* frame, below the tab strip, which is the box the
-            // renderer draws them on.
-            let (_, content) = ui::split_editor_area(*pane_rect);
+            // The bars ride the *content* frame, below the tab strip and the formatting bar,
+            // which is the box the renderer draws them on.
+            let (_, _, content) = ui::pane_areas(self, self.pane_editor_index(pane), *pane_rect);
             for axis in [ui::Axis::Vertical, ui::Axis::Horizontal] {
                 out.push((ScrollbarId::Editor(pane, axis), content, axis));
             }
@@ -8554,10 +8571,13 @@ impl App {
             let panes = ui::editor_pane_rects(areas.editor, true, self.settings.split_pct);
             if let Some(right) = panes.get(1) {
                 let seam_x = right.x;
-                // Skip the tab-bar row (the panes' top row): a click there is a tab click, not a
-                // seam grab, or the split drag would swallow the editor tabs sitting on it.
-                let (tab_bar, _) = ui::split_editor_area(*right);
-                if row >= areas.editor.y + tab_bar.height
+                // Skip the tab-bar row (the panes' top row) and the formatting bar under it: a
+                // click on either is a click on what is drawn there, not a seam grab, or the
+                // split drag would swallow the controls sitting on those rows.
+                let idx = self.pane_editor_index(EditorPane::Right);
+                let (tab_bar, toolbar, _) = ui::pane_areas(self, idx, *right);
+                let controls = tab_bar.height + toolbar.map_or(0, |t| t.height);
+                if row >= areas.editor.y + controls
                     && row < areas.editor.y + areas.editor.height
                     && (col == seam_x || col + 1 == seam_x)
                 {
@@ -9182,6 +9202,41 @@ impl App {
         }
     }
 
+    /// Runs one of the eleven markdown formatting actions on the focused pane's buffer.
+    ///
+    /// The one door for the bar, the Format menu and the command palette alike, so all three
+    /// refuse in the same words — and refuse out loud. A button that does nothing and says
+    /// nothing is indistinguishable from a button that is broken, which is why the two cases
+    /// are told apart: the wrong kind of file, and the right kind in a place the action has no
+    /// meaning (a rectangular selection, or a run of text crossing lines).
+    pub fn md_format(&mut self, tool: ui::MdTool) {
+        let lang = self.settings.lang;
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        if !ui::md_formattable(self, idx) {
+            self.status_message = i18n::t(lang, Key::MsgMdOnlyMarkdown).to_string();
+            return;
+        }
+        let placeholder = i18n::t(lang, Key::MdLinkPlaceholder);
+        let Some(ed) = self.editors.get_mut(idx) else { return };
+        let done = match tool {
+            ui::MdTool::Bold => ed.md_toggle_inline("**"),
+            ui::MdTool::Italic => ed.md_toggle_inline("*"),
+            ui::MdTool::Strike => ed.md_toggle_inline("~~"),
+            ui::MdTool::Code => ed.md_toggle_inline("`"),
+            ui::MdTool::Heading => ed.md_cycle_heading(),
+            ui::MdTool::Bullet => ed.md_toggle_bullet(),
+            ui::MdTool::Numbered => ed.md_toggle_numbered(),
+            ui::MdTool::Task => ed.md_toggle_task(),
+            ui::MdTool::Link => ed.md_insert_link(placeholder),
+            ui::MdTool::Quote => ed.md_toggle_quote(),
+            ui::MdTool::Fence => ed.md_toggle_fence(),
+        };
+        if !done {
+            self.status_message = i18n::t(lang, Key::MsgMdCantHere).to_string();
+        }
+        self.redraw = true;
+    }
+
     fn handle_terminal_key(&mut self, key: KeyEvent) {
         // Shift+arrows select inside the pane instead of reaching the shell, the same role a
         // terminal emulator plays for the program running in it. Esc drops the selection; every
@@ -9476,18 +9531,28 @@ impl App {
                     let pane_rect = *pane_rect;
                     self.focus = Focus::Editor;
                     self.editor_pane_focus = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
-                    let (tab_bar, content) = ui::split_editor_area(pane_rect);
-                    // A preview's controls sit inside its frame, so they are claimed before the
-                    // click can reach the picture behind them.
                     let idx = self.pane_editor_index(self.editor_pane_focus);
-                    // The zones, not the buttons: the gap between two of them belongs to one of
-                    // them, so a click a column wide of the mark still lands. See
-                    // `ui::nav_bar_hit_zones`.
+                    let (tab_bar, toolbar, content) = ui::pane_areas(self, idx, pane_rect);
+                    // A preview's controls sit inside its frame, so they are claimed before the
+                    // click can reach the picture behind them. The zones, not the buttons: the
+                    // gap between two of them belongs to one of them, so a click a column wide
+                    // of the mark still lands. See `ui::nav_bar_hit_zones`.
                     if let Some((control, _)) = ui::nav_bar_hit_zones(self, idx, content)
                         .into_iter()
                         .find(|(_, r)| within(*r, col, row))
                     {
                         self.preview_control(control);
+                        return;
+                    }
+                    // The formatting bar owns its whole row, so a click on it never falls
+                    // through to placing the cursor in the text below.
+                    if let Some(toolbar) = toolbar.filter(|t| within(*t, col, row)) {
+                        if let Some((tool, _)) = ui::md_toolbar_hit_zones(toolbar)
+                            .into_iter()
+                            .find(|(_, r)| within(*r, col, row))
+                        {
+                            self.md_format(tool);
+                        }
                         return;
                     }
                     if within(tab_bar, col, row) {
@@ -9596,7 +9661,8 @@ impl App {
                         } else {
                             panes[0]
                         };
-                        let (_, content) = ui::split_editor_area(pane_rect);
+                        let idx = self.pane_editor_index(self.editor_pane_focus);
+                        let (_, _, content) = ui::pane_areas(self, idx, pane_rect);
                         self.position_cursor_from_click(content, col, row);
                     }
                 }
@@ -9665,11 +9731,11 @@ impl App {
             if !within(*pane_rect, col, row) {
                 continue;
             }
-            let (tab_bar, content) = ui::split_editor_area(*pane_rect);
+            let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+            let (tab_bar, _, content) = ui::pane_areas(self, self.pane_editor_index(pane), *pane_rect);
             if within(tab_bar, col, row) {
                 // Over the tab strip the wheel scrolls tabs sideways, one per notch, rather
                 // than scrolling the text underneath.
-                let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
                 let step = if delta < 0 { -1 } else { 1 };
                 self.scroll_tabs(pane, step, tab_bar.width);
                 return;
@@ -9679,7 +9745,6 @@ impl App {
                 // `pane_editor_index` rather than read raw, and taken with `get_mut`: with every
                 // tab closed the pane's index still points at a buffer that is no longer there,
                 // and a wheel notch over the empty frame must not be a panic.
-                let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
                 let idx = self.pane_editor_index(pane);
                 // A rendered preview holds no rope, so its length comes from the lines drawn.
                 let rendered = self.rendered_len(idx);
