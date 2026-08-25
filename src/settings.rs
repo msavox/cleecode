@@ -40,6 +40,10 @@ pub struct Settings {
     // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
     pub show_menubar: bool,
+    /// The one-row markdown formatting bar over the editor. Defaults on; hide it
+    /// from the View menu once the syntax is in your fingers.
+    #[serde(default = "default_true")]
+    pub show_md_toolbar: bool,
     // Extension (no dot) -> shell command template; "{file}" is replaced with the
     // active file's shell-quoted absolute path. Hand-editable in settings.toml.
     #[serde(default = "default_run_commands")]
@@ -312,6 +316,7 @@ impl Default for Settings {
             terminal_on_right: false,
             split_pct: default_split_pct(),
             show_menubar: true,
+            show_md_toolbar: true,
             run_commands: default_run_commands(),
             active_venv: None,
             registered_venvs: Vec::new(),

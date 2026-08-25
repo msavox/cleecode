@@ -1177,6 +1177,460 @@ impl Editor {
         self.mark_edited_from(sl);
     }
 
+    // ---- Markdown formatting --------------------------------------------------------
+    //
+    // Semantic toggles rather than blind insertion of syntax: the button that made a word bold
+    // makes it plain again, which is the only behaviour that survives being pressed twice. Each
+    // one is a single undo step — a checkpoint up front and direct surgery on the rope after it,
+    // the way `toggle_comment` works — and each answers whether it changed anything, so the
+    // caller can say so rather than leaving a click that did nothing unexplained.
+
+    /// The two states in which none of these can act: a buffer that refuses every edit, and a
+    /// rectangular selection, which is neither a run of text to wrap nor a span of lines to
+    /// prefix. Checked first everywhere, so nothing below it ever checkpoints for nothing.
+    fn md_editable(&self) -> bool {
+        !self.read_only && !self.selection_block
+    }
+
+    /// Keeps the cursor and the selection's other end inside the lines they sit on.
+    ///
+    /// Called after every one of these edits, for the same reason `indent_selection` clamps: a
+    /// column left over from a longer line is an index past `len_chars()` waiting for the next
+    /// keystroke, and ropey asserts rather than forgiving one.
+    fn md_clamp_ends(&mut self) {
+        self.cursor_line = self.cursor_line.min(self.rope.len_lines().saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        if let Some((al, ac)) = self.selection_anchor {
+            let al = al.min(self.rope.len_lines().saturating_sub(1));
+            self.selection_anchor = Some((al, ac.min(self.line_char_len(al))));
+        }
+    }
+
+    /// How many `c` in a row end at `idx`, reading backwards.
+    fn md_run_before(&self, idx: usize, c: char) -> usize {
+        let mut n = 0;
+        while idx > n && self.rope.get_char(idx - n - 1) == Some(c) {
+            n += 1;
+        }
+        n
+    }
+
+    /// How many `c` in a row start at `idx`, reading forwards.
+    fn md_run_after(&self, idx: usize, c: char) -> usize {
+        let mut n = 0;
+        while self.rope.get_char(idx + n) == Some(c) {
+            n += 1;
+        }
+        n
+    }
+
+    /// Whether the document reads exactly `s` starting at `at`.
+    fn md_reads(&self, at: usize, s: &str) -> bool {
+        let n = s.chars().count();
+        at + n <= self.rope.len_chars() && self.rope.slice(at..at + n) == s
+    }
+
+    /// The word the cursor is on or against, as absolute char indices.
+    ///
+    /// Adjacency counts on both sides: pressing bold with the caret just after `word` is asking
+    /// about that word, not about the empty space at the caret.
+    fn md_word_at_cursor(&self) -> Option<(usize, usize)> {
+        let line_start = self.rope.line_to_char(self.cursor_line);
+        let len = self.line_char_len(self.cursor_line);
+        let col = self.cursor_col.min(len);
+        let is_word = |i: usize| {
+            self.rope.get_char(line_start + i).is_some_and(|c| c.is_alphanumeric() || c == '_')
+        };
+        let mut start = col;
+        while start > 0 && is_word(start - 1) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < len && is_word(end) {
+            end += 1;
+        }
+        (start < end).then(|| (line_start + start, line_start + end))
+    }
+
+    /// Wraps or unwraps a run of text in an inline marker: `**` bold, `*` italic, `` ` `` code,
+    /// `~~` strike.
+    ///
+    /// Presence is read off the markers already around the text — outside the selection's edges
+    /// first, then as its own first and last characters, so selecting `x` inside `**x**` and
+    /// selecting `**x**` whole both mean the same thing. For the `*` family it is the length of
+    /// the run that decides, not a string match: `**x**` is bold and not italic, `***x***` is
+    /// both, and asking for italic over bold has to add one star per side rather than find none
+    /// and add two more.
+    ///
+    /// The selection is left on the text without its markers, so the same button pressed again
+    /// undoes what it just did. A multi-line selection is refused: the markers would land inside
+    /// paragraphs they do not belong to.
+    pub fn md_toggle_inline(&mut self, marker: &str) -> bool {
+        if !self.md_editable() || marker.is_empty() {
+            return false;
+        }
+        let unit = marker.chars().count();
+        let (start, end) = match self.selection_range() {
+            Some(((sl, sc), (el, ec))) => {
+                if sl != el {
+                    return false;
+                }
+                (self.rope.line_to_char(sl) + sc, self.rope.line_to_char(el) + ec)
+            }
+            None => match self.md_word_at_cursor() {
+                Some(range) => range,
+                // Nothing to wrap: leave the pair behind with the caret between its halves, the
+                // way typing an opening bracket does.
+                None => {
+                    self.checkpoint(EditKind::Other);
+                    let idx = self.cursor_char_idx().min(self.rope.len_chars());
+                    self.rope.insert(idx, &format!("{marker}{marker}"));
+                    self.cursor_col += unit;
+                    self.clear_selection();
+                    self.md_clamp_ends();
+                    self.mark_edited();
+                    return true;
+                }
+            },
+        };
+        let inner_len = end.saturating_sub(start);
+        // The `*` family counts stars; the other two match their marker literally.
+        let star = marker.starts_with('*');
+        let (outside, inside) = if star {
+            let present = |run: usize| if unit == 1 { run % 2 == 1 } else { run >= 2 };
+            let outer = self.md_run_before(start, '*').min(self.md_run_after(end, '*'));
+            let inner = self
+                .md_run_after(start, '*')
+                .min(self.md_run_before(end, '*'))
+                .min(inner_len / 2);
+            (present(outer), present(inner))
+        } else {
+            let outer = start >= unit
+                && self.md_reads(start - unit, marker)
+                && self.md_reads(end, marker);
+            let inner = inner_len >= 2 * unit
+                && self.md_reads(start, marker)
+                && self.md_reads(end - unit, marker);
+            (outer, inner)
+        };
+
+        self.checkpoint(EditKind::Other);
+        // Both edges are cut or grown, and the far one goes first so the near one's index is
+        // still the index it was measured at.
+        let (inner_start, inner_end) = if outside {
+            self.rope.remove(end..end + unit);
+            self.rope.remove(start - unit..start);
+            (start - unit, end - unit)
+        } else if inside {
+            self.rope.remove(end - unit..end);
+            self.rope.remove(start..start + unit);
+            (start, end - 2 * unit)
+        } else {
+            self.rope.insert(end, marker);
+            self.rope.insert(start, marker);
+            (start + unit, end + unit)
+        };
+        let first_line = self.rope.char_to_line(inner_start.min(self.rope.len_chars()));
+        self.select_char_range(inner_start, inner_end);
+        self.md_clamp_ends();
+        self.mark_edited_from(first_line);
+        true
+    }
+
+    /// The shared shape of every line-prefix toggle.
+    ///
+    /// `carried` reads a line already stripped of its indentation and answers how many of its
+    /// characters are this kind of prefix — `Some(0)` for a line that counts as having one and is
+    /// never to be touched, which is how a checkbox stays a checkbox under the bullet button.
+    /// `to_add` is asked, for a line that has none, where past the indentation to write and what;
+    /// its first argument is the line's position among the non-blank lines of the span, which is
+    /// what numbers a numbered list.
+    ///
+    /// All-or-none, exactly as `toggle_comment`: a span whose non-blank lines all carry the
+    /// prefix loses it, and any other span gains it on the lines that lack it. Blank lines are
+    /// skipped either way — except when the span is a single blank line, which is how a list is
+    /// started on an empty one.
+    fn md_line_prefix(
+        &mut self,
+        carried: &dyn Fn(&str) -> Option<usize>,
+        to_add: &dyn Fn(usize, &str) -> (usize, String),
+    ) -> bool {
+        if !self.md_editable() {
+            return false;
+        }
+        let (sl, el) = self.indent_range();
+        let last = self.rope.len_lines().saturating_sub(1);
+        if sl > last {
+            return false;
+        }
+        let el = el.min(last);
+        let mut any = false;
+        let mut all = true;
+        for line in sl..=el {
+            let text = self.rope.line(line).to_string();
+            if text.trim().is_empty() {
+                continue;
+            }
+            any = true;
+            if carried(text.trim_start()).is_none() {
+                all = false;
+            }
+        }
+        let blank_only = !any && sl == el;
+        if !any && !blank_only {
+            return false;
+        }
+        // A lone blank line has nothing that could already carry the prefix, so it can only be
+        // the adding direction.
+        let all = any && all;
+        self.checkpoint(EditKind::Other);
+        let mut nth = 0usize;
+        for line in sl..=el {
+            let raw = self.rope.line(line).to_string();
+            let body = raw.trim_end_matches(['\n', '\r']);
+            if body.trim().is_empty() && !blank_only {
+                continue;
+            }
+            let indent = body.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            let rest: String = body.chars().skip(indent).collect();
+            let base = self.rope.line_to_char(line) + indent;
+            match (all, carried(&rest)) {
+                (true, Some(n)) if n > 0 => {
+                    let end = (base + n).min(self.rope.len_chars());
+                    if end > base {
+                        self.rope.remove(base..end);
+                    }
+                }
+                (false, None) => {
+                    let (at, text) = to_add(nth, &rest);
+                    let at = (base + at).min(self.rope.len_chars());
+                    self.rope.insert(at, &text);
+                }
+                _ => {}
+            }
+            nth += 1;
+        }
+        self.md_clamp_ends();
+        self.mark_edited_from(sl);
+        true
+    }
+
+    /// `- ` on every line of the span, or off it.
+    ///
+    /// A task line is left exactly as it is: it is already a bullet, and stripping the `- ` off
+    /// `- [ ] thing` would leave `[ ] thing`, which is a bullet list item that looks like a
+    /// checkbox and is not one.
+    pub fn md_toggle_bullet(&mut self) -> bool {
+        self.md_line_prefix(
+            &|rest| {
+                if md_task_marker(rest).is_some() {
+                    Some(0)
+                } else if rest.starts_with("- ") || rest.starts_with("* ") {
+                    Some(2)
+                } else {
+                    None
+                }
+            },
+            &|_, _| (0, "- ".to_string()),
+        )
+    }
+
+    /// `- [ ] ` on every line of the span, or off it. A ticked box counts as present, so the
+    /// button clears a list somebody has been working through rather than refusing to.
+    pub fn md_toggle_task(&mut self) -> bool {
+        self.md_line_prefix(
+            &|rest| md_task_marker(rest).map(|_| 6),
+            // A line that is already a bullet is promoted in place rather than given a second
+            // dash: `- thing` becomes `- [ ] thing`.
+            &|_, rest| {
+                if rest.starts_with("- ") {
+                    (2, "[ ] ".to_string())
+                } else {
+                    (0, "- [ ] ".to_string())
+                }
+            },
+        )
+    }
+
+    /// `> ` on every line of the span, or off it.
+    pub fn md_toggle_quote(&mut self) -> bool {
+        self.md_line_prefix(
+            &|rest| rest.starts_with("> ").then_some(2),
+            &|_, _| (0, "> ".to_string()),
+        )
+    }
+
+    /// `1. `, `2. `, … down the span, or off it.
+    ///
+    /// The numbers are the line's place in the span, not a continuation of whatever came before
+    /// it: a list renumbered from one is what markdown renders anyway, and guessing at a
+    /// preceding list would guess wrong across a blank line.
+    pub fn md_toggle_numbered(&mut self) -> bool {
+        self.md_line_prefix(&|rest| md_number_marker(rest), &|nth, _| (0, format!("{}. ", nth + 1)))
+    }
+
+    /// Steps the span's heading level round 0 → 1 → 2 → 3 → 0.
+    ///
+    /// One button rather than three, because the level you want is almost always one more or one
+    /// fewer than the one you have, and a bar with `#`, `##` and `###` on it spends three targets
+    /// saying the same thing. The level of the span's first non-blank line decides for all of
+    /// them, so a heading and the line under it do not end up a level apart.
+    pub fn md_cycle_heading(&mut self) -> bool {
+        if !self.md_editable() {
+            return false;
+        }
+        let last = self.rope.len_lines().saturating_sub(1);
+        let (sl, el) = self.indent_range();
+        if sl > last {
+            return false;
+        }
+        let el = el.min(last);
+        let mut level = None;
+        for line in sl..=el {
+            let text = self.rope.line(line).to_string();
+            if text.trim().is_empty() {
+                continue;
+            }
+            level = Some(md_heading_level(text.trim_start()));
+            break;
+        }
+        let blank_only = level.is_none() && sl == el;
+        let Some(level) = level.or(blank_only.then_some(0)) else { return false };
+        let next = (level + 1) % 4;
+        self.checkpoint(EditKind::Other);
+        for line in sl..=el {
+            let raw = self.rope.line(line).to_string();
+            let body = raw.trim_end_matches(['\n', '\r']);
+            if body.trim().is_empty() && !blank_only {
+                continue;
+            }
+            let indent = body.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            let rest: String = body.chars().skip(indent).collect();
+            let base = self.rope.line_to_char(line) + indent;
+            let old = md_heading_prefix_len(&rest);
+            if old > 0 {
+                let end = (base + old).min(self.rope.len_chars());
+                if end > base {
+                    self.rope.remove(base..end);
+                }
+            }
+            if next > 0 {
+                self.rope.insert(base, &format!("{} ", "#".repeat(next)));
+            }
+        }
+        self.md_clamp_ends();
+        self.mark_edited_from(sl);
+        true
+    }
+
+    /// Turns the selection into `[selection](url)`, or inserts `[placeholder](url)` where the
+    /// caret is, and leaves `url` selected — which is the part nobody has typed yet.
+    pub fn md_insert_link(&mut self, placeholder_text: &str) -> bool {
+        if !self.md_editable() {
+            return false;
+        }
+        const URL: &str = "url";
+        let (start, label, had_text) = match self.selection_range() {
+            Some(((sl, sc), (el, ec))) => {
+                if sl != el {
+                    return false;
+                }
+                let start = self.rope.line_to_char(sl) + sc;
+                let end = self.rope.line_to_char(el) + ec;
+                (start, self.rope.slice(start..end).to_string(), true)
+            }
+            None => {
+                (self.cursor_char_idx().min(self.rope.len_chars()), placeholder_text.to_string(), false)
+            }
+        };
+        let end = (start + label.chars().count()).min(self.rope.len_chars());
+        self.checkpoint(EditKind::Other);
+        if had_text && end > start {
+            self.rope.remove(start..end);
+        }
+        self.rope.insert(start, &format!("[{label}]({URL})"));
+        let first_line = self.rope.char_to_line(start.min(self.rope.len_chars()));
+        // Whichever half is still a placeholder is what the next keystroke should replace: the
+        // address when the words came from a selection, the words when they did not.
+        let (from, len) = if had_text {
+            // `[` + the label + `](` stands between the start and the address.
+            (start + label.chars().count() + 3, URL.chars().count())
+        } else {
+            (start + 1, label.chars().count())
+        };
+        self.select_char_range(from, from + len);
+        self.md_clamp_ends();
+        self.mark_edited_from(first_line);
+        true
+    }
+
+    /// Fences the span in ``` lines, or takes an existing pair away.
+    ///
+    /// The pair is recognised only immediately above and below the span, which is what "this
+    /// block" means when the cursor is inside one. With nothing selected on an empty line the
+    /// two fences land around the caret, so the next thing typed is already inside the block.
+    pub fn md_toggle_fence(&mut self) -> bool {
+        if !self.md_editable() {
+            return false;
+        }
+        let last = self.rope.len_lines().saturating_sub(1);
+        let (sl, el) = self.indent_range();
+        if sl > last {
+            return false;
+        }
+        let el = el.min(last);
+        let fenced = |ed: &Editor, line: usize| {
+            line <= last && ed.rope.line(line).to_string().trim_start().starts_with("```")
+        };
+        let wrapped = sl > 0 && fenced(self, sl - 1) && el + 1 <= last && fenced(self, el + 1);
+        self.checkpoint(EditKind::Other);
+        if wrapped {
+            // Bottom first: cutting it out cannot move a line above it.
+            self.md_remove_line(el + 1);
+            self.md_remove_line(sl - 1);
+            self.cursor_line = self.cursor_line.saturating_sub(1);
+            if let Some((al, ac)) = self.selection_anchor {
+                self.selection_anchor = Some((al.saturating_sub(1), ac));
+            }
+            self.md_clamp_ends();
+            self.mark_edited_from(sl.saturating_sub(1));
+            return true;
+        }
+        // The closing fence goes on before the opening one, for the same reason. It is written
+        // at the end of the span's last line rather than at the start of the one after it: the
+        // last line of a file need not end in a newline, and there may be no line after it.
+        let close_at = self.rope.line_to_char(el) + self.line_char_len(el);
+        self.rope.insert(close_at, "\n```");
+        let open_at = self.rope.line_to_char(sl);
+        self.rope.insert(open_at, "```\n");
+        self.cursor_line += 1;
+        if let Some((al, ac)) = self.selection_anchor {
+            self.selection_anchor = Some((al + 1, ac));
+        }
+        self.md_clamp_ends();
+        self.mark_edited_from(sl);
+        true
+    }
+
+    /// Cuts `line` out whole, newline included — and when it is the last line, the newline in
+    /// front of it instead, so removing a closing fence does not leave the block ending on a
+    /// blank line that was never in the file.
+    fn md_remove_line(&mut self, line: usize) {
+        let lines = self.rope.len_lines();
+        if line >= lines {
+            return;
+        }
+        let total = self.rope.len_chars();
+        let mut start = self.rope.line_to_char(line);
+        let end = if line + 1 < lines { self.rope.line_to_char(line + 1) } else { total };
+        if end == total && start > 0 && self.rope.get_char(start - 1) == Some('\n') {
+            start -= 1;
+        }
+        if start < end {
+            self.rope.remove(start..end);
+        }
+    }
+
     /// Moves the cursor to the start of `line_1based` (clamped to the document), clearing
     /// any selection. Used by Go-to-line.
     pub fn goto_line(&mut self, line_1based: usize) {
@@ -1380,6 +1834,46 @@ fn word_class(c: char) -> u8 {
         1
     } else {
         2
+    }
+}
+
+/// The checkbox at the head of `rest` (already past its indentation), and whether it is ticked.
+/// `None` for a line that is not a task item.
+fn md_task_marker(rest: &str) -> Option<bool> {
+    match rest.get(..6) {
+        Some("- [ ] ") => Some(false),
+        Some("- [x] ") | Some("- [X] ") => Some(true),
+        _ => None,
+    }
+}
+
+/// How many characters of `rest` are an ordered-list marker — digits, a `.` or `)`, a space —
+/// or `None` when it does not open with one. Parsed by hand: the crate list has no regex engine
+/// in it and one marker is not a reason to add one.
+fn md_number_marker(rest: &str) -> Option<usize> {
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let mut after = rest.chars().skip(digits);
+    match (after.next(), after.next()) {
+        (Some('.') | Some(')'), Some(' ')) => Some(digits + 2),
+        _ => None,
+    }
+}
+
+/// The heading level of `rest` (already past its indentation): the run of `#` that opens it,
+/// and 0 when there is none or no space follows it — `#tag` is a word, not a title.
+fn md_heading_level(rest: &str) -> usize {
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    if hashes > 0 && rest.chars().nth(hashes) == Some(' ') { hashes } else { 0 }
+}
+
+/// How many characters that heading prefix takes, space included.
+fn md_heading_prefix_len(rest: &str) -> usize {
+    match md_heading_level(rest) {
+        0 => 0,
+        n => n + 1,
     }
 }
 
@@ -1945,10 +2439,259 @@ mod tests {
         ed.move_line_down();
         ed.toggle_comment("//");
         ed.replace_char_range(0, 1, "Z");
+        // The formatting bar's eleven, which reach the rope by their own surgery rather than
+        // through any of the entry points above.
+        assert!(!ed.md_toggle_inline("**"));
+        assert!(!ed.md_toggle_inline("*"));
+        assert!(!ed.md_toggle_inline("`"));
+        assert!(!ed.md_toggle_inline("~~"));
+        assert!(!ed.md_cycle_heading());
+        assert!(!ed.md_toggle_bullet());
+        assert!(!ed.md_toggle_numbered());
+        assert!(!ed.md_toggle_task());
+        assert!(!ed.md_toggle_quote());
+        assert!(!ed.md_insert_link("text"));
+        assert!(!ed.md_toggle_fence());
 
         assert_eq!(ed.rope.to_string(), text_before, "a read-only buffer must not be mutated");
         assert_eq!(ed.dirty, dirty_before);
         assert_eq!(ed.undo_stack.len(), undo_depth_before, "no checkpoint should have been pushed either");
+    }
+
+    // ---- Markdown formatting --------------------------------------------------------
+
+    /// A buffer holding exactly `text`, with an empty history: these tests care about how many
+    /// undo steps an action leaves behind, so the setting-up must leave none.
+    fn md_buffer(text: &str) -> Editor {
+        let mut ed = Editor::empty();
+        ed.rope = Rope::from_str(text);
+        ed
+    }
+
+    /// Every action, on a buffer each can act on. Named, so a failure says which one.
+    fn md_actions() -> Vec<(&'static str, fn(&mut Editor) -> bool)> {
+        vec![
+            ("bold", |ed| ed.md_toggle_inline("**")),
+            ("italic", |ed| ed.md_toggle_inline("*")),
+            ("code", |ed| ed.md_toggle_inline("`")),
+            ("strike", |ed| ed.md_toggle_inline("~~")),
+            ("heading", |ed| ed.md_cycle_heading()),
+            ("bullet", |ed| ed.md_toggle_bullet()),
+            ("numbered", |ed| ed.md_toggle_numbered()),
+            ("task", |ed| ed.md_toggle_task()),
+            ("quote", |ed| ed.md_toggle_quote()),
+            ("link", |ed| ed.md_insert_link("text")),
+            ("fence", |ed| ed.md_toggle_fence()),
+        ]
+    }
+
+    /// A toggle that only ever adds is not a toggle: the same button pressed twice has to leave
+    /// the text where it found it. Which is why the selection is put back on the *inner* text
+    /// rather than on what was written — left over the markers, the second press would read the
+    /// stars as part of the selection and wrap them again.
+    #[test]
+    fn bold_wraps_a_selection_and_the_next_press_unwraps_it() {
+        let mut ed = md_buffer("hello world");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_col = 5;
+        assert!(ed.md_toggle_inline("**"));
+        assert_eq!(ed.rope.to_string(), "**hello** world");
+        assert_eq!(ed.selected_text().as_deref(), Some("hello"));
+        assert!(ed.md_toggle_inline("**"));
+        assert_eq!(ed.rope.to_string(), "hello world");
+        assert_eq!(ed.selected_text().as_deref(), Some("hello"));
+    }
+
+    /// Pressing bold with the caret in a word means that word. Without this the button was only
+    /// useful after a selection, which is two gestures for the thing every word processor does
+    /// in one.
+    #[test]
+    fn bold_with_no_selection_takes_the_word_the_cursor_is_in() {
+        for col in [0, 2, 5] {
+            let mut ed = md_buffer("hello world");
+            ed.cursor_col = col;
+            assert!(ed.md_toggle_inline("**"), "column {col}");
+            assert_eq!(ed.rope.to_string(), "**hello** world", "column {col}");
+        }
+    }
+
+    /// And with no word to take, the pair is left behind with the caret between its halves —
+    /// the way typing an opening bracket behaves. Landing after the pair would mean deleting
+    /// four characters to get out of a mistake.
+    #[test]
+    fn bold_on_an_empty_line_leaves_the_cursor_between_the_markers() {
+        let mut ed = md_buffer("");
+        assert!(ed.md_toggle_inline("**"));
+        assert_eq!(ed.rope.to_string(), "****");
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    /// Presence in the `*` family is the length of the run, not a string match. Reading `**x**`
+    /// as "italic is already there" is what a `starts_with("*")` test does, and it made the
+    /// italic button strip a word's bold instead of adding to it.
+    #[test]
+    fn italic_over_bold_adds_a_star_rather_than_finding_one() {
+        let mut ed = md_buffer("**x**");
+        ed.selection_anchor = Some((0, 2));
+        ed.cursor_col = 3;
+        assert!(ed.md_toggle_inline("*"));
+        assert_eq!(ed.rope.to_string(), "***x***");
+        assert_eq!(ed.selected_text().as_deref(), Some("x"));
+        assert!(ed.md_toggle_inline("*"));
+        assert_eq!(ed.rope.to_string(), "**x**", "the bold has to survive the italic going away");
+    }
+
+    /// Four levels and back to none, so one button reaches every heading a document needs and
+    /// the way out is pressing it again rather than deleting hashes by hand.
+    #[test]
+    fn the_heading_button_cycles_round_to_plain_text() {
+        let mut ed = md_buffer("Title");
+        for expected in ["# Title", "## Title", "### Title", "Title"] {
+            assert!(ed.md_cycle_heading());
+            assert_eq!(ed.rope.to_string(), expected);
+        }
+    }
+
+    /// A blank line inside a selected span is not a list item, and prefixing it would put a
+    /// dash on the empty line that separates two paragraphs. It must also not count towards
+    /// "are they all bulleted already", or a span with one blank line in it could never be
+    /// un-bulleted.
+    #[test]
+    fn a_blank_line_in_the_span_gets_no_bullet_and_does_not_decide_the_toggle() {
+        let mut ed = md_buffer("one\n\nthree");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_line = 2;
+        ed.cursor_col = 5;
+        assert!(ed.md_toggle_bullet());
+        assert_eq!(ed.rope.to_string(), "- one\n\n- three");
+        assert!(ed.md_toggle_bullet());
+        assert_eq!(ed.rope.to_string(), "one\n\nthree");
+    }
+
+    /// Numbers count down the span rather than repeating `1.`, and a span already numbered
+    /// loses the numbers instead of gaining a second set.
+    #[test]
+    fn a_numbered_list_numbers_its_lines_and_comes_off_again() {
+        let mut ed = md_buffer("a\nb\nc");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_line = 2;
+        ed.cursor_col = 1;
+        assert!(ed.md_toggle_numbered());
+        assert_eq!(ed.rope.to_string(), "1. a\n2. b\n3. c");
+        assert!(ed.md_toggle_numbered());
+        assert_eq!(ed.rope.to_string(), "a\nb\nc");
+        // `1)` is the other spelling markdown accepts, and a list written that way has to be
+        // recognised as one or the button would number it a second time.
+        let mut ed = md_buffer("1) a");
+        assert!(ed.md_toggle_numbered());
+        assert_eq!(ed.rope.to_string(), "a");
+    }
+
+    /// A ticked box is still a task line. Matching only `- [ ] ` left a list you had worked
+    /// through as the one list the button could not clear.
+    #[test]
+    fn the_task_button_recognises_a_box_that_has_been_ticked() {
+        let mut ed = md_buffer("buy milk");
+        assert!(ed.md_toggle_task());
+        assert_eq!(ed.rope.to_string(), "- [ ] buy milk");
+        assert!(ed.md_toggle_task());
+        assert_eq!(ed.rope.to_string(), "buy milk");
+
+        let mut ed = md_buffer("- [x] done");
+        assert!(ed.md_toggle_task());
+        assert_eq!(ed.rope.to_string(), "done");
+
+        // A plain bullet is promoted in place: `- - [ ] item` is not a checkbox.
+        let mut ed = md_buffer("- item");
+        assert!(ed.md_toggle_task());
+        assert_eq!(ed.rope.to_string(), "- [ ] item");
+        // And the bullet button leaves a checkbox alone rather than turning it into `[ ] item`,
+        // which looks like a checkbox and is not one.
+        let mut ed = md_buffer("- [ ] item");
+        assert!(ed.md_toggle_bullet());
+        assert_eq!(ed.rope.to_string(), "- [ ] item");
+    }
+
+    /// The fences come off as whole lines, the closing one taking the newline in front of it —
+    /// removing it with the newline *after* it left a blank line at the end of the file that
+    /// had never been there.
+    #[test]
+    fn a_code_fence_wraps_the_span_and_the_next_press_takes_both_lines_away() {
+        let mut ed = md_buffer("x");
+        assert!(ed.md_toggle_fence());
+        assert_eq!(ed.rope.to_string(), "```\nx\n```");
+        assert_eq!(ed.cursor_line, 1, "the caret stays inside the block");
+        assert!(ed.md_toggle_fence());
+        assert_eq!(ed.rope.to_string(), "x");
+    }
+
+    /// The address is what nobody has typed yet, so it is what is selected: the next keystroke
+    /// replaces it. Leaving the caret at the end meant selecting `url` by hand every time.
+    #[test]
+    fn a_link_leaves_its_address_selected() {
+        let mut ed = md_buffer("click here");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_col = 5;
+        assert!(ed.md_insert_link("text"));
+        assert_eq!(ed.rope.to_string(), "[click](url) here");
+        assert_eq!(ed.selected_text().as_deref(), Some("url"));
+
+        // With nothing selected the label is the placeholder, and that is what is selected.
+        let mut ed = md_buffer("");
+        assert!(ed.md_insert_link("text"));
+        assert_eq!(ed.rope.to_string(), "[text](url)");
+        assert_eq!(ed.selected_text().as_deref(), Some("text"));
+    }
+
+    /// Each of these is one gesture, so each has to be one Ctrl+Z. Built out of several rope
+    /// operations apiece, they would otherwise checkpoint once per operation and leave a user
+    /// pressing undo three times to get back a word.
+    #[test]
+    fn every_markdown_action_undoes_in_a_single_step() {
+        for (name, act) in md_actions() {
+            let mut ed = md_buffer("one two\nthree four");
+            ed.selection_anchor = Some((0, 0));
+            ed.cursor_col = 3;
+            let before = ed.rope.to_string();
+            assert!(act(&mut ed), "{name} did nothing to act on");
+            assert_ne!(ed.rope.to_string(), before, "{name} claimed to have changed something");
+            assert!(ed.undo(), "{name} left no undo step at all");
+            assert_eq!(ed.rope.to_string(), before, "{name} takes more than one undo");
+        }
+    }
+
+    /// A rectangle is neither a run of text to wrap nor a span of lines to prefix: every one of
+    /// these refuses it outright rather than guessing which of the two it meant. Checked on the
+    /// history as well — an action that checkpointed and then did nothing would leave an undo
+    /// step that undoes nothing.
+    #[test]
+    fn a_column_selection_stops_every_markdown_action() {
+        for (name, act) in md_actions() {
+            let mut ed = md_buffer("one two\nthree four");
+            ed.selection_anchor = Some((0, 0));
+            ed.cursor_line = 1;
+            ed.cursor_col = 3;
+            ed.selection_block = true;
+            let before = ed.rope.to_string();
+            assert!(!act(&mut ed), "{name} acted on a rectangle");
+            assert_eq!(ed.rope.to_string(), before, "{name}");
+            assert!(ed.undo_stack.is_empty(), "{name} checkpointed for nothing");
+        }
+    }
+
+    /// A selection crossing lines would put the closing marker in a paragraph the opening one
+    /// is not in, which markdown does not render as anything. Refused, and said so, rather than
+    /// written and left looking like a bug in the renderer.
+    #[test]
+    fn an_inline_marker_refuses_a_selection_that_crosses_lines() {
+        let mut ed = md_buffer("one\ntwo");
+        ed.selection_anchor = Some((0, 0));
+        ed.cursor_line = 1;
+        ed.cursor_col = 3;
+        assert!(!ed.md_toggle_inline("**"));
+        assert!(!ed.md_insert_link("text"));
+        assert_eq!(ed.rope.to_string(), "one\ntwo");
+        assert!(ed.undo_stack.is_empty());
     }
 
     #[test]
