@@ -1,3 +1,43 @@
+## What's new in 0.13.2
+
+**Markdown files get a formatting bar.** One row above the text, only when the buffer is an
+editable Markdown file: bold, italic, strikethrough, inline code, a heading cycle, the three
+kinds of list, link, quote and code fence. The buttons are semantic toggles, not blind
+insertion — bold on a bold word makes it plain again, the selection survives the press, and
+every action is a single undo step. Each button shows the syntax it writes beside its label,
+so the bar teaches the thing it is for; once `**` is in your fingers, *View → Formatting bar*
+switches it off, and the choice is remembered across sessions.
+
+The same eleven actions sit in a new *Format* menu — offered whatever file is open, so they
+can be found, and saying so in the status bar on a file they are not for rather than doing
+nothing silently — and, through the menu, in the command palette. No new keyboard shortcuts:
+five comfortable chords remain free in the whole application, and eleven actions would not
+fit in them.
+
+## What's new in 0.13.1
+
+**Quit gives the terminal back.** Reported minutes after 0.13.0: quitting with an interactive
+fish in a pane froze the editor. Two causes, one on top of the other. portable-pty's `kill`
+only sends SIGHUP on unix — `/bin/sh` dies of that, which is why every lifecycle test passed,
+and an interactive fish ignores it — so now the hangup is the offer and SIGKILL the deadline,
+six tenths of a second later. And the pty reader thread exited on the stop flag instead of
+draining: the kernel does not let a process finish exiting while output sits unread in its
+pty, and fish repaints its prompt as it dies. The flag now silences the reader instead of
+stopping it — bytes drain and are dropped until EOF, like a real terminal reading to the
+hangup.
+
+## What's new in 0.13.0
+
+**The review debt is paid.** Six waves of fixes out of a line-by-line review of the whole
+codebase: the four paths that could lose unsaved changes, atomic writes everywhere a file is
+written, a terminal Drop that really ends the shell, the stack overflow in the directory
+walk, incremental highlighting so the cost of a keystroke stops growing with the file, an
+event loop that redraws only when something changed, LSP positions in the units the protocol
+means, a language server that restarts when it dies, a Git panel that works on a repository
+born a minute ago, bracketed paste and mouse reporting inside the panes, and paste in every
+input box. The pty drivers now run in CI against the real binary, and a release checks that
+the tag and `Cargo.toml` agree before publishing binaries that would say the wrong version.
+
 ## What's new in 0.12.5
 
 **The Octave frame speedup from 0.12.3 is reverted.** It wrote gnuplot's own chatter into the

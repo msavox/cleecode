@@ -1793,6 +1793,31 @@ fissabile — una shell che ignora SIGHUP non può tenere aperto il pane — e l
 l'altra: un ciclo di vita dei pty non è provato finché non è provato con la shell che l'utente
 usa davvero.
 
+## 0.13.2 — la barra che insegna il markdown (2026-08-25)
+
+Idea dell'utente: chi non sa la sintassi markdown a memoria si merita una toolbar da editor
+WYSIWYG — che però scrive la sintassi vera nel buffer, sotto gli occhi. Educativa per
+costruzione: si clicca B, si vedono comparire gli asterischi, e dopo un po' li si scrive da
+soli e si spegne la barra da *Vista → Barra di formattazione* (persistito nei settings).
+
+Undici azioni semantiche in `editor.rs`, ognuna un solo passo di undo: i toggle inline
+contano i run di `*` ai bordi (corsivo presente ⇔ run dispari, così il corsivo su un
+grassetto dà `***x***` invece di romperlo), i prefissi di riga seguono il modello
+tutte-o-nessuna di `toggle_comment`, il link lascia selezionato il segnaposto `url` così la
+prima cosa digitata è l'indirizzo. La barra ricalca la nav bar della preview — funzione di
+layout pura condivisa fra renderer e hit-test del mouse, `pane_areas` come unica porta così i
+nove call site non possono divergere — e sparisce da sola sotto le sei righe di pane. Nuovo
+menu Formato (sempre visibile: un'azione che dice per quali file è si scopre, una che appare
+e scompare col tab no), stato On/Off leggibile nella voce di Vista, niente scorciatoie nuove:
+restano cinque lettere Ctrl+Shift libere in tutta l'applicazione e undici azioni non ci
+starebbero. Specifica scritta a tavolino dopo una ricognizione del codice, implementazione
+delegata, 17 test nuovi (418 in tutto).
+
+Ripagato anche un piccolo debito trovato per strada: la 0.13.0 e la 0.13.1 erano uscite senza
+aggiornare né la man page (ferma a "CleeCode 0.12.5") né `.github/release-notes.md` — il
+guard della release confronta il tag col solo `Cargo.toml`. Le due sezioni mancanti sono
+state scritte a posteriori insieme a quella nuova.
+
 ---
 
 # L'ASTICELLA (2026-08-24) — da progetto serio a IDE quotidiano
