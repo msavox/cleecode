@@ -1,3 +1,26 @@
+## What's new in 0.13.3
+
+**A URL in terminal output opens on a double-click.** The same double-click that already takes
+a `path:line` to the editor now takes a `https://…` to the browser — the hand-off *Open outside
+CleeCode* uses, refused over ssh for the same reason, where the desktop it would open on
+belongs to whoever is sitting at the far machine.
+
+The address it takes is the one that was printed. It stops where a URL cannot go on, so
+`<https://…>` and `href="https://…"` give up their markup and an ANSI escape after an address
+is not swallowed into it; a closing bracket goes only when nothing inside the URL opened it, so
+`…/wiki/Rust_(programming_language)` and `http://[::1]:8080` keep theirs while `(see https://…)`
+gives its up; and `…/wiki/Perù` stays as printed. A row naming a file that is not here *and* a
+URL opens the URL rather than complaining about the file.
+
+Only `http` and `https`: `file:` and `javascript:` are handlers nobody asked a double-click to
+reach, and are refused at the door to the desktop rather than trusted to the caller. A row of
+terminal output is whatever a build log, a `cat` or a `curl` printed, so on Windows the URL goes
+to `explorer` and never to `cmd /C start` — a shell would read the `&` of a query string as the
+end of one command and the start of another.
+
+First outside contribution: [#1](https://github.com/msavox/cleecode/pull/1) by
+[@rikhza](https://github.com/rikhza).
+
 ## What's new in 0.13.2
 
 **Markdown files get a formatting bar.** One row above the text, only when the buffer is an

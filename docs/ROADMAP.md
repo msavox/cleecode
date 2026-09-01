@@ -1818,6 +1818,46 @@ aggiornare né la man page (ferma a "CleeCode 0.12.5") né `.github/release-note
 guard della release confronta il tag col solo `Cargo.toml`. Le due sezioni mancanti sono
 state scritte a posteriori insieme a quella nuova.
 
+## 0.13.3 — il doppio click apre anche gli URL (2026-09-01)
+
+Prima contribuzione da fuori: [PR #1](https://github.com/msavox/cleecode/pull/1) di
+[@rikhza](https://github.com/rikhza), arrivata non richiesta su un repo che aveva appena
+superato le trenta stelle. Il doppio click su una riga di terminale che dice `percorso:riga`
+apriva già il file; ora una riga che dice `https://…` apre il browser, con la stessa consegna
+al desktop di *Apri fuori da CleeCode* e lo stesso rifiuto via ssh, dove il desktop è di chi
+sta seduto dall'altra parte. Codice pulito, nelle convenzioni della casa — commenti che dicono
+il perché, test con nomi che sono frasi, i18n EN+IT, manuale integrato aggiornato in entrambe
+le lingue — e con i rilievi di Copilot già chiusi dall'autore prima della review.
+
+Sopra ci sono andate tre correzioni, tutte sullo stesso tema: un URL non è una stringa che
+arriva da noi. Una riga di terminale è quello che ci hanno stampato un log di build, un `cat` o
+un `curl`.
+
+La prima è quella che conta. Su Windows l'opener dei file è `cmd /C start`, cioè una shell, e
+una shell legge la `&` di una query string come fine di un comando e inizio del successivo:
+`?a=1&b=2` avrebbe aperto mezza pagina e poi eseguito `b=2`. L'escaping degli argomenti di Rust
+non aiuta — protegge il parsing del programma chiamato, non una seconda lettura fatta da `cmd`
+— quindi non era solo un URL rotto, era esecuzione di comandi da una riga di output. Gli URL
+adesso vanno a `explorer`, avviato direttamente, senza niente in mezzo che rilegga
+l'argomento; e `open_url` rifiuta un URL che porti un carattere che un URI non può contenere
+prima di avviare qualsiasi cosa, su tutte le piattaforme.
+
+La seconda: un URL finisce dove un URL non può proseguire — spazio, carattere di controllo, o
+uno di quelli che la RFC 3986 esclude — così `<https://x>` e `href="https://x"` lasciano fuori
+il markup e una sequenza ANSI dopo l'indirizzo non ci finisce dentro. Una parentesi chiusa se
+ne va solo se dentro l'URL non c'era niente ad aprirla: `…/wiki/Rust_(programming_language)` e
+`http://[::1]:8080` si tengono la loro, `(vedi https://x)` cede la sua. Il non-ASCII resta:
+`…/wiki/Perù` è un indirizzo vero. Regola classica dei linkificatori, che la versione
+originale — `trim_end_matches` secco — non aveva.
+
+La terza è una riga che nomina insieme un file che non c'è e un URL: adesso apre l'URL invece
+di lamentarsi del file. E `find_url_start` è tornato a `str::find` invece di una scansione di
+byte scritta a mano: gli offset che restituisce sono su un confine di carattere per
+costruzione, e sparisce insieme il guard `is_char_boundary` che era stato aggiunto per
+difendersi da sé stessa.
+
+Dieci test nuovi (428 in tutto).
+
 ---
 
 # L'ASTICELLA (2026-08-24) — da progetto serio a IDE quotidiano
