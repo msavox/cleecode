@@ -2954,7 +2954,7 @@ impl App {
             .last()
             .is_some_and(|c| matches!(c, ')' | ']' | '}' | ',' | '.' | ';' | ':' | '?'))
         {
-            url = &url[..url.len() - 1];
+            url = &url[..url.len() - url.chars().last().unwrap().len_utf8()];
         }
         if url.is_empty() {
             return false;
