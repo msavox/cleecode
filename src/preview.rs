@@ -1007,9 +1007,9 @@ fn redraw_as(
 /// Deliberately not wrapped here: the lines are logical, and the widget wraps them to whatever
 /// the pane is at the time. Wrapping at render time would mean re-rendering on every resize and
 /// caching something that is only right at one width.
-pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
+pub fn render_markdown(source: &str, pal: crate::theme::Palette) -> Vec<ratatui::text::Line<'static>> {
     use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
 
     let mut options = Options::empty();
@@ -1029,13 +1029,18 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
     let mut lists: Vec<Option<u64>> = Vec::new();
 
     /// Ends the line being built, with the indent and quote marks its context calls for.
-    fn flush(lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, prefix: &str) {
+    fn flush(
+        lines: &mut Vec<Line<'static>>,
+        spans: &mut Vec<Span<'static>>,
+        prefix: &str,
+        pal: crate::theme::Palette,
+    ) {
         if spans.is_empty() && prefix.is_empty() {
             return;
         }
         let mut out = Vec::new();
         if !prefix.is_empty() {
-            out.push(Span::styled(prefix.to_string(), Style::default().fg(Color::DarkGray)));
+            out.push(Span::styled(prefix.to_string(), Style::default().fg(pal.text_dim)));
         }
         out.append(spans);
         lines.push(Line::from(out));
@@ -1054,9 +1059,9 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
                 }
                 heading = Some(level);
                 style = Style::default().fg(match level {
-                    HeadingLevel::H1 => Color::Cyan,
-                    HeadingLevel::H2 => Color::LightCyan,
-                    _ => Color::Blue,
+                    HeadingLevel::H1 => pal.accent,
+                    HeadingLevel::H2 => pal.info,
+                    _ => pal.info,
                 });
                 if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
                     style = style.add_modifier(Modifier::BOLD);
@@ -1064,27 +1069,27 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
                 // The marks stay: they say which level this is without relying on colour, which
                 // a monochrome terminal would not have.
                 let hashes = "#".repeat(level as usize);
-                spans.push(Span::styled(format!("{hashes} "), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(format!("{hashes} "), Style::default().fg(pal.text_dim)));
             }
             Event::End(TagEnd::Heading(_)) => {
-                flush(&mut lines, &mut spans, "");
+                flush(&mut lines, &mut spans, "", pal);
                 heading = None;
                 style = Style::default();
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 in_code_block = true;
-                style = Style::default().fg(Color::LightGreen);
+                style = Style::default().fg(pal.success);
                 let label = match &kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => format!("\u{250c} {lang}"),
                     _ => "\u{250c}".to_string(),
                 };
-                lines.push(Line::from(Span::styled(label, Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled(label, Style::default().fg(pal.text_dim))));
             }
             Event::End(TagEnd::CodeBlock) => {
-                flush(&mut lines, &mut spans, "\u{2502} ");
+                flush(&mut lines, &mut spans, "\u{2502} ", pal);
                 lines.push(Line::from(Span::styled(
                     "\u{2514}".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 )));
                 in_code_block = false;
                 style = Style::default();
@@ -1110,10 +1115,10 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
                 };
                 spans.push(Span::styled(
                     format!("{}{marker}", list_indent(depth)),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(pal.warning),
                 ));
             }
-            Event::End(TagEnd::Item) => flush(&mut lines, &mut spans, &quote_prefix(quote_depth)),
+            Event::End(TagEnd::Item) => flush(&mut lines, &mut spans, &quote_prefix(quote_depth), pal),
             Event::Start(Tag::Emphasis) => style = style.add_modifier(Modifier::ITALIC),
             Event::End(TagEnd::Emphasis) => style = style.remove_modifier(Modifier::ITALIC),
             Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
@@ -1121,7 +1126,7 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
             Event::Start(Tag::Strikethrough) => style = style.add_modifier(Modifier::CROSSED_OUT),
             Event::End(TagEnd::Strikethrough) => style = style.remove_modifier(Modifier::CROSSED_OUT),
             Event::Start(Tag::Link { .. }) => {
-                style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+                style = style.fg(pal.info).add_modifier(Modifier::UNDERLINED);
             }
             Event::End(TagEnd::Link) => style = Style::default(),
             Event::Text(text) => {
@@ -1132,7 +1137,7 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
                     while let Some(part) = parts.next() {
                         spans.push(Span::styled(part.to_string(), style));
                         if parts.peek().is_some() {
-                            flush(&mut lines, &mut spans, "\u{2502} ");
+                            flush(&mut lines, &mut spans, "\u{2502} ", pal);
                         }
                     }
                 } else {
@@ -1142,24 +1147,24 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
             Event::Code(code) => {
                 spans.push(Span::styled(
                     format!(" {code} "),
-                    Style::default().fg(Color::LightGreen).bg(Color::Rgb(40, 40, 40)),
+                    Style::default().fg(pal.success).bg(pal.surface),
                 ));
             }
             Event::SoftBreak => spans.push(Span::raw(" ")),
-            Event::HardBreak => flush(&mut lines, &mut spans, &quote_prefix(quote_depth)),
+            Event::HardBreak => flush(&mut lines, &mut spans, &quote_prefix(quote_depth), pal),
             Event::Rule => {
-                flush(&mut lines, &mut spans, "");
+                flush(&mut lines, &mut spans, "", pal);
                 lines.push(Line::from(Span::styled(
                     "\u{2500}".repeat(40),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 )));
             }
             Event::TaskListMarker(done) => {
                 let mark = if done { "[x] " } else { "[ ] " };
-                spans.push(Span::styled(mark.to_string(), Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled(mark.to_string(), Style::default().fg(pal.warning)));
             }
             Event::End(TagEnd::Paragraph) => {
-                flush(&mut lines, &mut spans, &quote_prefix(quote_depth));
+                flush(&mut lines, &mut spans, &quote_prefix(quote_depth), pal);
                 if lists.is_empty() {
                     lines.push(Line::from(""));
                 }
@@ -1171,7 +1176,7 @@ pub fn render_markdown(source: &str) -> Vec<ratatui::text::Line<'static>> {
         // A heading never spans lines, so nothing else has to remember to close it.
         let _ = heading;
     }
-    flush(&mut lines, &mut spans, "");
+    flush(&mut lines, &mut spans, "", pal);
     lines
 }
 

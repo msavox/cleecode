@@ -78,7 +78,21 @@ impl LineCache {
 }
 
 impl Highlighter {
+    /// A highlighter for the default theme, for the tests that care about grammars rather than
+    /// about colours. Everything that draws goes through `for_theme` instead.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::for_theme(crate::theme::Theme::default())
+    }
+
+    /// A highlighter coloured by `theme`. Rebuilt rather than re-tinted when the theme changes:
+    /// a syntect `Theme` is the thing the highlighter borrows from on every line, and swapping
+    /// the field under it is the same work as building a new one.
+    pub fn for_theme(theme: crate::theme::Theme) -> Self {
+        Self::named(theme.syntax_theme())
+    }
+
+    fn named(wanted: &str) -> Self {
         // syntect's own defaults are the Sublime Text packages and nothing else, which in 2026
         // is a strange set of languages to have: no TypeScript, no TOML, no Kotlin, no Swift,
         // no Zig, no Dockerfile, no Vue. two-face ships bat's collection — those defaults plus
@@ -88,7 +102,7 @@ impl Highlighter {
         let theme_set = ThemeSet::load_defaults();
         let theme = theme_set
             .themes
-            .get("base16-ocean.dark")
+            .get(wanted)
             .or_else(|| theme_set.themes.values().next())
             .expect("syntect ships at least one default theme")
             .clone();
@@ -379,3 +393,4 @@ mod tests {
         assert_eq!(syntax_name("dump.qqq", "zzz\n"), "Plain Text");
     }
 }
+

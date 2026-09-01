@@ -153,6 +153,11 @@ pub struct Settings {
     // the text unreadable, and then this is the only way back.
     #[serde(default)]
     pub opaque_background: bool,
+    // Which set of colours the interface is drawn in. Defaults to the one the editor has always
+    // used, so an existing settings.toml — which has no such key — loads into exactly the editor
+    // it was written by.
+    #[serde(default)]
+    pub theme: crate::theme::Theme,
     // Workspace resume: which project folder and which of its files were open, so
     // launching cleecode with no arguments picks up where the last session left off.
     #[serde(default)]
@@ -334,6 +339,7 @@ impl Default for Settings {
             plots_in_tabs: true,
             show_splash: true,
             opaque_background: false,
+            theme: crate::theme::Theme::default(),
             last_root: None,
             last_open_files: Vec::new(),
             last_active_file: None,

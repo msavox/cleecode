@@ -23,6 +23,7 @@ mod search;
 mod session;
 mod settings;
 mod terminal_panel;
+mod theme;
 mod ui;
 mod workspace;
 mod wsnap;

@@ -100,6 +100,7 @@ pub enum Key {
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
     ItemOpaqueBackground,
+    ItemThemes,
     ItemPlotsInTabs,
     MenuValuePlotsTabs,
     MenuValuePlotsWindows,
@@ -426,6 +427,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemOpaqueBackground) => "Solid background",
         (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
+
+        (Lang::En, ItemThemes) => "Theme\u{2026}",
+        (Lang::It, ItemThemes) => "Tema\u{2026}",
 
         // Named for where the file goes rather than for the machinery: "with the default
         // application" is how a settings dialog would say it, and this is a right-click on a
@@ -1868,6 +1872,17 @@ pub fn msg_opaque_background(lang: Lang, on: bool) -> String {
         (Lang::En, false) => "Solid background off — the terminal's own background is back".to_string(),
         (Lang::It, true) => "Sfondo pieno attivo — il terminale non traspare più".to_string(),
         (Lang::It, false) => "Sfondo pieno disattivato — torna lo sfondo del terminale".to_string(),
+    }
+}
+
+/// Why the background cannot be handed back. A theme that brings its own surface has no
+/// terminal colours left to reveal: turning the fill off would not make it translucent, it would
+/// leave light text on whatever the terminal happens to be. Better to say so than to offer a
+/// switch that does nothing.
+pub fn msg_background_owned_by_theme(lang: Lang, theme: &str) -> String {
+    match lang {
+        Lang::En => format!("{theme} brings its own background — it cannot be made translucent"),
+        Lang::It => format!("{theme} porta il proprio sfondo — non può essere reso trasparente"),
     }
 }
 

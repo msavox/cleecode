@@ -475,6 +475,9 @@ pub struct App {
     pub rename_input: String,
     /// The run-target drop-down, while it is open under its toolbar button.
     pub run_menu: Option<RunMenu>,
+    /// The theme drop-down, while it is open under its button on the menu bar. Just the row the
+    /// cursor is on: the list itself is `Theme::ALL`, which cannot change while it is open.
+    pub theme_menu: Option<usize>,
     /// Which step the "register a venv" box is on, when it's open.
     pub venv_register: Option<VenvRegisterStep>,
     pub venv_register_input: String,
@@ -1897,10 +1900,10 @@ impl App {
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
             pointer: None,
+            highlighter: Highlighter::for_theme(settings.theme),
             settings,
             show_settings: false,
             settings_selected: 0,
-            highlighter: Highlighter::new(),
             menu: MenuBar::new(),
             show_about: false,
             clipboard: Clipboard::new(),
@@ -1913,6 +1916,7 @@ impl App {
             rename_target: None,
             rename_input: String::new(),
             run_menu: None,
+            theme_menu: None,
             venv_register: None,
             venv_register_input: String::new(),
             venv_register_path: None,
@@ -2038,6 +2042,13 @@ impl App {
     /// The plot destination is the *effective* one and not the stored preference: a machine with
     /// no screen captures whatever the setting says, so reading the setting out would have the
     /// menu claim "windows" while every figure kept arriving as a tab.
+    /// The colours to draw this frame in. Read from the settings every time rather than cached:
+    /// it is a couple of dozen `Color`s copied once per frame, and a cache would be one more
+    /// thing to remember to invalidate when the theme changes.
+    pub fn palette(&self) -> crate::theme::Palette {
+        self.settings.theme.palette()
+    }
+
     pub fn menu_states(&self) -> crate::menu::MenuStates {
         crate::menu::MenuStates {
             plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
@@ -2303,7 +2314,7 @@ impl App {
         if self.show_save_as {
             return Some(ModalTextField::SaveAs);
         }
-        if self.run_menu.is_some() {
+        if self.run_menu.is_some() || self.theme_menu.is_some() {
             return None;
         }
         if self.venv_register.is_some() {
@@ -6160,6 +6171,16 @@ impl App {
     /// this is reached for when the screen has become unreadable, and having to do it again
     /// after every session would be its own small misery.
     fn toggle_opaque_background(&mut self) {
+        // A theme that paints its own surface is painting it either way, so the switch has
+        // nothing to turn off. Refused out loud rather than silently ignored: a control that
+        // moves and changes nothing is worse than one that explains itself.
+        if self.settings.theme.paints_its_own_background() {
+            self.status_message = i18n::msg_background_owned_by_theme(
+                self.settings.lang,
+                self.settings.theme.name(),
+            );
+            return;
+        }
         self.settings.opaque_background = !self.settings.opaque_background;
         self.settings.save();
         self.status_message =
@@ -6852,7 +6873,7 @@ impl App {
             if !as_document || failed || text_only {
                 // Parsing is cheap enough to do on the spot, so the text view keeps up with the
                 // keys — which on a terminal without graphics is the whole of what it can offer.
-                let lines = crate::preview::render_markdown(&text);
+                let lines = crate::preview::render_markdown(&text, self.palette());
                 if let Some(preview) = self.editors[i].preview.as_mut() {
                     preview.state = crate::preview::State::Rendered { lines, revision };
                     preview.shown_revision = revision;
@@ -6885,7 +6906,7 @@ impl App {
                 Some(crate::preview::State::Rendered { lines, .. }) if lines.is_empty()
             );
             if first {
-                let lines = crate::preview::render_markdown(&text);
+                let lines = crate::preview::render_markdown(&text, self.palette());
                 if let Some(preview) = self.editors[i].preview.as_mut() {
                     preview.state = crate::preview::State::Rendered { lines, revision };
                 }
@@ -7183,6 +7204,51 @@ impl App {
     /// files, and for every file type the run command behind the Run button. Replaces cycling
     /// blindly to the next venv, which with more than two meant clicking until the right one
     /// appeared.
+    /// Opens the theme drop-down on the row of the theme in use, so the list opens showing where
+    /// you are rather than at the top.
+    pub fn open_theme_menu(&mut self) {
+        let here = crate::theme::Theme::ALL.iter().position(|t| *t == self.settings.theme);
+        self.theme_menu = Some(here.unwrap_or(0));
+        self.redraw = true;
+    }
+
+    fn handle_theme_menu_key(&mut self, key: KeyEvent) {
+        let Some(selected) = self.theme_menu else { return };
+        let len = crate::theme::Theme::ALL.len();
+        match key.code {
+            KeyCode::Esc => self.theme_menu = None,
+            KeyCode::Up => self.theme_menu = Some((selected + len - 1) % len),
+            KeyCode::Down => self.theme_menu = Some((selected + 1) % len),
+            KeyCode::Enter => {
+                self.theme_menu = None;
+                self.set_theme(crate::theme::Theme::ALL[selected]);
+            }
+            _ => {}
+        }
+        self.redraw = true;
+    }
+
+    /// Changes the colours everything is drawn in.
+    ///
+    /// Written out at once, like the background it is a cousin of: a theme is chosen because the
+    /// screen is unreadable as it stands, and having to choose it again next session would be a
+    /// poor answer. The highlighter is rebuilt rather than re-tinted — its syntect theme is what
+    /// every coloured line borrows from — and every open buffer is told its colours are stale, so
+    /// the next frame recolours the lines it is about to draw and no others.
+    pub fn set_theme(&mut self, theme: crate::theme::Theme) {
+        if self.settings.theme == theme {
+            return;
+        }
+        self.settings.theme = theme;
+        self.settings.save();
+        self.highlighter = Highlighter::for_theme(theme);
+        for editor in &mut self.editors {
+            editor.forget_highlight();
+        }
+        self.status_message = theme.name().to_string();
+        self.redraw = true;
+    }
+
     pub fn open_run_menu(&mut self, pane: EditorPane) {
         let ext = self.editor_ext(self.pane_editor_index(pane));
         // Nothing to configure without an extension to key the command on; say so rather than
@@ -7527,6 +7593,7 @@ impl App {
             || self.pending_upload.is_some()
             || self.show_save_as
             || self.run_menu.is_some()
+            || self.theme_menu.is_some()
             || self.venv_register.is_some()
             || self.run_command_edit.is_some()
             || self.picker.is_some()
@@ -7572,6 +7639,10 @@ impl App {
         }
         if self.run_menu.is_some() {
             self.handle_run_menu_key(key);
+            return;
+        }
+        if self.theme_menu.is_some() {
+            self.handle_theme_menu_key(key);
             return;
         }
         if self.venv_register.is_some() {
@@ -8002,6 +8073,7 @@ impl App {
             MenuAction::MdQuote => self.md_format(ui::MdTool::Quote),
             MenuAction::MdFence => self.md_format(ui::MdTool::Fence),
             MenuAction::ToggleOpaqueBackground => self.toggle_opaque_background(),
+            MenuAction::ShowThemes => self.open_theme_menu(),
             MenuAction::TogglePlotsInTabs => self.toggle_plots_in_tabs(),
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::NewTerminal => self.new_terminal(),
@@ -9493,6 +9565,25 @@ impl App {
                     self.cancel_run_command_edit();
                     return;
                 }
+                if self.theme_menu.is_some() {
+                    // Inside the list picks a theme; anywhere else dismisses it, like the menus.
+                    // The button itself is outside, so a second click on it closes the list
+                    // rather than reopening it on top of itself.
+                    match ui::theme_menu_rect(self, full)
+                        .map(ui::inner_rect)
+                        .filter(|inner| within(*inner, col, row))
+                    {
+                        Some(inner) => {
+                            let picked = (row - inner.y) as usize;
+                            self.theme_menu = None;
+                            if let Some(theme) = crate::theme::Theme::ALL.get(picked) {
+                                self.set_theme(*theme);
+                            }
+                        }
+                        None => self.theme_menu = None,
+                    }
+                    return;
+                }
                 if self.run_menu.is_some() {
                     // Inside the list picks a row; anywhere else dismisses it, like the menus.
                     let rect = ui::run_menu_rect(self, areas.editor, full);
@@ -10174,6 +10265,11 @@ impl App {
         let button = ui::menu_bar_button_range(self, width);
         if !button.is_empty() && button.contains(&col) {
             self.toggle_opaque_background();
+            return;
+        }
+        let themes = ui::menu_bar_theme_range(self, width);
+        if !themes.is_empty() && themes.contains(&col) {
+            self.open_theme_menu();
         }
     }
 
