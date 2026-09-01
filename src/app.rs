@@ -2947,24 +2947,9 @@ impl App {
     /// it — the URL may be dead, or the opener may have failed — is a message rather than
     /// silence, because a double-click that does nothing says nothing.
     fn open_url_at(&mut self, text: &str, lang: Lang) -> bool {
-        let Some(start) = crate::locate::find_url_start(text) else {
+        let Some(url) = crate::locate::find_url(text) else {
             return false;
         };
-        let rest = &text[start..];
-        let end = rest
-            .find(|c: char| c.is_whitespace())
-            .unwrap_or(rest.len());
-        let mut url = &rest[..end];
-        while url
-            .chars()
-            .last()
-            .is_some_and(|c| matches!(c, ')' | ']' | '}' | ',' | '.' | ';' | ':' | '?'))
-        {
-            url = &url[..url.len() - url.chars().last().unwrap().len_utf8()];
-        }
-        if url.is_empty() {
-            return false;
-        }
         self.status_message = match crate::dnd::open_url(url) {
             Ok(()) => i18n::msg_opened_url(lang, url),
             Err(e) => i18n::msg_open_url_failed(lang, url, &e),
