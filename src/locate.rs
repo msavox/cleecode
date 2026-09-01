@@ -189,6 +189,21 @@ pub fn find_url_start(text: &str) -> Option<usize> {
     None
 }
 
+/// The first URL in `text`, with trailing punctuation — `)`, `]`, `}`, `,`, `.`, `;` — cut
+/// off, or `None` when there is no http(s) URL. The punctuation is around the URL rather than
+/// part of it; a trailing `?` or `:` is kept, since either can be a real part of a URL.
+pub fn find_url(text: &str) -> Option<&str> {
+    let start = find_url_start(text)?;
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches([')', ']', '}', ',', '.', ';']);
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +355,21 @@ mod tests {
         assert_eq!(find_url_start("ftp://example.com"), None);
         assert_eq!(find_url_start("no url here"), None);
         assert_eq!(find_url_start(""), None);
+    }
+
+    /// Trailing punctuation around a URL is trimmed, but a trailing `?` or `:` is kept —
+    /// either can be a real part of a URL, and trimming it would silently open a different
+    /// page.
+    #[test]
+    fn a_url_keeps_what_belongs_to_it() {
+        assert_eq!(find_url("see https://example.com/x,"), Some("https://example.com/x"));
+        assert_eq!(find_url("(https://a.io/p)"), Some("https://a.io/p"));
+        assert_eq!(find_url("https://x.io;"), Some("https://x.io"));
+        assert_eq!(find_url("https://x.io?"), Some("https://x.io?"));
+        assert_eq!(find_url("http://localhost:3000"), Some("http://localhost:3000"));
+        assert_eq!(find_url("https://x.io/a/b."), Some("https://x.io/a/b"));
+        assert_eq!(find_url("no url"), None);
+        assert_eq!(find_url(""), None);
     }
 
     /// The offset a caller slices with has to be on a UTF-8 boundary, or the slice panics.
