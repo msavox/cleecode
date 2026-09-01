@@ -44,6 +44,7 @@ pub enum MenuAction {
     ToggleSplitView,
     ToggleHiddenFiles,
     ToggleOpaqueBackground,
+    ShowThemes,
     TogglePlotsInTabs,
     Undo,
     Redo,
@@ -150,6 +151,7 @@ impl MenuAction {
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
         MenuAction::ToggleOpaqueBackground,
+        MenuAction::ShowThemes,
         MenuAction::TogglePlotsInTabs,
         MenuAction::Undo,
         MenuAction::Redo,
@@ -399,6 +401,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // that the screen has become hard to read — which is a bad moment to be asked
                 // to find a menu in it.
                 item(Key::ItemOpaqueBackground, MenuAction::ToggleOpaqueBackground, None),
+                // Also a button on the menu bar, for the same reason as the one above it: the
+                // moment you want a different theme is the moment the current one is hard to
+                // read. Here as well, because a control reachable only by mouse is one the
+                // keyboard cannot have.
+                item(Key::ItemThemes, MenuAction::ShowThemes, None),
                 // The bar teaches the syntax it writes, so it is meant to be switched off once
                 // it has: this row reads out which way it is set, because "is it me or is it
                 // this file" is the question somebody who cannot see it arrives with.

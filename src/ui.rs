@@ -3,6 +3,7 @@ use crate::i18n::{self, Key, Lang};
 use crate::menu::{self, ContextMenu, MenuBar};
 use crate::terminal_panel::{TermSelection, TerminalWindow};
 use crate::settings;
+use crate::theme::Palette;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -574,6 +575,10 @@ pub fn menu_titles_within(menu: &MenuBar, lang: Lang, width: u16) -> Vec<(u16, u
 /// something else, and which is two columns of emoji whose width not every terminal agrees on.
 const BACKGROUND_BUTTON: [&str; 2] = [" ◐ ", " ● "];
 
+/// The theme button, immediately left of the background one. Three columns like its
+/// neighbour, so the two read as a pair rather than as one control and an ornament.
+const THEME_BUTTON: &str = " ◩ ";
+
 /// The badge naming the open workspace, right-aligned on the menu bar. Empty when none is open.
 /// Built here rather than in the drawing code because the button beside it has to know how wide
 /// it is, and a click has to land where the eye says it should.
@@ -597,6 +602,30 @@ pub fn menu_bar_button_range(app: &App, width: u16) -> std::ops::Range<u16> {
         .map(|(_, end)| *end)
         .unwrap_or(0);
     button_range(width, titles, badge)
+}
+
+/// Where the theme button sits: hard against the background button, and gone whenever that one
+/// is. They give up their room in that order — the background button is the one worth keeping
+/// longest, because it is the way back from a screen that cannot be read at all.
+pub fn menu_bar_theme_range(app: &App, width: u16) -> std::ops::Range<u16> {
+    let background = menu_bar_button_range(app, width);
+    if background.is_empty() {
+        return 0..0;
+    }
+    let titles = menu_titles_within(&app.menu, app.settings.lang, width)
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or(0);
+    theme_range(background.start, titles)
+}
+
+/// The arithmetic of the above. `background_start` is where the button it leans on begins, which
+/// is the only thing about that button this needs to know.
+fn theme_range(background_start: u16, titles_end: u16) -> std::ops::Range<u16> {
+    let button = columns(THEME_BUTTON);
+    let end = background_start;
+    let start = end.saturating_sub(button);
+    if start < titles_end || end - start < button { start..start } else { start..end }
 }
 
 /// The arithmetic of the above, away from the app it reads those three numbers out of.
@@ -821,16 +850,12 @@ pub fn settings_modal_rect(app: &App, full: Rect) -> Rect {
     centered_rect(width, height, full)
 }
 
-/// The colour a frame's border takes while a resize is under way (Ctrl+Shift+U, or a border drag).
-/// Orange, to stand clearly apart from the cyan of ordinary focus.
-const RESIZE_BORDER_COLOR: Color = Color::Rgb(255, 140, 0);
-
-fn focused_border_style(is_focused: bool, resizing: bool) -> Style {
+fn focused_border_style(pal: Palette, is_focused: bool, resizing: bool) -> Style {
     if is_focused {
-        let color = if resizing { RESIZE_BORDER_COLOR } else { Color::Cyan };
+        let color = if resizing { pal.resize_border } else { pal.accent };
         Style::default().fg(color)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(pal.text_dim)
     }
 }
 
@@ -844,10 +869,11 @@ const SPLASH_BANNER: &[&str] = &[
 ];
 
 fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let mut lines: Vec<Line> = Vec::new();
     for row in SPLASH_BANNER {
-        lines.push(Line::from(Span::styled(*row, Style::default().fg(Color::Green))).alignment(ratatui::layout::Alignment::Center));
+        lines.push(Line::from(Span::styled(*row, Style::default().fg(pal.success))).alignment(ratatui::layout::Alignment::Center));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(i18n::t(lang, Key::SplashTagline)).alignment(ratatui::layout::Alignment::Center));
@@ -857,7 +883,7 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
             .alignment(ratatui::layout::Alignment::Center),
     );
     lines.push(
-        Line::from(Span::styled("msavox 2026", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled("msavox 2026", Style::default().fg(pal.text_dim)))
             .alignment(ratatui::layout::Alignment::Center),
     );
     // Started with a workspace — `clee -w name`, or a resumed one — so say which, while the
@@ -866,15 +892,15 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
         lines.push(Line::from(""));
         lines.push(
             Line::from(vec![
-                Span::styled(format!("{} ", i18n::t(lang, Key::WorkspaceBadge)), Style::default().fg(Color::DarkGray)),
-                Span::styled(name.to_string(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{} ", i18n::t(lang, Key::WorkspaceBadge)), Style::default().fg(pal.text_dim)),
+                Span::styled(name.to_string(), Style::default().fg(pal.success).add_modifier(Modifier::BOLD)),
             ])
             .alignment(ratatui::layout::Alignment::Center),
         );
     }
     lines.push(Line::from(""));
     lines.push(
-        Line::from(Span::styled(i18n::t(lang, Key::SplashHint), Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled(i18n::t(lang, Key::SplashHint), Style::default().fg(pal.text_dim)))
             .alignment(ratatui::layout::Alignment::Center),
     );
 
@@ -895,15 +921,20 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
 /// Split in two so that the painting cannot be skipped: the drawing below returns early for the
 /// splash screen, and an unreadable splash is exactly as unreadable as an unreadable editor.
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let opaque = app.settings.opaque_background;
+    // A theme that brings its own surface has to paint it whether or not the user asked for an
+    // opaque background: the setting is about a terminal whose colours you want to keep, and a
+    // light theme has no colours of the terminal's left to keep.
+    let pal = app.palette();
+    let opaque = app.settings.opaque_background || app.settings.theme.paints_its_own_background();
     draw_frame(f, app);
     // Last of all, once every widget has had its say about which cells it colours.
     if opaque {
-        paint_background(f.buffer_mut());
+        paint_background(f.buffer_mut(), pal);
     }
 }
 
 fn draw_frame(f: &mut Frame, app: &mut App) {
+    let pal = app.palette();
     // Remembered for the key path, which opens pop-ups without being handed the layout.
     app.last_full = f.area();
     if app.show_splash {
@@ -933,7 +964,7 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if let Some(popup) = app.completion.as_ref()
         && app.completion_live()
     {
-        draw_completion(f, popup, app.completion_anchor, f.area());
+        draw_completion(pal, f, popup, app.completion_anchor, f.area());
     }
 
     if app.show_settings {
@@ -990,6 +1021,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.run_menu.is_some() {
         draw_run_menu(f, app, areas.editor, f.area());
     }
+    if app.theme_menu.is_some() {
+        draw_theme_menu(f, app, f.area());
+    }
     if app.venv_register.is_some() {
         draw_venv_register_modal(f, app, f.area());
     }
@@ -1012,14 +1046,6 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// The background CleeCode paints when it is not willing to trust the terminal's.
-///
-/// An explicit colour rather than a darker "default": a translucent terminal is translucent
-/// exactly where the default background shows, so asking for that again would change nothing.
-/// This is the near-black the rest of the chrome is drawn against, so switching it on looks like
-/// the editor filling in its own surface rather than a sheet laid over it.
-const OPAQUE_BACKGROUND: Color = Color::Rgb(24, 24, 24);
-
 /// Fills in every cell that would otherwise show the terminal through it.
 ///
 /// Done as a pass over the finished frame rather than by painting a sheet underneath it, because
@@ -1030,22 +1056,32 @@ const OPAQUE_BACKGROUND: Color = Color::Rgb(24, 24, 24);
 ///
 /// Cells a picture is drawn over are left alone by the backend anyway (they are marked skipped),
 /// so the graphics protocols are unaffected.
-fn paint_background(buffer: &mut ratatui::buffer::Buffer) {
+///
+/// The same pass settles the text. Most of what the editor writes never states a foreground — it
+/// is content, and content is whatever colour the terminal writes in. That is right until a theme
+/// brings its own surface, at which point the terminal's idea of "text" can be the paper the
+/// theme just painted. A cell still on `Reset` at the end of the frame is one nothing claimed,
+/// here as much as for the background, so both are filled in the one walk.
+fn paint_background(buffer: &mut ratatui::buffer::Buffer, pal: Palette) {
     for cell in buffer.content.iter_mut() {
         if cell.bg == Color::Reset {
-            cell.bg = OPAQUE_BACKGROUND;
+            cell.bg = pal.background;
+        }
+        if cell.fg == Color::Reset && pal.text != Color::Reset {
+            cell.fg = pal.text;
         }
     }
 }
 
 fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.palette();
     // Hidden bar collapses to a zero-height row; nothing to paint (menus still reachable
     // via Ctrl+Shift+B, whose dropdown anchors to the top independently of this row).
     if area.height == 0 {
         return;
     }
     let lang = app.settings.lang;
-    let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(Color::Black))];
+    let mut spans = vec![Span::styled(MENU_LOGO, Style::default().bg(pal.bar))];
     let mut used = columns(MENU_LOGO);
     // Titles with no columns left to them are not drawn at all. The paragraph would have clipped
     // them anyway, but going through the same layout the button and the click use keeps `used`
@@ -1059,11 +1095,11 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         let label = format!(" {} ", title);
         used += columns(&label);
         let is_open = app.menu.active && app.menu.menu_index == i;
-        let mut style = if is_open {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+        let mut style = chrome(pal, if is_open {
+            Style::default().fg(pal.on_accent).bg(pal.accent)
         } else {
-            Style::default().fg(Color::Gray).bg(Color::Black)
-        };
+            Style::default().fg(pal.on_bar).bg(pal.bar)
+        });
         if i == 0 {
             style = style.add_modifier(Modifier::BOLD);
         }
@@ -1076,7 +1112,13 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         let mut chars = title.chars();
         let mnemonic = chars.next().map(|c| c.to_string()).unwrap_or_default();
         let rest: String = chars.collect();
-        let mnemonic_style = if app.menu.active { style.add_modifier(Modifier::UNDERLINED) } else { style };
+        let mut mnemonic_style =
+            if app.menu.active { style.add_modifier(Modifier::UNDERLINED) } else { style };
+        // Not on the open title: there the initial is already lit, and a second colour on top of
+        // the highlight would be one distinction too many — and red on cyan is unreadable.
+        if let Some(colour) = pal.accelerator.filter(|_| !is_open) {
+            mnemonic_style = mnemonic_style.fg(colour);
+        }
         spans.push(Span::styled(" ", style));
         spans.push(Span::styled(mnemonic, mnemonic_style));
         spans.push(Span::styled(format!("{} ", rest), style));
@@ -1090,32 +1132,48 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     // window is too narrow for all three.
     let button = menu_bar_button_range(app, area.width);
     let button_width = button.end - button.start;
+    let themes = menu_bar_theme_range(app, area.width);
+    let themes_width = themes.end - themes.start;
     let pad = area
         .width
         .saturating_sub(used)
         .saturating_sub(columns(&workspace))
-        .saturating_sub(button_width);
+        .saturating_sub(button_width)
+        .saturating_sub(themes_width);
     if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad as usize), Style::default().bg(Color::Black)));
+        spans.push(Span::styled(" ".repeat(pad as usize), Style::default().bg(pal.bar)));
+    }
+    if themes_width > 0 {
+        // Lit while its list is open, the same way an open menu title is lit.
+        let style = if app.theme_menu.is_some() {
+            Style::default().fg(pal.on_accent).bg(pal.accent)
+        } else {
+            Style::default().fg(pal.on_bar).bg(pal.bar)
+        };
+        spans.push(Span::styled(THEME_BUTTON, style));
     }
     if button_width > 0 {
-        let on = app.settings.opaque_background;
+        // What is actually on the screen, not what the setting says: with a theme that brings
+        // its own surface the fill is on whatever the setting was left at, and a button showing
+        // otherwise would be reporting a state the frame does not have.
+        let on = app.settings.opaque_background || app.settings.theme.paints_its_own_background();
         // Lit like the open menu title when it is on, so "something has been switched on here"
         // reads the same way everywhere on this row.
         let style = if on {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default().fg(pal.on_accent).bg(pal.accent)
         } else {
-            Style::default().fg(Color::Gray).bg(Color::Black)
+            Style::default().fg(pal.on_bar).bg(pal.bar)
         };
         spans.push(Span::styled(BACKGROUND_BUTTON[usize::from(on)], style));
     }
     if !workspace.is_empty() {
-        spans.push(Span::styled(workspace, Style::default().fg(Color::Black).bg(Color::Green)));
+        spans.push(Span::styled(workspace, Style::default().fg(pal.on_accent).bg(pal.success)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let rect = menu_dropdown_rect(&app.menu, lang, full);
     let inner_width = rect.width.saturating_sub(2) as usize;
@@ -1124,7 +1182,7 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     // selected item's display row so the highlight lands on the right line.
     let separator = ListItem::new(Line::from(Span::styled(
         "─".repeat(inner_width),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(pal.text_dim),
     )));
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
@@ -1144,21 +1202,21 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
             Some(sc) => Some(i18n::shortcut_label(lang, sc)),
             None => menu::item_value(lang, i.action, states),
         };
-        let line = match right {
+        let tail = match right {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
                 let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
-                format!(" {}{}{} ", label, " ".repeat(pad), sc)
+                format!("{}{}{} ", label, " ".repeat(pad), sc)
             }
-            None => format!(" {} ", label),
+            None => format!("{} ", label),
         };
-        items.push(ListItem::new(line));
+        items.push(ListItem::new(accelerated_line(pal, &tail)));
     }
     let mut state = ListState::default();
     state.select(Some(selected_row));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -1166,16 +1224,40 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     f.render_stateful_widget(list, rect, &mut state);
 }
 
+/// Adds the theme's chrome weight to a style. One place, so the bar, the tabs and the status
+/// line cannot drift apart on the question of how heavy the frame is.
+fn chrome(pal: Palette, style: Style) -> Style {
+    if pal.bold_chrome { style.add_modifier(Modifier::BOLD) } else { style }
+}
+
+/// A drop-down row with its initial in the accelerator colour, for the themes that have one.
+///
+/// `tail` is the row without its leading space, because the space is not the initial and putting
+/// it in the coloured span would paint a red block where the letter is not.
+fn accelerated_line(pal: Palette, tail: &str) -> Line<'static> {
+    let Some(colour) = pal.accelerator else {
+        return Line::from(format!(" {tail}"));
+    };
+    let mut chars = tail.chars();
+    let Some(initial) = chars.next() else { return Line::from(" ".to_string()) };
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(initial.to_string(), Style::default().fg(colour)),
+        Span::raw(chars.collect::<String>()),
+    ])
+}
+
 /// A caption over a group: dim and italic, so it reads as a label for the rows under it rather
 /// than as a row that has been greyed out because it cannot be chosen.
-fn menu_header(label: &str, width: usize) -> ListItem<'static> {
+fn menu_header(pal: Palette, label: &str, width: usize) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(
         format!(" {label:<width$}"),
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default().fg(pal.text_dim).add_modifier(Modifier::ITALIC),
     )))
 }
 
 fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let Some(menu) = app.context_menu.as_ref() else { return };
     let rect = context_menu_rect(menu, lang, full);
@@ -1184,7 +1266,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
     // selected item's row down, so track where the highlight should land.
     let separator = ListItem::new(Line::from(Span::styled(
         "─".repeat(inner_width),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(pal.text_dim),
     )));
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
@@ -1197,7 +1279,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
         }
         let label = i18n::t(lang, i.label_key);
         if i.header {
-            items.push(menu_header(label, inner_width.saturating_sub(1)));
+            items.push(menu_header(pal, label, inner_width.saturating_sub(1)));
             continue;
         }
         let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
@@ -1214,7 +1296,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
     state.select(Some(selected_row));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -1223,6 +1305,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
 }
 
 fn draw_settings_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let rect = settings_modal_rect(app, full);
     f.render_widget(Clear, rect);
     let rows = app.settings.rows();
@@ -1246,7 +1329,7 @@ fn draw_settings_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::SettingsTitle)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -1346,13 +1429,14 @@ fn draw_about_art(f: &mut Frame, art: &[&str], area: Rect) {
 }
 
 fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let rect = about_modal_rect(full);
     f.render_widget(Clear, rect);
     let lang = app.settings.lang;
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::AboutTitle)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -1390,6 +1474,7 @@ pub fn delete_confirm_modal_rect(full: Rect) -> Rect {
 }
 
 fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let rect = delete_confirm_modal_rect(full);
     f.render_widget(Clear, rect);
     let name = app
@@ -1401,7 +1486,7 @@ fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::ModalDelete)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(pal.danger));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let text = i18n::msg_confirm_delete(app.settings.lang, &name);
@@ -1413,6 +1498,7 @@ pub fn unsaved_modal_rect(full: Rect) -> Rect {
 }
 
 fn draw_unsaved_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     use crate::app::UnsavedPrompt;
     let rect = unsaved_modal_rect(full);
     f.render_widget(Clear, rect);
@@ -1427,12 +1513,12 @@ fn draw_unsaved_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::ModalUnsaved)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(pal.warning));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(i18n::msg_unsaved_question(lang, &detail)),
-        Line::from(Span::styled(i18n::msg_unsaved_choices(lang), Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(i18n::msg_unsaved_choices(lang), Style::default().fg(pal.text_muted))),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -1442,6 +1528,7 @@ pub fn rename_modal_rect(full: Rect) -> Rect {
 }
 
 fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let rect = rename_modal_rect(full);
     f.render_widget(Clear, rect);
     let old_name = app
@@ -1453,11 +1540,11 @@ fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::ModalRename)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let prompt = i18n::msg_rename_prompt(app.settings.lang, &old_name);
-    let lines = vec![Line::from(prompt), Line::from(Span::styled(app.rename_input.clone(), Style::default().fg(Color::Yellow)))];
+    let lines = vec![Line::from(prompt), Line::from(Span::styled(app.rename_input.clone(), Style::default().fg(pal.warning)))];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     // Clamped to the box: a name longer than the modal is wide would otherwise park the caret
     // on whatever is drawn beside it, which reads as the cursor having escaped.
@@ -1467,18 +1554,18 @@ fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
 }
 
 /// Simple single-line input modal shared by Go-to-line and New file/folder.
-fn draw_input_modal(f: &mut Frame, full: Rect, title: &str, prompt: &str, input: &str) {
+fn draw_input_modal(pal: Palette, f: &mut Frame, full: Rect, title: &str, prompt: &str, input: &str) {
     let rect = centered_rect(60, 6, full);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(prompt.to_string()),
-        Line::from(Span::styled(input.to_string(), Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(input.to_string(), Style::default().fg(pal.warning))),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     // Clamped to the box for the same reason every other input here is: typing past the right
@@ -1488,10 +1575,11 @@ fn draw_input_modal(f: &mut Frame, full: Rect, title: &str, prompt: &str, input:
 }
 
 fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     // What the number will mean depends on what is being looked at.
     let pages = app.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
-    draw_input_modal(
+    draw_input_modal(pal, 
         f,
         full,
         i18n::goto_title(lang, pages),
@@ -1561,6 +1649,7 @@ pub fn git_tab_at(lang: i18n::Lang, header: Rect, col: u16) -> Option<crate::app
 /// Read-only, and the numbers came from the session rather than from anything CleeCode worked
 /// out: what is on screen is what the interpreter says it holds, at the moment it was asked.
 fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let Some(inspector) = app.inspector.as_ref() else { return };
     let lang = app.settings.lang;
     let rect = git_panel_rect(full);
@@ -1576,19 +1665,19 @@ fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     if inner.height < 2 {
         return;
     }
 
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(pal.text_dim);
     let mut lines: Vec<Line> = Vec::new();
     match slice {
         None => lines.push(Line::from(Span::styled(i18n::msg_inspect_waiting(lang), dim))),
         Some(slice) if !slice.error.is_empty() => {
-            lines.push(Line::from(Span::styled(slice.error.clone(), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(slice.error.clone(), Style::default().fg(pal.danger))));
         }
         Some(slice) if slice.text => {
             for line in slice.lines() {
@@ -1647,6 +1736,7 @@ fn git_body_layout(inner: Rect, has_notice: bool) -> (Rect, bool) {
 }
 
 fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
+    let pal = app.palette();
     use crate::app::{GitPrompt, GitTab};
     let lang = app.settings.lang;
     let rect = git_panel_rect(full);
@@ -1655,7 +1745,7 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::msg_git_panel_title(lang)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     if inner.height < 3 {
         return;
@@ -1688,26 +1778,26 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
             break;
         }
         let style = if slot.tab == panel.tab {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default().fg(pal.on_accent).bg(pal.accent)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(pal.text_dim)
         };
         let area = Rect { x, y: header.y, width: slot.width, height: 1 };
         f.render_widget(Paragraph::new(Span::styled(format!(" {} ", slot.label), style)), area);
     }
 
-    draw_git_footer(f, panel, lang, inner, show_notice);
+    draw_git_footer(pal, f, panel, lang, inner, show_notice);
 
     let Some(snap) = panel.snap.as_ref() else {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(i18n::msg_git_loading(lang), Style::default().fg(Color::DarkGray)))),
+            Paragraph::new(Line::from(Span::styled(i18n::msg_git_loading(lang), Style::default().fg(pal.text_dim)))),
             body,
         );
         return;
     };
     if let Some(error) = &snap.error {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red)))),
+            Paragraph::new(Line::from(Span::styled(error.clone(), Style::default().fg(pal.danger)))),
             body,
         );
         return;
@@ -1719,7 +1809,7 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
             if snap.changes.is_empty() {
                 vec![Line::from(Span::styled(
                     i18n::msg_git_clean(lang),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 ))]
             } else {
                 snap.changes
@@ -1727,7 +1817,7 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     .enumerate()
                     .skip(panel.scroll)
                     .take(rows)
-                    .map(|(row, change)| status_line(change, row == panel.selected, width))
+                    .map(|(row, change)| status_line(pal, change, row == panel.selected, width))
                     .collect()
             }
         }
@@ -1736,17 +1826,17 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                 let of = snap.diff_of.as_ref().map(|p| p.display().to_string());
                 vec![Line::from(Span::styled(
                     i18n::msg_git_no_changes(lang, of.as_deref()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 ))]
             } else {
-                snap.diff.iter().skip(panel.scroll).take(rows).map(|l| Line::from(diff_span(l))).collect()
+                snap.diff.iter().skip(panel.scroll).take(rows).map(|l| Line::from(diff_span(pal, l))).collect()
             }
         }
         GitTab::Graph => {
             if panel.rows.is_empty() {
                 vec![Line::from(Span::styled(
                     i18n::msg_git_no_commits(lang),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 ))]
             } else {
                 // One column for the art, the same on every row. A graph whose text starts in a
@@ -1758,7 +1848,7 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     .enumerate()
                     .skip(panel.scroll)
                     .take(rows)
-                    .map(|(row, r)| graph_line(r, &snap.graph, art, row == panel.selected, width))
+                    .map(|(row, r)| graph_line(pal, r, &snap.graph, art, row == panel.selected, width))
                     .collect()
             }
         }
@@ -1768,13 +1858,13 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
             .enumerate()
             .skip(panel.scroll)
             .take(rows)
-            .map(|(row, b)| branch_line(b, row == panel.selected, width))
+            .map(|(row, b)| branch_line(pal, b, row == panel.selected, width))
             .collect(),
         GitTab::Stashes => {
             if snap.stashes.is_empty() {
                 vec![Line::from(Span::styled(
                     i18n::msg_git_no_stashes(lang),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 ))]
             } else {
                 snap.stashes
@@ -1782,7 +1872,7 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     .enumerate()
                     .skip(panel.scroll)
                     .take(rows)
-                    .map(|(row, st)| stash_line(st, row == panel.selected, width))
+                    .map(|(row, st)| stash_line(pal, st, row == panel.selected, width))
                     .collect()
             }
         }
@@ -1797,14 +1887,14 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 i18n::msg_git_unfinished(lang, unfinished),
-                Style::default().fg(Color::Black).bg(Color::Yellow),
+                Style::default().fg(pal.on_accent).bg(pal.warning),
             ))),
             area,
         );
     }
 
     if let Some(detail) = panel.detail.as_ref() {
-        draw_git_detail(f, detail, lang, rect);
+        draw_git_detail(pal, f, detail, lang, rect);
     }
 
     if let Some(prompt) = panel.prompt.as_ref() {
@@ -1815,14 +1905,14 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     rect,
                     &i18n::msg_git_text_prompt(lang, kind, panel.staged_count()),
                     &format!("{typed}▏"),
-                    Color::Cyan,
+                    pal.accent,
                 );
             }
             GitPrompt::Confirm(confirm) => {
                 // Red only where saying yes destroys something that is in no commit, no stash
                 // and no reflog. Deleting a branch asks in the same shape and not in the same
                 // colour, because red on every question is red on none of them.
-                let colour = if confirm.destroys_work() { Color::Red } else { Color::Yellow };
+                let colour = if confirm.destroys_work() { pal.danger } else { pal.warning };
                 draw_git_question(f, rect, &i18n::msg_git_confirm_prompt(lang, confirm), "", colour);
             }
         }
@@ -1835,16 +1925,14 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
 /// cursor is a lane that looks selected on every row. They repeat past six, which is honest —
 /// two lanes in one colour is a graph with more branches than a screen has room to tell apart,
 /// and the lines themselves still say which is which.
-const LANE_COLOURS: [Color; 6] =
-    [Color::Green, Color::Magenta, Color::Yellow, Color::Blue, Color::Red, Color::LightGreen];
-
-fn lane_colour(lane: usize) -> Color {
-    LANE_COLOURS[lane % LANE_COLOURS.len()]
+fn lane_colour(pal: Palette, lane: usize) -> Color {
+    let lanes = [pal.success, pal.special, pal.warning, pal.info, pal.danger, pal.graph_extra];
+    lanes[lane % lanes.len()]
 }
 
 /// One row of the graph: the drawing, then — if the row is a commit rather than the lines
 /// between two — its hash, what points at it, and what it says.
-fn graph_line(
+fn graph_line(pal: Palette, 
     row: &crate::git_graph::Row,
     commits: &[crate::git::GraphCommit],
     art_width: usize,
@@ -1860,7 +1948,7 @@ fn graph_line(
             row.glyphs
                 .iter()
                 .map(|g| {
-                    Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(g.lane)))
+                    Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(pal, g.lane)))
                 })
                 .collect::<Vec<_>>(),
         );
@@ -1873,34 +1961,34 @@ fn graph_line(
         // the shape stays readable under the cursor even though its colours do not.
         let text = format!("{art:<art_width$} {:<9}{refs}{} {}", commit.hash, commit.subject, tail);
         let padded = format!("{text:<width$}");
-        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+        return Line::from(Span::styled(padded, Style::default().fg(pal.on_accent).bg(pal.accent)));
     }
 
     let mut spans: Vec<Span<'static>> = row
         .glyphs
         .iter()
-        .map(|g| Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(g.lane))))
+        .map(|g| Span::styled(g.ch.to_string(), Style::default().fg(lane_colour(pal, g.lane))))
         .collect();
     spans.push(Span::raw(" ".repeat(art_width.saturating_sub(art.chars().count()) + 1)));
-    spans.push(Span::styled(format!("{:<9}", commit.hash), Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(format!("{:<9}", commit.hash), Style::default().fg(pal.text_dim)));
     for name in &commit.refs {
-        spans.push(Span::styled(format!("{} ", ref_label(name)), ref_style(name.kind)));
+        spans.push(Span::styled(format!("{} ", ref_label(name)), ref_style(pal, name.kind)));
     }
     spans.push(Span::raw(commit.subject.clone()));
-    spans.push(Span::styled(tail, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(tail, Style::default().fg(pal.text_dim)));
     Line::from(spans)
 }
 
 /// What a ref is drawn as. The kinds git's own log colours apart are coloured apart here for the
 /// same reason: `main` and `origin/main` on different commits is the whole of "have I pushed
 /// this", and in one colour it is two words that look alike.
-fn ref_style(kind: crate::git::RefKind) -> Style {
+fn ref_style(pal: Palette, kind: crate::git::RefKind) -> Style {
     use crate::git::RefKind::*;
     match kind {
-        Head => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        Local => Style::default().fg(Color::Green),
-        Remote => Style::default().fg(Color::Red),
-        Tag => Style::default().fg(Color::Yellow),
+        Head => Style::default().fg(pal.accent).add_modifier(Modifier::BOLD),
+        Local => Style::default().fg(pal.success),
+        Remote => Style::default().fg(pal.danger),
+        Tag => Style::default().fg(pal.warning),
     }
 }
 
@@ -1923,14 +2011,14 @@ fn refs_text(refs: &[crate::git::RefName]) -> String {
     refs.iter().map(ref_label).collect::<Vec<_>>().join(" ") + " "
 }
 
-fn stash_line(stash: &crate::git::Stash, picked: bool, width: usize) -> Line<'static> {
+fn stash_line(pal: Palette, stash: &crate::git::Stash, picked: bool, width: usize) -> Line<'static> {
     let text = format!("{}  {}", stash.name, stash.subject);
     if picked {
         let padded = format!("{text:<width$}");
-        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+        return Line::from(Span::styled(padded, Style::default().fg(pal.on_accent).bg(pal.accent)));
     }
     Line::from(vec![
-        Span::styled(format!("{:<11}", stash.name), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{:<11}", stash.name), Style::default().fg(pal.warning)),
         Span::raw(stash.subject.clone()),
     ])
 }
@@ -1940,7 +2028,7 @@ fn stash_line(stash: &crate::git::Stash, picked: bool, width: usize) -> Line<'st
 /// Its own box rather than a sixth tab: it is about the row the cursor is on rather than about
 /// the repository, and a tab you can only reach from one row of one other tab is a tab that is
 /// empty most of the time you look at it.
-fn draw_git_detail(f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::Lang, panel: Rect) {
+fn draw_git_detail(pal: Palette, f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::Lang, panel: Rect) {
     let rect = Rect {
         x: panel.x + 2,
         y: panel.y + 2,
@@ -1955,23 +2043,23 @@ fn draw_git_detail(f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::La
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(pal.warning));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
     let lines: Vec<Line> = match detail.lines.as_ref() {
         None => vec![Line::from(Span::styled(
             i18n::msg_git_loading(lang),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(pal.text_dim),
         ))],
         Some(Err(complaint)) => {
-            vec![Line::from(Span::styled(complaint.clone(), Style::default().fg(Color::Red)))]
+            vec![Line::from(Span::styled(complaint.clone(), Style::default().fg(pal.danger)))]
         }
         Some(Ok(text)) => text
             .iter()
             .skip(detail.scroll)
             .take(inner.height as usize)
-            .map(|l| Line::from(diff_span(l)))
+            .map(|l| Line::from(diff_span(pal, l)))
             .collect(),
     };
     f.render_widget(Paragraph::new(lines), inner);
@@ -1985,11 +2073,11 @@ fn draw_git_detail(f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::La
 ///
 /// A picked row is one span across the full width instead of three, so the highlight covers the
 /// row rather than stopping where the filename does.
-fn status_line(change: &crate::git::Change, picked: bool, width: usize) -> Line<'static> {
+fn status_line(pal: Palette, change: &crate::git::Change, picked: bool, width: usize) -> Line<'static> {
     let text = format!("{}{} {}", change.index, change.worktree, change.path.display());
     if picked {
         let padded = format!("{text:<width$}");
-        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+        return Line::from(Span::styled(padded, Style::default().fg(pal.on_accent).bg(pal.accent)));
     }
     let path = change.path.display().to_string();
     let untracked = change.untracked();
@@ -2000,24 +2088,24 @@ fn status_line(change: &crate::git::Change, picked: bool, width: usize) -> Line<
     Line::from(vec![
         Span::styled(
             change.index.to_string(),
-            Style::default().fg(if untracked { Color::DarkGray } else { Color::Green }),
+            Style::default().fg(if untracked { pal.text_dim } else { pal.success }),
         ),
         Span::styled(
             format!("{} ", change.worktree),
-            Style::default().fg(if untracked { Color::DarkGray } else { Color::Red }),
+            Style::default().fg(if untracked { pal.text_dim } else { pal.danger }),
         ),
         Span::styled(
             path,
             match (untracked, ready) {
-                (true, _) => Style::default().fg(Color::DarkGray),
-                (_, true) => Style::default().fg(Color::Green),
+                (true, _) => Style::default().fg(pal.text_dim),
+                (_, true) => Style::default().fg(pal.success),
                 _ => Style::default(),
             },
         ),
     ])
 }
 
-fn branch_line(b: &crate::git::Branch, picked: bool, width: usize) -> Line<'static> {
+fn branch_line(pal: Palette, b: &crate::git::Branch, picked: bool, width: usize) -> Line<'static> {
     if picked {
         let mut text = format!("{} {}", if b.current { "●" } else { " " }, b.name);
         if let Some(upstream) = &b.upstream {
@@ -2027,24 +2115,24 @@ fn branch_line(b: &crate::git::Branch, picked: bool, width: usize) -> Line<'stat
             text.push_str(&format!(" {track}"));
         }
         let padded = format!("{text:<width$}");
-        return Line::from(Span::styled(padded, Style::default().fg(Color::Black).bg(Color::Cyan)));
+        return Line::from(Span::styled(padded, Style::default().fg(pal.on_accent).bg(pal.accent)));
     }
     let mut spans = vec![
-        Span::styled(if b.current { "● " } else { "  " }, Style::default().fg(Color::Green)),
+        Span::styled(if b.current { "● " } else { "  " }, Style::default().fg(pal.success)),
         Span::styled(
             b.name.clone(),
             if b.current {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default().fg(pal.success).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             },
         ),
     ];
     if let Some(upstream) = &b.upstream {
-        spans.push(Span::styled(format!("  → {upstream}"), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(format!("  → {upstream}"), Style::default().fg(pal.text_dim)));
     }
     if let Some(track) = &b.track {
-        spans.push(Span::styled(format!(" {track}"), Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled(format!(" {track}"), Style::default().fg(pal.warning)));
     }
     Line::from(spans)
 }
@@ -2055,7 +2143,7 @@ fn branch_line(b: &crate::git::Branch, picked: bool, width: usize) -> Line<'stat
 /// modifier — which is only safe while the panel owns the keyboard, and only discoverable if the
 /// panel says so. A key that stages a file on one tab and does nothing on the next has to say
 /// which is which, or the way to find out is to press it.
-fn draw_git_footer(
+fn draw_git_footer(pal: Palette, 
     f: &mut Frame,
     panel: &crate::app::GitPanel,
     lang: i18n::Lang,
@@ -2066,7 +2154,7 @@ fn draw_git_footer(
     // this function rather than worked out again: two answers to that question is one row drawn
     // twice, which is what put git's last word over the last file in the list.
     if let Some((text, complaint)) = panel.notice.as_ref().filter(|_| show_notice) {
-        let colour = if *complaint { Color::Red } else { Color::Green };
+        let colour = if *complaint { pal.danger } else { pal.success };
         // The first line only: git's complaints run to paragraphs, and the terminal next door is
         // where the rest of one is read.
         let first = text.lines().next().unwrap_or_default().to_string();
@@ -2077,7 +2165,7 @@ fn draw_git_footer(
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             i18n::msg_git_keys(lang, panel.tab),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(pal.text_dim),
         ))),
         area,
     );
@@ -2101,17 +2189,17 @@ fn draw_git_question(f: &mut Frame, panel: Rect, question: &str, typed: &str, co
 /// One line of a diff, coloured the way every diff has been coloured since diffs were coloured.
 /// `+++`/`---` are file headers rather than added and removed lines, and are checked first — the
 /// prefix test alone would paint a header green.
-fn diff_span(line: &str) -> Span<'_> {
+fn diff_span(pal: Palette, line: &str) -> Span<'_> {
     let style = if line.starts_with("+++") || line.starts_with("---") {
-        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+        Style::default().fg(pal.text_muted).add_modifier(Modifier::BOLD)
     } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
+        Style::default().fg(pal.success)
     } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
+        Style::default().fg(pal.danger)
     } else if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(pal.accent)
     } else if line.starts_with("diff ") || line.starts_with("index ") {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(pal.text_dim)
     } else {
         Style::default()
     };
@@ -2123,23 +2211,24 @@ fn diff_span(line: &str) -> Span<'_> {
 /// and a query typed there have to be the same kind of thing, and the only way to know which way
 /// they are set is to be told.
 fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let rect = centered_rect(66, 7, full);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::ModalSearchProject)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
     let flags_on = app.search_case_sensitive || app.search_regex;
     let lines = vec![
-        Line::from(Span::styled(i18n::msg_search_prompt(lang), Style::default().fg(Color::Gray))),
-        Line::from(Span::styled(app.search_input.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(i18n::msg_search_prompt(lang), Style::default().fg(pal.text_muted))),
+        Line::from(Span::styled(app.search_input.clone(), Style::default().fg(pal.warning))),
         Line::from(Span::styled(
             i18n::msg_find_flags(lang, app.search_case_sensitive, app.search_regex),
-            Style::default().fg(if flags_on { Color::Cyan } else { Color::DarkGray }),
+            Style::default().fg(if flags_on { pal.accent } else { pal.text_dim }),
         )),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -2151,6 +2240,7 @@ fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
 /// The terminal's name and its startup command, in one box: two prompts, two values, and a
 /// caret on whichever field is being typed into.
 fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     use crate::app::TerminalField;
     let lang = app.settings.lang;
     let rect = centered_rect(74, 7, full);
@@ -2158,20 +2248,20 @@ fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::ModalTerminalForm)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
     let on_name = app.terminal_rename_field == TerminalField::Name;
     let marker = |active: bool| if active { "▶ " } else { "  " };
-    let value = Style::default().fg(Color::Yellow);
-    let label = Style::default().fg(Color::Gray);
+    let value = Style::default().fg(pal.warning);
+    let label = Style::default().fg(pal.text_muted);
     let lines = vec![
         Line::from(Span::styled(format!("{}{}", marker(on_name), i18n::msg_terminal_rename_prompt(lang)), label)),
         Line::from(Span::styled(format!("  {}", app.terminal_rename_input), value)),
         Line::from(Span::styled(format!("{}{}", marker(!on_name), i18n::msg_terminal_startup_prompt(lang)), label)),
         Line::from(Span::styled(format!("  {}", app.terminal_startup_input), value)),
-        Line::from(Span::styled(i18n::msg_terminal_form_hint(lang), Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(i18n::msg_terminal_form_hint(lang), Style::default().fg(pal.text_dim))),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 
@@ -2185,9 +2275,10 @@ fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
 }
 
 fn draw_workspace_save_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let prompt = i18n::msg_workspace_save_prompt(app.settings.lang);
     let lang = app.settings.lang;
-    draw_input_modal(f, full, i18n::t(lang, Key::ModalSaveWorkspace), &prompt, &app.workspace_save_input);
+    draw_input_modal(pal, f, full, i18n::t(lang, Key::ModalSaveWorkspace), &prompt, &app.workspace_save_input);
 }
 
 /// The manual's frame: bigger than the palette, but still a modal with the screen showing
@@ -2252,10 +2343,10 @@ fn looks_like_key(word: &str) -> bool {
 /// the outline of the diagrams — and prose stays plain, which is what keeps the colour meaning
 /// something. Styling happens here rather than in `manual.rs` so the text there stays plain
 /// strings that are easy to edit and to check the width of.
-fn manual_line(line: &'static str) -> Line<'static> {
-    let rule = Style::default().fg(Color::DarkGray);
-    let key = Style::default().fg(Color::Yellow);
-    let heading = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+fn manual_line(pal: Palette, line: &'static str) -> Line<'static> {
+    let rule = Style::default().fg(pal.text_dim);
+    let key = Style::default().fg(pal.warning);
+    let heading = Style::default().fg(pal.accent).add_modifier(Modifier::BOLD);
     let plain = Style::default();
 
     // A diagram: the rules recede so the labels drawn inside them come forward.
@@ -2302,6 +2393,7 @@ fn manual_line(line: &'static str) -> Line<'static> {
 }
 
 fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let Some(state) = app.manual.as_ref() else { return };
     let lang = app.settings.lang;
     let sections = crate::manual::sections(lang);
@@ -2310,7 +2402,7 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} · v{} ", i18n::t(lang, Key::ManualTitle), env!("CARGO_PKG_VERSION")))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -2321,9 +2413,9 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
         .enumerate()
         .map(|(i, s)| {
             let style = if i == state.section {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default().fg(pal.on_accent).bg(pal.accent)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(pal.text_muted)
             };
             let width = list.width as usize;
             let label = format!(" {} {}", i + 1, s.title);
@@ -2337,7 +2429,7 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
     // The rule between the contents and the text.
     let rule = Rect { x: inner.x + list.width + 1, y: inner.y, width: 1, height: inner.height };
     let rule_lines: Vec<Line> = (0..rule.height)
-        .map(|_| Line::from(Span::styled("│", Style::default().fg(Color::DarkGray))))
+        .map(|_| Line::from(Span::styled("│", Style::default().fg(pal.text_dim))))
         .collect();
     f.render_widget(Paragraph::new(rule_lines), rule);
 
@@ -2348,7 +2440,7 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
         .iter()
         .skip(state.scroll)
         .take(body_area.height as usize)
-        .map(|line| manual_line(line))
+        .map(|line| manual_line(pal, line))
         .collect();
     f.render_widget(Paragraph::new(visible), body_area);
 
@@ -2359,21 +2451,69 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
     let footer_lines = vec![
         Line::from(Span::styled(
             format!("{} · {}", section.title, position),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(pal.text_dim),
         )),
-        Line::from(Span::styled(i18n::t(lang, Key::ManualHint), Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(i18n::t(lang, Key::ManualHint), Style::default().fg(pal.text_dim))),
     ];
     f.render_widget(Paragraph::new(footer_lines), footer);
 }
 
 fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let title = i18n::t(lang, if app.new_entry_is_dir { Key::ModalNewFolder } else { Key::ModalNewFile });
     let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
-    draw_input_modal(f, full, title, prompt, &app.new_entry_input);
+    draw_input_modal(pal, f, full, title, prompt, &app.new_entry_input);
+}
+
+/// Where the theme list hangs: under its own button, and slid left if the list is wider than
+/// the room between the button and the right edge — the same rule the menus follow, because a
+/// drop-down that runs off the screen is a drop-down with rows nobody can read.
+pub fn theme_menu_rect(app: &App, full: Rect) -> Option<Rect> {
+    app.theme_menu?;
+    let button = menu_bar_theme_range(app, full.width);
+    if button.is_empty() {
+        return None;
+    }
+    let widest = crate::theme::Theme::ALL.iter().map(|t| columns(t.name())).max().unwrap_or(0);
+    // Two for the borders, two for the marker that says which one is on.
+    let width = (widest + 4).min(full.width);
+    let height = crate::theme::Theme::ALL.len() as u16 + 2;
+    Some(Rect {
+        x: button.start.min(full.width.saturating_sub(width)),
+        y: full.y + 1,
+        width,
+        height: height.min(full.height.saturating_sub(1)),
+    })
+}
+
+fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    let Some(selected) = app.theme_menu else { return };
+    let Some(rect) = theme_menu_rect(app, full) else { return };
+    f.render_widget(Clear, rect);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let items: Vec<ListItem> = crate::theme::Theme::ALL
+        .iter()
+        .map(|theme| {
+            // The dot marks the theme in use, not the row the cursor is on: arrowing down a list
+            // must not look like it has already changed anything.
+            let marker = if *theme == app.settings.theme { "\u{25cf} " } else { "  " };
+            ListItem::new(Line::from(format!("{marker}{}", theme.name())))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
+    let pal = app.palette();
     let Some(menu) = app.run_menu.as_ref() else { return };
     let Some(rect) = run_menu_rect(app, editor_area, full) else { return };
     f.render_widget(Clear, rect);
@@ -2382,7 +2522,7 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
         // file of this kind rather than only to the one on screen.
         .title(format!(" {} \u{00b7} .{} ", i18n::t(app.settings.lang, Key::RunMenuTitle), menu.ext))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -2393,13 +2533,13 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
             let marker = if row.active { "● " } else { "  " };
             let mut spans = vec![Span::raw(format!("{marker}{}", row.label))];
             if let Some(detail) = row.detail {
-                spans.push(Span::styled(format!("  {detail}"), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(format!("  {detail}"), Style::default().fg(pal.text_dim)));
             }
             ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let list = List::new(items).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let list = List::new(items).highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
     let mut state = ListState::default();
     state.select(Some(menu.selected));
     f.render_stateful_widget(list, inner, &mut state);
@@ -2409,6 +2549,7 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
 /// single-line one: a command line is long, and the placeholders are worth spelling out where
 /// they are being typed instead of leaving them to the manual.
 fn draw_run_command_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let Some((ext, scope)) = app.run_command_edit.as_ref() else { return };
     let lang = app.settings.lang;
     let rect = centered_rect(84, 7, full);
@@ -2422,13 +2563,13 @@ fn draw_run_command_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} .{ext} \u{2192} {where_} ", i18n::t(lang, Key::RunMenuTitle)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(pal.text_dim);
     let lines = vec![
         Line::from(i18n::msg_run_command_prompt(lang, *scope)),
-        Line::from(Span::styled(app.run_command_input.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(app.run_command_input.clone(), Style::default().fg(pal.warning))),
         Line::from(""),
         Line::from(Span::styled(i18n::msg_run_command_placeholders(lang), dim)),
     ];
@@ -2440,6 +2581,7 @@ fn draw_run_command_modal(f: &mut Frame, app: &App, full: Rect) {
 }
 
 fn draw_venv_register_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let (title, prompt) = match app.venv_register {
         Some(crate::app::VenvRegisterStep::Path) => {
@@ -2450,13 +2592,14 @@ fn draw_venv_register_modal(f: &mut Frame, app: &App, full: Rect) {
         }
         None => return,
     };
-    draw_input_modal(f, full, title, &prompt, &app.venv_register_input);
+    draw_input_modal(pal, f, full, title, &prompt, &app.venv_register_input);
 }
 
 fn draw_save_as_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let prompt = i18n::msg_save_as_prompt(app.settings.lang);
     let lang = app.settings.lang;
-    draw_input_modal(f, full, i18n::t(lang, Key::ModalSaveAs), &prompt, &app.save_as_input);
+    draw_input_modal(pal, f, full, i18n::t(lang, Key::ModalSaveAs), &prompt, &app.save_as_input);
 }
 
 /// Where the picker modal sits. Pulled out of the drawing so the mouse can land on exactly the
@@ -2518,7 +2661,7 @@ pub fn completion_rect(anchor: (u16, u16), prefix_len: u16, width: u16, rows: u1
 /// Takes the popup and the cursor cell rather than the whole `App`, so a test can render one
 /// into a buffer and read back what it drew — which is the only way to check a list of words
 /// actually reaches the screen without a terminal to look at.
-fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, u16), full: Rect) {
+fn draw_completion(pal: Palette, f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, u16), full: Rect) {
     let rows: Vec<(&crate::complete::Candidate, bool)> = popup.visible().collect();
     if rows.is_empty() {
         return;
@@ -2531,13 +2674,13 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
 
     f.render_widget(Clear, rect);
     let mut block =
-        Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray));
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.text_dim));
     // Only when the list is taller than its window: otherwise the count says what is already
     // plainly on screen, and the border is the wrong place to say anything twice.
     if popup.len() > rows.len() {
         block = block
             .title(format!(" {}/{} ", popup.selected + 1, popup.len()))
-            .title_style(Style::default().fg(Color::DarkGray));
+            .title_style(Style::default().fg(pal.text_dim));
     }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -2547,23 +2690,23 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
         .iter()
         .map(|(cand, selected)| {
             let base = if *selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default().fg(pal.on_accent).bg(pal.accent)
             } else if cand.source == crate::complete::Source::Keyword {
                 // The same blue the highlighter gives a keyword, so the list says where the
                 // candidate came from without spending a column on saying it.
-                Style::default().fg(Color::Blue)
+                Style::default().fg(pal.info)
             } else if cand.source == crate::complete::Source::Session {
                 // Green for something that exists in the interpreter right now, which is worth
                 // telling apart: it means the name is real rather than merely written somewhere.
-                Style::default().fg(Color::Green)
+                Style::default().fg(pal.success)
             } else if cand.source == crate::complete::Source::Lsp {
                 // Magenta for a name the language server offered. Same reason as the green one:
                 // it says the word is known to something that understands the file, rather than
                 // having been read off it — and after a dot, those are the only rows that mean
                 // anything at all.
-                Style::default().fg(Color::Magenta)
+                Style::default().fg(pal.special)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(pal.text_muted)
             };
             let mut label = cand.text.clone();
             if text_width == 0 {
@@ -2611,20 +2754,21 @@ fn draw_completion(f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, 
 /// nothing on screen that said so — they sat in the list looking exactly like something you
 /// had made and could throw away. Cyan is the colour the chooser already uses for the parts
 /// that belong to the app rather than to you: its border, its prompt.
-fn picker_row_style(kind: crate::picker::PickerKind, label: &str, selected: bool) -> Style {
+fn picker_row_style(pal: Palette, kind: crate::picker::PickerKind, label: &str, selected: bool) -> Style {
     if selected {
-        return Style::default().fg(Color::Black).bg(Color::Cyan);
+        return Style::default().fg(pal.on_accent).bg(pal.accent);
     }
     let built_in = matches!(kind, crate::picker::PickerKind::Workspaces)
         && crate::workspace::is_built_in(label);
     if built_in {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(pal.accent)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(pal.text_muted)
     }
 }
 
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let Some(p) = app.picker.as_ref() else { return };
     let rect = picker_rect(full);
     f.render_widget(Clear, rect);
@@ -2632,7 +2776,7 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -2643,13 +2787,13 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::styled(p.query.clone(), Style::default().fg(Color::White)),
+        Span::styled("> ", Style::default().fg(pal.accent)),
+        Span::styled(p.query.clone(), Style::default().fg(pal.bright)),
     ]));
     for (row, &item_idx) in p.filtered.iter().enumerate().skip(start).take(list_rows) {
         let item = &p.items[item_idx];
         let selected = row == p.selected;
-        let row_style = picker_row_style(p.kind, &item.label, selected);
+        let row_style = picker_row_style(pal, p.kind, &item.label, selected);
         let sc = item.shortcut.as_deref().unwrap_or("");
         let sc_w = sc.chars().count();
         // Reserve room for the right-aligned shortcut, then fit/ellipsize the label.
@@ -2669,9 +2813,9 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
         }
         if sc_w > 0 {
             let sc_style = if selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                Style::default().fg(pal.on_accent).bg(pal.accent)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(pal.text_dim)
             };
             spans.push(Span::styled(sc.to_string(), sc_style));
         }
@@ -2684,6 +2828,7 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
 }
 
 fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
     let Some(fs) = app.find.as_ref() else { return };
     let lang = app.settings.lang;
     // Two rows more than the fields need: the flag line always, and the pattern error when there
@@ -2693,7 +2838,7 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::ModalFindReplace)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -2706,8 +2851,8 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     };
     let find_marker = if fs.focus_replace { "  " } else { "▶ " };
     let repl_marker = if fs.focus_replace { "▶ " } else { "  " };
-    let label = Style::default().fg(Color::Gray);
-    let value = Style::default().fg(Color::Yellow);
+    let label = Style::default().fg(pal.text_muted);
+    let value = Style::default().fg(pal.warning);
     // A pattern that will not compile takes the place of the count: it is the answer to what
     // the query is doing, and "no matches" would be a lie about a search that never ran.
     let count = match &fs.error {
@@ -2716,7 +2861,7 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     };
     let flags = Line::from(Span::styled(
         i18n::msg_find_flags(lang, fs.case_sensitive, fs.regex),
-        Style::default().fg(if fs.case_sensitive || fs.regex { Color::Cyan } else { Color::DarkGray }),
+        Style::default().fg(if fs.case_sensitive || fs.regex { pal.accent } else { pal.text_dim }),
     ));
     // Both fields start their text in the same column, so the two rows read as one form rather
     // than as two sentences — which means the wider of the two labels sets the column, and the
@@ -2728,7 +2873,7 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
         Line::from(vec![
             Span::styled(format!("{find_marker}{find_label:<label_width$}"), label),
             Span::styled(fs.query.clone(), value),
-            Span::styled(count, Style::default().fg(Color::DarkGray)),
+            Span::styled(count, Style::default().fg(pal.text_dim)),
         ]),
         Line::from(vec![
             Span::styled(format!("{repl_marker}{replace_label:<label_width$}"), label),
@@ -2745,10 +2890,10 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
         if let Some(preview) = fs.preview(&matched, inner.width.saturating_sub(24) as usize) {
             lines.push(Line::from(vec![
                 Span::styled("  ", label),
-                Span::styled(preview, Style::default().fg(Color::Green)),
+                Span::styled(preview, Style::default().fg(pal.success)),
                 Span::styled(
                     i18n::msg_replace_all_count(lang, fs.matches.len()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(pal.text_dim),
                 ),
             ]));
         }
@@ -2756,10 +2901,10 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     if let Some(detail) = &fs.error {
         lines.push(Line::from(Span::styled(
             i18n::msg_find_pattern_error(lang, detail),
-            Style::default().fg(Color::Red),
+            Style::default().fg(pal.danger),
         )));
     }
-    lines.push(Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(pal.text_dim))));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
     // Cursor sits at the end of whichever field is focused.
@@ -2776,14 +2921,14 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     f.set_cursor_position((cursor_x, inner.y + row));
 }
 
-fn git_status_color(status: crate::git_status::FileStatus) -> Color {
+fn git_status_color(pal: Palette, status: crate::git_status::FileStatus) -> Color {
     use crate::git_status::FileStatus;
     match status {
-        FileStatus::Modified => Color::Yellow,
-        FileStatus::Added => Color::Green,
-        FileStatus::Deleted => Color::Red,
-        FileStatus::Renamed => Color::Cyan,
-        FileStatus::Untracked => Color::Gray,
+        FileStatus::Modified => pal.warning,
+        FileStatus::Added => pal.success,
+        FileStatus::Deleted => pal.danger,
+        FileStatus::Renamed => pal.accent,
+        FileStatus::Untracked => pal.text_muted,
     }
 }
 
@@ -2853,11 +2998,12 @@ fn tree_row_name(indent: &str, name: &str, inner_width: usize) -> (String, usize
 }
 
 fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
+    let pal = app.palette();
     let focused = app.focus == Focus::FileTree;
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::PanelFile)))
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
 
     let paths = app.file_tree.visible_paths();
     let inner_width = inner_rect(area).width as usize;
@@ -2872,7 +3018,7 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
             }
             let indent = "  ".repeat(entry.depth);
             let (icon, icon_color) = if entry.is_dir {
-                (if entry.expanded { "\u{f07c}" } else { "\u{f07b}" }, Color::Rgb(120, 170, 255))
+                (if entry.expanded { "\u{f07c}" } else { "\u{f07b}" }, pal.folder)
             } else {
                 file_icon(&entry.name)
             };
@@ -2887,7 +3033,7 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(Span::raw(" ".repeat(pad)));
             }
             spans.push(match dot {
-                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(*status))),
+                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status))),
                 None => Span::raw(" "),
             });
             ListItem::new(Line::from(spans))
@@ -2993,16 +3139,16 @@ fn restyle_range(
     result
 }
 
-fn highlight_selection(spans: Vec<(Style, String)>, sel_from: usize, sel_to: usize) -> Vec<(Style, String)> {
-    restyle_range(spans, sel_from, sel_to, |style| style.bg(Color::Rgb(60, 90, 130)))
+fn highlight_selection(pal: Palette, spans: Vec<(Style, String)>, sel_from: usize, sel_to: usize) -> Vec<(Style, String)> {
+    restyle_range(spans, sel_from, sel_to, |style| style.bg(pal.selection))
 }
 
-pub fn severity_colour(severity: crate::lsp::Severity) -> Color {
+pub fn severity_colour(pal: Palette, severity: crate::lsp::Severity) -> Color {
     match severity {
-        crate::lsp::Severity::Error => Color::Red,
-        crate::lsp::Severity::Warning => Color::Yellow,
-        crate::lsp::Severity::Info => Color::Cyan,
-        crate::lsp::Severity::Hint => Color::DarkGray,
+        crate::lsp::Severity::Error => pal.danger,
+        crate::lsp::Severity::Warning => pal.warning,
+        crate::lsp::Severity::Info => pal.accent,
+        crate::lsp::Severity::Hint => pal.text_dim,
     }
 }
 
@@ -3012,6 +3158,7 @@ pub fn severity_colour(severity: crate::lsp::Severity) -> Color {
 /// that painted over it would make you lose track of what you had selected while reading about
 /// what is wrong with it. Applied before the selection for the same reason.
 fn underline_marks(
+    pal: Palette,
     spans: Vec<(Style, String)>,
     marks: &[&crate::lsp::Mark],
 ) -> Vec<(Style, String)> {
@@ -3021,7 +3168,7 @@ fn underline_marks(
     let mut ordered: Vec<&&crate::lsp::Mark> = marks.iter().collect();
     ordered.sort_by_key(|m| m.severity);
     for mark in ordered {
-        let colour = severity_colour(mark.severity);
+        let colour = severity_colour(pal, mark.severity);
         out = restyle_range(out, mark.start, mark.end, move |style| {
             style.fg(colour).add_modifier(Modifier::UNDERLINED)
         });
@@ -3030,12 +3177,13 @@ fn underline_marks(
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pane: EditorPane) {
+    let pal = app.palette();
     let lang = app.settings.lang;
     let mut spans = Vec::new();
     let strip_width = tab_strip_width(app, area.width);
     let tabs = app.pane_tabs(pane);
     let strip = tab_strip_layout(&tab_widths(app, pane), strip_width, app.tab_offsets[pane.index()]);
-    let arrow_style = Style::default().fg(Color::Gray).bg(Color::DarkGray);
+    let arrow_style = Style::default().fg(pal.text_muted).bg(pal.tab_inactive);
     if strip.left_arrow.is_some() {
         spans.push(Span::styled(SCROLL_LEFT_GLYPH, arrow_style));
     }
@@ -3056,11 +3204,11 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
             fit(&format!(" {}{} ", editor.title(lang), dirty), label_width)
         );
         used = layout.full.1;
-        let style = if position == active_position {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+        let style = chrome(pal, if position == active_position {
+            Style::default().fg(pal.on_accent).bg(pal.accent)
         } else {
-            Style::default().fg(Color::Gray).bg(Color::DarkGray)
-        };
+            Style::default().fg(pal.text_muted).bg(pal.tab_inactive)
+        });
         spans.push(Span::styled(prefix, style));
         spans.push(Span::styled("\u{2715}", style));
         spans.push(Span::styled(" ", style));
@@ -3082,11 +3230,11 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
     }
     if target_range.is_some() {
         let label = run_target_button_label(app, app.pane_editor_index(pane));
-        spans.push(Span::styled(label, Style::default().fg(Color::Gray).bg(Color::DarkGray)));
+        spans.push(Span::styled(label, Style::default().fg(pal.text_muted).bg(pal.tab_inactive)));
     }
     if run_range.is_some() {
         let label = run_button_label(app, app.pane_editor_index(pane));
-        spans.push(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green)));
+        spans.push(Span::styled(label, Style::default().fg(pal.on_accent).bg(pal.success)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -3279,11 +3427,12 @@ fn preview_image_rect(area: Rect) -> Rect {
 /// The navigation bar: the controls, then what they are acting on — page, and zoom — pushed to
 /// the right so the numbers stay in one place while the buttons stay in another.
 fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
+    let pal = app.palette();
     let Some(row) = nav_bar_rect(area) else { return };
     let Some(preview) = app.editors.get(idx).and_then(|e| e.preview.as_ref()) else { return };
     let lang = app.settings.lang;
     f.render_widget(
-        Paragraph::new(" ".repeat(row.width as usize)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+        Paragraph::new(" ".repeat(row.width as usize)).style(Style::default().bg(pal.surface_dim)),
         row,
     );
 
@@ -3295,7 +3444,7 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     for (control, rect) in nav_bar_layout(app, idx, area) {
         // The key that does the same thing is written under the label, so the bar teaches the
         // keyboard rather than competing with it.
-        let style = Style::default().fg(Color::Gray).bg(Color::Rgb(45, 45, 45));
+        let style = Style::default().fg(pal.text_muted).bg(pal.surface);
         let style = match control {
             NavControl::FigLeft
             | NavControl::FigRight
@@ -3305,23 +3454,23 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
             | NavControl::FigExport
                 if !live =>
             {
-                style.fg(Color::DarkGray)
+                style.fg(pal.text_dim)
             }
             _ => style,
         };
         let style = match control {
             NavControl::FitWidth if preview.fit == crate::preview::Fit::Width => {
-                style.fg(Color::Black).bg(Color::Cyan)
+                style.fg(pal.on_accent).bg(pal.accent)
             }
             NavControl::FitPage if preview.fit == crate::preview::Fit::Page => {
-                style.fg(Color::Black).bg(Color::Cyan)
+                style.fg(pal.on_accent).bg(pal.accent)
             }
-            NavControl::Invert if preview.inverted => style.fg(Color::Black).bg(Color::Cyan),
-            NavControl::TextMode if preview.text_only => style.fg(Color::Black).bg(Color::Cyan),
+            NavControl::Invert if preview.inverted => style.fg(pal.on_accent).bg(pal.accent),
+            NavControl::TextMode if preview.text_only => style.fg(pal.on_accent).bg(pal.accent),
             _ => style,
         };
         let (name, key) = nav_label(control, preview.kind());
-        let dim = Style::default().fg(Color::DarkGray).bg(style.bg.unwrap_or(Color::Reset));
+        let dim = Style::default().fg(pal.text_dim).bg(style.bg.unwrap_or(Color::Reset));
         // Whatever the label came to, the button is at least `NAV_MIN_WIDTH` wide — so the
         // padding has to carry the button's own background, or a wider target would read as a
         // narrow button with a hole beside it.
@@ -3384,7 +3533,7 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     }
     let width = text.chars().count() as u16;
     let rect = Rect { x: row.x + row.width - width, width, ..row };
-    f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))), rect);
+    f.render_widget(Paragraph::new(Span::styled(text, Style::default().fg(pal.text_dim))), rect);
 }
 
 // ---- The markdown formatting bar ----------------------------------------------------------
@@ -3532,17 +3681,17 @@ fn md_toolbar_shown(wanted: bool, ext: &str, editable: bool, area: Rect) -> bool
 
 /// The formatting bar, drawn the way the preview's navigation bar is: a label, and the syntax it
 /// writes in a dimmer colour beside it.
-fn draw_md_toolbar(f: &mut Frame, area: Rect) {
+fn draw_md_toolbar(pal: Palette, f: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
     f.render_widget(
-        Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+        Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(pal.surface_dim)),
         area,
     );
     for (tool, rect) in md_toolbar_layout(area) {
-        let style = Style::default().fg(Color::Gray).bg(Color::Rgb(45, 45, 45));
-        let dim = Style::default().fg(Color::DarkGray).bg(Color::Rgb(45, 45, 45));
+        let style = Style::default().fg(pal.text_muted).bg(pal.surface);
+        let dim = Style::default().fg(pal.text_dim).bg(pal.surface);
         let (name, hint) = md_tool_label(tool);
         // The padding carries the button's own background, or a target wider than its label
         // would read as a narrow button with a hole beside it.
@@ -3589,11 +3738,12 @@ fn draw_preview_pane(
     content_area: Rect,
     focused: bool,
 ) {
+    let pal = app.palette();
     use crate::preview::State as Preview;
     let lang = app.settings.lang;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
     f.render_widget(block, content_area);
     let inner = preview_image_rect(content_area);
     if inner.width == 0 || inner.height == 0 {
@@ -3607,7 +3757,7 @@ fn draw_preview_pane(
         let engaged = app.scrollbar_engaged(id, content_area, axis);
         if let Some((total, position, viewport)) = app.preview_scroll_view(idx, axis) {
             if engaged || app.editors[idx].scrolled_within(SCROLLBAR_LINGER) {
-                draw_scrollbar(f, scrollbar_area(app, idx, content_area), axis, total, position, viewport, engaged);
+                draw_scrollbar(pal, f, scrollbar_area(app, idx, content_area), axis, total, position, viewport, engaged);
             }
         }
     }
@@ -3633,10 +3783,10 @@ fn draw_preview_pane(
         preview.area_rows = inner.height;
     }
     match app.editors[idx].preview.as_mut().map(|p| &mut p.state) {
-        Some(Preview::Loading) => centred(f, i18n::msg_preview_loading(lang), Color::DarkGray),
+        Some(Preview::Loading) => centred(f, i18n::msg_preview_loading(lang), pal.text_dim),
         Some(Preview::Failed(reason)) => {
             let text = i18n::msg_preview_failed(lang, &reason.clone());
-            centred(f, text, Color::Red);
+            centred(f, text, pal.danger);
         }
         Some(Preview::Ready(protocol)) => {
             // The filter is chosen per kind, because the two want opposite things.
@@ -3693,15 +3843,16 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
 /// The state you get by closing your last tab. It takes the whole frame, tab strip included:
 /// a strip with no tabs on it is a bar of nothing, and the frame is already saying that.
 fn draw_no_file_open(f: &mut Frame, app: &App, area: Rect, focused: bool) {
+    let pal = app.palette();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let lines: Vec<Line> = i18n::msg_no_file_open(app.settings.lang)
         .iter()
         .map(|text| {
-            Line::from(Span::styled(*text, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(*text, Style::default().fg(pal.text_dim)))
                 .alignment(ratatui::layout::Alignment::Center)
         })
         .collect();
@@ -3715,6 +3866,7 @@ fn draw_no_file_open(f: &mut Frame, app: &App, area: Rect, focused: bool) {
 }
 
 fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, pane: EditorPane) {
+    let pal = app.palette();
     // Asked of the strip rather than of `idx`, which is a buffer number and stays 0 whether or
     // not there is a buffer 0 to be had.
     if app.pane_tabs(pane).is_empty() {
@@ -3723,7 +3875,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     }
     let (tab_bar_area, toolbar_area, content_area) = pane_areas(app, idx, area);
     if let Some(toolbar_area) = toolbar_area {
-        draw_md_toolbar(f, toolbar_area);
+        draw_md_toolbar(pal, f, toolbar_area);
     }
     if tab_bar_area.height > 0 {
         // Only acts when the active tab changed; a manual scroll survives untouched.
@@ -3736,7 +3888,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     // No title here: the open tab right above already shows the filename and dirty marker.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
 
     // A picture takes the whole frame and none of the text machinery: no gutter, no wrapping,
     // no syntax, and no scrollbars, because there is nothing to scroll through.
@@ -3808,24 +3960,24 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             // breakpoint having gone away.
             let at_break = breaks.contains(&(line_idx + 1));
             let num_style = if at_break {
-                Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default().fg(pal.on_accent).bg(pal.danger).add_modifier(Modifier::BOLD)
             } else if stopped == Some(line_idx) {
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(pal.on_accent).bg(pal.warning).add_modifier(Modifier::BOLD)
             } else {
                 match (worst, is_current) {
                 (Some(severity), current) => {
-                    let style = Style::default().fg(severity_colour(severity));
+                    let style = Style::default().fg(severity_colour(pal, severity));
                     if current { style.add_modifier(Modifier::BOLD) } else { style }
                 }
-                (None, true) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                (None, false) => Style::default().fg(Color::DarkGray),
+                (None, true) => Style::default().fg(pal.warning).add_modifier(Modifier::BOLD),
+                (None, false) => Style::default().fg(pal.text_dim),
                 }
             };
             let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
             spans.push(Span::styled(num_text, num_style));
         }
         if app.editors[idx].folds.iter().any(|&(s, _)| s == line_idx) {
-            spans.push(Span::styled("▸ ", Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled("▸ ", Style::default().fg(pal.accent)));
         }
 
         let raw_spans: Vec<(Style, String)> = if app.settings.syntax_highlighting {
@@ -3842,17 +3994,17 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         } else {
             raw_spans
         };
-        let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(raw_spans, &on_line) };
+        let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(pal, raw_spans, &on_line) };
         // The whole stopped line, marked: where the program *is* is worth more than a colour on
         // one word, and it is what you look for when you glance back at the editor.
         let raw_spans = match stopped == Some(line_idx) {
-            true => restyle_range(raw_spans, 0, usize::MAX, |style| style.bg(Color::Rgb(70, 60, 0))),
+            true => restyle_range(raw_spans, 0, usize::MAX, |style| style.bg(pal.current_line)),
             false => raw_spans,
         };
         // The editor decides the shape — a run of text or a rectangle — so the highlight always
         // matches what a copy would take.
         let raw_spans = match app.editors[idx].selected_columns(line_idx) {
-            Some((from, to)) => highlight_selection(raw_spans, from, to),
+            Some((from, to)) => highlight_selection(pal, raw_spans, from, to),
             None => raw_spans,
         };
 
@@ -3879,7 +4031,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
 
     // After the paragraph, so the bars sit over the frame it drew rather than under it.
     app.editors[idx].observe_scroll();
-    draw_editor_scrollbars(f, app, idx, pane, content_area, viewport_height, text_width);
+    draw_editor_scrollbars(pal, f, app, idx, pane, content_area, viewport_height, text_width);
 
     if focused {
         let cursor_col = app.editors[idx].cursor_col;
@@ -3981,7 +4133,9 @@ pub fn editor_scroll_metrics(
 /// and nothing reflows when they appear. They fade out once the view settles — a hint about
 /// where you are while you move, not permanent furniture — but come back the moment the pointer
 /// is on them, which is when they have to be aimable.
+#[allow(clippy::too_many_arguments)]
 fn draw_editor_scrollbars(
+    pal: Palette,
     f: &mut Frame,
     app: &App,
     idx: usize,
@@ -4000,7 +4154,7 @@ fn draw_editor_scrollbars(
         else {
             continue;
         };
-        draw_scrollbar(f, scrollbar_area(app, idx, area), axis, total, position, viewport, engaged);
+        draw_scrollbar(pal, f, scrollbar_area(app, idx, area), axis, total, position, viewport, engaged);
     }
 }
 
@@ -4162,7 +4316,7 @@ pub fn scroll_position_from_track(offset: u16, len: u16, total: usize, viewport:
 /// `lit` marks the bar as being pointed at or dragged, which is the moment its click targets
 /// have to be legible rather than merely hinted at.
 #[allow(clippy::too_many_arguments)]
-fn draw_scrollbar(
+fn draw_scrollbar(pal: Palette, 
     f: &mut Frame,
     box_: Rect,
     axis: Axis,
@@ -4185,7 +4339,7 @@ fn draw_scrollbar(
             Axis::Vertical => ("\u{25b4}", "\u{25be}"),
             Axis::Horizontal => ("\u{25c2}", "\u{25b8}"),
         };
-        let arrow_style = Style::default().fg(Color::Gray);
+        let arrow_style = Style::default().fg(pal.text_muted);
         if let Some(rect) = layout.back {
             f.render_widget(Paragraph::new(Span::styled(back_glyph, arrow_style)), rect);
         }
@@ -4213,9 +4367,9 @@ fn draw_scrollbar(
         // does not jump when the arrows appear.
         .begin_symbol(None)
         .end_symbol(None)
-        .thumb_style(Style::default().fg(Color::Cyan));
+        .thumb_style(Style::default().fg(pal.accent));
     bar = if lit {
-        bar.track_symbol(Some(track_glyph)).track_style(Style::default().fg(Color::DarkGray))
+        bar.track_symbol(Some(track_glyph)).track_style(Style::default().fg(pal.text_dim))
     } else {
         // Nothing but the thumb: a groove painted over the text would blank a column of it for
         // no gain while nobody is aiming at the bar.
@@ -4228,6 +4382,7 @@ fn draw_scrollbar(
 /// while the history is being moved through — except when the view is parked back in it, which
 /// is the one moment the position is worth stating rather than hinting at.
 fn draw_terminal_scrollbar(
+    pal: Palette,
     f: &mut Frame,
     terminal: &crate::terminal_panel::TerminalPanel,
     area: Rect,
@@ -4239,7 +4394,7 @@ fn draw_terminal_scrollbar(
     if terminal.scrollback_offset() == 0 && !engaged && !terminal.scrolled_within(SCROLLBAR_LINGER) {
         return;
     }
-    draw_scrollbar(f, inner_rect(area), Axis::Vertical, total, position, viewport, engaged);
+    draw_scrollbar(pal, f, inner_rect(area), Axis::Vertical, total, position, viewport, engaged);
 }
 
 /// What a terminal's scrollbar describes: the held history followed by the live screen, with
@@ -4322,16 +4477,16 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
 /// never reads as an editor tab (those go cyan). Each tab carries a `✕` to close it.
-fn draw_terminal_tab_strip(f: &mut Frame, area: Rect, labels: &[String], active: usize) {
+fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[String], active: usize) {
     let tabs = terminal_tab_ranges(area, labels);
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let budget = (tab.full.1 - tab.full.0) as usize;
         let chip: String = format!(" {} ✕ ", labels[i]).chars().take(budget).collect();
         let style = if i == active {
-            Style::default().fg(Color::Black).bg(Color::Green)
+            Style::default().fg(pal.on_accent).bg(pal.success)
         } else {
-            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+            Style::default().fg(pal.text_muted).bg(pal.tab_inactive)
         };
         spans.push(Span::styled(chip, style));
     }
@@ -4348,6 +4503,7 @@ fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
 }
 
 fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, focused: bool) {
+    let pal = app.palette();
     let (labels, active_tab) = {
         let Some(window) = app.terminals.get(index) else { return };
         (terminal_tab_labels(window, index, app.settings.lang), window.active)
@@ -4357,7 +4513,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
     // With a single tab the top border carries the (possibly renamed) terminal's name; with
     // several, the tabs ride the border instead (drawn below) and stand in for the title.
     if tab_count <= 1 {
@@ -4368,7 +4524,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     // `terminal_close_cell`, kept in step with the right-aligned title here.
     if window_close {
         block = block.title_top(
-            Line::from(Span::styled("\u{2715}", Style::default().fg(Color::Red))).right_aligned(),
+            Line::from(Span::styled("\u{2715}", Style::default().fg(pal.danger))).right_aligned(),
         );
     }
     // The tab strip rides the top border, so the content is the whole interior.
@@ -4378,7 +4534,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     f.render_widget(block, area);
     if tab_count > 1 {
         let strip = terminal_tab_strip_rect(area, window_close);
-        draw_terminal_tab_strip(f, strip, &labels, active_tab);
+        draw_terminal_tab_strip(pal, f, strip, &labels, active_tab);
     }
 
     let rows = content.height;
@@ -4404,7 +4560,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
                 height: 1,
             };
             f.render_widget(
-                Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                Paragraph::new(Span::styled(hint, Style::default().fg(pal.text_dim))),
                 rect,
             );
         }
@@ -4413,7 +4569,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     // Read before the parser is locked below: the lock is a plain mutex, so asking the panel
     // anything about its scrollback while holding it would deadlock the whole app.
-    draw_terminal_scrollbar(f, terminal, area, engaged);
+    draw_terminal_scrollbar(pal, f, terminal, area, engaged);
 
     let selection = terminal.selection;
     let parser = crate::terminal_panel::lock_poisoned(&terminal.parser);
@@ -4537,15 +4693,16 @@ fn diagnostic_under_cursor(app: &App) -> Option<(String, crate::lsp::Severity)> 
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.palette();
     let msg = if app.resize_mode {
         i18n::t(app.settings.lang, Key::ResizeModeHint).to_string()
     } else {
         app.status_message.clone()
     };
     let style = if app.resize_mode {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+        Style::default().fg(pal.on_accent).bg(pal.warning)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(pal.text_muted)
     };
     let paragraph = Paragraph::new(Line::from(Span::raw(msg.clone()))).style(style);
     f.render_widget(paragraph, area);
@@ -4563,8 +4720,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // something wrong with it, the type is very likely the reason. So the hover fills the same
     // spot only when the line is clean, and in a colour that says it is not a complaint.
     let said = diagnostic_under_cursor(app)
-        .map(|(text, severity)| (text, severity_colour(severity)))
-        .or_else(|| app.what_it_is().map(|text| (text.to_string(), Color::DarkGray)))
+        .map(|(text, severity)| (text, severity_colour(pal, severity)))
+        .or_else(|| app.what_it_is().map(|text| (text.to_string(), pal.text_dim)))
         .filter(|_| !app.resize_mode && room >= 8)
         .map(|(text, colour)| match text.chars().count() > room {
             true => (text.chars().take(room - 1).collect::<String>() + "…", colour),
@@ -4594,7 +4751,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         let width = text.chars().count() as u16;
         let spot = Rect { x: area.right() - width, y: area.y, width, height: 1 };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(text, colour_of(Color::DarkGray)))),
+            Paragraph::new(Line::from(Span::styled(text, colour_of(pal.text_dim)))),
             spot,
         );
     }
@@ -4672,7 +4829,8 @@ mod tests {
     #[test]
     fn the_built_in_workspaces_are_marked_as_the_apps_own() {
         use crate::picker::PickerKind;
-        let colour = |kind, name| picker_row_style(kind, name, false).fg;
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let colour = |kind, name| picker_row_style(pal, kind, name, false).fg;
         let mine = colour(PickerKind::Workspaces, "my layout");
         assert_ne!(colour(PickerKind::Workspaces, "octave"), mine);
         assert_ne!(colour(PickerKind::Workspaces, "pylab"), mine);
@@ -4682,8 +4840,8 @@ mod tests {
         assert_eq!(colour(PickerKind::Files, "octave"), mine, "only the workspace list marks them");
         // Selected is selected, whatever it is: one highlight, not two competing ones.
         assert_eq!(
-            picker_row_style(PickerKind::Workspaces, "octave", true),
-            picker_row_style(PickerKind::Workspaces, "my layout", true)
+            picker_row_style(pal, PickerKind::Workspaces, "octave", true),
+            picker_row_style(pal, PickerKind::Workspaces, "my layout", true)
         );
     }
 
@@ -4764,6 +4922,63 @@ mod tests {
     /// The About box is drawn at whatever size the terminal has room for, so the sizes have to
     /// agree with the thresholds that pick them: one column too many and the box is clipped by
     /// `centered_rect`, which takes the close hint off the bottom of it.
+    /// The two buttons at the right-hand end share a row with the menu titles and with each
+    /// other. Overlapping either way is the same bug twice: a button drawn over a title is a
+    /// button nobody can see and a title nobody can click.
+    /// The initial is split into a span of its own only for the themes that colour it. For the
+    /// rest the row stays one span, because three spans that are all the same colour is three
+    /// times the work to draw the same line.
+    #[test]
+    fn only_a_theme_with_an_accelerator_splits_the_initial_off() {
+        let plain = accelerated_line(crate::theme::Theme::CleeCode.palette(), "File ");
+        assert_eq!(plain.spans.len(), 1, "the default theme should draw one span");
+        assert_eq!(plain.to_string(), " File ");
+
+        let turbo = accelerated_line(crate::theme::Theme::Turbo.palette(), "File ");
+        assert_eq!(turbo.spans.len(), 3, "the initial should have a span of its own");
+        assert_eq!(turbo.spans[1].content, "F");
+        assert_eq!(turbo.spans[1].style.fg, crate::theme::Theme::Turbo.palette().accelerator);
+        // The row still reads the same: colouring a letter must not move it.
+        assert_eq!(turbo.to_string(), " File ");
+    }
+
+    #[test]
+    fn the_two_bar_buttons_never_overlap_or_land_on_a_title() {
+        for width in 0..=200u16 {
+            for titles in 0..=width {
+                for badge in [0u16, 12] {
+                    let background = button_range(width, titles, badge);
+                    let themes = theme_range(background.start, titles);
+                    if themes.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        themes.end <= background.start,
+                        "the buttons overlap at {width}x{titles}: {themes:?} into {background:?}"
+                    );
+                    assert!(
+                        themes.start >= titles,
+                        "the theme button sits on a title at {width}x{titles}: {themes:?}"
+                    );
+                    assert!(!background.is_empty(), "a theme button with no background button");
+                }
+            }
+        }
+    }
+
+    /// The background button is the one worth keeping longest: it is the way back from a screen
+    /// that cannot be read, and the themes are reachable from the list either way. So when the
+    /// bar runs out of room the theme button goes first.
+    #[test]
+    fn the_theme_button_gives_up_its_room_first() {
+        // A bar with exactly one button's worth of space to the right of the titles.
+        let width = 40;
+        let titles = width - columns(BACKGROUND_BUTTON[0]);
+        let background = button_range(width, titles, 0);
+        assert!(!background.is_empty(), "the background button should still fit");
+        assert!(theme_range(background.start, titles).is_empty(), "the theme button should not");
+    }
+
     #[test]
     fn the_about_box_fits_the_terminal_it_is_drawn_in() {
         for width in 20..=200u16 {
@@ -4828,6 +5043,7 @@ mod tests {
 
     #[test]
     fn the_completion_list_draws_the_words_it_was_given() {
+        let pal = crate::theme::Theme::CleeCode.palette();
         use crate::complete::{Candidate, Popup, Source};
         let cands = vec![
             Candidate { text: "config_path".into(), source: Source::Buffer, distance: 0, freq: 1 },
@@ -4836,7 +5052,7 @@ mod tests {
         let popup = Popup::open(0, 0, "con".into(), cands).unwrap();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
-        terminal.draw(|f| draw_completion(f, &popup, (10, 2), f.area())).unwrap();
+        terminal.draw(|f| draw_completion(pal, f, &popup, (10, 2), f.area())).unwrap();
 
         let buffer = terminal.backend().buffer();
         let screen: Vec<String> = (0..12)
@@ -4932,17 +5148,18 @@ mod tests {
     /// terminal through it gets filled in, and whatever a widget coloured is left alone.
     #[test]
     fn the_background_is_painted_only_where_nothing_else_claimed_it() {
+        let pal = crate::theme::Theme::CleeCode.palette();
         let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 3, 1));
         buffer[(0, 0)].set_bg(Color::Reset); // as a `Clear`ed modal leaves it
         buffer[(1, 0)].set_bg(Color::Cyan); // a selected menu title
         buffer[(2, 0)].set_bg(Color::Rgb(30, 30, 30)); // the status line
-        paint_background(&mut buffer);
-        assert_eq!(buffer[(0, 0)].bg, OPAQUE_BACKGROUND);
+        paint_background(&mut buffer, pal);
+        assert_eq!(buffer[(0, 0)].bg, pal.background);
         assert_eq!(buffer[(1, 0)].bg, Color::Cyan);
         assert_eq!(buffer[(2, 0)].bg, Color::Rgb(30, 30, 30));
         // And the colour it fills with must be one a translucent terminal cannot see through:
         // asking for the default background again would paint nothing at all.
-        assert!(matches!(OPAQUE_BACKGROUND, Color::Rgb(..)));
+        assert!(matches!(pal.background, Color::Rgb(..)));
     }
 
     #[test]
