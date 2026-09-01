@@ -153,7 +153,8 @@ teaches you not to need it, and View hides it once it has.
 
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named
-workspace and open it with `clee -w NAME`.
+workspace and open it with `clee -w NAME`. Double-click a row of output to go where it points:
+a `path:line` opens in the editor at that line, a `https://…` opens in the browser.
 
 **Previews.** A `.png` opens as pixels, a PDF as pages that re-render when you typeset them, a
 Markdown file as a document beside its source. When a file wants a real application instead,
