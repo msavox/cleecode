@@ -191,6 +191,18 @@ the theme around it rather than glowing in the middle of it.*
 *Stopped inside `calcola`: the line is marked, and the panel shows `a` and `n` — the function's
 own locals, not the session's variables.*
 
+**Nine themes, five dark and four light.** The button beside the background toggle on the menu
+bar opens the list, or *View → Theme…* if your hands are on the keyboard. The choice is written
+out at once, because the reason to reach for it is usually that the screen has become hard to
+read, and having to make it again next session would be its own small misery.
+
+![The nine themes: CleeCode, Turbo, Solarized Dark, Eighties, Mocha, CleeCode Light, Solarized Light, Ocean Light and GitHub](docs/screenshots/themes.png)
+
+*Turbo is the blue screen, for anyone who learned to program on one: a light bar over a dark
+field, and the initial of each menu entry in red. The four light ones paint their own surface —
+they have to, or their dark text lands on whatever your terminal's background is. The dark ones
+do not have to, so on a translucent terminal they stay translucent unless you ask otherwise.*
+
 **It does not close on you.** CleeCode hosts long-running shells, so an internal failure is
 contained and reported in the status line rather than ending the process. A broken terminal
 costs you that terminal, at most.

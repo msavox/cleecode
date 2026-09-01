@@ -1986,6 +1986,7 @@ byte. Un'impostazione a tre valori: scuro, chiaro, auto. L'auto legge il termina
 > dell'applicazione: la 0.14 porta UI nuova — le righe cambiate accese nel gutter, il modo segui —
 > e scriverla contro una palette che esiste costa meno che scriverla coi colori cablati e
 > riconvertirla il mese dopo. Chi arriva secondo paga il doppio, quindi la palette arriva prima.
+> I numeri seguono l'ordine: i temi sono la 0.14, gli agenti la 0.15.
 
 Il lavoro si spezza in due pezzi rilasciabili separatamente. **Il primo è meccanico e senza
 rischi**: la struct della palette, la scelta scuro/chiaro a mano, il tema syntect di conseguenza.
