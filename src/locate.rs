@@ -169,6 +169,24 @@ fn shallow_find(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     None
 }
 
+/// The byte offset of the first `http://` or `https://` in `text`, or `None`.
+///
+/// Parsed by hand like the rest of this file — the crate list has no regex engine and a
+/// double-click has no business paying for one. Only http(s) is a URL worth opening: anything
+/// else a row prints — `www.`, `ftp://`, a bare hostname — is more likely a word being typed
+/// than a link the user is pointing at.
+pub fn find_url_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 7 <= bytes.len() {
+        if bytes[i..].starts_with(b"http://") || bytes[i..].starts_with(b"https://") {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +324,19 @@ mod tests {
         let missing = find("src/nothing.rs:1:1").unwrap();
         assert_eq!(resolve(&missing, &root), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A URL is handed to the browser, not read as a file location. Only http(s) counts — a
+    /// bare `www.` or a typed `ftp://` is more likely a word being written than a link to open.
+    #[test]
+    fn a_url_is_found_and_a_word_is_not() {
+        assert_eq!(find_url_start("see https://example.com/x now"), Some(4));
+        assert_eq!(find_url_start("https://example.com"), Some(0));
+        assert_eq!(find_url_start("http://example.com"), Some(0));
+        assert_eq!(find_url_start("prefix https://a.io/path?q=1 tail"), Some(7));
+        assert_eq!(find_url_start("visit www.example.com"), None);
+        assert_eq!(find_url_start("ftp://example.com"), None);
+        assert_eq!(find_url_start("no url here"), None);
+        assert_eq!(find_url_start(""), None);
     }
 }

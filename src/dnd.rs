@@ -269,6 +269,7 @@ mod tests {
             return;
         }
         assert_eq!(open_with_the_desktop(std::path::Path::new("/etc/hosts")), Err("over ssh".into()));
+        assert_eq!(open_url("https://example.com"), Err("over ssh".into()));
     }
     use super::*;
 
@@ -422,6 +423,25 @@ pub fn open_with_the_desktop(path: &std::path::Path) -> Result<(), String> {
         .arg(path)
         // Detached from CleeCode's own streams: an opener that printed to stdout would print
         // over the editor, and one that waited on stdin would wait for ever.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Hands a URL to the desktop's browser.
+///
+/// Same guard as `open_with_the_desktop`: over ssh there is no desktop here to open it on.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if running_over_ssh() {
+        return Err("over ssh".to_string());
+    }
+    let (program, before) = desktop_opener();
+    std::process::Command::new(program)
+        .args(before)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
