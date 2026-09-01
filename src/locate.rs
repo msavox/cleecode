@@ -359,4 +359,15 @@ mod tests {
             }
         }
     }
+
+    /// A URL with a port reads as a `path:line` — `http://localhost:3000` parses as the file
+    /// "http://localhost" at line 3000 — because the generic parser does not know about URLs.
+    /// The caller must notice the http(s) path and hand it to the browser instead of the tree.
+    #[test]
+    fn a_url_with_a_port_reads_as_a_path_the_caller_can_recognise() {
+        let found = find("http://localhost:3000").unwrap();
+        assert_eq!(found.path, "http://localhost");
+        assert_eq!(found.line, 3000);
+        assert!(found.path.starts_with("http://"));
+    }
 }
