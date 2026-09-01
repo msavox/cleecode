@@ -180,7 +180,9 @@ pub fn find_url_start(text: &str) -> Option<usize> {
     let mut i = 0;
     while i + 7 <= bytes.len() {
         if bytes[i..].starts_with(b"http://") || bytes[i..].starts_with(b"https://") {
-            return Some(i);
+            // The match is ASCII, so `i` is always on a UTF-8 boundary, but say so rather
+            // than let a future edit to the match slip a panic into the caller's slice.
+            return Some(i).filter(|&i| text.is_char_boundary(i));
         }
         i += 1;
     }
@@ -338,5 +340,23 @@ mod tests {
         assert_eq!(find_url_start("ftp://example.com"), None);
         assert_eq!(find_url_start("no url here"), None);
         assert_eq!(find_url_start(""), None);
+    }
+
+    /// The offset a caller slices with has to be on a UTF-8 boundary, or the slice panics.
+    /// The match is ASCII so this holds today; the test pins it so a future edit cannot
+    /// slip a non-ASCII match in and crash every double-click that lands on a URL.
+    #[test]
+    fn a_found_url_start_is_always_on_a_utf8_boundary() {
+        for line in [
+            "日本語 https://example.com",
+            "café https://example.com",
+            "🚀 https://a.io/x",
+            "https://example.com",
+            "\u{1f422} https://x.io",
+        ] {
+            if let Some(start) = find_url_start(line) {
+                assert!(line.is_char_boundary(start), "{line:?} gave {start}");
+            }
+        }
     }
 }
