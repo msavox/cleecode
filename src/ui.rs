@@ -695,10 +695,112 @@ pub fn run_menu_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
     })
 }
 
+/// The drawing the About box carries beside its text, in the two sizes it is kept in, held as a
+/// bitmap rather than as characters: one letter per pixel, and two strings per screen row, since
+/// a row is drawn as a half-block with one colour in front and another behind and so holds two
+/// pixels stacked. That is what buys the drawing its resolution — the row grid is half as coarse
+/// as the character grid — and it is why the letters name a colour rather than a glyph.
+const ABOUT_ART_WIDE: &[&str] = &[
+    "..............lll..............",
+    ".............lllll.............",
+    ".............lllll.............",
+    ".......eel...lllll...lee.......",
+    ".....ellll...rlllr...lllle.....",
+    "...elllll..rrrsssrrr..llllle...",
+    "..elllll.ersssssssssre.llllle..",
+    ".llllle.rrssmmmmmmmssrr.elllll.",
+    "ellle..ersssmmmmmmmsssre..ellle",
+    ".ee....rsssssmmmmmsssssr....ee.",
+    "......ermssssmmmmmssssmre......",
+    "......rsmmmsssmmmsssmmmsr......",
+    "......rsmmmmmsmmmsmmmmmsr......",
+    "......rsmmmmmmmmmmmmmmmsr......",
+    "......rsmmmmmmmmmmmmmmmsr......",
+    "......rsmmmmmsmmmsmmmmmsr......",
+    "......rsmmmsssmmmsssmmmsr......",
+    "......ermssssmmmmmssssmre......",
+    ".ee....rsssssmmmmmsssssr....ee.",
+    "ellle..ersssmmmmmmmsssre..ellle",
+    ".llllle.rrssmmmmmmmssrr.elllll.",
+    "..elllll.ersssssssssre.llllle..",
+    "...elllll..rrrsssrrr..llllle...",
+    ".....ellll...errre...lllle.....",
+    ".......eel....lll....lee.......",
+    "..............lll..............",
+    "..............ele..............",
+    "...............................",
+];
+
+const ABOUT_ART_NARROW: &[&str] = &[
+    "............eee............",
+    "...........ellle...........",
+    "...........lllll...........",
+    ".......ee..lllll..ee.......",
+    "....ellll..ellle..lllle....",
+    "...lllll.errsssrre.lllll...",
+    ".elllle.rsssssssssr.elllle.",
+    "ellll..rssmmmmmmmssr..lllle",
+    "llle..rssssmmmmmssssr..elll",
+    ".....erssssmmmmmssssre.....",
+    ".....rsmmsssmmmsssmmsr.....",
+    ".....rsmmmmsmmmsmmmmsr.....",
+    ".....rsmmmmmmmmmmmmmsr.....",
+    ".....rsmmmmmmmmmmmmmsr.....",
+    ".....rsmmmmsmmmsmmmmsr.....",
+    ".....rsmmsssmmmsssmmsr.....",
+    ".....erssssmmmmmssssre.....",
+    "llle..rssssmmmmmssssr..elll",
+    "ellll..rssmmmmmmmssr..lllle",
+    ".elllle.rsssssssssr.elllle.",
+    "...lllll.errsssrre.lllll...",
+    "....ellll..errre..lllle....",
+    ".......ee...lll...ee.......",
+    "............lll............",
+    ".............e.............",
+    "...........................",
+];
+
+/// Columns given to the text beside the drawing. Wide enough for the two lines that cannot be
+/// broken any narrower: the repository line, and the English close hint.
+const ABOUT_TEXT_COLS: u16 = 36;
+
+/// Columns of air between the drawing and the text.
+const ABOUT_GUTTER: u16 = 3;
+
+/// The drawing this terminal has room for, or `None` when it has room for neither and the box
+/// falls back to the text on its own. The thresholds ask for a margin the modal does not use: a
+/// box that reaches the edge of the screen reads as clipped even when every column of it is there.
+fn about_art(full: Rect) -> Option<&'static [&'static str]> {
+    if full.width >= 76 && full.height >= 18 {
+        Some(ABOUT_ART_WIDE)
+    } else if full.width >= 72 && full.height >= 17 {
+        Some(ABOUT_ART_NARROW)
+    } else {
+        None
+    }
+}
+
+fn about_art_width(art: &[&str]) -> u16 {
+    art.iter().map(|row| row.chars().count() as u16).max().unwrap_or(0)
+}
+
+/// Screen rows the drawing takes: two pixel rows to each of them.
+fn about_art_height(art: &[&str]) -> u16 {
+    art.len() as u16 / 2
+}
+
 pub fn about_modal_rect(full: Rect) -> Rect {
-    // Tall enough for the version, the wrapped tagline (three lines in Italian, the longer
-    // of the two), the author and repository lines, and the close hint.
-    centered_rect(60, 13, full)
+    match about_art(full) {
+        // The drawing, the gutter, the text and the two borders.
+        Some(art) => centered_rect(
+            about_art_width(art) + ABOUT_GUTTER + ABOUT_TEXT_COLS + 2,
+            about_art_height(art) + 2,
+            full,
+        ),
+        // Tall enough for the version, the wrapped tagline (three lines in Italian, the longer
+        // of the two), the author and repository lines, and the close hint.
+        None => centered_rect(60, 13, full),
+    }
 }
 
 pub fn settings_modal_rect(app: &App, full: Rect) -> Rect {
@@ -1151,6 +1253,98 @@ fn draw_settings_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_stateful_widget(list, rect, &mut state);
 }
 
+/// Breaks `text` at spaces so that no line is wider than `width` columns. A word with no room of
+/// its own is left to overflow rather than cut in half: the only word here long enough to manage
+/// that is the repository address, which is easier to read hanging over the edge than in pieces.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match out.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => out.push(word.to_string()),
+        }
+    }
+    out
+}
+
+/// Everything the About box says, wrapped to `width`. Wrapped here rather than left to `Wrap`
+/// because the block is centred against the drawing beside it, and centring needs the line count.
+fn about_text_lines(lang: Lang, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("CleeCode v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(wrap_words(i18n::t(lang, Key::AboutTagline), width).into_iter().map(Line::from));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        i18n::t(lang, Key::AboutAuthor),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("{}  ·  MIT", i18n::t(lang, Key::AboutRepo)),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines.extend(
+        wrap_words(i18n::t(lang, Key::AboutCloseHint), width)
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, Style::default().fg(Color::DarkGray)))),
+    );
+    lines
+}
+
+/// The colours a pixel of the drawing can be, stated outright rather than taken from `Color::Red`
+/// and `Color::Green`: those are palette entries every terminal theme is free to redefine, and the
+/// themes that make their red a salmon turned the mark in the middle pink. The darkest green is
+/// the one the outline is feathered with, which is what keeps the curves from reading as steps.
+fn about_ink(pixel: char) -> Option<Color> {
+    Some(match pixel {
+        's' => Color::Rgb(94, 148, 82),
+        'l' => Color::Rgb(74, 118, 66),
+        'r' => Color::Rgb(58, 96, 52),
+        'e' => Color::Rgb(42, 70, 38),
+        'm' => Color::Rgb(196, 26, 34),
+        _ => return None,
+    })
+}
+
+/// Draws the bitmap into `area`, a row of it per screen row: the upper half-block takes the top
+/// pixel as its foreground and the bottom one as its background, so both are drawn in full colour
+/// in the one cell they share. A row with a pixel on one side only is drawn as the half that has
+/// it, leaving whatever is behind the modal to show through the other half.
+fn draw_about_art(f: &mut Frame, art: &[&str], area: Rect) {
+    for row in 0..about_art_height(art).min(area.height) {
+        let (top, bottom) = (art[row as usize * 2], art[row as usize * 2 + 1]);
+        for (col, (over, under)) in top.chars().zip(bottom.chars()).enumerate() {
+            let col = col as u16;
+            if col >= area.width {
+                break;
+            }
+            let Some(cell) = f.buffer_mut().cell_mut((area.x + col, area.y + row)) else {
+                continue;
+            };
+            match (about_ink(over), about_ink(under)) {
+                (None, None) => {}
+                (Some(fg), None) => {
+                    cell.set_symbol("\u{2580}").set_fg(fg);
+                }
+                (None, Some(fg)) => {
+                    cell.set_symbol("\u{2584}").set_fg(fg);
+                }
+                (Some(fg), Some(bg)) => {
+                    cell.set_symbol("\u{2580}").set_fg(fg).set_bg(bg);
+                }
+            }
+        }
+    }
+}
+
 fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
     let rect = about_modal_rect(full);
     f.render_widget(Clear, rect);
@@ -1162,29 +1356,33 @@ fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("CleeCode v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(i18n::t(lang, Key::AboutTagline)),
-        Line::from(""),
-        Line::from(Span::styled(
-            i18n::t(lang, Key::AboutAuthor),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!("{}  ·  MIT", i18n::t(lang, Key::AboutRepo)),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            i18n::t(lang, Key::AboutCloseHint),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let Some(art) = about_art(full) else {
+        let lines = about_text_lines(lang, inner.width as usize);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    };
+
+    let art_width = about_art_width(art);
+    let text_width = inner.width.saturating_sub(art_width + ABOUT_GUTTER);
+    let lines = about_text_lines(lang, text_width as usize);
+    // The text is shorter than the drawing, so it sits against the middle of it rather than the
+    // top. A translation long enough to fill the height simply starts at the top instead.
+    let top = inner.height.saturating_sub(lines.len() as u16) / 2;
+
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            x: inner.x + art_width + ABOUT_GUTTER,
+            y: inner.y + top,
+            width: text_width,
+            height: inner.height.saturating_sub(top),
+        },
+    );
+    draw_about_art(
+        f,
+        art,
+        Rect { x: inner.x, y: inner.y, width: art_width, height: inner.height },
+    );
 }
 
 pub fn delete_confirm_modal_rect(full: Rect) -> Rect {
@@ -4561,6 +4759,71 @@ mod tests {
         let mut full = vt100::Parser::new(2, 10, 0);
         full.process("日本語テキ".as_bytes());
         assert_eq!(terminal_lines(full.screen(), None)[0].width(), 10);
+    }
+
+    /// The About box is drawn at whatever size the terminal has room for, so the sizes have to
+    /// agree with the thresholds that pick them: one column too many and the box is clipped by
+    /// `centered_rect`, which takes the close hint off the bottom of it.
+    #[test]
+    fn the_about_box_fits_the_terminal_it_is_drawn_in() {
+        for width in 20..=200u16 {
+            for height in 6..=60u16 {
+                let full = Rect { x: 0, y: 0, width, height };
+                let rect = about_modal_rect(full);
+                if let Some(art) = about_art(full) {
+                    assert!(
+                        rect.width <= width && rect.height <= height,
+                        "{width}x{height} was offered a drawing it cannot hold: {rect:?}"
+                    );
+                    assert_eq!(
+                        rect.height,
+                        about_art_height(art) + 2,
+                        "the drawing is cut short"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Both languages have to fit the column beside the drawing: the text is wrapped to it by
+    /// hand, and a line too long for it is not wrapped again by the paragraph, it is cut off.
+    #[test]
+    fn the_about_text_fits_the_column_beside_the_drawing() {
+        for art in [ABOUT_ART_WIDE, ABOUT_ART_NARROW] {
+            for lang in [Lang::En, Lang::It] {
+                let lines = about_text_lines(lang, ABOUT_TEXT_COLS as usize);
+                for line in &lines {
+                    assert!(
+                        line.width() <= ABOUT_TEXT_COLS as usize,
+                        "{lang:?} overflows the column: {:?}",
+                        line.to_string()
+                    );
+                }
+                assert!(
+                    lines.len() <= about_art_height(art) as usize,
+                    "{lang:?} is taller than the drawing it sits beside"
+                );
+            }
+        }
+    }
+
+    /// Every row of the bitmap is padded to the same width, because the column the text starts at
+    /// is measured from the widest row and a short row would leave the text hanging off it. The
+    /// row count has to be even as well: they are read two at a time, and an odd one left over
+    /// would be read past the end of the array.
+    #[test]
+    fn the_about_drawing_is_a_rectangle() {
+        for art in [ABOUT_ART_WIDE, ABOUT_ART_NARROW] {
+            let width = about_art_width(art);
+            assert_eq!(art.len() % 2, 0, "an odd number of pixel rows: {}", art.len());
+            for row in art {
+                assert_eq!(row.chars().count() as u16, width, "ragged row: {row:?}");
+                assert!(
+                    row.chars().all(|p| p == '.' || about_ink(p).is_some()),
+                    "a pixel with no colour behind it: {row:?}"
+                );
+            }
+        }
     }
 
     #[test]
