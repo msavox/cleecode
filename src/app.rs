@@ -2915,37 +2915,41 @@ impl App {
             return false;
         };
         let lang = self.settings.lang;
-        let Some(location) = crate::locate::find(&text) else {
-            return self.open_url_at(&text, lang);
-        };
-        // A URL that looks like a `path:line` — http://localhost:3000 reads as path
-        // "http://localhost", line 3000 — is a URL all the same, not a file that failed to
-        // resolve. Hand it to the browser before trying the file tree.
-        if location.path.starts_with("http://") || location.path.starts_with("https://") {
-            return self.open_url_at(&text, lang);
+        // A URL that parses as a `path:line` — `http://localhost:3000` reads as the file
+        // "http://localhost" at line 3000 — is a URL all the same, and not a file worth going
+        // to look for.
+        let location = crate::locate::find(&text).filter(|at| !crate::locate::is_http_url(&at.path));
+        if let Some(at) = &location
+            && let Some(path) = crate::locate::resolve(at, &self.root)
+        {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.open_file_at(path, at.line.saturating_sub(1), at.column.saturating_sub(1));
+            self.status_message = i18n::msg_jumped_to(lang, &name, at.line);
+            return true;
         }
-        match crate::locate::resolve(&location, &self.root) {
-            Some(path) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.open_file_at(path, location.line.saturating_sub(1), location.column.saturating_sub(1));
-                self.status_message = i18n::msg_jumped_to(lang, &name, location.line);
+        // Nothing here to open as a file. A URL on the same row is worth more than a complaint
+        // about a file that is not here — `see foo.py:3 and https://docs…` names both, and only
+        // one of them can be reached.
+        if self.open_url_at(&text, lang) {
+            return true;
+        }
+        // It named something, and the something is not here. Saying so beats a double-click
+        // that silently does nothing, and beats opening a file of that name from elsewhere.
+        match location {
+            Some(at) => {
+                self.status_message = i18n::msg_jump_not_found(lang, &at.path);
                 true
             }
-            // It named something, and the something is not here. Saying so beats a double-click
-            // that silently does nothing, and beats opening a file of that name from elsewhere.
-            None => {
-                self.status_message = i18n::msg_jump_not_found(lang, &location.path);
-                true
-            }
+            None => false,
         }
     }
 
     /// Opens the URL in a line of terminal output, when there is one. `true` when it opened one.
     ///
-    /// A trailing `)`, `]`, `}`, `,`, `.` or `;` is punctuation around the URL rather than part
-    /// of it, so it is trimmed before handing it to the desktop opener. What the opener did with
-    /// it — the URL may be dead, or the opener may have failed — is a message rather than
-    /// silence, because a double-click that does nothing says nothing.
+    /// Where the URL ends and what of the punctuation around it belongs to the sentence is
+    /// `locate::find_url`'s to decide. What the opener did with it — the URL may be dead, or the
+    /// opener may have failed — is a message rather than silence, because a double-click that
+    /// does nothing says nothing.
     fn open_url_at(&mut self, text: &str, lang: Lang) -> bool {
         let Some(url) = crate::locate::find_url(text) else {
             return false;

@@ -169,39 +169,76 @@ fn shallow_find(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     None
 }
 
-/// The byte offset of the first `http://` or `https://` in `text`, or `None`.
+/// One of the two schemes a double-click will open.
 ///
-/// Parsed by hand like the rest of this file — the crate list has no regex engine and a
-/// double-click has no business paying for one. Only http(s) is a URL worth opening: anything
-/// else a row prints — `www.`, `ftp://`, a bare hostname — is more likely a word being typed
-/// than a link the user is pointing at.
-pub fn find_url_start(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 7 <= bytes.len() {
-        if bytes[i..].starts_with(b"http://") || bytes[i..].starts_with(b"https://") {
-            // The match is ASCII, so `i` is always on a UTF-8 boundary, but say so rather
-            // than let a future edit to the match slip a panic into the caller's slice.
-            return Some(i).filter(|&i| text.is_char_boundary(i));
-        }
-        i += 1;
-    }
-    None
+/// Asked about a `Location.path`, not only about a whole row: `http://localhost:3000` reaches a
+/// caller through `find` as the file `http://localhost` at line 3000, because the `path:line`
+/// parser knows nothing about URLs. It is a URL all the same, and looking for a file of that
+/// name would find nothing and say so about the wrong thing.
+///
+/// Only http(s) counts: anything else a row prints — `www.`, `ftp://`, a bare hostname — is
+/// more likely a word being typed than a link the user is pointing at, and `file:` or
+/// `javascript:` is a handler nobody asked a double-click to reach.
+pub fn is_http_url(text: &str) -> bool {
+    text.starts_with("http://") || text.starts_with("https://")
 }
 
-/// The first URL in `text`, with trailing punctuation — `)`, `]`, `}`, `,`, `.`, `;` — cut
-/// off, or `None` when there is no http(s) URL. The punctuation is around the URL rather than
-/// part of it; a trailing `?` or `:` is kept, since either can be a real part of a URL.
-pub fn find_url(text: &str) -> Option<&str> {
-    let start = find_url_start(text)?;
-    let rest = &text[start..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let url = rest[..end].trim_end_matches([')', ']', '}', ',', '.', ';']);
-    if url.is_empty() {
-        None
-    } else {
-        Some(url)
+/// The byte offset of the first `http://` or `https://` in `text`, or `None`.
+///
+/// `str::find` rather than a hand-rolled byte scan: it answers in bytes that are always on a
+/// character boundary, so the caller's slice cannot be handed an offset that panics.
+fn find_url_start(text: &str) -> Option<usize> {
+    match (text.find("http://"), text.find("https://")) {
+        (Some(http), Some(https)) => Some(http.min(https)),
+        (http, https) => http.or(https),
     }
+}
+
+/// The first URL in a line of terminal output, or `None` when there is no http(s) one.
+///
+/// It ends where a URL cannot go on: whitespace, a control character, or one of the characters
+/// RFC 3986 leaves out of a URI — `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `}`, `|`. That is what
+/// takes the address out of `<https://x>` and `href="https://x"` whole. Anything non-ASCII stays
+/// in: `…/wiki/Perù` is a real address, printed the way a browser shows it.
+///
+/// Then the punctuation the sentence put there is cut: a trailing `,`, `.` or `;` belongs to the
+/// prose around the URL, and so does a closing bracket that nothing inside the URL opened. One
+/// that *was* opened stays — `…/wiki/Foo_(bar)` closes its own parenthesis and `http://[::1]:80`
+/// its own bracket, and cutting either would quietly open a different page. A trailing `?` or
+/// `:` stays too: both can be a real part of an address.
+pub fn find_url(text: &str) -> Option<&str> {
+    let rest = &text[find_url_start(text)?..];
+    let end = rest.find(not_in_a_url).unwrap_or(rest.len());
+    let url = trim_prose_around(&rest[..end]);
+    (!url.is_empty()).then_some(url)
+}
+
+/// Where a URL stops. The space is covered by the whitespace test rather than listed twice, and
+/// control characters are here because a row of terminal output can hold them.
+fn not_in_a_url(c: char) -> bool {
+    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
+}
+
+/// Cuts the punctuation a sentence left on the end of a URL, a character at a time, so that
+/// `(https://x/a_(b)),` gives up the comma and one parenthesis and keeps the other.
+///
+/// Counting the brackets again on each cut is a rescan of something the width of a URL, which is
+/// nothing, and it keeps the rule in one readable line per bracket.
+fn trim_prose_around(url: &str) -> &str {
+    let mut url = url;
+    while let Some(last) = url.chars().next_back() {
+        let is_prose = match last {
+            ',' | '.' | ';' => true,
+            ')' => url.matches('(').count() < url.matches(')').count(),
+            ']' => url.matches('[').count() < url.matches(']').count(),
+            _ => false,
+        };
+        if !is_prose {
+            break;
+        }
+        url = &url[..url.len() - last.len_utf8()];
+    }
+    url
 }
 
 #[cfg(test)]
@@ -370,6 +407,44 @@ mod tests {
         assert_eq!(find_url("https://x.io/a/b."), Some("https://x.io/a/b"));
         assert_eq!(find_url("no url"), None);
         assert_eq!(find_url(""), None);
+    }
+
+    /// A bracket the URL opened itself is part of the address, and cutting it would open a
+    /// different page — a Wikipedia article on the wrong thing, or nothing at all. Only a
+    /// closing bracket with nothing to close is the sentence's.
+    #[test]
+    fn a_bracket_the_url_opened_is_not_the_sentences() {
+        let wiki = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(find_url(wiki), Some(wiki));
+        assert_eq!(find_url(&format!("see {wiki},")), Some(wiki));
+        assert_eq!(find_url(&format!("({wiki})")), Some(wiki));
+        assert_eq!(find_url("http://[::1]:8080/x"), Some("http://[::1]:8080/x"));
+        assert_eq!(find_url("[https://a.io/p]"), Some("https://a.io/p"));
+        assert_eq!(find_url("https://a.io/p))"), Some("https://a.io/p"));
+    }
+
+    /// A URL printed inside markup ends at the markup, not at the next space: the row a browser
+    /// or a log prints is often `href="…"` or `<…>`, and taking the quote with it opens nothing.
+    /// A non-ASCII character is not markup, though — it is part of the address.
+    #[test]
+    fn a_url_ends_where_a_url_cannot_go_on() {
+        assert_eq!(find_url("<https://a.io/p>"), Some("https://a.io/p"));
+        assert_eq!(find_url("href=\"https://a.io/p\">x"), Some("https://a.io/p"));
+        assert_eq!(find_url("https://a.io/p|next"), Some("https://a.io/p"));
+        assert_eq!(find_url("https://it.wikipedia.org/wiki/Perù."), Some("https://it.wikipedia.org/wiki/Perù"));
+        assert_eq!(find_url("https://a.io/\u{1b}[0m"), Some("https://a.io/"));
+    }
+
+    /// The scheme test is what tells a caller that a `path:line` is really a URL, and it is the
+    /// same test in front of the browser hand-off.
+    #[test]
+    fn only_http_and_https_are_urls_to_open() {
+        assert!(is_http_url("http://a.io"));
+        assert!(is_http_url("https://a.io"));
+        assert!(!is_http_url("file:///etc/passwd"));
+        assert!(!is_http_url("javascript:alert(1)"));
+        assert!(!is_http_url("src/main.rs"));
+        assert!(!is_http_url(""));
     }
 
     /// The offset a caller slices with has to be on a UTF-8 boundary, or the slice panics.
