@@ -116,7 +116,9 @@ impl Palette {
 #[serde(rename_all = "kebab-case")]
 pub enum Theme {
     #[default]
+    #[serde(rename = "cleecode")]
     CleeCode,
+    #[serde(rename = "cleecode-light")]
     CleeCodeLight,
     Turbo,
     SolarizedDark,
@@ -124,6 +126,7 @@ pub enum Theme {
     Eighties,
     Mocha,
     OceanLight,
+    #[serde(rename = "github")]
     GitHub,
 }
 
@@ -565,6 +568,37 @@ mod tests {
             assert_ne!(colour, p.bar, "{}: the initial is the bar it sits on", theme.name());
             assert_ne!(colour, p.on_bar, "{}: the initial is the rest of the word", theme.name());
         }
+    }
+
+    /// The key each theme is written into `settings.toml` under. Spelled out rather than left to
+    /// whatever the derive produces, because these are in users' config files: renaming a variant
+    /// must not silently reset somebody's theme to the default, and the only way to notice is to
+    /// have written the keys down.
+    #[test]
+    fn the_settings_keys_are_what_they_have_always_been() {
+        let expected = [
+            (Theme::CleeCode, "cleecode"),
+            (Theme::Turbo, "turbo"),
+            (Theme::SolarizedDark, "solarized-dark"),
+            (Theme::Eighties, "eighties"),
+            (Theme::Mocha, "mocha"),
+            (Theme::CleeCodeLight, "cleecode-light"),
+            (Theme::SolarizedLight, "solarized-light"),
+            (Theme::OceanLight, "ocean-light"),
+            (Theme::GitHub, "github"),
+        ];
+        for (theme, key) in expected {
+            let written = toml::to_string(&Wrapper { theme }).unwrap();
+            assert_eq!(written.trim(), format!("theme = \"{key}\""), "{}", theme.name());
+            let read: Wrapper = toml::from_str(&written).unwrap();
+            assert_eq!(read.theme, theme, "{} did not survive the round trip", theme.name());
+        }
+        assert_eq!(expected.len(), Theme::ALL.len(), "a theme with no key written down");
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Wrapper {
+        theme: Theme,
     }
 
     /// Names are what the picker shows and what `settings.toml` round-trips; two themes sharing

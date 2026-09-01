@@ -14,7 +14,16 @@ pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
 /// pane can be squeezed to nothing.
 pub const SPLIT_PCT_RANGE: (u16, u16) = (20, 80);
 
+/// Missing keys fall back to the default for that key alone, rather than throwing the file away.
+///
+/// Most fields here already said `#[serde(default)]` one at a time — every one added after the
+/// first release had to, or that release's settings.toml would have stopped parsing. Saying it
+/// once for the struct covers the handful from the first release that never did, and those were
+/// the ones that made a hand-written file fail: the file is documented as hand-editable, and a
+/// file holding just the one line the user meant to change would be set aside as broken and
+/// silently replaced by the defaults.
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub show_line_numbers: bool,
     pub syntax_highlighting: bool,
@@ -561,6 +570,22 @@ impl ProjectSettings {
 
 #[cfg(test)]
 mod tests {
+    /// A settings file holding one key is the file somebody hand-edited, and it has to load as
+    /// that key on top of the defaults. It used to be set aside as broken and replaced, which
+    /// took the rest of their settings with it — the file is written back out on exit, so the
+    /// defaults were saved over the evidence before anyone could see what happened.
+    #[test]
+    fn a_file_with_one_key_keeps_that_key_and_defaults_the_rest() {
+        let one_line: Settings = toml::from_str("theme = \"turbo\"").expect("a partial file loads");
+        assert_eq!(one_line.theme, crate::theme::Theme::Turbo);
+        let fresh = Settings::default();
+        assert_eq!(one_line.tab_size, fresh.tab_size, "the rest is the defaults, not nothing");
+        assert_eq!(one_line.show_line_numbers, fresh.show_line_numbers);
+        // And an empty file is every default, rather than an error.
+        let empty: Settings = toml::from_str("").expect("an empty file loads");
+        assert_eq!(empty.theme, fresh.theme);
+    }
+
     use super::*;
 
     /// The plot destination is a preference on a desktop and a fact on a server. It names both
