@@ -280,6 +280,40 @@ mod tests {
             assert_eq!(open_url(url), Err("not an http(s) URL".into()), "{url}");
         }
     }
+
+    /// A URL comes off a row of terminal output, which is whatever was printed there. One
+    /// carrying a character a URI cannot hold is refused before the opener is started — on
+    /// Windows those characters are also what a shell would read as a second command, and this
+    /// is the guard that says so on every platform.
+    #[test]
+    fn a_url_that_is_not_shaped_like_one_is_refused() {
+        for url in [
+            "https://a.io/x\"",
+            "https://a.io/x`whoami`",
+            "https://a.io/x^",
+            "https://a.io/x|y",
+            "https://a.io/x y",
+            "https://a.io/x\ny",
+            "https://a.io/x\u{1b}[0m",
+            "https://a.io/x\\y",
+        ] {
+            assert_eq!(open_url(url), Err("not an http(s) URL".into()), "{url:?}");
+        }
+    }
+
+    /// A URL goes to the browser, and on Windows that is not the opener a file goes to: the
+    /// file opener is a shell, and a shell reads the `&` of a query string as a new command.
+    #[test]
+    fn a_url_is_never_handed_to_a_shell() {
+        let (program, before) = url_opener();
+        assert!(!program.is_empty());
+        if cfg!(windows) {
+            assert_eq!((program, before), ("explorer", &[] as &[&str]));
+        } else {
+            assert_eq!((program, before), desktop_opener());
+        }
+        assert_ne!(program, "cmd", "a URL from terminal output must not be re-parsed by a shell");
+    }
     use super::*;
 
     #[test]
@@ -440,19 +474,52 @@ pub fn open_with_the_desktop(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The program that opens a *URL*, which on Windows is not the one that opens a file.
+///
+/// `cmd /C start` is a shell, and a shell reads `&` in a URL as the end of one command and the
+/// start of the next: `?a=1&b=2` would open half the page and then run `b=2`. Rust's argument
+/// escaping cannot help, because it escapes for the program's own parsing and `cmd` re-parses
+/// what it is handed. A row of terminal output is not ours to trust — it is whatever a build
+/// log, a `cat` or a `curl` put on the screen — so a URL from one must not reach a shell at
+/// all. `explorer` takes a URL to the default browser and is started directly, with no shell
+/// in between and nothing to re-read the argument.
+///
+/// macOS and Linux hand a URL to the same opener as a file: `open` and `xdg-open` are started
+/// directly too, so the argument arrives as written.
+fn url_opener() -> (&'static str, &'static [&'static str]) {
+    #[cfg(windows)]
+    {
+        ("explorer", &[])
+    }
+    #[cfg(not(windows))]
+    {
+        desktop_opener()
+    }
+}
+
 /// Hands a URL to the desktop's browser.
 ///
 /// Only http(s) is a URL worth opening — anything else is a scheme the opener might hand to a
 /// handler the user did not ask for, so it is refused here as well as at the call site. Same
 /// guard as `open_with_the_desktop`: over ssh there is no desktop here to open it on.
+///
+/// What arrives has to *look* like a URL as well as start like one. `locate::find_url` already
+/// stops at every character a URI cannot hold, but this is the door to the desktop and a caller
+/// that had not been through it — a future one, or a row of output read some other way — would
+/// otherwise decide for itself what a URL is.
 pub fn open_url(url: &str) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !crate::locate::is_http_url(url) {
+        return Err("not an http(s) URL".to_string());
+    }
+    if url.chars().any(|c| {
+        c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
+    }) {
         return Err("not an http(s) URL".to_string());
     }
     if running_over_ssh() {
         return Err("over ssh".to_string());
     }
-    let (program, before) = desktop_opener();
+    let (program, before) = url_opener();
     std::process::Command::new(program)
         .args(before)
         .arg(url)
