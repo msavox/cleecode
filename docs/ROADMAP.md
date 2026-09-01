@@ -1981,6 +1981,74 @@ conseguenza — quelli chiari sono già compilati nel binario, `base16-ocean.lig
 byte. Un'impostazione a tre valori: scuro, chiaro, auto. L'auto legge il terminale dove si può
 (OSC 11 con timeout, come già si interrogano device attributes e kitty) e ripiega su scuro.
 
+> **L'ordine cambia (2026-09-01).** La metà meccanica dei temi passa *davanti* al lavoro sugli
+> agenti. Il motivo non è che sia più urgente, è che la palette tocca ogni punto di disegno
+> dell'applicazione: la 0.14 porta UI nuova — le righe cambiate accese nel gutter, il modo segui —
+> e scriverla contro una palette che esiste costa meno che scriverla coi colori cablati e
+> riconvertirla il mese dopo. Chi arriva secondo paga il doppio, quindi la palette arriva prima.
+
+Il lavoro si spezza in due pezzi rilasciabili separatamente. **Il primo è meccanico e senza
+rischi**: la struct della palette, la scelta scuro/chiaro a mano, il tema syntect di conseguenza.
+Nessun protocollo, nessuna interrogazione, ogni modifica locale e verificabile. **Il secondo è
+l'`auto`** con OSC 11 e il suo timeout — l'unico pezzo che può andare storto, perché un terminale
+che non risponde non deve poter ritardare l'avvio, e va scritto quando il primo è già in uso.
+
+Le misure, prese sul codice della 0.13.3: 239 occorrenze di `Color::` in tutto il sorgente, 224
+in `ui.rs` e 13 in `preview.rs`. Di quelle in `ui.rs`, 34 sono i colori delle icone dei file
+(colori di marca, giustamente fissi) più quelli del disegno della finestra Informazioni. Restano
+circa duecento punti da instradare sulla palette, e nei test ci sono solo sei asserzioni di
+colore: un diff grosso ma piatto, con una superficie di regressione pari a tutta la UI e un
+rischio per singola riga vicino a zero. Il lato syntect è invece un punto solo, `highlight.rs`,
+più un ri-highlight dei buffer aperti quando il tema cambia.
+
+**Il pezzo difficile c'è già.** `paint_background` riempie ogni cella rimasta sul colore del
+terminale, fatto come passata sul frame finito apposta perché i modali che fanno `Clear` non
+aprano buchi trasparenti. CleeCode sa già smettere di essere trasparente e dipingere la propria
+superficie: un tema con un campo opaco è quel meccanismo con un altro colore dentro.
+
+**Il tema attuale si chiama CleeCode** ed è il default; tutti gli altri sono aggiunte. Per i temi
+importati la palette della UI si può *derivare*, perché un tema syntect porta nei suoi `settings`
+sfondo, primo piano, selezione e gutter; scritte a mano restano solo le palette dei temi nostri.
+
+**Turbo, il collaudo.** Un tema ispirato all'IDE di Turbo Pascal e Turbo C — blu EGA, cornice
+grigia, la lettera acceleratrice in rosso — va scritto *secondo*, subito dopo il default, perché
+è il caso che mette sotto sforzo la palette come nessun altro tema scuro farebbe: chiede un
+colore di campo distinto da quello di cornice, un accento usato come sfondo e non come testo, e
+chiaro-su-scuro e scuro-su-chiaro dentro lo stesso tema. Se la struct regge Turbo Pascal regge
+qualunque cosa le chiederemo dopo, ed è meglio scoprirlo mentre cambiarla è ancora gratis. Si
+chiama *Turbo* e non *Borland* per la stessa regola sulle licenze qui sotto. Perimetro: v1 solo
+colori. I bordi doppi e l'ombra dei dialoghi sono glifi, non colori — eventualmente un campo
+separato più avanti, se l'effetto senza non convince.
+
+**Sette temi sono già dentro il binario** e oggi ne buttiamo via sei: `load_defaults()` di syntect
+porta `base16-ocean.dark` (l'attuale), `base16-eighties.dark`, `base16-mocha.dark` e
+`Solarized (dark)` fra gli scuri, `base16-ocean.light`, `Solarized (light)` e `InspiredGitHub`
+fra i chiari. Il bundle scuro-e-chiaro esiste già: basta smettere di ignorarlo.
+
+**La regola sulle licenze, per il bundle.** Un tema è un file di colori e copiarlo è banale, ma
+nome e file sono due questioni diverse: il nome è marchio, il file è copyright. Rinominare serve
+contro il primo e non estingue il secondo — un file MIT copiato, rinominato e privato della nota
+di copyright non è una scappatoia, è la violazione. Quindi: **licenza permissiva, nome vero,
+`themes/NOTICE`** con autore e licenza di ciascuno; oppure **palette nostra e nome nostro**, come
+Turbo. Niente file altrui con la targhetta cambiata. I nomi delicati (Darcula è di JetBrains,
+Dracula ha marchio e linee guida, Monokai ha una variante commerciale) non valgono la fatica,
+perché il terreno cromatico è coperto da roba pulita: Catppuccin per lo scuro violaceo, Gruvbox
+per il grigio caldo, One Dark per il grigio-blu. Da aggiungere ai sette di casa, tutti MIT:
+Nord, Gruvbox Dark e Light, One Dark e One Light, Catppuccin Mocha e Latte.
+
+**L'importazione, dopo.** I `.tmTheme` costano quasi zero — syntect è un motore TextMate e
+`ThemeSet::get_theme` legge già un file da `~/.config/cleecode/themes/`. Il formato
+d'interscambio giusto per noi è però **base16**: sedici colori con una mappatura definita, nato
+per i terminali, e l'unico che copre con un file solo sia la palette della UI sia la sintassi.
+Il JSON di VS Code resta rimandato: i `tokenColors` sono scope TextMate e si convertono, ma le
+centinaia di chiavi `workbench.*` sono pensate per una GUI e ne useremmo otto.
+
+**La scelta rapida** è una tendina accanto al pulsante dello sfondo, all'estremità destra della
+barra dei menu: il pulsante e la sua zona di clic esistono già, e la tendina si ancora come
+quelle dei menu. Vale la stessa regola del pulsante — è fra i primi a cedere quando la finestra
+è stretta. Una domanda da decidere lì: se scegliere un tema a fondo opaco debba accendere da sé
+il flag dello sfondo, o se i due interruttori restino indipendenti e liberi di contraddirsi.
+
 **I keybinding rimappabili.** I vincoli di questo progetto — niente F-key, niente Alt+lettera,
 niente Ctrl+freccia — sono sacrosanti *per un layout italiano su macOS* e arbitrari per
 chiunque altro. La forma: una tabella `[keys]` in `settings.toml`, azione = corda, che
