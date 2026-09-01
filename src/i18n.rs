@@ -1920,6 +1920,29 @@ pub fn msg_open_outside_failed(lang: Lang, name: &str, err: &str) -> String {
     }
 }
 
+/// Handed to the browser. A double-click on a URL should say where it went, the way a jump to
+/// a traceback does.
+pub fn msg_opened_url(lang: Lang, url: &str) -> String {
+    match lang {
+        Lang::En => format!("Opening {url} in the browser"),
+        Lang::It => format!("Apertura di {url} nel browser"),
+    }
+}
+
+/// Why a URL could not be handed over. Over ssh there is no browser on this side either.
+pub fn msg_open_url_failed(lang: Lang, url: &str, err: &str) -> String {
+    match (lang, err) {
+        (Lang::En, "over ssh") => {
+            format!("{url} stays here: over ssh there is no browser to open it on")
+        }
+        (Lang::It, "over ssh") => {
+            format!("{url} resta qui: via ssh non c'è un browser su cui aprirlo")
+        }
+        (Lang::En, _) => format!("Could not open {url}: {err}"),
+        (Lang::It, _) => format!("Impossibile aprire {url}: {err}"),
+    }
+}
+
 pub fn msg_workspace_readonly(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => {
