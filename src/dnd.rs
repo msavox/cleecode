@@ -269,6 +269,16 @@ mod tests {
             return;
         }
         assert_eq!(open_with_the_desktop(std::path::Path::new("/etc/hosts")), Err("over ssh".into()));
+        assert_eq!(open_url("https://example.com"), Err("over ssh".into()));
+    }
+
+    /// Only http(s) may be handed to the opener, and the refusal happens before anything is
+    /// spawned — so this is safe to run on a machine that is not ssh-ing anywhere.
+    #[test]
+    fn only_http_urls_are_handed_to_the_opener() {
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com", "ssh://x", "mailto:a@b.c"] {
+            assert_eq!(open_url(url), Err("not an http(s) URL".into()), "{url}");
+        }
     }
     use super::*;
 
@@ -422,6 +432,30 @@ pub fn open_with_the_desktop(path: &std::path::Path) -> Result<(), String> {
         .arg(path)
         // Detached from CleeCode's own streams: an opener that printed to stdout would print
         // over the editor, and one that waited on stdin would wait for ever.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Hands a URL to the desktop's browser.
+///
+/// Only http(s) is a URL worth opening — anything else is a scheme the opener might hand to a
+/// handler the user did not ask for, so it is refused here as well as at the call site. Same
+/// guard as `open_with_the_desktop`: over ssh there is no desktop here to open it on.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("not an http(s) URL".to_string());
+    }
+    if running_over_ssh() {
+        return Err("over ssh".to_string());
+    }
+    let (program, before) = desktop_opener();
+    std::process::Command::new(program)
+        .args(before)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

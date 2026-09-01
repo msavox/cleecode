@@ -169,6 +169,41 @@ fn shallow_find(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     None
 }
 
+/// The byte offset of the first `http://` or `https://` in `text`, or `None`.
+///
+/// Parsed by hand like the rest of this file — the crate list has no regex engine and a
+/// double-click has no business paying for one. Only http(s) is a URL worth opening: anything
+/// else a row prints — `www.`, `ftp://`, a bare hostname — is more likely a word being typed
+/// than a link the user is pointing at.
+pub fn find_url_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 7 <= bytes.len() {
+        if bytes[i..].starts_with(b"http://") || bytes[i..].starts_with(b"https://") {
+            // The match is ASCII, so `i` is always on a UTF-8 boundary, but say so rather
+            // than let a future edit to the match slip a panic into the caller's slice.
+            return Some(i).filter(|&i| text.is_char_boundary(i));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first URL in `text`, with trailing punctuation — `)`, `]`, `}`, `,`, `.`, `;` — cut
+/// off, or `None` when there is no http(s) URL. The punctuation is around the URL rather than
+/// part of it; a trailing `?` or `:` is kept, since either can be a real part of a URL.
+pub fn find_url(text: &str) -> Option<&str> {
+    let start = find_url_start(text)?;
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches([')', ']', '}', ',', '.', ';']);
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +341,63 @@ mod tests {
         let missing = find("src/nothing.rs:1:1").unwrap();
         assert_eq!(resolve(&missing, &root), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A URL is handed to the browser, not read as a file location. Only http(s) counts — a
+    /// bare `www.` or a typed `ftp://` is more likely a word being written than a link to open.
+    #[test]
+    fn a_url_is_found_and_a_word_is_not() {
+        assert_eq!(find_url_start("see https://example.com/x now"), Some(4));
+        assert_eq!(find_url_start("https://example.com"), Some(0));
+        assert_eq!(find_url_start("http://example.com"), Some(0));
+        assert_eq!(find_url_start("prefix https://a.io/path?q=1 tail"), Some(7));
+        assert_eq!(find_url_start("visit www.example.com"), None);
+        assert_eq!(find_url_start("ftp://example.com"), None);
+        assert_eq!(find_url_start("no url here"), None);
+        assert_eq!(find_url_start(""), None);
+    }
+
+    /// Trailing punctuation around a URL is trimmed, but a trailing `?` or `:` is kept —
+    /// either can be a real part of a URL, and trimming it would silently open a different
+    /// page.
+    #[test]
+    fn a_url_keeps_what_belongs_to_it() {
+        assert_eq!(find_url("see https://example.com/x,"), Some("https://example.com/x"));
+        assert_eq!(find_url("(https://a.io/p)"), Some("https://a.io/p"));
+        assert_eq!(find_url("https://x.io;"), Some("https://x.io"));
+        assert_eq!(find_url("https://x.io?"), Some("https://x.io?"));
+        assert_eq!(find_url("http://localhost:3000"), Some("http://localhost:3000"));
+        assert_eq!(find_url("https://x.io/a/b."), Some("https://x.io/a/b"));
+        assert_eq!(find_url("no url"), None);
+        assert_eq!(find_url(""), None);
+    }
+
+    /// The offset a caller slices with has to be on a UTF-8 boundary, or the slice panics.
+    /// The match is ASCII so this holds today; the test pins it so a future edit cannot
+    /// slip a non-ASCII match in and crash every double-click that lands on a URL.
+    #[test]
+    fn a_found_url_start_is_always_on_a_utf8_boundary() {
+        for line in [
+            "日本語 https://example.com",
+            "café https://example.com",
+            "🚀 https://a.io/x",
+            "https://example.com",
+            "\u{1f422} https://x.io",
+        ] {
+            if let Some(start) = find_url_start(line) {
+                assert!(line.is_char_boundary(start), "{line:?} gave {start}");
+            }
+        }
+    }
+
+    /// A URL with a port reads as a `path:line` — `http://localhost:3000` parses as the file
+    /// "http://localhost" at line 3000 — because the generic parser does not know about URLs.
+    /// The caller must notice the http(s) path and hand it to the browser instead of the tree.
+    #[test]
+    fn a_url_with_a_port_reads_as_a_path_the_caller_can_recognise() {
+        let found = find("http://localhost:3000").unwrap();
+        assert_eq!(found.path, "http://localhost");
+        assert_eq!(found.line, 3000);
+        assert!(found.path.starts_with("http://"));
     }
 }

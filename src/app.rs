@@ -2908,13 +2908,22 @@ impl App {
     /// Opens whatever file a terminal row is pointing at. `true` when it found one.
     ///
     /// Works on anything that prints `path:line:column`, which is every compiler, linter and
-    /// grep — not only on the tracebacks it was written for.
+    /// grep — not only on the tracebacks it was written for. When the line is a URL instead,
+    /// it opens that in the browser.
     fn open_location_at(&mut self, pane: usize, row: u16) -> bool {
         let Some(text) = self.window_tab_mut(pane).and_then(|t| t.row_text(row)) else {
             return false;
         };
         let lang = self.settings.lang;
-        let Some(location) = crate::locate::find(&text) else { return false };
+        let Some(location) = crate::locate::find(&text) else {
+            return self.open_url_at(&text, lang);
+        };
+        // A URL that looks like a `path:line` — http://localhost:3000 reads as path
+        // "http://localhost", line 3000 — is a URL all the same, not a file that failed to
+        // resolve. Hand it to the browser before trying the file tree.
+        if location.path.starts_with("http://") || location.path.starts_with("https://") {
+            return self.open_url_at(&text, lang);
+        }
         match crate::locate::resolve(&location, &self.root) {
             Some(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2929,6 +2938,23 @@ impl App {
                 true
             }
         }
+    }
+
+    /// Opens the URL in a line of terminal output, when there is one. `true` when it opened one.
+    ///
+    /// A trailing `)`, `]`, `}`, `,`, `.` or `;` is punctuation around the URL rather than part
+    /// of it, so it is trimmed before handing it to the desktop opener. What the opener did with
+    /// it — the URL may be dead, or the opener may have failed — is a message rather than
+    /// silence, because a double-click that does nothing says nothing.
+    fn open_url_at(&mut self, text: &str, lang: Lang) -> bool {
+        let Some(url) = crate::locate::find_url(text) else {
+            return false;
+        };
+        self.status_message = match crate::dnd::open_url(url) {
+            Ok(()) => i18n::msg_opened_url(lang, url),
+            Err(e) => i18n::msg_open_url_failed(lang, url, &e),
+        };
+        true
     }
 
     // ---- Figures from a live session ------------------------------------------------------
