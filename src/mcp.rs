@@ -1,5 +1,5 @@
 //! `clee --mcp`: CleeCode as a Model Context Protocol server, so one implementation serves
-//! Claude Code, codex and opencode instead of three integrations.
+//! Claude Code, codex, opencode and gemini instead of four integrations.
 //!
 //! The awkward part is not the protocol, it is the topology. `clee --mcp` is a *child* of the
 //! agent — the agent spawns it as a stdio server — while everything worth exposing (which files

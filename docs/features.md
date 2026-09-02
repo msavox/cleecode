@@ -196,12 +196,12 @@ which wins and is meant to be committed with it. Interpreters off `PATH` go unde
 
 ### Agents, over MCP
 
-Claude Code, codex and opencode are terminal programs, and CleeCode hosts real terminals — so an
-agent already runs in a pane beside the file it is working on, with nothing to install. What an
-integration adds is the other direction: telling the agent what only the editor knows.
+Claude Code, codex, opencode and gemini are terminal programs, and CleeCode hosts real terminals —
+so an agent already runs in a pane beside the file it is working on, with nothing to install. What
+an integration adds is the other direction: telling the agent what only the editor knows.
 
 `clee --mcp` is that. CleeCode becomes an MCP server on stdin and stdout, spawned by the agent
-itself: one implementation, three consumers. It works by descent — every shell CleeCode starts
+itself: one implementation, four consumers. It works by descent — every shell CleeCode starts
 carries `CLEE_SESSION`, the directory this editor publishes into, so an agent launched in a pane
 inherits it and the `clee --mcp` it spawns inherits it in turn. Neither end searches for the
 other, which is what stops two open CleeCodes being mistaken for each other; an agent started
@@ -234,8 +234,14 @@ opencode, in `~/.config/opencode/opencode.json`:
 { "mcp": { "clee": { "type": "local", "command": ["clee", "--mcp"], "enabled": true } } }
 ```
 
-The Claude Code line is the one to trust. The other two are written from those projects'
-documented shapes and have not been checked here against a running codex or opencode.
+gemini, in `~/.gemini/settings.json`:
+
+```json
+{ "mcpServers": { "clee": { "command": "clee", "args": ["--mcp"] } } }
+```
+
+The Claude Code line is the one to trust. The other three are written from those projects'
+documented shapes and have not been checked here against a running codex, opencode or gemini.
 
 ### Workspaces
 
@@ -251,12 +257,12 @@ does restore the project, its open files and the layout you left.
 
 ### An agent in the next pane
 
-`clee -w claude`, `clee -w opencode` and `clee -w codex` open a coding agent the way it wants to
-be opened: in a terminal tab named after it, with a plain shell in the next tab and the editor
-beside it — underneath it on a window narrower than 150 columns, where two columns would leave
-the agent forty. There is nothing to install and nothing to configure, because these are real
-ptys and all three are terminal programs. If the agent is not on your `PATH`, the pane shows the
-shell saying so; nothing here checks on your behalf.
+`clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` open a coding agent the
+way it wants to be opened: in a terminal tab named after it, with a plain shell in the next tab
+and the editor beside it — underneath it on a window narrower than 150 columns, where two columns
+would leave the agent forty. There is nothing to install and nothing to configure, because these
+are real ptys and all four are terminal programs. If the agent is not on your `PATH`, the pane
+shows the shell saying so; nothing here checks on your behalf.
 
 `Ctrl+Shift+A` hands the one that is running whatever you are looking at: the selection, or the
 diagnostic under the cursor, or the line the cursor is on — written at its prompt as `path:line`,

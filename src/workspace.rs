@@ -78,11 +78,12 @@ pub const DEFAULT_NAME: &str = "Default layout";
 /// The workspaces CleeCode ships rather than reads from a file.
 ///
 /// Two of them set up a session for a language: a prompt for it already running, a shell beside
-/// it, and the frames arranged the way that kind of work wants them. Three more open a coding
+/// it, and the frames arranged the way that kind of work wants them. Four more open a coding
 /// agent the same way — they are terminal programs and CleeCode hosts real terminals, so the
 /// whole preset is a tab with its name and a shell beside it. Being built in is why they cannot
 /// be deleted — there is nothing on disk to delete — and why they travel between projects.
-pub const BUILT_INS: [&str; 6] = [DEFAULT_NAME, "octave", "pylab", "claude", "opencode", "codex"];
+pub const BUILT_INS: [&str; 7] =
+    [DEFAULT_NAME, "octave", "pylab", "claude", "opencode", "codex", "gemini"];
 
 /// Whether `name` is one of the built-ins. Compared by slug, so case and spacing do not matter.
 pub fn is_built_in(name: &str) -> bool {
@@ -125,7 +126,7 @@ const SIDE_BY_SIDE_COLS: u16 = 150;
 pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
     let name = built_in_named(name)?;
     // Each agent preset is named after the agent it opens, which is also the command that opens
-    // it, so the seam in `session.rs` answers "is this one of mine" and the three share an arm
+    // it, so the seam in `session.rs` answers "is this one of mine" and the four share an arm
     // written once. An agent added there gets its preset by being added there.
     if let Some(agent) = crate::session::Agent::of_program(name) {
         return Some(agent_workspace(agent, shape));
@@ -237,7 +238,7 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
     }
 }
 
-/// The shape the three agent presets share: the agent in a tab, a plain shell in the next one,
+/// The shape the four agent presets share: the agent in a tab, a plain shell in the next one,
 /// and the editor beside them.
 ///
 /// Deliberately *not* [`session_workspace`], and the difference is the argument for two
@@ -545,6 +546,7 @@ mod tests {
         assert!(is_built_in("Default layout") && is_built_in("default  LAYOUT"), "matched by slug");
         assert!(is_built_in("octave") && is_built_in("Octave") && is_built_in("pylab"));
         assert!(is_built_in("claude") && is_built_in("opencode") && is_built_in("codex"));
+        assert!(is_built_in("gemini"));
         // A workspace of your own called "default" is not one of them and must survive.
         assert!(!is_built_in("default") && !is_built_in("Defaults") && !is_built_in("octavelab"));
 
@@ -594,7 +596,7 @@ mod tests {
     /// screen and the files it writes are in the editor and the git panel.
     #[test]
     fn an_agent_preset_is_the_agent_a_shell_and_no_third_window() {
-        for name in ["claude", "opencode", "codex"] {
+        for name in ["claude", "opencode", "codex", "gemini"] {
             let ws = built_in(name, &shape(200)).unwrap();
             assert_eq!(ws.terminals.len(), 1, "{name}: one window");
             let tabs = &ws.terminals[0].tabs;
