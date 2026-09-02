@@ -2238,8 +2238,12 @@ riscritti con la strada temp+rename.
   come le altre. Il cassetto assorbe la composizione — `octave+claude` diventa il preset
   con il cassetto già aperto — e `Ctrl+Shift+A` dà precedenza al suo agente. Da decidere
   allora: quale agente evoca il tasto la prima volta, un'impostazione o un picker al primo
-  uso. Un frame dedicato agli LLM nella *split dell'editor* resta valutato e rimandato: la
-  split ospita buffer, un pty lì dentro tocca focus e routing per comprare solo estetica. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
+  uso. E il cassetto ha due modi, da impostazione: **pin**, aperto finché non lo chiudi tu,
+  e **autocollapse**, che si ritira da solo quando il focus torna all'editor e si riapre
+  all'evocazione — in una TUI il segnale è il focus, non il mouse che passa. Il default è
+  pin, perché un pannello che si muove da sé è una sorpresa finché non sei tu ad averla
+  chiesta. Un frame dedicato agli LLM nella *split dell'editor* resta valutato e rimandato:
+  la split ospita buffer, un pty lì dentro tocca focus e routing per comprare solo estetica. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
   `Ctrl+Shift+W` — quindi la voce non è renderlo possibile: è renderlo di serie, col
   layout giusto e un nome che si legge da solo nella lista di `clee -w`. Il flusso che ne
   esce non ce l'ha nessun editor intero: l'agente vede diagnostici e selezione via MCP,
