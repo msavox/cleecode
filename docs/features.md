@@ -32,7 +32,18 @@ the split rather than leaving it empty. Closing the last tab of all leaves nothi
 empty frame that says how to open something — rather than the untitled buffer that used to take
 its place, which made that tab the one tab you could not close. Files changed underneath you are reloaded when they are
 not dirty, and a binary or non-UTF-8 file opens
-read-only rather than being corrupted on save. Scrollbars appear inside the frame while the view
+read-only rather than being corrupted on save.
+
+An editor with an agent running in one of its terminal panes is being written to while you read
+it, so the reload says what it did: **the lines that arrived are lit in the gutter**, their line
+numbers green, until an edit of your own — or `Esc` — puts them out. A diagnostic or a breakpoint
+on the same line keeps the colour, because one is information and the other you put there
+yourself. **Follow mode**, off until you ask for it, takes the next step: a file something writes
+that you have not opened appears beside your work without ever taking the keyboard, at most one
+per sweep and five in a session. It needs no watcher and knows nothing about agents — what it
+follows is the difference between two `git status` sweeps, which happen anyway, so `claude`,
+`codex`, `opencode` and a `sed` in a shell all trip it identically. Outside a git repository
+there is nothing to watch, and switching it on says so. Scrollbars appear inside the frame while the view
 moves or the pointer rests on them, and they are working controls: drag the thumb, click the
 groove to jump, click the end arrows to step a line.
 

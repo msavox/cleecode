@@ -100,6 +100,7 @@ pub enum MenuAction {
     MdQuote,
     MdFence,
     ToggleMdToolbar,
+    ToggleFollowAgentEdits,
 }
 
 impl MenuAction {
@@ -206,6 +207,7 @@ impl MenuAction {
         MenuAction::MdQuote,
         MenuAction::MdFence,
         MenuAction::ToggleMdToolbar,
+        MenuAction::ToggleFollowAgentEdits,
     ];
 }
 
@@ -250,6 +252,10 @@ pub struct MenuStates {
     /// this instant: over a Rust file there is no bar either way, and the menu is answering "is
     /// it switched on", which is the question you turn it off with.
     pub md_toolbar: bool,
+    /// Whether files touched from outside open themselves beside your work. The setting, again:
+    /// outside a repository it is on and does nothing, and the status line is where that is
+    /// said — a menu that read "off" there would be answering a different question.
+    pub follow_agent_edits: bool,
 }
 
 /// What `action` says about its state, in the column the shortcuts live in. `None` for the
@@ -262,6 +268,9 @@ pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<
         )),
         MenuAction::ToggleMdToolbar => {
             Some(i18n::t(lang, if states.md_toolbar { Key::On } else { Key::Off }))
+        }
+        MenuAction::ToggleFollowAgentEdits => {
+            Some(i18n::t(lang, if states.follow_agent_edits { Key::On } else { Key::Off }))
         }
         _ => None,
     }
@@ -280,7 +289,13 @@ pub fn item_value_width(lang: Lang, action: MenuAction) -> usize {
     [true, false]
         .into_iter()
         .flat_map(|plots_in_tabs| {
-            [true, false].into_iter().map(move |md_toolbar| MenuStates { plots_in_tabs, md_toolbar })
+            [true, false].into_iter().flat_map(move |md_toolbar| {
+                [true, false].into_iter().map(move |follow_agent_edits| MenuStates {
+                    plots_in_tabs,
+                    md_toolbar,
+                    follow_agent_edits,
+                })
+            })
         })
         .filter_map(|states| item_value(lang, action, states))
         .map(|value| value.chars().count())
@@ -410,6 +425,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // it has: this row reads out which way it is set, because "is it me or is it
                 // this file" is the question somebody who cannot see it arrives with.
                 item(Key::ItemToggleMdToolbar, MenuAction::ToggleMdToolbar, None),
+                // Reads out its own state for the same reason the bar above it does: it is a
+                // switch whose effect is that something appears by itself, and "is this on"
+                // is the first question anybody arrives with.
+                item(Key::ItemFollowAgentEdits, MenuAction::ToggleFollowAgentEdits, None),
                 group(Key::ItemFocusFileTree, MenuAction::FocusFileTree, Some("Ctrl+Alt+←")),
                 item(Key::ItemFocusEditor, MenuAction::FocusEditor, Some("Ctrl+Tab")),
                 item(Key::ItemFocusTerminal, MenuAction::FocusTerminal, Some("Ctrl+Alt+↓")),
@@ -728,9 +747,9 @@ mod tests {
     fn the_plot_item_says_which_of_the_two_it_is() {
         for lang in [Lang::En, Lang::It] {
             let tabs =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true });
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false });
             let windows =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true });
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true, follow_agent_edits: false });
             assert!(tabs.is_some() && windows.is_some(), "{lang:?}");
             assert_ne!(tabs, windows, "{lang:?}: both states read the same");
             // Wide enough for either, so the dropdown does not resize under the cursor at the
@@ -749,7 +768,7 @@ mod tests {
             for item in def.items {
                 assert!(
                     item.shortcut.is_none()
-                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true })
+                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false })
                             .is_none(),
                     "\"{}\" has both a shortcut and a state to read out",
                     i18n::t(Lang::En, item.label_key)

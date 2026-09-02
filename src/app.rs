@@ -614,6 +614,25 @@ pub struct App {
     git_status_tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
     git_status_rx: Receiver<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
     git_status_pending: Arc<AtomicBool>,
+    /// The previous sweep's git status, kept so the next one can be compared with it: the
+    /// difference between two of them is the list of files something has just written, which is
+    /// all follow mode ever knows. `None` until the first sweep lands — before that there is no
+    /// "previously", and treating an empty map as one would open every changed file in the
+    /// project at startup.
+    ///
+    /// Kept whether or not follow mode is on, so switching it on means "from now on" rather than
+    /// "everything git has been holding since this morning".
+    follow_seen: Option<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
+    /// Files something has written that follow mode has not shown yet, oldest first.
+    ///
+    /// A queue rather than a single path, because an agent's first move often touches several
+    /// files inside one 700 ms sweep and the ones after the first would otherwise be lost: git
+    /// reports the same status next time, so no later sweep would ever mention them again.
+    /// Drained one per sweep, which is what the throttle actually is — a burst arrives as a
+    /// sequence, and the window moves once at a time.
+    follow_queue: std::collections::VecDeque<PathBuf>,
+    /// How many tabs follow mode has opened this session, against `FOLLOW_TAB_LIMIT`.
+    follow_opened: usize,
     bg_tx: Sender<String>,
     bg_rx: Receiver<String>,
     /// Pictures being decoded off the main thread, answering by path: a tab's index can change
@@ -1589,6 +1608,31 @@ pub struct LayoutPreset {
 /// editor: two panes of thirty columns each are two panes nobody can read.
 const SPLIT_FOR_FIGURES_COLS: u16 = 120;
 
+/// How many tabs follow mode may open in one session.
+///
+/// A ceiling rather than a rotation: none of them is ever closed again by the editor. An agent
+/// working through a refactor touches thirty files, and a strip of thirty tabs — one of which
+/// you were reading — is not a view of anything. Five is about what fits in a tab strip and
+/// stays legible; past that the status line says so and the Git panel is the place to see the
+/// rest, which is what it has always been for.
+const FOLLOW_TAB_LIMIT: usize = 5;
+
+/// How many files may be waiting their turn to be shown. Insurance rather than policy: the queue
+/// drains every sweep and can only ever produce `FOLLOW_TAB_LIMIT` tabs, but a `git checkout` of
+/// a branch that differs by ten thousand files should not be held in memory to be ignored.
+const FOLLOW_QUEUE_LIMIT: usize = 64;
+
+/// Whether two paths name the same file, allowing for the several spellings one file has here:
+/// `git status` is keyed the way the file tree spells its rows (`./src/main.rs` when the project
+/// was opened as `.`), and a tab may hold the absolute path the picker gave it.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+}
+
 /// One variable, being looked at a screenful at a time.
 ///
 /// The values are not in the snapshot — a large matrix is millions of numbers — so each
@@ -1881,6 +1925,9 @@ impl App {
             tabs: [vec![0], Vec::new()],
             tab_offsets: [0, 0],
             tab_revealed: [None, None],
+            follow_seen: None,
+            follow_queue: std::collections::VecDeque::new(),
+            follow_opened: 0,
             terminals: vec![t1, t2],
             active_terminal: 0,
             context_menu: None,
@@ -2053,6 +2100,7 @@ impl App {
         crate::menu::MenuStates {
             plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
             md_toolbar: self.settings.show_md_toolbar,
+            follow_agent_edits: self.settings.follow_agent_edits,
         }
     }
 
@@ -2612,9 +2660,124 @@ impl App {
 
     pub fn poll_git_status(&mut self) {
         while let Ok(status) = self.git_status_rx.try_recv() {
+            // The sweep the sidebar's dots come from, read a second time for what it also says:
+            // which files have moved since the last one. No watcher, no second process, no
+            // guess about which agent is running — just two consecutive answers to a question
+            // that was already being asked.
+            let touched = match &self.follow_seen {
+                Some(before) => crate::git_status::touched_between(before, &status),
+                None => Vec::new(),
+            };
+            self.follow_seen = Some(status.clone());
             self.git_status = status;
             self.redraw = true;
+            if self.settings.follow_agent_edits {
+                self.follow_touched_files(touched);
+            }
         }
+    }
+
+    /// Opens one of the files something has just written, if any of them is worth opening.
+    ///
+    /// One per sweep, deliberately: an agent's first move is often to touch a dozen files, and a
+    /// dozen tabs arriving in one frame is not "showing" anything. At a sweep every 700 ms the
+    /// interesting ones are all there within a few seconds, in the order git reports them, and
+    /// the window never jumps more than once at a time.
+    fn follow_touched_files(&mut self, touched: Vec<PathBuf>) {
+        for path in touched {
+            if self.follow_queue.len() >= FOLLOW_QUEUE_LIMIT {
+                break;
+            }
+            if !self.follow_queue.contains(&path) {
+                self.follow_queue.push_back(path);
+            }
+        }
+        // Everything unopenable is dropped on the way past — a directory, a file already in a
+        // tab, something that has been deleted again since — and the first one that is left is
+        // shown. Then the loop returns: whatever is still queued waits for the next sweep.
+        while let Some(path) = self.follow_queue.pop_front() {
+            if !self.worth_following(&path) {
+                continue;
+            }
+            if self.follow_opened >= FOLLOW_TAB_LIMIT {
+                // Said once, at the moment it starts mattering, and the queue is let go: what
+                // was in it will not be opened, and holding paths that will never be used is
+                // just a leak with a long fuse. Nothing already open is closed to make room —
+                // a tab is something you might be reading, and follow mode's whole promise is
+                // that it does not touch what you are working on.
+                if self.follow_opened == FOLLOW_TAB_LIMIT {
+                    self.follow_opened += 1;
+                    self.status_message =
+                        i18n::msg_follow_full(self.settings.lang, FOLLOW_TAB_LIMIT);
+                }
+                self.follow_queue.clear();
+                return;
+            }
+            self.follow_opened += 1;
+            self.open_beside_without_focus(path);
+            return;
+        }
+    }
+
+    /// Whether a path something touched is one follow mode should put on screen.
+    fn worth_following(&self, path: &Path) -> bool {
+        // A directory carries a status too — `git_status` marks every parent of a changed file
+        // so the tree can draw a dot on a collapsed folder — and there is nothing to open in one.
+        if !path.is_file() {
+            return false;
+        }
+        if self.editors.iter().any(|e| e.path.as_deref().is_some_and(|open| same_file(open, path))) {
+            return false;
+        }
+        // Something that would be *run* rather than opened: a PDF with a viewer configured goes
+        // to a terminal, and a command starting itself because a file changed is a surprise of a
+        // completely different order.
+        !(Editor::looks_binary(path) && self.run_command_for(&file_ext(path)).is_some())
+    }
+
+    /// Puts a file on screen in the half you are not typing in, and leaves the keyboard exactly
+    /// where it was — the rule the figures of 0.9 established, by the same road they take.
+    fn open_beside_without_focus(&mut self, path: PathBuf) {
+        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
+            self.toggle_split_view();
+        }
+        if self.split_view {
+            self.editor_pane_focus = match was.1 {
+                EditorPane::Left => EditorPane::Right,
+                EditorPane::Right => EditorPane::Left,
+            };
+        }
+        self.open_file_in_tab(path);
+        // Everything about where the keyboard was, put back — including which tab the pane you
+        // were in is showing. That last part is where this parts company with a figure: a
+        // picture that took the front of a narrow window still cannot receive a keystroke, and a
+        // text file can. In a window too narrow to split, the new tab therefore joins the strip
+        // and waits there rather than arriving in front of the line you were typing.
+        self.focus = was.0;
+        self.editor_pane_focus = was.1;
+        match was.1 {
+            EditorPane::Left => self.active_editor = was.2,
+            EditorPane::Right => self.active_editor_right = was.3,
+        }
+    }
+
+    /// Said when follow mode has just been switched, from wherever it was switched.
+    ///
+    /// Outside a repository it is switched all the same and does nothing at all, which is the
+    /// one state that has to be spoken aloud: a setting that reads "on" while no file ever
+    /// appears looks like a broken feature rather than a missing repository.
+    fn follow_mode_switched(&mut self, was: bool) {
+        let now = self.settings.follow_agent_edits;
+        if now == was {
+            return;
+        }
+        let lang = self.settings.lang;
+        self.status_message = if now && crate::git::toplevel(&self.root).is_none() {
+            i18n::msg_follow_needs_a_repo(lang).to_string()
+        } else {
+            i18n::msg_follow_mode(lang, now).to_string()
+        };
     }
 
     // ---- Project search -------------------------------------------------------------------
@@ -6146,6 +6309,11 @@ impl App {
         self.root = new_root;
         self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
         self.project_settings = settings::ProjectSettings::load(&self.root);
+        // The sweep that lands next belongs to another repository, and comparing it with this
+        // one's would read as "everything in the new project has just been written". Forgotten
+        // rather than replaced: the first sweep of a folder has nothing to be a difference from.
+        self.follow_seen = None;
+        self.follow_queue.clear();
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
         // Changing folder steps *out* of the workspace rather than dragging it along. A saved
         // workspace is the set-up of its own project, and staying attached meant exit wrote this
@@ -8061,6 +8229,11 @@ impl App {
             MenuAction::ToggleMdToolbar => {
                 self.settings.show_md_toolbar = !self.settings.show_md_toolbar
             }
+            MenuAction::ToggleFollowAgentEdits => {
+                let was = self.settings.follow_agent_edits;
+                self.settings.follow_agent_edits = !was;
+                self.follow_mode_switched(was);
+            }
             MenuAction::MdBold => self.md_format(ui::MdTool::Bold),
             MenuAction::MdItalic => self.md_format(ui::MdTool::Italic),
             MenuAction::MdStrike => self.md_format(ui::MdTool::Strike),
@@ -8875,16 +9048,22 @@ impl App {
                 self.settings_selected = (self.settings_selected + 1) % settings::SETTINGS_COUNT;
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
+                let followed = self.settings.follow_agent_edits;
                 self.settings.activate(self.settings_selected);
                 self.settings_changed();
+                self.follow_mode_switched(followed);
             }
             KeyCode::Left => {
+                let followed = self.settings.follow_agent_edits;
                 self.settings.adjust(self.settings_selected, -1);
                 self.settings_changed();
+                self.follow_mode_switched(followed);
             }
             KeyCode::Right => {
+                let followed = self.settings.follow_agent_edits;
                 self.settings.adjust(self.settings_selected, 1);
                 self.settings_changed();
+                self.follow_mode_switched(followed);
             }
             _ => {}
         }
@@ -9107,6 +9286,10 @@ impl App {
                 let tab_size = self.settings.tab_size;
                 self.editor_mut().outdent_selection(tab_size);
             }
+            // Puts out the lines the last reload lit in the gutter. Every *edit* does this on
+            // its own — see `Editor::mark_edited_from` — which leaves the reader who only wants
+            // to look, and Esc is what that reader already presses to dismiss things.
+            KeyCode::Esc => self.editor_mut().forget_arrived_lines(),
             _ => {}
         }
         self.follow_completion(key, ctrl);
@@ -10322,9 +10505,11 @@ impl App {
         }
         let idx = (row - inner.y) as usize;
         if idx < settings::SETTINGS_COUNT {
+            let followed = self.settings.follow_agent_edits;
             self.settings_selected = idx;
             self.settings.activate(idx);
             self.settings_changed();
+            self.follow_mode_switched(followed);
         }
     }
 
