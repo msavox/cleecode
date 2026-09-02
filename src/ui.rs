@@ -1000,6 +1000,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.rename_preview.is_some() {
         draw_rename_preview(f, app, f.area());
     }
+    if app.replace_sweep.is_some() {
+        draw_replace_sweep(f, app, f.area());
+    }
     if app.show_terminal_rename {
         draw_terminal_rename_modal(f, app, f.area());
     }
@@ -1600,54 +1603,92 @@ fn draw_symbol_rename_modal(f: &mut Frame, app: &App, full: Rect) {
 fn draw_rename_preview(f: &mut Frame, app: &mut App, full: Rect) {
     let pal = app.palette();
     let lang = app.settings.lang;
-    let rect = git_panel_rect(full);
     let Some(preview) = app.rename_preview.as_ref() else { return };
+    let title = i18n::msg_rename_preview_title(
+        lang,
+        &preview.old_name,
+        &preview.new_name,
+        preview.edits,
+        preview.files.len(),
+    );
+    let rows = draw_edit_preview(f, pal, lang, full, &title, &preview.rows, preview.scroll);
+    // Told back to the preview because paging needs the height and the renderer is the only
+    // thing that knows it — the same arrangement as the git panel's. Written after the draw
+    // rather than before it, which changes nothing: it is read by the next key press.
+    if let (Some(preview), Some(rows)) = (app.rename_preview.as_mut(), rows) {
+        preview.body_rows = rows;
+    }
+}
+
+/// The same box for the sweep across the project, because it is the same promise: what would
+/// change, grouped by file, read before anything is written. The one difference is what the
+/// title says — a query becoming a replacement rather than a name becoming a name.
+fn draw_replace_sweep(f: &mut Frame, app: &mut App, full: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let Some(sweep) = app.replace_sweep.as_ref() else { return };
+    let title = i18n::msg_replace_preview_title(
+        lang,
+        &sweep.query,
+        &sweep.replacement,
+        sweep.edits,
+        sweep.files.len(),
+    );
+    let rows = draw_edit_preview(f, pal, lang, full, &title, &sweep.rows, sweep.scroll);
+    if let (Some(sweep), Some(rows)) = (app.replace_sweep.as_mut(), rows) {
+        sweep.body_rows = rows;
+    }
+}
+
+/// Draws one of the two previews of edits that have not happened yet, and answers how many rows
+/// its body had room for.
+///
+/// One function for both because they are one thing on screen: the same frame, the same
+/// diff-shaped rows, the same footer, the same keys. Two copies of this would be two boxes that
+/// agree today and drift apart the first time one of them is adjusted.
+///
+/// `None` when the frame was too short to draw anything, which is also the signal that the row
+/// count it returned would be a lie.
+fn draw_edit_preview(
+    f: &mut Frame,
+    pal: Palette,
+    lang: Lang,
+    full: Rect,
+    title: &str,
+    rows: &[String],
+    scroll: usize,
+) -> Option<usize> {
+    let rect = git_panel_rect(full);
     let block = Block::default()
-        .title(format!(
-            " {} ",
-            i18n::msg_rename_preview_title(
-                lang,
-                &preview.old_name,
-                &preview.new_name,
-                preview.edits,
-                preview.files.len(),
-            )
-        ))
+        .title(format!(" {title} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     if inner.height < 2 {
-        return;
+        return None;
     }
     // One row kept back for the keys, the way the git panel keeps one back for its own.
     let body = Rect { height: inner.height.saturating_sub(1), ..inner };
-    let rows = body.height as usize;
-    // Told back to the preview before anything is drawn, because paging needs the height and the
-    // renderer is the only thing that knows it — the same arrangement as the git panel's.
-    if let Some(preview) = app.rename_preview.as_mut() {
-        preview.body_rows = rows;
-    }
-    let app: &App = app;
-    let Some(preview) = app.rename_preview.as_ref() else { return };
+    let height = body.height as usize;
 
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    let lines: Vec<Line> = preview
-        .rows
+    let lines: Vec<Line> = rows
         .iter()
-        .skip(preview.scroll)
-        .take(rows)
+        .skip(scroll)
+        .take(height)
         .map(|row| Line::from(diff_span(pal, row)))
         .collect();
     f.render_widget(Paragraph::new(lines), body);
     let keys = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            i18n::msg_rename_keys(lang),
+            i18n::msg_preview_keys(lang),
             Style::default().fg(pal.text_dim),
         ))),
         keys,
     );
+    Some(height)
 }
 
 /// Simple single-line input modal shared by Go-to-line and New file/folder.
@@ -2303,14 +2344,20 @@ fn diff_span(pal: Palette, line: &str) -> Span<'_> {
     Span::styled(line, style)
 }
 
-/// What to look for across the project. Its own box rather than the shared input modal, because
-/// it carries the same two switches as the Find box and by the same keys — a query typed here
-/// and a query typed there have to be the same kind of thing, and the only way to know which way
-/// they are set is to be told.
+/// What to look for across the project, and what to put there instead. Its own box rather than
+/// the shared input modal, because it carries the same two switches as the Find box and by the
+/// same keys — a query typed here and a query typed there have to be the same kind of thing, and
+/// the only way to know which way they are set is to be told.
+///
+/// Two fields, marked the way the terminal's name-and-command box marks its own, because they are
+/// read the same way: whichever carries the caret is the one Tab last landed on. The second one
+/// being empty is the whole difference between a search and a sweep, so its prompt says so rather
+/// than leaving the reader to find out by pressing Enter.
 fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
+    use crate::app::SearchField;
     let lang = app.settings.lang;
-    let rect = centered_rect(66, 7, full);
+    let rect = centered_rect(66, 9, full);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(format!(" {} ", i18n::t(lang, Key::ModalSearchProject)))
@@ -2319,19 +2366,34 @@ fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
+    let on_query = app.search_field == SearchField::Query;
+    let marker = |active: bool| if active { "▶ " } else { "  " };
     let flags_on = app.search_case_sensitive || app.search_regex;
+    let value = Style::default().fg(pal.warning);
+    let label = Style::default().fg(pal.text_muted);
     let lines = vec![
-        Line::from(Span::styled(i18n::msg_search_prompt(lang), Style::default().fg(pal.text_muted))),
-        Line::from(Span::styled(app.search_input.clone(), Style::default().fg(pal.warning))),
+        Line::from(Span::styled(
+            format!("{}{}", marker(on_query), i18n::msg_search_prompt(lang)),
+            label,
+        )),
+        Line::from(Span::styled(format!("  {}", app.search_input), value)),
+        Line::from(Span::styled(
+            format!("{}{}", marker(!on_query), i18n::msg_search_replace_prompt(lang)),
+            label,
+        )),
+        Line::from(Span::styled(format!("  {}", app.search_replace), value)),
         Line::from(Span::styled(
             i18n::msg_find_flags(lang, app.search_case_sensitive, app.search_regex),
             Style::default().fg(if flags_on { pal.accent } else { pal.text_dim }),
         )),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    let cursor_x = (inner.x + app.search_input.chars().count() as u16)
-        .min(inner.right().saturating_sub(1));
-    f.set_cursor_position((cursor_x, inner.y + 1));
+    // The two spaces the value rows are indented by are part of the caret's arithmetic: it sits
+    // after the last character typed, which is two columns in from the frame.
+    let typed = match on_query { true => &app.search_input, false => &app.search_replace };
+    let cursor_x =
+        (inner.x + 2 + typed.chars().count() as u16).min(inner.right().saturating_sub(1));
+    f.set_cursor_position((cursor_x, inner.y + if on_query { 1 } else { 3 }));
 }
 
 /// The terminal's name and its startup command, in one box: two prompts, two values, and a

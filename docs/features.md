@@ -363,6 +363,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+F` / `Ctrl+G` | Find and replace / go to line |
 | `Ctrl+U` / `Ctrl+N` | Inside Find: case sensitivity / read the query as a regex |
 | `Ctrl+Shift+H` | Search the project; results are a list, `Enter` opens one at its line |
+| `Tab` in that box | A second field: what the matches become. Empty, `Enter` is the search above; filled, `Enter` shows a diff of every file it would change and writes nothing until you agree — open buffers take one `Ctrl+Z` each, files with no tab are rewritten on disk (no undo, so the count is said out loud) |
 | `Ctrl+Shift+D` | Git panel: status, changes, history, branches — stage, commit, switch, straight from `git` |
 | `Ctrl+K` | Toggle line comment |
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |

@@ -212,6 +212,26 @@ impl TerminalField {
     }
 }
 
+/// Which field the project search box is typing into.
+///
+/// Two fields rather than two boxes, because they are two halves of one question. The second one
+/// being empty is what keeps the search exactly the search it was: nothing about pressing Enter
+/// on a query changes because a replacement field now exists beside it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum SearchField {
+    Query,
+    Replace,
+}
+
+impl SearchField {
+    fn other(self) -> Self {
+        match self {
+            SearchField::Query => SearchField::Replace,
+            SearchField::Replace => SearchField::Query,
+        }
+    }
+}
+
 /// Registering a venv asks for two things in turn: where it is, then what to call it.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum VenvRegisterStep {
@@ -724,6 +744,18 @@ pub struct App {
     /// The box asking what to look for across the project, when open.
     pub show_search: bool,
     pub search_input: String,
+    /// The box's second field: what the matches become. Empty is the whole of the difference
+    /// between the two things this box does — Enter on an empty one is the search that has always
+    /// been here and opens a list, Enter on a filled one opens a preview of a sweep.
+    pub search_replace: String,
+    /// Which of the two fields typing goes into, switched with Tab. The terminal's name-and-
+    /// command box works exactly this way, and two boxes that look alike have to behave alike.
+    pub search_field: SearchField,
+    /// The replacement the running walk was asked for, if it was asked for one, held until the
+    /// walk answers. See [`PendingReplace`] for why the flags travel with it.
+    replace_asked: Option<PendingReplace>,
+    /// The preview of a sweep, when one is up.
+    pub replace_sweep: Option<ReplaceSweep>,
     /// How the project search reads its query. Kept on the app rather than in the Find box: a
     /// search across files outlives the box it was typed in, and asking for a pattern twice —
     /// once per place you can search — would be asking the same question twice.
@@ -1059,10 +1091,121 @@ pub struct RenamePreview {
 impl RenamePreview {
     /// Moves the reading position, stopping at the top and at the last screenful.
     pub fn scroll_by(&mut self, by: isize) {
-        let page = self.body_rows.max(1);
-        let last = self.rows.len().saturating_sub(page) as isize;
-        self.scroll = (self.scroll as isize + by).clamp(0, last.max(0)) as usize;
+        self.scroll = scrolled(self.scroll, self.rows.len(), self.body_rows, by);
     }
+}
+
+/// A reading position moved by `by`, stopping at the top and at the last screenful.
+///
+/// A free function because there are two previews now and they scroll identically — the rename's
+/// and the project sweep's. Nothing about clamping a scroll knows which of them it is looking at,
+/// and two copies of it would be two chances for one of them to stop scrolling one row short.
+fn scrolled(scroll: usize, rows: usize, body_rows: usize, by: isize) -> usize {
+    let page = body_rows.max(1);
+    let last = rows.saturating_sub(page) as isize;
+    (scroll as isize + by).clamp(0, last.max(0)) as usize
+}
+
+/// Where a file a sweep would change actually lives, and the guard that says it has not moved
+/// since the preview was built.
+///
+/// The discriminator is the whole safety of replacing across a project, because the two roads
+/// are not interchangeable and the choice is not an optimisation. A file with a tab open is
+/// edited *through the rope*, always: a disk write under an open tab is picked up by the 700 ms
+/// sweep in the frame loop, which reloads a clean buffer and clears its undo stack outright — so
+/// the replacement would land and the one keystroke that could take it back would be gone — and
+/// under a *dirty* tab it is worse still, since the buffer keeps its text, the disk keeps the
+/// replacement, and the two diverge in silence. A file with no tab has no rope to edit, so it is
+/// rewritten on disk, and everything it needs to be written back the way it was found travels
+/// here with it.
+pub enum SweepTarget {
+    /// A file a tab holds. Edited through [`Editor::replace_char_range`], one call and therefore
+    /// one step of undo, whether the buffer is clean or dirty.
+    OpenBuffer {
+        /// The buffer's revision when the preview was built — the guard on the char offsets, and
+        /// the same one the rename uses. See [`RenameFile::revision`].
+        revision: u64,
+    },
+    /// A file nothing has open. Rewritten whole, through `settings::write_atomic`.
+    Disk {
+        /// The file's timestamp when it was read. The disk's answer to a buffer's revision: if it
+        /// has moved, something else has written the file and every offset below is measured
+        /// against text that is no longer there.
+        ///
+        /// `None` from a filesystem that will not say, which then compares equal to the `None`
+        /// read again at apply time — a guard that cannot be checked is not one to refuse on, and
+        /// the preview is seconds old.
+        mtime: Option<std::time::SystemTime>,
+        /// How the file ends its lines, and whether it ends with one at all. Both recorded on the
+        /// way in and re-applied on the way out, because the text below is normalized to `\n` the
+        /// way a buffer's is: a sweep that turned a CRLF file into an LF one, or quietly grew a
+        /// final newline, would show up as a diff of every line in the file.
+        line_ending: crate::editor::LineEnding,
+        final_newline: bool,
+    },
+}
+
+/// One file a sweep would change: where it is, which road it takes, and the replacements.
+pub struct SweepFile {
+    pub path: PathBuf,
+    pub target: SweepTarget,
+    /// Absolute char indices into the file's text as it was read, ascending and not overlapping —
+    /// the same shape [`edits_as_one_span`] takes, and produced by the same walk for both roads
+    /// so a file cannot be replaced one way in a tab and another way on disk.
+    pub edits: Vec<BufferEdit>,
+}
+
+/// What a replace across the project would change, ready to be read and then applied.
+///
+/// The rename's preview with the project's problem added: the rename refuses a file no tab holds,
+/// and this one is *for* the files no tab holds. Everything else is deliberately the same — built
+/// once and never recomputed, diff-shaped rows, one step of undo per buffer, all-or-nothing —
+/// because it is the same problem and a reader who has agreed to one has agreed to the other.
+pub struct ReplaceSweep {
+    /// The query as it was typed, and what it becomes. Shown in the title; a pattern's groups are
+    /// already resolved in the rows, which is where they can actually be read.
+    pub query: String,
+    pub replacement: String,
+    /// Where the keyboard was when the sweep was asked for, so the cursor can be put back after
+    /// text moves under it. `None` when no tab was open, which is a perfectly ordinary way to
+    /// search a project.
+    pub from: Option<(PathBuf, usize, usize)>,
+    pub from_char: usize,
+    pub files: Vec<SweepFile>,
+    /// The lines to draw, diff-shaped: a header per file, then a `-`/`+` pair per changed line.
+    pub rows: Vec<String>,
+    pub edits: usize,
+    pub scroll: usize,
+    /// How many rows the body has room for, written by the renderer — the same arrangement as
+    /// the rename preview's and the git panel's, for the same reason.
+    pub body_rows: usize,
+}
+
+impl ReplaceSweep {
+    pub fn scroll_by(&mut self, by: isize) {
+        self.scroll = scrolled(self.scroll, self.rows.len(), self.body_rows, by);
+    }
+
+    /// How many of the files take each road. Two numbers rather than one because they are two
+    /// different promises to the reader: the buffers can be undone and the disk cannot.
+    fn split(&self) -> (usize, usize) {
+        let buffers =
+            self.files.iter().filter(|f| matches!(f.target, SweepTarget::OpenBuffer { .. })).count();
+        (buffers, self.files.len() - buffers)
+    }
+}
+
+/// A project search that was asked with a replacement, and so answers with a preview instead of
+/// a list.
+///
+/// The flags ride along rather than being read off the app when the answer comes back. The walk
+/// happens on a thread and the box is closed the moment it starts, so by the time this is used
+/// the switches could have been moved by the *next* search being typed — and re-scanning with
+/// flags the hits were not found under is how a preview comes to describe a query nobody asked.
+struct PendingReplace {
+    replacement: String,
+    regex: bool,
+    case_sensitive: bool,
 }
 
 /// A question the panel is holding everything else for.
@@ -1370,13 +1513,28 @@ fn empty_state_focus(show_sidebar: bool, show_terminal: bool) -> Focus {
 /// `edits` must be ascending and non-overlapping. `None` for an empty list, which is a file the
 /// server named and then asked nothing of.
 fn edits_as_one_span(editor: &Editor, edits: &[BufferEdit]) -> Option<(usize, usize, String)> {
+    rebuild_edits(edits, |from, to| editor.rope.slice(from..to).to_string())
+}
+
+/// The same rebuild, told where to get the untouched text from rather than being handed a buffer.
+///
+/// Split out because a replace across the project writes files nobody has open, and those have no
+/// rope to slice: they are a `String` read a moment ago. The arithmetic is the part that must not
+/// exist twice — it is where an off-by-one eats a character — so it exists here, and the two
+/// roads differ only in how they say "the characters from here to there".
+///
+/// `slice` is asked for half-open char ranges, which is what [`BufferEdit`] counts in.
+fn rebuild_edits(
+    edits: &[BufferEdit],
+    slice: impl Fn(usize, usize) -> String,
+) -> Option<(usize, usize, String)> {
     let span_start = edits.first()?.start;
     let span_end = edits.last()?.end;
     let mut rebuilt = String::new();
     let mut carried = span_start;
     for edit in edits {
         if edit.start > carried {
-            rebuilt.push_str(&editor.rope.slice(carried..edit.start).to_string());
+            rebuilt.push_str(&slice(carried, edit.start));
         }
         rebuilt.push_str(&edit.new_text);
         carried = edit.end;
@@ -1476,13 +1634,26 @@ fn format_spans(
 ///
 /// `edits` must be ascending and non-overlapping, which is what the caller has just checked.
 fn preview_rows(editor: &Editor, lines: &[String], edits: &[BufferEdit]) -> Vec<String> {
+    diff_rows(lines, edits, |line| editor.rope.line_to_char(line))
+}
+
+/// The same rows, told where each line begins rather than being handed a buffer.
+///
+/// Split from [`preview_rows`] for the reason [`rebuild_edits`] is split from
+/// [`edits_as_one_span`]: the sweep across the project draws these rows for files that have no
+/// rope, only a `String` and the line offsets counted while walking it. One diff, drawn once.
+fn diff_rows(
+    lines: &[String],
+    edits: &[BufferEdit],
+    line_start_of: impl Fn(usize) -> usize,
+) -> Vec<String> {
     let mut rows = Vec::new();
     let mut at = 0usize;
     while at < edits.len() {
         let line = edits[at].line;
         let end = at + edits[at..].iter().take_while(|e| e.line == line).count();
         let old: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
-        let line_start = editor.rope.line_to_char(line);
+        let line_start = line_start_of(line);
         let mut new = String::new();
         let mut carried = 0usize;
         for edit in &edits[at..end] {
@@ -1498,6 +1669,150 @@ fn preview_rows(editor: &Editor, lines: &[String], edits: &[BufferEdit]) -> Vec<
         at = end;
     }
     rows
+}
+
+/// One file walked for a sweep: its lines, where each of them begins, and every replacement.
+///
+/// The line starts are kept because the diff rows need them and counting them twice is counting
+/// them differently once. They are char offsets, like everything a [`BufferEdit`] carries.
+struct FileScan {
+    lines: Vec<String>,
+    line_starts: Vec<usize>,
+    edits: Vec<BufferEdit>,
+}
+
+/// Every match in `text`, line by line, as the replacements one file would receive.
+///
+/// A re-scan rather than a reading of the search's own hits, and that is not waste: a
+/// [`crate::search::Hit`] is *a line*, with the match's start and nothing about its end, and one
+/// hit per line however many times the line matches. That shape is exactly right for a list of
+/// places to go and useless for a list of characters to replace, so the query is asked again —
+/// through the same [`crate::find::compile`], with the same flags — of the text as it is now.
+///
+/// Line by line, because that is how the search matched: `^` holds at the start of every line in
+/// a project search, and a sweep whose anchors meant something else would replace text the list
+/// never offered. Groups are resolved against the line for the same reason, by
+/// [`crate::find::expand_at`].
+///
+/// `regex` says whether the query was a pattern. A literal query has no groups, so its
+/// replacement is written out verbatim and a `$1` in it stays three characters — the rule the
+/// Find box already follows.
+///
+/// A line the pattern gave up on — the backtrack limit — keeps whatever was found before it gave
+/// up and moves to the next line, which is how the search treats the same line.
+fn scan_for_replacements(
+    text: &str,
+    re: &fancy_regex::Regex,
+    template: &str,
+    regex: bool,
+) -> FileScan {
+    let mut scan = FileScan { lines: Vec::new(), line_starts: Vec::new(), edits: Vec::new() };
+    // Char offset of the current line's first character. `lines()` drops the terminator, so it
+    // is added back by hand — and the text reaching here is always normalized to `\n`, which is
+    // what makes that one character rather than a guess.
+    let mut line_start = 0usize;
+    for (number, line) in text.lines().enumerate() {
+        scan.lines.push(line.to_string());
+        scan.line_starts.push(line_start);
+        // Walked by byte offset, recorded by char index, exactly as the Find box walks a buffer:
+        // the engine counts in bytes and everything downstream of here counts in characters.
+        let mut byte = 0usize;
+        let mut chars_before = 0usize;
+        while let Ok(Some(m)) = re.find_from_pos(line, byte) {
+            let start_char = chars_before + line[byte..m.start()].chars().count();
+            let end_char = start_char + line[m.start()..m.end()].chars().count();
+            scan.edits.push(BufferEdit {
+                start: line_start + start_char,
+                end: line_start + end_char,
+                line: number,
+                new_text: match regex {
+                    true => crate::find::expand_at(re, line, m.start(), template),
+                    false => template.to_string(),
+                },
+            });
+            // An empty match — `a*`, or `^` — matches without consuming anything, so the walk is
+            // moved on by hand or it never ends.
+            let next = if m.end() > m.start() {
+                m.end()
+            } else {
+                match line[m.start()..].chars().next() {
+                    Some(c) => m.start() + c.len_utf8(),
+                    None => break,
+                }
+            };
+            chars_before = start_char + line[m.start()..next].chars().count();
+            byte = next;
+        }
+        line_start += line.chars().count() + 1;
+    }
+    scan
+}
+
+/// Which road a file takes through a sweep, and the text the sweep is going to scan.
+///
+/// The single decision the whole feature turns on, in one place so it cannot be made twice and
+/// differently. `held` is the tab that has this file open, if any, and its presence settles it:
+/// a file with a tab is scanned and edited *through the rope*, always, and the text scanned is
+/// the text on screen — a dirty buffer included, since what somebody has typed is what they mean
+/// to replace in. See [`SweepTarget`] for what a disk write under an open tab actually costs.
+///
+/// `None` for a file with no tab that is not readable text, which is the same test the search
+/// made on the way past.
+fn sweep_text_and_target(held: Option<&Editor>, path: &Path) -> Option<(String, SweepTarget)> {
+    match held {
+        Some(editor) => {
+            Some((editor.rope.to_string(), SweepTarget::OpenBuffer { revision: editor.revision() }))
+        }
+        None => read_for_sweep(path),
+    }
+}
+
+/// A file with no tab, read as text to scan plus everything needed to write it back the way it
+/// was found.
+///
+/// `None` for anything that is not text, which is the same test the search made on the way past:
+/// reading as UTF-8 and failing is the cheapest way to skip a picture without opening it to ask.
+fn read_for_sweep(path: &Path) -> Option<(String, SweepTarget)> {
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    let raw = std::fs::read_to_string(path).ok()?;
+    let target = SweepTarget::Disk {
+        mtime,
+        line_ending: match raw.contains("\r\n") {
+            true => crate::editor::LineEnding::Crlf,
+            false => crate::editor::LineEnding::Lf,
+        },
+        final_newline: raw.ends_with('\n'),
+    };
+    // Normalized to `\n` for the scan, exactly as `Editor::open` normalizes a buffer. Without it
+    // a `$` would match before a `\r` nobody typed, and every char offset past the first line
+    // would be one out.
+    Some((raw.replace("\r\n", "\n"), target))
+}
+
+/// A swept file's text put back the way the file was found.
+///
+/// The two steps at the end of [`Editor::save`], in the same order and for the same reason: the
+/// final newline the file did or did not have, then the line ending it did or did not use. A
+/// sweep that grew a trailing newline, or turned a CRLF file into an LF one, would show up in
+/// review as every line in the file having changed — which is the one thing a replacement of
+/// three words must not look like.
+///
+/// Mirrored rather than shared with `save`, deliberately. `save` writes a *buffer* — it also
+/// clears the dirty flag and re-reads the mtime, neither of which means anything here — and
+/// prying those two lines out of it would make the most safety-critical function in the editor
+/// depend on this one.
+fn text_for_disk(
+    mut text: String,
+    line_ending: crate::editor::LineEnding,
+    final_newline: bool,
+) -> String {
+    if !final_newline && text.ends_with('\n') {
+        text.pop();
+    }
+    if line_ending == crate::editor::LineEnding::Crlf {
+        text = text.replace('\n', "\r\n");
+    }
+    text
 }
 
 fn located_label(root: &Path, path: &Path, line: usize, text: Option<&str>) -> String {
@@ -2380,6 +2695,10 @@ impl App {
             preview_rx,
             show_search: false,
             search_input: String::new(),
+            search_replace: String::new(),
+            search_field: SearchField::Query,
+            replace_asked: None,
+            replace_sweep: None,
             search_regex: false,
             search_case_sensitive: false,
             search_tx,
@@ -2692,7 +3011,7 @@ impl App {
             ModalTextField::GotoLine => {
                 self.goto_input.extend(text.chars().filter(char::is_ascii_digit))
             }
-            ModalTextField::ProjectSearch => self.search_input.push_str(&text),
+            ModalTextField::ProjectSearch => self.search_field_mut().push_str(&text),
             ModalTextField::NewEntry => self.new_entry_input.push_str(&text),
             ModalTextField::Rename => self.rename_input.push_str(&text),
             ModalTextField::SymbolRename => {
@@ -2766,7 +3085,7 @@ impl App {
         }
         // The preview that follows it takes no text: it is a list and a yes/no, and a sentence
         // pasted into it would have nowhere to go.
-        if self.rename_preview.is_some() {
+        if self.rename_preview.is_some() || self.replace_sweep.is_some() {
             return None;
         }
         if self.show_terminal_rename {
@@ -3166,35 +3485,88 @@ impl App {
             .filter(|s| !s.contains('\n') && !s.trim().is_empty())
             .or_else(|| self.find.as_ref().map(|f| f.query.clone()).filter(|q| !q.is_empty()))
             .unwrap_or_default();
+        // Emptied every time, unlike the query, which is prefilled. The asymmetry is the safety:
+        // an empty replacement is what makes Enter a search, so a replacement left over from ten
+        // minutes ago would turn the next Ctrl+Shift+H into a sweep nobody asked for — and the
+        // query field, being prefilled, is the one place the reader is already looking.
+        self.search_replace.clear();
+        self.search_field = SearchField::Query;
         self.show_search = true;
+    }
+
+    /// The same box, opened on the field that makes it a replace.
+    fn begin_project_replace(&mut self) {
+        self.begin_project_search();
+        self.search_field = SearchField::Replace;
+    }
+
+    /// The field typing goes into, so the two arms below never have to name both.
+    fn search_field_mut(&mut self) -> &mut String {
+        match self.search_field {
+            SearchField::Query => &mut self.search_input,
+            SearchField::Replace => &mut self.search_replace,
+        }
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => {
-                self.show_search = false;
-                self.search_input.clear();
-            }
+            KeyCode::Esc => self.close_search_box(),
             KeyCode::Enter => self.start_project_search(),
+            // Both fields are one line, so the vertical keys move between them too — the same
+            // arrangement as the terminal's name-and-command box, and for the same reason:
+            // nobody should have to guess that only Tab works.
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                self.search_field = self.search_field.other();
+            }
             // The same two switches as the Find box, by the same two keys: one idea, one pair
-            // of keys, wherever a query is typed.
+            // of keys, wherever a query is typed. They belong to the query whichever field is
+            // being typed into — there is one search here, not one per field.
             KeyCode::Char('u') if ctrl => self.search_case_sensitive = !self.search_case_sensitive,
             KeyCode::Char('n') if ctrl => self.search_regex = !self.search_regex,
-            KeyCode::Backspace => pop_grapheme(&mut self.search_input),
-            KeyCode::Char(c) if is_a_typed_character(key) => self.search_input.push(c),
+            KeyCode::Backspace => pop_grapheme(self.search_field_mut()),
+            KeyCode::Char(c) if is_a_typed_character(key) => self.search_field_mut().push(c),
             _ => {}
         }
     }
 
+    /// Closes the box and forgets what was in it. The replacement goes too: a field holding text
+    /// nobody can see is a field that turns the next Ctrl+Shift+H into a sweep.
+    fn close_search_box(&mut self) {
+        self.show_search = false;
+        self.search_input.clear();
+        self.search_replace.clear();
+        self.search_field = SearchField::Query;
+    }
+
+    /// Starts the walk. One walk, whichever of the two things the box was asked for: a replace is
+    /// a search whose answer is read differently, and running a second kind of scan for it would
+    /// be two dialects of "what matches" for one query.
     fn start_project_search(&mut self) {
         let query = self.search_input.trim().to_string();
         if query.is_empty() {
             return;
         }
+        // Untrimmed, unlike the query: a replacement is text to write, and leading or trailing
+        // spaces in it are as meant as any other character. Trimming it would make `" -> "`
+        // impossible to type.
+        let replacement = self.search_replace.clone();
         self.show_search = false;
         let lang = self.settings.lang;
-        self.status_message = i18n::msg_search_running(lang, &query);
+        self.status_message = match replacement.is_empty() {
+            true => i18n::msg_search_running(lang, &query),
+            false => i18n::msg_replace_running(lang, &query, &replacement),
+        };
+        // Set before the walk starts and read when it answers. An empty field leaves it `None`,
+        // which is what makes the search below byte-for-byte the search it has always been.
+        self.replace_asked = match replacement.is_empty() {
+            true => None,
+            false => Some(PendingReplace {
+                replacement,
+                regex: self.search_regex,
+                case_sensitive: self.search_case_sensitive,
+            }),
+        };
         crate::search::spawn(
             self.root.clone(),
             query,
@@ -3204,6 +3576,254 @@ impl App {
             self.search_tx.clone(),
             self.search_pending.clone(),
         );
+    }
+
+    // ---- Replacing across the project -------------------------------------------------------
+    //
+    // The same discipline as the rename, because it is the same problem: a preview grouped by
+    // file, one place where a query becomes a pattern, all-or-nothing application, one step of
+    // undo per open buffer. What it adds is the half the rename refuses outright — files nothing
+    // has open — and everything below that is not shared with the rename exists to make that half
+    // safe: a file with a tab NEVER takes the disk road (see [`SweepTarget`]), a file without one
+    // is rewritten through the temp-and-rename that `settings::write_atomic` does, and what the
+    // file said about its own line endings is said back to it.
+    //
+    // The disk half has no undo. That is not hidden and cannot be fixed by hiding it: the preview
+    // is the consent, and the sentence afterwards counts the files it rewrote out loud.
+
+    /// Turns a finished search into a preview of the sweep, or into the one sentence saying why
+    /// there is not going to be one.
+    ///
+    /// Every `Err` refuses the *whole* replace, and they are asked in the order of what the
+    /// reader can do about them: narrow the query, close a read-only tab, or search again.
+    fn replace_sweep_from(
+        &self,
+        outcome: &crate::search::Outcome,
+        asked: &PendingReplace,
+    ) -> Result<ReplaceSweep, String> {
+        let lang = self.settings.lang;
+        // A search that stopped at its limit looked at part of the project, and a *list* that is
+        // part of the project is still useful — you go to one of the rows. A sweep is not: it is
+        // a claim about every occurrence, and half of every occurrence is the shape of bug that
+        // is found weeks later in a file nobody opened.
+        if outcome.truncated {
+            return Err(i18n::msg_replace_refused_truncated(lang, crate::search::HIT_LIMIT));
+        }
+        let re = crate::find::compile(&outcome.query, asked.regex, asked.case_sensitive)
+            .map_err(|detail| i18n::msg_find_pattern_error(lang, &detail))?;
+
+        // One entry per file, in path order, so the preview reads the same way twice running —
+        // the hits arrive in walk order, which is an order of the filesystem's choosing.
+        let mut paths: Vec<PathBuf> = outcome.hits.iter().map(|h| h.path.clone()).collect();
+        paths.sort();
+        paths.dedup();
+
+        let held = |path: &Path| self.editors.iter().find(|e| e.path.as_deref() == Some(path));
+        // Asked before anything is built, like the rename asks it: a tab that cannot be typed in
+        // is a refusal the reader fixes by closing it, not something to discover file by file.
+        if paths.iter().any(|p| held(p).is_some_and(|e| e.read_only)) {
+            return Err(i18n::msg_replace_refused_read_only(lang).to_string());
+        }
+
+        let mut files = Vec::new();
+        let mut rows = Vec::new();
+        let mut total = 0usize;
+        for path in paths {
+            // Buffer first, always — see [`sweep_text_and_target`]. Unreadable, or no longer
+            // text, is dropped rather than refused, for the reason a file that has stopped
+            // matching is dropped: the search is a moment old.
+            let Some((text, target)) = sweep_text_and_target(held(&path), &path) else { continue };
+            let scan = scan_for_replacements(&text, &re, &asked.replacement, asked.regex);
+            // The file has stopped matching between the walk and now — something wrote it, or a
+            // buffer was typed into. Silently left out: that is not an error, it is a search
+            // being a moment old, and a refusal here would make every sweep hostage to whatever
+            // an agent happens to be doing in another file.
+            if scan.edits.is_empty() {
+                continue;
+            }
+            total += scan.edits.len();
+            rows.push(i18n::msg_preview_file_header(
+                lang,
+                &path.strip_prefix(&self.root).unwrap_or(&path).display().to_string(),
+                scan.edits.len(),
+            ));
+            rows.extend(diff_rows(&scan.lines, &scan.edits, |line| scan.line_starts[line]));
+            files.push(SweepFile { path, target, edits: scan.edits });
+        }
+        // Everything the search found has moved on. Said rather than shown, because the
+        // alternative is an empty box asking to be agreed to.
+        if files.is_empty() {
+            return Err(i18n::msg_replace_nothing_left(lang).to_string());
+        }
+
+        // Where the keyboard is, as an offset, worked out here because here is where the text it
+        // is an offset into still exists.
+        let from = self.editor().path.clone().map(|path| {
+            let editor = self.editor();
+            (path, editor.cursor_line, editor.cursor_col)
+        });
+        let from_char = from
+            .as_ref()
+            .and_then(|(path, line, col)| {
+                held(path).map(|e| {
+                    e.rope.line_to_char((*line).min(e.rope.len_lines().saturating_sub(1))) + col
+                })
+            })
+            .unwrap_or(0);
+        Ok(ReplaceSweep {
+            query: outcome.query.clone(),
+            replacement: asked.replacement.clone(),
+            from,
+            from_char,
+            files,
+            rows,
+            edits: total,
+            scroll: 0,
+            body_rows: 1,
+        })
+    }
+
+    /// The preview's keys, which are the rename preview's keys down to the letter — one shape of
+    /// question, one set of answers.
+    fn handle_replace_sweep_key(&mut self, key: KeyEvent) {
+        let lang = self.settings.lang;
+        let page = self.replace_sweep.as_ref().map(|s| s.body_rows.max(1) as isize).unwrap_or(1);
+        if let Some(sweep) = self.replace_sweep.as_mut() {
+            match key.code {
+                KeyCode::Up => return sweep.scroll_by(-1),
+                KeyCode::Down => return sweep.scroll_by(1),
+                KeyCode::PageUp => return sweep.scroll_by(-page),
+                KeyCode::PageDown => return sweep.scroll_by(page),
+                KeyCode::Home => {
+                    sweep.scroll = 0;
+                    return;
+                }
+                KeyCode::End => return sweep.scroll_by(sweep.rows.len() as isize),
+                _ => {}
+            }
+        }
+        match key.code {
+            KeyCode::Enter => self.apply_replace_sweep(),
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&i18n::yes_key(lang)) => {
+                self.apply_replace_sweep()
+            }
+            _ => {
+                self.replace_sweep = None;
+                self.status_message = i18n::msg_replace_cancelled(lang).to_string();
+            }
+        }
+    }
+
+    /// Writes the preview into the buffers and the files it was built against.
+    ///
+    /// Two phases, and the split is the all-or-nothing promise. The first re-checks every guard
+    /// and works out every file's new contents in memory, writing nothing: a buffer's revision
+    /// must be the one the offsets were measured against, a file's timestamp must be the one it
+    /// was read at, and a file that has since been opened in a tab is a refusal rather than a
+    /// disk write under somebody's undo stack. Only when all of that holds does the second phase
+    /// start putting bytes anywhere.
+    fn apply_replace_sweep(&mut self) {
+        let lang = self.settings.lang;
+        let Some(sweep) = self.replace_sweep.take() else { return };
+        let moved = i18n::msg_replace_refused_moved(lang).to_string();
+
+        let mut writes: Vec<(PathBuf, String)> = Vec::new();
+        for file in &sweep.files {
+            match &file.target {
+                SweepTarget::OpenBuffer { revision } => {
+                    let held = self
+                        .editors
+                        .iter()
+                        .find(|e| e.path.as_deref() == Some(file.path.as_path()));
+                    // The tab closed, the buffer was reloaded by the sweep in the frame loop, or
+                    // it turned read-only. Any of the three and the offsets below describe text
+                    // that is no longer in that rope.
+                    if !held.is_some_and(|e| e.revision() == *revision && !e.read_only) {
+                        self.status_message = moved;
+                        return;
+                    }
+                }
+                SweepTarget::Disk { mtime, line_ending, final_newline } => {
+                    // A tab opened over it since the preview. Refused rather than written: the
+                    // whole point of the two roads is that a file with a tab never takes this
+                    // one, and "since the preview" does not make it an exception.
+                    if self.editors.iter().any(|e| e.path.as_deref() == Some(file.path.as_path())) {
+                        self.status_message = moved;
+                        return;
+                    }
+                    let now = std::fs::metadata(&file.path).ok().and_then(|m| m.modified().ok());
+                    if now != *mtime {
+                        self.status_message = moved;
+                        return;
+                    }
+                    let Ok(raw) = std::fs::read_to_string(&file.path) else {
+                        self.status_message = moved;
+                        return;
+                    };
+                    let chars: Vec<char> = raw.replace("\r\n", "\n").chars().collect();
+                    // Belt and braces over the timestamp: a filesystem whose mtime has a one-
+                    // second granularity can hide a write that landed in the same second, and an
+                    // offset past the end of the text would be a panic rather than a refusal.
+                    if file.edits.last().is_some_and(|e| e.end > chars.len()) {
+                        self.status_message = moved;
+                        return;
+                    }
+                    let Some((start, end, rebuilt)) =
+                        rebuild_edits(&file.edits, |from, to| chars[from..to].iter().collect())
+                    else {
+                        continue;
+                    };
+                    let mut whole: String = chars[..start].iter().collect();
+                    whole.push_str(&rebuilt);
+                    whole.extend(&chars[end..]);
+                    writes.push((
+                        file.path.clone(),
+                        text_for_disk(whole, *line_ending, *final_newline),
+                    ));
+                }
+            }
+        }
+
+        // The files first, because they are the half that can fail — a read-only file, a full
+        // disk. Stopping here leaves what was written written and every open buffer untouched,
+        // which is the state the sentence below can describe truthfully; carrying on into the
+        // buffers would leave the reader with edits on screen and a file that never took them.
+        for (path, text) in &writes {
+            if let Err(e) = settings::write_atomic(path, text.as_bytes()) {
+                let shown = path.strip_prefix(&self.root).unwrap_or(path).display().to_string();
+                self.status_message = i18n::msg_replace_write_failed(lang, &shown, &e.to_string());
+                return;
+            }
+        }
+        // And the buffers, which cannot. One `replace_char_range` per file, which is one
+        // checkpoint and therefore one step of undo — the same shape as Replace All and as the
+        // rename, and for the same reason: a sweep is one action, so taking it back in a given
+        // file is one Ctrl+Z and not one per occurrence. A dirty buffer is fine; the edit goes
+        // through the rope like any other.
+        for file in &sweep.files {
+            if !matches!(file.target, SweepTarget::OpenBuffer { .. }) {
+                continue;
+            }
+            let Some(index) =
+                self.editors.iter().position(|e| e.path.as_deref() == Some(file.path.as_path()))
+            else {
+                continue;
+            };
+            let editor = &mut self.editors[index];
+            let Some((start, end, rebuilt)) = edits_as_one_span(editor, &file.edits) else {
+                continue;
+            };
+            editor.replace_char_range(start, end, &rebuilt);
+        }
+        // The one buffer somebody is looking at, if the sweep reached it at all.
+        let landed = sweep.from.clone().and_then(|(path, line, col)| {
+            sweep.files.iter().find(|f| f.path == path).map(|file| (path, line, col, file))
+        });
+        if let Some((path, line, col, file)) = landed {
+            self.restore_cursor_after_edits(&path, line, col, sweep.from_char, &file.edits);
+        }
+        let (buffers, disk) = sweep.split();
+        self.status_message = i18n::msg_replace_applied(lang, sweep.edits, buffers, disk);
     }
 
     // ---- Breakpoints, and being stopped -----------------------------------------------------
@@ -4854,7 +5474,7 @@ impl App {
                 return Err(i18n::msg_rename_refused_overlap(lang).to_string());
             }
             total += edits.len();
-            rows.push(i18n::msg_rename_file_header(
+            rows.push(i18n::msg_preview_file_header(
                 lang,
                 &file.path.strip_prefix(&self.root).unwrap_or(&file.path).display().to_string(),
                 edits.len(),
@@ -4984,19 +5604,33 @@ impl App {
     fn restore_cursor_after_rename(&mut self, preview: &RenamePreview) {
         let (path, line, col) = &preview.from;
         let Some(target) = preview.files.iter().find(|t| &t.path == path) else { return };
-        let delta: isize = target
-            .edits
+        self.restore_cursor_after_edits(path, *line, *col, preview.from_char, &target.edits);
+    }
+
+    /// The arithmetic of the two paragraphs above, given the one buffer's edits.
+    ///
+    /// Shared with the sweep across the project, which has the same problem for the same reason:
+    /// `replace_char_range` leaves the cursor at the end of what it wrote, and the one buffer
+    /// somebody is actually looking at is the one where that reads as the screen jumping.
+    fn restore_cursor_after_edits(
+        &mut self,
+        path: &Path,
+        line: usize,
+        col: usize,
+        from_char: usize,
+        edits: &[BufferEdit],
+    ) {
+        let delta: isize = edits
             .iter()
-            .filter(|e| e.line == *line && e.end <= preview.from_char)
+            .filter(|e| e.line == line && e.end <= from_char)
             .map(|e| e.new_text.chars().count() as isize - (e.end - e.start) as isize)
             .sum();
-        let Some(index) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
-        else {
+        let Some(index) = self.editors.iter().position(|e| e.path.as_deref() == Some(path)) else {
             return;
         };
         let editor = &mut self.editors[index];
-        editor.cursor_line = (*line).min(editor.rope.len_lines().saturating_sub(1));
-        let wanted = (*col as isize + delta).max(0) as usize;
+        editor.cursor_line = line.min(editor.rope.len_lines().saturating_sub(1));
+        let wanted = (col as isize + delta).max(0) as usize;
         editor.cursor_col = wanted.min(editor.line_char_len(editor.cursor_line));
     }
 
@@ -5356,6 +5990,9 @@ impl App {
         let lang = self.settings.lang;
         while let Ok(outcome) = self.search_rx.try_recv() {
             self.redraw = true;
+            // Taken whatever the answer turns out to be: it belongs to *this* walk, and a
+            // replacement left lying about would be applied to whatever the next search found.
+            let asked = self.replace_asked.take();
             if let Some(detail) = &outcome.error {
                 self.status_message = i18n::msg_find_pattern_error(lang, detail);
                 continue;
@@ -5368,6 +6005,22 @@ impl App {
                     true => i18n::msg_search_done(lang, 0, outcome.files_searched, true),
                     false => i18n::msg_search_none(lang, &outcome.query, outcome.files_searched),
                 };
+                continue;
+            }
+            // A replacement was typed, so the hits are not a list of places to go: they are the
+            // input to a preview of what would change. Everything above this line is the search
+            // exactly as it was, which is the point — the second field changes what the answer
+            // *opens*, not how the question was asked.
+            if let Some(asked) = asked {
+                match self.replace_sweep_from(&outcome, &asked) {
+                    Ok(sweep) => {
+                        self.replace_sweep = Some(sweep);
+                        // The preview is the answer, so the line that said the walk was running
+                        // has done its job.
+                        self.status_message = String::new();
+                    }
+                    Err(refusal) => self.status_message = refusal,
+                }
                 continue;
             }
             self.status_message = i18n::msg_search_done(
@@ -9377,6 +10030,7 @@ impl App {
             || self.show_rename
             || self.symbol_rename.is_some()
             || self.rename_preview.is_some()
+            || self.replace_sweep.is_some()
             || self.show_terminal_rename
             || self.show_workspace_save
             || self.git_panel.is_some()
@@ -9461,6 +10115,10 @@ impl App {
         }
         if self.rename_preview.is_some() {
             self.handle_rename_preview_key(key);
+            return;
+        }
+        if self.replace_sweep.is_some() {
+            self.handle_replace_sweep_key(key);
             return;
         }
         if self.show_terminal_rename {
@@ -9916,6 +10574,7 @@ impl App {
             MenuAction::Find => self.open_find(false),
             MenuAction::GotoLine => self.open_goto(),
             MenuAction::SearchProject => self.begin_project_search(),
+            MenuAction::ReplaceProject => self.begin_project_replace(),
             MenuAction::ToggleGitPanel => self.toggle_git_panel(),
             MenuAction::GitStatus => self.open_git_panel_on(GitTab::Status),
             MenuAction::GitChanges => self.open_git_panel_on(GitTab::Diff),
@@ -11333,6 +11992,30 @@ impl App {
             return;
         }
 
+        // The sweep's preview, on the same frame and with the same rule: the wheel reads it and
+        // any click puts it away. A click is not an agreement to rewrite files on disk.
+        if self.replace_sweep.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(sweep) = self.replace_sweep.as_mut() {
+                        sweep.scroll_by(-3);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(sweep) = self.replace_sweep.as_mut() {
+                        sweep.scroll_by(3);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.replace_sweep = None;
+                    self.status_message =
+                        i18n::msg_replace_cancelled(self.settings.lang).to_string();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The manual is a reader, not a frame: while it is up the mouse only picks sections,
         // scrolls, or dismisses it.
         if self.manual.is_some() {
@@ -11407,8 +12090,7 @@ impl App {
                     return;
                 }
                 if self.show_search {
-                    self.show_search = false;
-                    self.search_input.clear();
+                    self.close_search_box();
                     return;
                 }
                 if self.show_save_as {
@@ -13139,6 +13821,126 @@ mod tests {
                 new_text: new_text.to_string(),
             })
             .collect()
+    }
+
+    // ---- Replacing across the project -----------------------------------------------------
+    //
+    // The three things a sweep gets wrong quietly, each on its own: a line that matches more than
+    // once, a file whose line endings it has to hand back untouched, and the choice of which road
+    // a file takes. All three fail invisibly in a driver — the screen looks right and the bytes
+    // are wrong — which is exactly what a unit test is for.
+
+    /// The reason the preview re-scans instead of reading the search's hits: a hit is a line and
+    /// carries one match, and a replace-all that stopped at the first one per line would be a
+    /// replace-some wearing the same name.
+    #[test]
+    fn every_match_on_a_line_is_replaced_not_just_the_first() {
+        let re = crate::find::compile("ab", false, true).unwrap();
+        let scan = scan_for_replacements("ab xx ab\nno\nab ab ab\n", &re, "Z", false);
+        assert_eq!(scan.edits.len(), 5, "two on the first line, three on the third");
+        assert_eq!(scan.edits.iter().map(|e| e.line).collect::<Vec<_>>(), vec![0, 0, 2, 2, 2]);
+        // Char offsets into the whole text, which is what the rebuild and the rows both count in.
+        assert_eq!(scan.edits[0].start, 0);
+        assert_eq!(scan.edits[1].start, 6);
+        assert_eq!(scan.line_starts, vec![0, 9, 12]);
+
+        // And the rows collapse a line's matches into one pair, the way the rename's do: two
+        // intermediate states that never exist are not a preview of anything.
+        let rows = diff_rows(&scan.lines, &scan.edits, |line| scan.line_starts[line]);
+        assert_eq!(rows, vec!["- ab xx ab", "+ Z xx Z", "- ab ab ab", "+ Z Z Z"]);
+    }
+
+    /// An accent is where the engine's bytes and the editor's characters come apart, and every
+    /// offset here is a character.
+    #[test]
+    fn offsets_land_on_characters_in_an_accented_file() {
+        let re = crate::find::compile("città", false, true).unwrap();
+        let text = "una città e una città\nperò\n";
+        let scan = scan_for_replacements(text, &re, "paese", false);
+        assert_eq!(scan.edits.len(), 2);
+        let chars: Vec<char> = text.chars().collect();
+        for edit in &scan.edits {
+            assert_eq!(chars[edit.start..edit.end].iter().collect::<String>(), "città");
+        }
+    }
+
+    /// A pattern's groups are resolved against the line the match was found in, because that is
+    /// the text the project search matched against — and a literal query has no groups, so its
+    /// dollars stay dollars.
+    #[test]
+    fn a_group_reaches_the_replacement_and_a_literal_dollar_does_not() {
+        let re = crate::find::compile(r"(\w+)@(\w+)", true, true).unwrap();
+        let scan = scan_for_replacements("ada@lovelace\nalan@turing\n", &re, "$2.$1", true);
+        let becomes: Vec<&str> = scan.edits.iter().map(|e| e.new_text.as_str()).collect();
+        assert_eq!(becomes, vec!["lovelace.ada", "turing.alan"]);
+
+        let plain = crate::find::compile("cost", false, true).unwrap();
+        let scan = scan_for_replacements("cost\n", &plain, "$1", false);
+        assert_eq!(scan.edits[0].new_text, "$1", "no groups to quote, so no quoting");
+    }
+
+    /// What the file said about itself is said back to it. A sweep that turned a CRLF file into
+    /// an LF one, or grew a final newline the file never had, would read in review as every line
+    /// having changed — which is the one thing replacing three words must not look like.
+    #[test]
+    fn a_rewritten_file_keeps_its_line_endings_and_its_last_newline() {
+        let dir = setup_dir("sweep_endings");
+        let crlf = dir.join("crlf.txt");
+        std::fs::write(&crlf, b"alfa here\r\nalfa again\r\n").unwrap();
+        let bare = dir.join("bare.txt");
+        std::fs::write(&bare, b"alfa here\nalfa again").unwrap();
+
+        let re = crate::find::compile("alfa", false, true).unwrap();
+        for path in [&crlf, &bare] {
+            let (text, target) = read_for_sweep(path).expect("both are text");
+            assert!(!text.contains('\r'), "the scan sees normalized text, whatever is on disk");
+            let SweepTarget::Disk { line_ending, final_newline, .. } = target else {
+                panic!("a file with no tab takes the disk road");
+            };
+            let scan = scan_for_replacements(&text, &re, "beta", false);
+            assert_eq!(scan.edits.len(), 2);
+            let chars: Vec<char> = text.chars().collect();
+            let (start, end, rebuilt) =
+                rebuild_edits(&scan.edits, |from, to| chars[from..to].iter().collect()).unwrap();
+            let mut whole: String = chars[..start].iter().collect();
+            whole.push_str(&rebuilt);
+            whole.extend(&chars[end..]);
+            let written = text_for_disk(whole, line_ending, final_newline);
+            std::fs::write(path, written.as_bytes()).unwrap();
+        }
+        assert_eq!(std::fs::read(&crlf).unwrap(), b"beta here\r\nbeta again\r\n");
+        assert_eq!(
+            std::fs::read(&bare).unwrap(),
+            b"beta here\nbeta again",
+            "a file that ended without a newline still does"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The choice the whole feature turns on. A file with a tab is scanned in the rope — dirty
+    /// included, since the text on screen is the text somebody means — and a file without one is
+    /// read from disk with everything needed to write it back.
+    #[test]
+    fn a_file_with_a_tab_never_takes_the_disk_road() {
+        let dir = setup_dir("sweep_roads");
+        let path = dir.join("open.txt");
+        std::fs::write(&path, "what is on disk\n").unwrap();
+
+        let mut editor = buffer("what is in the buffer\n");
+        editor.path = Some(path.clone());
+        let (text, target) = sweep_text_and_target(Some(&editor), &path).expect("a tab holds it");
+        assert_eq!(text, "what is in the buffer\n", "the text the user can see");
+        assert!(matches!(target, SweepTarget::OpenBuffer { revision } if revision == editor.revision()));
+
+        let (text, target) = sweep_text_and_target(None, &path).expect("and without a tab");
+        assert_eq!(text, "what is on disk\n");
+        assert!(matches!(target, SweepTarget::Disk { .. }));
+
+        // Not text at all: skipped rather than mangled, the same answer the search gave it.
+        let blob = dir.join("blob.bin");
+        std::fs::write(&blob, [0x61, 0x00, 0xff, 0xfe]).unwrap();
+        assert!(sweep_text_and_target(None, &blob).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// One replacement for the whole file, whatever the edits are spread over — which is what

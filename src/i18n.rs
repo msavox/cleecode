@@ -151,6 +151,7 @@ pub enum Key {
     ItemFind,
     ItemGotoLine,
     ItemSearchProject,
+    ItemReplaceProject,
     ItemGitPanel,
     ItemGoToDefinition,
     ItemJumpBack,
@@ -612,6 +613,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemGotoLine) => "Vai alla riga...",
         (Lang::En, ItemSearchProject) => "Search in project...",
         (Lang::It, ItemSearchProject) => "Cerca nel progetto...",
+
+        (Lang::En, ItemReplaceProject) => "Replace in project...",
+        (Lang::It, ItemReplaceProject) => "Sostituisci nel progetto...",
         (Lang::En, ItemGitPanel) => "Git panel",
         (Lang::It, ItemGitPanel) => "Pannello Git",
         (Lang::En, ItemGoToDefinition) => "Go to definition",
@@ -1349,6 +1353,123 @@ pub fn msg_search_none(lang: Lang, query: &str, files: usize) -> String {
     }
 }
 
+// ---- Replacing across the project ------------------------------------------------------------
+//
+// The same box as the search above, with a second field, and therefore the same family of
+// refusals as the rename: this is the only thing in CleeCode that writes files nobody has open.
+// Every sentence below says what was *not* done as well as why, because a sweep that stopped
+// halfway and said nothing would leave a project nobody can reason about.
+
+/// The second field of the search box. Empty it is a search, filled it is a sweep, and the box
+/// has to say which of the two Enter is about to do.
+pub fn msg_search_replace_prompt(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Replace with (Tab switches, empty = just search):".to_string(),
+        Lang::It => "Sostituisci con (Tab cambia, vuoto = cerca e basta):".to_string(),
+    }
+}
+
+/// Said while the walk is running, which is the same walk the search runs — so it says the same
+/// thing, plus what the hits are going to be offered as.
+pub fn msg_replace_running(lang: Lang, query: &str, replacement: &str) -> String {
+    match lang {
+        Lang::En => format!("Searching for \"{query}\" to replace with \"{replacement}\"…"),
+        Lang::It => format!("Cerco \"{query}\" da sostituire con \"{replacement}\"…"),
+    }
+}
+
+/// The search stopped at its own limit, so what came back is part of the project rather than the
+/// project. A preview built on part of it would show a sweep that is honest about what it draws
+/// and silent about the rest, and the rest is what a replace-all is for.
+pub fn msg_replace_refused_truncated(lang: Lang, limit: usize) -> String {
+    match lang {
+        Lang::En => format!(
+            "More than {limit} lines match — more than one sweep can hold, narrow the query"
+        ),
+        Lang::It => format!(
+            "Più di {limit} righe corrispondono — più di quanto una passata regga, restringi la ricerca"
+        ),
+    }
+}
+
+/// One of the files it would write to is open in a tab that cannot be typed in.
+pub fn msg_replace_refused_read_only(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "One of the files this would change is open read-only — nothing was changed",
+        Lang::It => "Uno dei file da cambiare è aperto in sola lettura — non ho cambiato niente",
+    }
+}
+
+/// Every file the search named has stopped matching between the search and the preview.
+///
+/// Not an error on its own — a file rewritten by a build, a formatter or an agent in the second
+/// the walk took is dropped from the preview without comment, because the search *is* a moment
+/// old and that is not news. It only becomes a sentence when there is nothing left at all, since
+/// then the preview would be an empty box asking to be agreed to.
+pub fn msg_replace_nothing_left(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing left to replace — the files changed since the search",
+        Lang::It => "Non c'è più niente da sostituire — i file sono cambiati dopo la ricerca",
+    }
+}
+
+/// The text moved between the preview being built and the key being pressed: a buffer's revision
+/// bumped, or a file's timestamp on disk. Checked for every file before any of them is written,
+/// so this refusal always arrives with nothing half done behind it.
+pub fn msg_replace_refused_moved(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "A file changed under the preview — nothing was changed, search again",
+        Lang::It => "Un file è cambiato sotto l'anteprima — non ho cambiato niente, ricerca di nuovo",
+    }
+}
+
+/// The preview's title: what becomes what, and how much of it there is.
+pub fn msg_replace_preview_title(
+    lang: Lang,
+    query: &str,
+    replacement: &str,
+    edits: usize,
+    files: usize,
+) -> String {
+    match lang {
+        Lang::En => format!("{query} → {replacement}  ·  {edits} change(s) in {files} file(s)"),
+        Lang::It => format!("{query} → {replacement}  ·  {edits} modifiche in {files} file"),
+    }
+}
+
+/// What happened, counted the way it will have to be taken back.
+///
+/// The two halves are named separately because they are not the same promise. The buffers took
+/// one step of undo each and one Ctrl+Z puts any of them back. The files on disk have no undo at
+/// all — the preview was the consent, and saying "N rewritten on disk" out loud is the whole of
+/// the honesty available afterwards.
+pub fn msg_replace_applied(lang: Lang, edits: usize, buffers: usize, disk: usize) -> String {
+    match lang {
+        Lang::En => format!(
+            "{edits} replacement(s): {buffers} open buffer(s), one undo each · {disk} file(s) rewritten on disk"
+        ),
+        Lang::It => format!(
+            "{edits} sostituzioni: {buffers} buffer aperti, un annulla ciascuno · {disk} file riscritti su disco"
+        ),
+    }
+}
+
+/// A file on disk refused the write — read-only, a full disk, a directory that has gone. Named,
+/// because the count on its own would leave the reader guessing which sweep is now half done.
+pub fn msg_replace_write_failed(lang: Lang, path: &str, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("Could not write {path}: {detail} — the sweep stopped there"),
+        Lang::It => format!("Non riesco a scrivere {path}: {detail} — la passata si è fermata lì"),
+    }
+}
+
+pub fn msg_replace_cancelled(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Replace cancelled — nothing was changed",
+        Lang::It => "Sostituzione annullata — non ho cambiato niente",
+    }
+}
+
 /// Said when a pattern will not compile, or gave up. Without it a half-typed pattern is
 /// indistinguishable from one that simply matches nothing.
 pub fn msg_find_pattern_error(lang: Lang, detail: &str) -> String {
@@ -1908,17 +2029,22 @@ pub fn msg_rename_preview_title(
     }
 }
 
-/// One file's header row in the preview, written the way a diff writes one so it reads as one.
-pub fn msg_rename_file_header(lang: Lang, path: &str, count: usize) -> String {
+/// One file's header row in a preview, written the way a diff writes one so it reads as one.
+///
+/// Not `msg_rename_*`, because the rename is no longer the only thing that shows a file's worth
+/// of changes before making them: the sweep across the project draws the same rows. One header,
+/// so two previews cannot come to look like two different features.
+pub fn msg_preview_file_header(lang: Lang, path: &str, count: usize) -> String {
     match lang {
         Lang::En => format!("--- {path}  ({count} change(s))"),
         Lang::It => format!("--- {path}  ({count} modifiche)"),
     }
 }
 
-/// The preview's footer. Spelled out for the same reason the git panel's is: these are bare keys,
-/// safe only while the box owns the keyboard, and discoverable only if the box says so.
-pub fn msg_rename_keys(lang: Lang) -> String {
+/// A preview's footer, shared by both of them. Spelled out for the same reason the git panel's
+/// is: these are bare keys, safe only while the box owns the keyboard, and discoverable only if
+/// the box says so.
+pub fn msg_preview_keys(lang: Lang) -> String {
     let yes = yes_key(lang).to_ascii_uppercase();
     match lang {
         Lang::En => format!("Enter or {yes} = apply   Esc = cancel   ↑↓ PgUp/PgDn = scroll"),

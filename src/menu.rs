@@ -57,6 +57,7 @@ pub enum MenuAction {
     Find,
     GotoLine,
     SearchProject,
+    ReplaceProject,
     ToggleGitPanel,
     GitStatus,
     GitChanges,
@@ -172,6 +173,7 @@ impl MenuAction {
         MenuAction::Find,
         MenuAction::GotoLine,
         MenuAction::SearchProject,
+        MenuAction::ReplaceProject,
         MenuAction::ToggleGitPanel,
         MenuAction::GitStatus,
         MenuAction::GitChanges,
@@ -375,6 +377,12 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
                 item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
                 item(Key::ItemSearchProject, MenuAction::SearchProject, Some("Ctrl+Shift+H")),
+                // The same box, opened on its second field. No chord of its own, deliberately:
+                // searching and replacing are one question asked with one or two answers, and a
+                // second key would be a second thing to learn for a box the first key already
+                // opens. This row exists so the palette has a name for it — "replace" is not a
+                // word anybody would think to look for under "search".
+                item(Key::ItemReplaceProject, MenuAction::ReplaceProject, None),
                 // The two the language server adds to moving around. Here rather than in a menu
                 // of their own: from where you are sitting they are the same kind of thing as
                 // Find and Go to line — ways of arriving somewhere — and which of the three
