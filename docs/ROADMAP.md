@@ -2132,7 +2132,11 @@ Tre pezzi, in ordine di dipendenza:
 - **Il sito: `cleecode.marunja.com`.** Una vetrina alla maniera del sito di VS Code: le
   feature principali mostrate (gli screenshot dei temi e le tape demo esistono già in
   `docs/` e si rigenerano da script — il sito li riusa, non li duplica), e i pulsanti di
-  download per sistema operativo. Statico, su una pagina Cloudflare; il DNS è del dominio
+  download per sistema operativo. Il selling point in testa è quello della 0.15: il tuo
+  agente — Claude Code, codex, opencode — con l'abbonamento che hai già, dentro l'editor,
+  e i suoi edit visibili live nei buffer; nessuna chiave API da configurare, da custodire
+  o da pagare a consumo. Nessun editor GUI può dire questa frase intera, e la vetrina la
+  dice per prima. Statico, su una pagina Cloudflare; il DNS è del dominio
   marunja.com e ci arriva con una redirezione. Il sito dice anche la strada che c'è già:
   `brew install` dal tap per macOS. E il sito madre ricambia: su marunja.com un piccolo
   banner — o una card, come quella che Maestrino ha già — che manda a
