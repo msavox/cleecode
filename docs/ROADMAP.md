@@ -2103,6 +2103,34 @@ riscritti con la strada temp+rename.
   indice del completamento, undo a profondità ridotta — e la barra che lo dice. Meglio un
   editor che dichiara i suoi limiti di uno che li scopre congelandosi.
 
+## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
+
+Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
+trovabile e installabile quello che le release costruiscono, e si fa a pezzi accanto a loro.
+Tre pezzi, in ordine di dipendenza:
+
+- **Il marchio Marunja.** La gerarchia, detta una volta per tutte: Marunja è la casa,
+  msavox (Matteo Savoia) l'autore, CleeCode il marchio dell'applicazione. CleeCode si
+  dichiara un prodotto Marunja nella finestra About, nel README e nel piè di pagina del
+  sito — un'apposizione sobria, non un rebranding: l'editor si chiama CleeCode e continua
+  a chiamarsi così. Ovunque serva un copyright (il sito madre già fa così) la firma è
+  © msavox.
+- **Il sito: `cleecode.marunja.com`.** Una vetrina alla maniera del sito di VS Code: le
+  feature principali mostrate (gli screenshot dei temi e le tape demo esistono già in
+  `docs/` e si rigenerano da script — il sito li riusa, non li duplica), e i pulsanti di
+  download per sistema operativo. Statico, su una pagina Cloudflare; il DNS è del dominio
+  marunja.com e ci arriva con una redirezione. Il sito dice anche la strada che c'è già:
+  `brew install` dal tap per macOS. E il sito madre ricambia: su marunja.com un piccolo
+  banner — o una card, come quella che Maestrino ha già — che manda a
+  `cleecode.marunja.com`; il sito madre è VitePress nel monorepo marunja-suite, e la card
+  di Maestrino è il precedente da copiare.
+- **I pacchetti Linux: `.deb` come minimo.** Oggi Linux scarica un binario dalla release;
+  un utente Debian/Ubuntu si aspetta `apt install ./clee.deb`. Il pacchetto entra nella CI
+  guidata dai tag accanto ai binari esistenti (il guard tag↔versione della 0.13 vale anche
+  per lui), con dentro binario, man page e desktop entry. Gli altri formati — rpm,
+  AppImage — dopo, se qualcuno li chiede: un formato di pacchetto è una promessa di
+  manutenzione, e le promesse si fanno una alla volta.
+
 ## 1.0 — la definizione, non una data
 
 La 1.0 non è una release di funzionalità: è un elenco di frasi che devono essere vere.
