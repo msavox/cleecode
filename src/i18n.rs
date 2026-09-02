@@ -56,6 +56,7 @@ pub enum Key {
     ItemMdQuote,
     ItemMdFence,
     ItemToggleMdToolbar,
+    ItemFollowAgentEdits,
     MsgMdOnlyMarkdown,
     MsgMdCantHere,
     MdLinkPlaceholder,
@@ -128,6 +129,7 @@ pub enum Key {
     SettingAutoIndent,
     SettingCompletion,
     SettingLanguageServer,
+    SettingFollowAgentEdits,
     SettingPlotsInTabs,
     SettingPlotsNoDisplay,
     SettingPlotsTabs,
@@ -300,6 +302,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemMdFence) => "Blocco di codice",
         (Lang::En, ItemToggleMdToolbar) => "Formatting bar",
         (Lang::It, ItemToggleMdToolbar) => "Barra di formattazione",
+        (Lang::En, ItemFollowAgentEdits) => "Follow edits made outside",
+        (Lang::It, ItemFollowAgentEdits) => "Segui le modifiche da fuori",
         // The menu offers the eleven actions on every file, so the refusal has to say what kind
         // of file they are for rather than only that nothing happened.
         (Lang::En, MsgMdOnlyMarkdown) => "Formatting applies to Markdown files",
@@ -526,6 +530,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingCompletion) => "Completamento parole",
         (Lang::En, SettingLanguageServer) => "Language server (diagnostics, completion)",
         (Lang::It, SettingLanguageServer) => "Language server (diagnostici, completamento)",
+        // Named after what it does to the screen rather than after the agent, because a `sed`
+        // in one of the terminal panes trips it in exactly the same way.
+        (Lang::En, SettingFollowAgentEdits) => "Follow edits made outside (open the files)",
+        (Lang::It, SettingFollowAgentEdits) => "Segui le modifiche da fuori (apri i file)",
 
         // Named for the question rather than for one of its two answers. As "Plots as tabs"
         // with an on/off beside it, the row said nothing about what "off" meant — and "off"
@@ -1813,6 +1821,35 @@ pub fn msg_externally_reloaded(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("{name} reloaded (changed on disk)"),
         Lang::It => format!("{name} ricaricato (modificato esternamente)"),
+    }
+}
+
+/// Said when follow mode is switched on somewhere that has no repository to watch. It is not an
+/// error and nothing is refused — the setting stays where it was put — but a switch that does
+/// nothing has to say so, or it reads as broken the first time a file fails to appear.
+pub fn msg_follow_needs_a_repo(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Follow mode watches git status, and this folder is not in a repository",
+        Lang::It => "Il modo segui guarda git status, e questa cartella non è in un repository",
+    }
+}
+
+pub fn msg_follow_mode(lang: Lang, on: bool) -> &'static str {
+    match (lang, on) {
+        (Lang::En, true) => "Follow mode on: files touched from outside open beside your work",
+        (Lang::En, false) => "Follow mode off",
+        (Lang::It, true) => "Modo segui acceso: i file toccati da fuori si aprono di fianco",
+        (Lang::It, false) => "Modo segui spento",
+    }
+}
+
+/// Said once, when follow mode has opened as many tabs as it is allowed to. It closes none of
+/// them by itself — a tab you were reading is not the editor's to take away — so the way on is
+/// to close the ones that are done with.
+pub fn msg_follow_full(lang: Lang, limit: usize) -> String {
+    match lang {
+        Lang::En => format!("Follow mode has opened its {limit} tabs; close some to see more"),
+        Lang::It => format!("Il modo segui ha aperto le sue {limit} schede; chiudine per vederne altre"),
     }
 }
 

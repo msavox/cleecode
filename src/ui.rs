@@ -3966,18 +3966,27 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             // there the user put on purpose, and a warning colouring over it would read as the
             // breakpoint having gone away.
             let at_break = breaks.contains(&(line_idx + 1));
+            // A line somebody else wrote while you were looking at the file, from the last
+            // reload. It comes after the diagnostic on purpose: a diagnostic is information —
+            // something is wrong here — and an arrival is only evidence that something moved.
+            // Where the two land on one line the reader needs the one that says to act.
+            let arrived = app.editors[idx].line_arrived(line_idx);
             let num_style = if at_break {
                 Style::default().fg(pal.on_accent).bg(pal.danger).add_modifier(Modifier::BOLD)
             } else if stopped == Some(line_idx) {
                 Style::default().fg(pal.on_accent).bg(pal.warning).add_modifier(Modifier::BOLD)
             } else {
-                match (worst, is_current) {
-                (Some(severity), current) => {
+                match (worst, arrived, is_current) {
+                (Some(severity), _, current) => {
                     let style = Style::default().fg(severity_colour(pal, severity));
                     if current { style.add_modifier(Modifier::BOLD) } else { style }
                 }
-                (None, true) => Style::default().fg(pal.warning).add_modifier(Modifier::BOLD),
-                (None, false) => Style::default().fg(pal.text_dim),
+                (None, true, current) => {
+                    let style = Style::default().fg(pal.changed_line);
+                    if current { style.add_modifier(Modifier::BOLD) } else { style }
+                }
+                (None, false, true) => Style::default().fg(pal.warning).add_modifier(Modifier::BOLD),
+                (None, false, false) => Style::default().fg(pal.text_dim),
                 }
             };
             let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));

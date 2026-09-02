@@ -65,6 +65,14 @@ pub struct Palette {
     pub selection: Color,
     /// The background of a line the editor is pointing at — a search hit, the line being run.
     pub current_line: Color,
+    /// The number of a line that arrived from outside while the file was open: an agent's write,
+    /// a formatter, a branch switched under the buffer.
+    ///
+    /// Green, the way a diff draws the lines that were added. The gutter has no other green —
+    /// every mark it can already draw is red (a breakpoint, an error), yellow (the stopped line,
+    /// a warning, the cursor's own line) or the accent — so this reads as its own thing without
+    /// anybody having to be told which of two similar colours they are looking at.
+    pub changed_line: Color,
     /// Folders in the tree. A colour, not an icon colour: it belongs to the tree, not to a type.
     pub folder: Color,
     /// The colour the initial of a menu entry is drawn in, for a theme that wants one — the DOS
@@ -329,6 +337,8 @@ const CLEECODE: Palette = Palette {
     bright: Color::White,
     selection: Color::Rgb(60, 90, 130),
     current_line: Color::Rgb(70, 60, 0),
+    // The one bright green among the named colours, and the theme is built out of those.
+    changed_line: Color::LightGreen,
     folder: Color::Rgb(120, 170, 255),
     accelerator: None,
     bold_chrome: false,
@@ -360,6 +370,9 @@ const CLEECODE_LIGHT: Palette = Palette {
     bright: Color::Rgb(16, 18, 20),
     selection: Color::Rgb(198, 216, 240),
     current_line: Color::Rgb(248, 240, 198),
+    // Darker than the dark theme's green by the same rule as everything else here: on paper a
+    // bright one is a haze, and the gutter is small text.
+    changed_line: Color::Rgb(20, 132, 70),
     folder: Color::Rgb(38, 96, 168),
     accelerator: None,
     bold_chrome: false,
@@ -395,6 +408,8 @@ const TURBO: Palette = Palette {
     bright: Color::Rgb(255, 255, 255),
     selection: Color::Rgb(0, 168, 168),
     current_line: Color::Rgb(0, 0, 85),
+    // EGA bright green. There are sixteen colours and no others, which is the theme.
+    changed_line: Color::Rgb(85, 255, 85),
     folder: Color::Rgb(255, 255, 85),
     accelerator: Some(Color::Rgb(170, 0, 0)),
     bold_chrome: true,
@@ -426,6 +441,8 @@ const SOLARIZED_DARK: Palette = Palette {
     bright: Color::Rgb(253, 246, 227),
     selection: Color::Rgb(44, 76, 85),
     current_line: Color::Rgb(7, 54, 66),
+    // Solarized's own green, which is the only green the scheme has and the same on both grounds.
+    changed_line: Color::Rgb(133, 153, 0),
     folder: Color::Rgb(38, 139, 210),
     accelerator: None,
     bold_chrome: false,
@@ -456,6 +473,7 @@ const SOLARIZED_LIGHT: Palette = Palette {
     bright: Color::Rgb(0, 43, 54),
     selection: Color::Rgb(238, 232, 213),
     current_line: Color::Rgb(245, 239, 220),
+    changed_line: Color::Rgb(133, 153, 0),
     folder: Color::Rgb(38, 139, 210),
     accelerator: None,
     bold_chrome: false,
@@ -487,6 +505,8 @@ const EIGHTIES: Palette = Palette {
     bright: Color::Rgb(242, 240, 236),
     selection: Color::Rgb(81, 81, 81),
     current_line: Color::Rgb(57, 57, 57),
+    // base16 Eighties' own green, the one its syntax theme colours strings with.
+    changed_line: Color::Rgb(153, 204, 153),
     folder: Color::Rgb(102, 153, 204),
     accelerator: None,
     bold_chrome: false,
@@ -517,6 +537,9 @@ const MOCHA: Palette = Palette {
     bright: Color::Rgb(245, 238, 235),
     selection: Color::Rgb(100, 82, 64),
     current_line: Color::Rgb(75, 64, 52),
+    // Warm and muted like the rest of it: base16 Mocha has no clean green and inventing one
+    // would put the only cold colour in the theme in its smallest text.
+    changed_line: Color::Rgb(190, 181, 91),
     folder: Color::Rgb(138, 179, 181),
     accelerator: None,
     bold_chrome: false,
@@ -548,6 +571,7 @@ const OCEAN_LIGHT: Palette = Palette {
     bright: Color::Rgb(30, 36, 44),
     selection: Color::Rgb(208, 214, 228),
     current_line: Color::Rgb(232, 234, 222),
+    changed_line: Color::Rgb(86, 124, 62),
     folder: Color::Rgb(76, 105, 140),
     accelerator: None,
     bold_chrome: false,
@@ -580,6 +604,8 @@ const GITHUB: Palette = Palette {
     bright: Color::Rgb(20, 22, 24),
     selection: Color::Rgb(248, 238, 199),
     current_line: Color::Rgb(245, 245, 245),
+    // The green GitHub itself draws an added line in.
+    changed_line: Color::Rgb(34, 134, 58),
     folder: Color::Rgb(0, 92, 197),
     accelerator: None,
     bold_chrome: false,
@@ -795,6 +821,25 @@ mod tests {
             assert_eq!(all[i + 1], ThemeChoice::Fixed(*theme));
         }
         assert_eq!(all[0].name(), "Auto");
+    }
+
+    /// The gutter draws five things in the same column, and two of them the same colour would be
+    /// a breakpoint that reads as an external edit — or worse, an error that reads as one.
+    #[test]
+    fn a_changed_line_cannot_be_mistaken_for_the_other_marks() {
+        for theme in Theme::ALL {
+            let p = theme.palette();
+            for (name, other) in
+                [("danger", p.danger), ("warning", p.warning), ("dim", p.text_dim), ("accent", p.accent)]
+            {
+                assert_ne!(
+                    p.changed_line,
+                    other,
+                    "{}: a changed line is drawn in the same colour as {name}",
+                    theme.name()
+                );
+            }
+        }
     }
 
     /// Names are what the picker shows and what `settings.toml` round-trips; two themes sharing

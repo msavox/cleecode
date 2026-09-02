@@ -134,6 +134,35 @@ pub fn compute(root: &Path) -> HashMap<PathBuf, FileStatus> {
     result
 }
 
+/// The paths whose status is new, or different, between two consecutive sweeps.
+///
+/// This is the whole of the detection behind follow mode, and it costs nothing: `compute` above
+/// already runs every few hundred milliseconds to keep the sidebar's dots honest, so the
+/// difference between what it said last time and what it says now *is* the list of files
+/// something has just written. Nothing here knows or cares what did the writing — an agent in a
+/// terminal pane, a formatter, a `sed`, a branch switched in another window all look the same
+/// from here, which is the point.
+///
+/// What it cannot see: a file written twice in a row. Its status is `Modified` both times, so
+/// the second write shows up as no change at all. That is not worth fixing here — by then the
+/// file is open, and an open file is reloaded by the mtime check instead.
+///
+/// Paths only ever *appearing* is not the same as files: `compute` also files a status against
+/// every parent directory, and a caller that means files has to say so. Sorted, so a caller
+/// taking one per sweep takes them in a stable order rather than in the map's.
+pub fn touched_between(
+    before: &HashMap<PathBuf, FileStatus>,
+    after: &HashMap<PathBuf, FileStatus>,
+) -> Vec<PathBuf> {
+    let mut touched: Vec<PathBuf> = after
+        .iter()
+        .filter(|(path, status)| before.get(*path) != Some(*status))
+        .map(|(path, _)| path.clone())
+        .collect();
+    touched.sort();
+    touched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +185,39 @@ mod tests {
         // Changed somewhere in the repository but above the folder that was opened. There is no
         // row for it, so there is nothing to file.
         assert_eq!(key_for(Path::new("."), base, Path::new("/home/ada/other.rs")), None);
+    }
+
+    /// The delta follow mode is built on: what is new, what changed status, and — just as
+    /// important — what did not move, since a file reported every sweep would reopen itself
+    /// every 700 milliseconds.
+    #[test]
+    fn two_sweeps_name_the_files_that_moved_between_them() {
+        let snapshot = |entries: &[(&str, FileStatus)]| -> HashMap<PathBuf, FileStatus> {
+            entries.iter().map(|(p, s)| (PathBuf::from(*p), *s)).collect()
+        };
+
+        let before = snapshot(&[("./src/main.rs", FileStatus::Modified)]);
+        let after = snapshot(&[
+            ("./src/main.rs", FileStatus::Modified),
+            ("./src/new.rs", FileStatus::Untracked),
+            ("./README.md", FileStatus::Modified),
+        ]);
+        assert_eq!(
+            touched_between(&before, &after),
+            vec![PathBuf::from("./README.md"), PathBuf::from("./src/new.rs")],
+            "a file whose status is the same as last time has not been touched again"
+        );
+
+        // A status that changed under the same path counts: staged after being modified, or a
+        // new file that has since been added.
+        let staged = snapshot(&[("./src/main.rs", FileStatus::Added)]);
+        assert_eq!(touched_between(&before, &staged), vec![PathBuf::from("./src/main.rs")]);
+
+        // Nothing moved, and nothing is reported — the answer on almost every sweep.
+        assert!(touched_between(&before, &before).is_empty());
+
+        // A file put back the way it was leaves the map; a disappearance is not something to
+        // open, so it is not reported.
+        assert!(touched_between(&before, &HashMap::new()).is_empty());
     }
 }
