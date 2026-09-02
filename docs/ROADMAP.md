@@ -1962,6 +1962,13 @@ test) — niente tokio, niente dipendenze nuove, il modello thread+mpsc+poll che
 Stessa regola del pannello Git per le azioni: leggere ha rischio zero e si espone largo,
 scrivere passa dal consenso dell'utente.
 
+> **Fatto.** `clee --mcp` in `src/mcp.rs`: NDJSON su stdio (non il framing LSP), quattro tool —
+> `open_files`, `selection`, `diagnostics`, `open_file`. Il ponte è file-based come wsnap: la dir
+> di sessione `~/.config/cleecode/sessions/<pid>/`, esportata alle shell come `CLEE_SESSION` e
+> quindi ereditata dall'agente e dal suo server; `state.json` scritto atomico e throttlato,
+> le richieste in `requests/`. `open_file` apre **a fianco senza prendere la tastiera**. Nessun
+> tool scrive in un buffer: il consenso dell'utente è UI di un'iterazione successiva.
+
 **Cosa deliberatamente NON si fa:** nessuna chat ricostruita dentro l'editor, nessuna chiave
 API custodita da CleeCode, nessun agente reimplementato. Gli agenti esistono, sono bravi, e
 sono TUI: il valore di CleeCode è essere il posto migliore dove farli girare — con l'editor,
