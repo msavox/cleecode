@@ -1,5 +1,6 @@
 use crate::app::{App, EditorPane, Focus};
 use crate::i18n::{self, Key, Lang};
+use crate::keymap::{self, Keymap};
 use crate::menu::{self, ContextMenu, MenuBar};
 use crate::terminal_panel::{TermSelection, TerminalWindow};
 use crate::settings;
@@ -636,7 +637,7 @@ fn button_range(width: u16, titles_end: u16, badge: u16) -> std::ops::Range<u16>
     if start < titles_end || end - start < button { start..start } else { start..end }
 }
 
-pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
+pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, keymap: &Keymap, full: Rect) -> Rect {
     let ranges = menu_title_ranges(menu, lang);
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
@@ -647,7 +648,7 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
     let shortcut_width = items
         .iter()
         .map(|i| match i.shortcut {
-            Some(sc) => i18n::shortcut_label(lang, sc).chars().count(),
+            Some(sc) => keymap::shortcut_hint(lang, keymap, sc).chars().count(),
             None => menu::item_value_width(lang, i.action),
         })
         .max()
@@ -670,13 +671,13 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, full: Rect) -> Rect {
 
 /// Where a context menu hangs: from its anchor, but pulled back so it never spills past the
 /// right or bottom edge. Shared by the renderer and click handling so both agree on the rows.
-pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, full: Rect) -> Rect {
+pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, keymap: &Keymap, full: Rect) -> Rect {
     let items = &menu.items;
     let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
     let shortcut_width = items
         .iter()
         .filter_map(|i| i.shortcut)
-        .map(|s| i18n::shortcut_label(lang, s).chars().count())
+        .map(|s| keymap::shortcut_hint(lang, keymap, s).chars().count())
         .max()
         .unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
@@ -1175,7 +1176,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
     let lang = app.settings.lang;
-    let rect = menu_dropdown_rect(&app.menu, lang, full);
+    let rect = menu_dropdown_rect(&app.menu, lang, &app.keymap, full);
     let inner_width = rect.width.saturating_sub(2) as usize;
     // Separator rules are woven in between real items, so the row a given item
     // renders on drifts down by one for every group opened above it. Track the
@@ -1199,8 +1200,8 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
         // Nothing has both: a row that carries a setting is a row you have to open the menu to
         // read, which is the whole reason its value is drawn here.
         let right = match i.shortcut {
-            Some(sc) => Some(i18n::shortcut_label(lang, sc)),
-            None => menu::item_value(lang, i.action, states),
+            Some(sc) => Some(keymap::shortcut_hint(lang, &app.keymap, sc)),
+            None => menu::item_value(lang, i.action, states).map(str::to_string),
         };
         let tail = match right {
             Some(sc) => {
@@ -1260,7 +1261,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
     let lang = app.settings.lang;
     let Some(menu) = app.context_menu.as_ref() else { return };
-    let rect = context_menu_rect(menu, lang, full);
+    let rect = context_menu_rect(menu, lang, &app.keymap, full);
     let inner_width = rect.width.saturating_sub(2) as usize;
     // Same separator-aware layout as the menu bar's drop-down: rules between groups shift the
     // selected item's row down, so track where the highlight should land.
@@ -1282,7 +1283,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
             items.push(menu_header(pal, label, inner_width.saturating_sub(1)));
             continue;
         }
-        let line = match i.shortcut.map(|sc| i18n::shortcut_label(lang, sc)) {
+        let line = match i.shortcut.map(|sc| keymap::shortcut_hint(lang, &app.keymap, sc)) {
             Some(sc) => {
                 let content_width = inner_width.saturating_sub(2);
                 let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
@@ -2343,7 +2344,10 @@ fn looks_like_key(word: &str) -> bool {
 /// the outline of the diagrams — and prose stays plain, which is what keeps the colour meaning
 /// something. Styling happens here rather than in `manual.rs` so the text there stays plain
 /// strings that are easy to edit and to check the width of.
-fn manual_line(pal: Palette, line: &'static str) -> Line<'static> {
+///
+/// Borrowed rather than `'static`, because a line whose chords the reader has remapped is built
+/// for this frame and does not outlive it.
+fn manual_line(pal: Palette, line: &str) -> Line<'_> {
     let rule = Style::default().fg(pal.text_dim);
     let key = Style::default().fg(pal.warning);
     let heading = Style::default().fg(pal.accent).add_modifier(Modifier::BOLD);
@@ -2396,7 +2400,7 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
     let Some(state) = app.manual.as_ref() else { return };
     let lang = app.settings.lang;
-    let sections = crate::manual::sections(lang);
+    let sections = crate::manual::sections(lang, &app.keymap);
     let rect = manual_rect(full);
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -2440,7 +2444,7 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
         .iter()
         .skip(state.scroll)
         .take(body_area.height as usize)
-        .map(|line| manual_line(pal, line))
+        .map(|line| manual_line(pal, line.as_ref()))
         .collect();
     f.render_widget(Paragraph::new(visible), body_area);
 
@@ -5262,13 +5266,13 @@ mod tests {
         let full = Rect { x: 0, y: 0, width: 80, height: 24 };
         // Anchored comfortably inside: the menu opens exactly there.
         let m = ContextMenu::new(ContextTarget::Editor, (10, 5), false);
-        let rect = context_menu_rect(&m, Lang::En, full);
+        let rect = context_menu_rect(&m, Lang::En, &Keymap::default(), full);
         assert_eq!((rect.x, rect.y), (10, 5));
         assert!(rect.x + rect.width <= full.width && rect.y + rect.height <= full.height);
 
         // Anchored in the far bottom-right: pulled back so it never spills off either edge.
         let m2 = ContextMenu::new(ContextTarget::Editor, (79, 23), false);
-        let rect2 = context_menu_rect(&m2, Lang::En, full);
+        let rect2 = context_menu_rect(&m2, Lang::En, &Keymap::default(), full);
         assert_eq!(rect2.x + rect2.width, full.width);
         assert_eq!(rect2.y + rect2.height, full.height);
     }
@@ -5496,7 +5500,7 @@ mod tests {
         menu.menu_index = menu.defs.len() - 1;
         for width in [10u16, 20, 40, 80] {
             let full = Rect { x: 0, y: 0, width, height: 24 };
-            let rect = menu_dropdown_rect(&menu, Lang::En, full);
+            let rect = menu_dropdown_rect(&menu, Lang::En, &Keymap::default(), full);
             assert!(rect.right() <= full.right(), "{width}: {rect:?} runs off the edge");
             assert!(rect.width > 0 && rect.x >= full.x, "{width}: {rect:?}");
         }

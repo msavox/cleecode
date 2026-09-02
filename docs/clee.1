@@ -213,6 +213,37 @@ remove \(bu
 show hidden files \(bu
 .B Enter
 open a file, or make a folder the project root.
+.SS Moving a chord
+Those reasons hold for an Italian layout on a Mac and are arbitrary anywhere else, so every chord
+in the
+.B Ctrl+Shift
+layer can be moved \(em one at a time, by a
+.B [keys]
+table in settings.toml:
+.PP
+.RS 4
+.EX
+[keys]
+find\-in\-project = "Ctrl+Alt+F"
+manual = "F1"
+.EE
+.RE
+.PP
+Anything not named there keeps the key it shipped with. This is not a keymap language: it is the
+ability to move a chord your keyboard does not have. A chord is modifiers and a key joined with
+.BR + " \(em " ctrl ", " shift " and " alt
+in any case or order, then a letter, a digit,
+.BR F1 " to " F12 ,
+an arrow
+.RB ( left / right / up / down ", or " \(<- \(->\(ua\(da ),
+.BR enter ", " tab ", " esc " or " space .
+.PP
+.B "CleeCode \(bu Keybindings..."
+writes the whole table into settings.toml as comments \(em every action, on the key it is on now
+\(em and opens the file. Uncomment a line, change its chord, save; the new chords take effect on
+that save. A name or a chord CleeCode cannot read is a sentence on the status line and a default
+left where it was, never a file that fails to load, and two actions on one chord is reported with
+the first of the two winning. The manual and the menus then advertise the chord you chose.
 .SH WORKSPACES
 A workspace is a whole set\-up saved under a name: project root, open files, frame sizes, and the
 terminal windows with their tab names and startup commands. Reopening one brings the shells back
@@ -359,8 +390,10 @@ must not break the REPL, so a mistake there has one symptom: a panel that quietl
 .SH FILES
 .TP
 .I ~/.config/cleecode/settings.toml
-Preferences, layout, terminal scrollback, run commands per file extension, and interpreter
-paths. On Windows,
+Preferences, layout, terminal scrollback, run commands per file extension, interpreter paths, and
+the
+.B [keys]
+table of remapped chords. On Windows,
 .IR %APPDATA%\ecleecode\e .
 .TP
 .I ~/.config/cleecode/workspaces/

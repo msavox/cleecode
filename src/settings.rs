@@ -180,6 +180,17 @@ pub struct Settings {
     // layout — terminal names and startup commands included — survives the session.
     #[serde(default)]
     pub last_workspace: Option<String>,
+    /// Chords the user has moved: action name -> chord, overriding the built-in table one entry
+    /// at a time. See `keymap.rs` for what the names and the chords are; everything not named
+    /// here keeps the key CleeCode ships with, and a name or a chord this does not understand is
+    /// a warning on the status line rather than a file that fails to load.
+    ///
+    /// Not written back out while it is empty, which is what keeps the Keybindings menu entry
+    /// useful: the block it seeds is comments, and comments do not survive the exit that rewrites
+    /// this file. Leaving an empty `[keys]` behind would mean the entry saw a section already
+    /// there and never offered the list again.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, String>,
 }
 
 /// A venv registered by absolute path, offered in every project. Accepts either form in
@@ -353,6 +364,7 @@ impl Default for Settings {
             last_open_files: Vec::new(),
             last_active_file: None,
             last_workspace: None,
+            keys: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -374,8 +386,26 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-fn config_path() -> Option<std::path::PathBuf> {
+/// The settings file itself. Public because two things outside this module need to recognise it
+/// by path rather than by name: the menu entry that opens it for editing, and the save that has
+/// to notice you have just saved *this* file and reload the keymap from it.
+pub fn config_path() -> Option<std::path::PathBuf> {
     config_dir().map(|d| d.join("settings.toml"))
+}
+
+/// Re-reads just the `[keys]` table from disk, for a settings.toml that was edited in the editor
+/// and saved a moment ago.
+///
+/// Only the chords, deliberately. Everything else in this file is also live state — the layout
+/// the user has been dragging, the theme they picked from the menu — and reloading the whole
+/// struct would throw the session's own changes away in favour of whatever was last written.
+/// `None` means the file does not parse, which is worth saying out loud rather than reading as
+/// "no overrides".
+pub fn read_keys_from_disk() -> Option<std::collections::BTreeMap<String, String>> {
+    let path = config_path()?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let parsed: Settings = toml::from_str(&text).ok()?;
+    Some(parsed.keys)
 }
 
 /// Where a write to `path` actually belongs, following a symlink to the thing it points at.
@@ -587,6 +617,42 @@ mod tests {
     }
 
     use super::*;
+
+    /// A file holding nothing but `[keys]` is the file somebody wrote after using the
+    /// Keybindings menu entry, and it has to load as those chords on top of every other default
+    /// — not as a file that quietly redefines the editor around them.
+    ///
+    /// The reverse matters just as much and is the easier one to get wrong: a settings.toml
+    /// written before this feature existed has no `[keys]` at all, and it has to keep loading.
+    /// That is what `#[serde(default)]` on the field is for, and it is the lesson the 0.14
+    /// themes left behind.
+    #[test]
+    fn a_file_of_nothing_but_keys_keeps_every_other_default() {
+        let only_keys: Settings =
+            toml::from_str("[keys]\nfind-in-project = \"Ctrl+Alt+F\"\n").expect("a [keys]-only file loads");
+        assert_eq!(only_keys.keys.get("find-in-project").map(String::as_str), Some("Ctrl+Alt+F"));
+        let fresh = Settings::default();
+        assert_eq!(only_keys.tab_size, fresh.tab_size);
+        assert_eq!(only_keys.theme, fresh.theme);
+        assert_eq!(only_keys.terminal_scrollback, fresh.terminal_scrollback);
+        assert!(!only_keys.run_commands.is_empty() || fresh.run_commands.is_empty());
+
+        // A file from before `[keys]` existed has none, and that is not an error.
+        let older: Settings = toml::from_str("theme = \"turbo\"").expect("an older file loads");
+        assert!(older.keys.is_empty());
+
+        // Round trip: what is written out is what comes back.
+        let mut mine = Settings::default();
+        mine.keys.insert("manual".to_string(), "F1".to_string());
+        let text = toml::to_string_pretty(&mine).expect("settings serialise");
+        let back: Settings = toml::from_str(&text).expect("and parse again");
+        assert_eq!(back.keys.get("manual").map(String::as_str), Some("F1"));
+
+        // An empty table is not written at all, so the commented block the Keybindings entry
+        // seeds is offered again after an exit rather than suppressed by an empty `[keys]`.
+        let text = toml::to_string_pretty(&Settings::default()).expect("settings serialise");
+        assert!(!text.contains("[keys]"), "an empty keys table should not be written out:\n{text}");
+    }
 
     /// The plot destination is a preference on a desktop and a fact on a server. It names both
     /// of its answers rather than reading on/off: "off" meant the interpreter's own windows,
