@@ -1994,6 +1994,14 @@ Nessun protocollo, nessuna interrogazione, ogni modifica locale e verificabile. 
 l'`auto`** con OSC 11 e il suo timeout — l'unico pezzo che può andare storto, perché un terminale
 che non risponde non deve poter ritardare l'avvio, e va scritto quando il primo è già in uso.
 
+> **Fatti tutti e due.** Il primo pezzo è uscito con la 0.14; l'`auto` è dentro dal 2026-09-02.
+> `theme = "auto"` chiede lo sfondo con OSC 11 accanto alle altre domande d'avvio, prima della
+> cattura del mouse, e la domanda si fa solo se il tema è già `auto`: chi ne ha scelto uno per
+> nome non paga niente. Attesa 150 ms su `poll`, non un thread parcheggiato in `read` che poi si
+> mangerebbe il primo tasto; un terminale muto ottiene il tema scuro. La risposta vale per la
+> sessione — scegliere Auto dalla tendina risolve su quella, e se all'avvio non era `auto`
+> dipinge scuro fino al riavvio, perché a mouse catturato la domanda non si può rifare.
+
 Le misure, prese sul codice della 0.13.3: 239 occorrenze di `Color::` in tutto il sorgente, 224
 in `ui.rs` e 13 in `preview.rs`. Di quelle in `ui.rs`, 34 sono i colori delle icone dei file
 (colori di marca, giustamente fissi) più quelli del disegno della finestra Informazioni. Restano
