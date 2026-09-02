@@ -129,12 +129,15 @@ with its folder as the project root. To keep it in the Dock, open it once and ch
 The launcher needs [Ghostty](https://ghostty.org) (`brew install --cask ghostty`) to host
 the editor, and asks for a new window in the Ghostty already running rather than starting a
 second one — which is automation, so macOS asks for permission the first time. Refusing it
-costs only that: the launcher falls back to opening a separate Ghostty instance.
+costs only that: the launcher falls back to opening a separate Ghostty instance. That window
+is the editor's, so it asks for `wait-after-command` to be off and closes when you quit,
+whatever your own Ghostty config says — no "Process exited. Press any key" left behind.
 
 The bundle is built on your machine rather than downloaded, which is what keeps it free of
 Gatekeeper warnings: nothing arrives quarantined, so nothing needs an Apple Developer
-signature to open. It has the path to `clee` compiled into it, so re-run the command after
-moving or reinstalling the binary.
+signature to open. The launcher is compiled into it, path to `clee` and all, so re-run the
+command after moving or reinstalling the binary — and to pick up any change to the launcher
+itself that came with a new version.
 
 ## What it does
 

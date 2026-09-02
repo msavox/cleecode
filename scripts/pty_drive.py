@@ -120,6 +120,41 @@ class Session:
         self.send(keys)
         return self.wait(predicate, timeout)
 
+    def quit(self, timeout=20.0):
+        """Ctrl+Q, then the status the editor's process ends with.
+
+        Worth measuring because somebody reads it. Started from the Dock, CleeCode is given a
+        terminal window of its own, and that window closes itself when the process inside it
+        ends — as long as it ended the way a program that was asked to stop ends. So the exit
+        status of a quit the user requested is part of what they see: it has to be a plain 0.
+
+        Returns the `waitpid` status, or None if the editor was still running when the wait ran
+        out. The pty is deliberately left open throughout: closing it first hangs the editor up,
+        which would measure a different ending than the one being asked about."""
+        self.send("\x11")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.drain()
+            try:
+                pid, status = os.waitpid(self.pid, os.WNOHANG)
+            except OSError:
+                return None
+            if pid:
+                return status
+            time.sleep(0.03)
+        return None
+
+    @staticmethod
+    def describe_status(status):
+        """A `waitpid` status as a phrase to put beside a failed check."""
+        if status is None:
+            return "still running"
+        if os.WIFEXITED(status):
+            return "exit %d" % os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return "killed by signal %d" % os.WTERMSIG(status)
+        return "status %d" % status
+
     def lines(self):
         """The screen as text, rendered from the cell buffer.
 

@@ -192,6 +192,15 @@ mod macos {
     /// That costs one thing: talking to another application is automation, so macOS asks
     /// for permission the first time. If it is refused, the launcher falls back to `open -n`
     /// and still works — with the extra instance it was trying to avoid.
+    ///
+    /// Both ways of asking say `wait-after-command` is off. The window belongs to the editor:
+    /// when the editor quits, the window has finished its job and should go, rather than sit
+    /// there saying "Process exited. Press any key to close the terminal." That is Ghostty's
+    /// behaviour when it is told to wait, and whether it waits is a setting in the user's own
+    /// config — so a launcher that does not say leaves it to a file it knows nothing about.
+    ///
+    /// This script is compiled into the bundle, so changing it here changes nothing on a Mac
+    /// that already has one: `clee --install-app` has to be run again to rebuild the launcher.
     fn applescript(clee: &Path) -> String {
         let clee = escape(&clee.to_string_lossy());
         format!(
@@ -232,6 +241,13 @@ on launchClee(target)
 				set surface to new surface configuration
 				set command of surface to cleeCommand
 				set initial working directory of surface to projectRoot
+				-- Close the window when the editor quits. Said out loud even though it is
+				-- also the default of the record {TERMINAL} just handed back, because a
+				-- default is a thing that changes. It is worth less than the flag on the
+				-- other branch, mind: {TERMINAL} only ever reads this as permission to
+				-- wait, never as an instruction not to, so a config asking to wait still
+				-- keeps the window. Nothing a script can do about that from here.
+				set wait after command of surface to false
 				new window with configuration surface
 				activate
 			end tell
@@ -251,7 +267,10 @@ end ghosttyIsRunning
 
 on openNewInstance(projectRoot, cleeCommand)
 	try
-		do shell script "open -na {TERMINAL} --args --working-directory=" & quoted form of projectRoot & " -e /bin/sh -c " & quoted form of ("exec " & cleeCommand)
+		-- `--wait-after-command=false` before the `-e`, which swallows everything after it.
+		-- On the command line it is a real override: it beats whatever the user's config
+		-- file says, so this window closes with the editor either way.
+		do shell script "open -na {TERMINAL} --args --wait-after-command=false --working-directory=" & quoted form of projectRoot & " -e /bin/sh -c " & quoted form of ("exec " & cleeCommand)
 	-- Not named `message`: that is the name of a `display alert` parameter, and AppleScript
 	-- reads it as one wherever it appears, so the alert below would not compile.
 	on error why
@@ -420,6 +439,23 @@ end openNewInstance
             assert!(script.contains("on run"));
             assert!(script.contains("--resume"));
             assert!(script.contains("/opt/homebrew/bin/clee"));
+        }
+
+        /// Both ways of asking for a window have to say the window closes with the editor.
+        /// Left to the terminal's own configuration this is right on most machines and wrong
+        /// on some, and being wrong looks like a bug in CleeCode: the editor quits and its
+        /// window stays behind holding a line of Ghostty's text.
+        #[test]
+        fn the_window_is_told_to_close_when_the_editor_quits() {
+            let script = applescript(Path::new("/opt/homebrew/bin/clee"));
+            assert!(script.contains("set wait after command of surface to false"));
+            // The command line built for the other branch, read as one line so that the flag
+            // is checked where it is passed rather than where it is talked about in a comment.
+            let open = script.lines().find(|l| l.contains("open -na")).expect("the fallback branch");
+            let flag = open.find("--wait-after-command=false").expect("the flag is passed");
+            let e = open.find(" -e /bin/sh").expect("the command follows -e");
+            // Before the `-e`, which takes everything after it as the command to run.
+            assert!(flag < e);
         }
     }
 }
