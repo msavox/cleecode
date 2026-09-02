@@ -2146,6 +2146,16 @@ il 40% che manca è quello che si usa ogni ora:
 > blocco: rename, format on demand, trigger characters — e il rename è il prossimo, ora che
 > la forma delle liste è rodata.
 
+> **Fatto il rename (2026-09-02), ed è la disciplina promessa.** Ctrl+Shift+C, casella
+> pre-riempita con l'identificatore, e la risposta del server non tocca niente: diventa
+> un'anteprima a forma di diff sul telaio del pannello Git, con Invio che applica ed Esc che
+> annulla. Un passo di undo per buffer (la campata ricostruita in memoria, la forma di
+> Sostituisci Tutto), la guardia di revisione contro lo sweep che ricarica sotto il modale, e
+> sei rifiuti onesti con la loro frase ciascuno — operazioni-file, file senza tab, edit su
+> più righe, sola lettura, righe inesistenti, campate sovrapposte. Solo buffer aperti, solo
+> in memoria: i file su disco restano a Sostituisci nel progetto, come scritto qui sopra.
+> Restano del blocco: format on demand e i trigger characters.
+
 **Sostituisci nel progetto.** La ricerca c'è; manca la metà che scrive. Stessa disciplina del
 rename perché *è* lo stesso problema: anteprima raggruppata per file, `find::compile` resta
 l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale ancora),
@@ -2191,6 +2201,17 @@ riscritti con la strada temp+rename.
 - **Un modo large-file dichiarato**: sopra una soglia (50 MB?) niente highlighting, niente
   indice del completamento, undo a profondità ridotta — e la barra che lo dice. Meglio un
   editor che dichiara i suoi limiti di uno che li scopre congelandosi.
+- **Le GIF animate nella scheda, in modalità grafica** (chiesto il 2026-09-02). Oggi una
+  `.gif` aperta come scheda mostra il primo fotogramma e basta: il decode è un
+  `DynamicImage` solo, e l'animazione vera passa solo da ▶ Run con chafa a caratteri nel
+  terminale. La macchina per farla davvero esiste già ed è quella delle figure animate: una
+  picture nuova per tick senza lampeggiare, col protocollo che tiene lo stesso id fra un
+  fotogramma e l'altro — c'è perfino il test che lo inchioda. Mancano i pezzi GIF: i frame
+  del `GifDecoder` del crate `image` coi loro delay (decodificati una volta, non a ogni
+  giro), un timer nel ciclo dei frame che rispetti i tempi del file invece di un tick fisso,
+  e il loop. Le regole delle figure valgono identiche: mai prendere la tastiera, mai un
+  fotogramma bianco fra due, e un file i cui frame non stanno in memoria dichiara il limite
+  invece di scoprirlo congelandosi.
 
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
