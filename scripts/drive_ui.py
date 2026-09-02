@@ -214,6 +214,31 @@ def the_startup_banner_is_scrubbed(binary, root, report):
         session.close()
 
 
+def quitting_ends_the_process_cleanly(binary, root, report):
+    """Ctrl+Q has to end the process with status 0, shells and all.
+
+    Which nobody sees in a shell they typed `clee` in, and everybody sees from the Dock: there
+    the editor is given a terminal window of its own, and that window closes when the editor's
+    process ends — unless the ending looked like a failure, in which case some terminals keep
+    the window open with a line of their own text where the editor was. The panes are the part
+    worth testing: quitting hangs up two live shells on the way out, waits for them, and kills
+    the ones that would not go, and any of that turning into a signal or a non-zero status
+    would leave that window sitting there."""
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the session to be quit starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        status = session.quit()
+        report.check("Ctrl+Q ends the process, and with status 0",
+                     status is not None and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0,
+                     note=Session.describe_status(status))
+    finally:
+        session.close()
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -248,6 +273,7 @@ def main():
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)
+        quitting_ends_the_process_cleanly(binary, root, report)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
