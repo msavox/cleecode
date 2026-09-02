@@ -1607,6 +1607,36 @@ pub fn msg_run_piece_unsaved(lang: Lang) -> String {
     .to_string()
 }
 
+/// Said after context went to an agent's prompt. It names what was sent and where it went, and
+/// it says the part that matters: nothing has been submitted, and Enter is the user's to press.
+pub fn msg_agent_sent(lang: Lang, reference: &str, agent: &str, terminal: usize) -> String {
+    match lang {
+        Lang::En => {
+            format!("{reference} → {agent}, terminal {} — Enter sends it", terminal + 1)
+        }
+        Lang::It => {
+            format!("{reference} → {agent}, terminale {} — Enter lo manda", terminal + 1)
+        }
+    }
+}
+
+/// No agent anywhere, said plainly rather than by doing nothing. Names the way to get one.
+pub fn msg_agent_none(lang: Lang) -> String {
+    match lang {
+        Lang::En => "No agent in any terminal — clee -w claude, opencode or codex opens one",
+        Lang::It => "Nessun agente nei terminali — clee -w claude, opencode o codex ne apre uno",
+    }
+    .to_string()
+}
+
+pub fn msg_agent_unsaved(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Save the file first — an agent is pointed at a path, not at a buffer",
+        Lang::It => "Salva prima il file — a un agente si indica un percorso, non un buffer",
+    }
+    .to_string()
+}
+
 pub fn msg_run_piece_no_language(lang: Lang, ext: &str) -> String {
     match lang {
         Lang::En => format!("No live session for .{ext} — this works in Octave and Python"),
