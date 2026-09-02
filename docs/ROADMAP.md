@@ -2156,6 +2156,18 @@ il 40% che manca è quello che si usa ogni ora:
 > in memoria: i file su disco restano a Sostituisci nel progetto, come scritto qui sopra.
 > Restano del blocco: format on demand e i trigger characters.
 
+> **Fatti anche quelli, e il blocco è chiuso (2026-09-02).** I *trigger characters*: il punto
+> (e il `::` appena completato) manda la domanda col context del protocollo, e il popup si
+> apre all'arrivo della risposta, mai a vuoto — dopo un punto le parole del buffer sono il
+> contesto sbagliato, ed è il posto esatto dove la sorgente LSP le supera. Il *format*:
+> Ctrl+Shift+Q, un edit unico e un undo, col convertitore multi-linea che il rename
+> giustamente non ha — e il rename continua a rifiutarle, le campate su più righe. Con
+> Sostituisci nel progetto qui sotto, dei sei punti LSP più la metà che scrive non resta
+> niente: la 0.16 è tutta su master, 541 test e cinque driver pty a guardarla — compreso
+> drive_replace.py, che alla ricerca progetto mancava del tutto. In un giorno solo, con
+> l'architettura da una parte e sei agenti dall'altra: il metodo della campagna di agosto,
+> che regge anche quando i comandi scrivono.
+
 **Sostituisci nel progetto.** La ricerca c'è; manca la metà che scrive. Stessa disciplina del
 rename perché *è* lo stesso problema: anteprima raggruppata per file, `find::compile` resta
 l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale ancora),
