@@ -337,6 +337,9 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+Shift+N` | New terminal window |
 | `Ctrl+Shift+U` | Resize mode (arrows grow the focused frame, `Shift`+arrow shrinks) |
 | `Ctrl+Shift+F` | Fold/unfold the block under the cursor |
+| `Ctrl+Shift+Y` | Everywhere the name under the cursor is used, as a filterable list |
+| `Ctrl+Shift+V` | The symbols of this file, in document order — Enter jumps to one |
+| `Ctrl+Shift+C` | Rename the symbol under the cursor: a diff-shaped preview first, one undo step per file |
 | `Ctrl+L` | Toggle split editor (`Ctrl+Alt+←`/`→` moves between the panes) |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / save all (an unnamed buffer asks for a name; Save As is in the File menu) |
 | `Ctrl+Shift+A` | Send where you are — selection, diagnostic, or cursor line — to the prompt of an agent running in one of the terminals. Nothing is submitted: Enter is yours |
