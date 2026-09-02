@@ -183,6 +183,49 @@ its output. A command can be shared by every project or kept in the project's ow
 which wins and is meant to be committed with it. Interpreters off `PATH` go under
 `[interpreter_paths]`.
 
+### Agents, over MCP
+
+Claude Code, codex and opencode are terminal programs, and CleeCode hosts real terminals — so an
+agent already runs in a pane beside the file it is working on, with nothing to install. What an
+integration adds is the other direction: telling the agent what only the editor knows.
+
+`clee --mcp` is that. CleeCode becomes an MCP server on stdin and stdout, spawned by the agent
+itself: one implementation, three consumers. It works by descent — every shell CleeCode starts
+carries `CLEE_SESSION`, the directory this editor publishes into, so an agent launched in a pane
+inherits it and the `clee --mcp` it spawns inherits it in turn. Neither end searches for the
+other, which is what stops two open CleeCodes being mistaken for each other; an agent started
+anywhere else gets a tool that says so rather than a wrong answer.
+
+Four tools: `open_files` (the files open in tabs, and which is active), `selection` (the active
+file, the cursor's line and column, and the selected text), `diagnostics` (what the language
+server currently says, whole or for one file) and `open_file` (show a file, optionally at a
+line). `open_file` opens it **beside** your work and does not take the keyboard, the same rule
+the Octave and Python figures follow. Nothing writes to a buffer: reading has no risk and is
+offered generously, writing needs your consent, and the way to ask for it is not built yet.
+
+One line of configuration per agent. Claude Code:
+
+```
+claude mcp add clee -- clee --mcp
+```
+
+codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.clee]
+command = "clee"
+args = ["--mcp"]
+```
+
+opencode, in `~/.config/opencode/opencode.json`:
+
+```json
+{ "mcp": { "clee": { "type": "local", "command": ["clee", "--mcp"], "enabled": true } } }
+```
+
+The Claude Code line is the one to trust. The other two are written from those projects'
+documented shapes and have not been checked here against a running codex or opencode.
+
 ### Workspaces
 
 Save a whole set-up under a name: project root, open files, frame sizes, and the terminal windows

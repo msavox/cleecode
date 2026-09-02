@@ -17,6 +17,7 @@ clee \- terminal IDE with a file tree, embedded terminals and syntax highlightin
 .B clee
 .RB [ \-\-install\-font ]
 .RB [ \-\-install\-app ]
+.RB [ \-\-mcp ]
 .RB [ \-\-resume ]
 .RB [ \-h ]
 .RB [ \-V ]
@@ -66,6 +67,29 @@ to host the editor, and has the path to
 .B clee
 compiled into it, so run this again after moving the binary. Uninstall by dragging the app to the
 Bin.
+.TP
+.B \-\-mcp
+Run as a Model Context Protocol server on standard input and output instead of starting the
+editor, so an agent can ask CleeCode what only the editor knows: the files open in tabs and which
+is active
+.RB ( open_files ),
+the active file with the cursor's line and column and the selected text
+.RB ( selection ),
+the language server's current diagnostics
+.RB ( diagnostics ),
+and \(em the one action \(em showing a file, optionally at a line
+.RB ( open_file ),
+which opens it beside the user's work without taking the keyboard focus. No tool writes to a
+buffer.
+.IP
+Not meant to be typed. It belongs in the agent's own configuration, for example
+.B claude mcp add clee \-\- clee \-\-mcp
+for
+.BR claude (1).
+The server finds the editor through
+.BR CLEE_SESSION ,
+which every shell CleeCode starts carries and an agent launched in a pane inherits; run outside a
+CleeCode terminal, every tool answers that it is not inside a session.
 .TP
 .B \-\-resume
 Start in the project last worked in, whatever directory the command was run from. This is what

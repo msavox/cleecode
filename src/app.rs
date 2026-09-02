@@ -658,6 +658,10 @@ pub struct App {
     /// action it had just taken, with nothing on screen to say so. The answer carries the number
     /// it was asked under and anything but the latest is dropped.
     git_asked: u64,
+    /// The bridge to `clee --mcp`: the session directory this editor publishes into, and reads
+    /// requests back out of. `None` on a machine with nowhere to put it, which costs the MCP
+    /// server and nothing else.
+    mcp: Option<crate::mcp::Session>,
 }
 
 /// Which of the five questions the git panel is answering.
@@ -1857,6 +1861,9 @@ impl App {
         let show_splash = settings.show_splash;
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
+        // Before the first shell is spawned, because a shell inherits `CLEE_SESSION` and an agent
+        // started in it would otherwise be pointed at a directory that does not exist yet.
+        let mcp = crate::mcp::Session::start();
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
         let t1 = TerminalWindow::new(term_rows, half_cols, &root)?;
         let t2 = TerminalWindow::new(term_rows, half_cols, &root)?;
@@ -1983,6 +1990,7 @@ impl App {
             git_panel_tx,
             git_panel_rx,
             git_asked: 0,
+            mcp,
             git_wanted: None,
         })
     }
@@ -3253,6 +3261,142 @@ impl App {
                 EditorPane::Right => self.active_editor_right = was.3,
             }
         }
+    }
+
+    // ---- The MCP bridge ------------------------------------------------------------------
+
+    /// One call per frame: publish what the editor knows, and act on what an agent has asked for.
+    ///
+    /// Both halves are throttled inside [`crate::mcp::Session`] rather than here, so the frame
+    /// loop can call this unconditionally the way it calls every other poll. Assembling a state
+    /// copies paths and the selected text, which is why the throttle is asked *before* the state
+    /// is built and not after.
+    pub fn poll_mcp(&mut self) {
+        if self.mcp.as_ref().is_some_and(crate::mcp::Session::due_for_state) {
+            let state = self.mcp_state();
+            if let Some(session) = self.mcp.as_mut() {
+                session.publish(state);
+            }
+        }
+        let requests = match self.mcp.as_mut() {
+            Some(session) if session.due_for_requests() => session.take_requests(),
+            _ => Vec::new(),
+        };
+        for request in requests {
+            self.apply_mcp_request(request);
+        }
+    }
+
+    /// Everything published about this editor, as of now.
+    ///
+    /// Every path goes out resolved. A project opened as `.` holds its buffers as `./src/main.rs`,
+    /// and an agent handed that would resolve it against its own working directory — which is
+    /// where it happens to have been started, not where the editor is. The language server client
+    /// keeps its own translation table for exactly this reason.
+    fn mcp_state(&self) -> crate::mcp::State {
+        let open_files =
+            self.editors.iter().filter_map(|e| e.path.as_deref()).map(|p| self.mcp_path(p)).collect();
+        let editor = self.editor();
+        let active = editor.path.as_deref().map(|path| crate::mcp::Active {
+            path: self.mcp_path(path),
+            // 1-based on the wire, because the other end thinks in the `path:line` a compiler
+            // prints and the editor counts from zero internally.
+            line: editor.cursor_line + 1,
+            column: editor.cursor_col + 1,
+            selection: crate::mcp::selection_for(editor.selected_text()),
+        });
+        let diagnostics = self
+            .diagnostics
+            .iter()
+            .flat_map(|(path, marks)| {
+                // Resolved once per file rather than once per mark: a file mid-refactor can carry
+                // hundreds, and they all live at the same path.
+                let path = self.mcp_path(path);
+                marks.iter().map(move |mark| crate::mcp::Diagnostic {
+                    path: path.clone(),
+                    line: mark.line + 1,
+                    severity: match mark.severity {
+                        crate::lsp::Severity::Error => "error",
+                        crate::lsp::Severity::Warning => "warning",
+                        crate::lsp::Severity::Info => "info",
+                        crate::lsp::Severity::Hint => "hint",
+                    }
+                    .to_string(),
+                    message: mark.message.clone(),
+                })
+            })
+            .collect();
+        crate::mcp::State {
+            root: self.mcp_path(&self.root),
+            open_files,
+            active,
+            diagnostics: crate::mcp::tidy_diagnostics(diagnostics),
+        }
+    }
+
+    /// A path as an agent should see it: absolute, and with the links resolved when the file is
+    /// really there. A path that resolves to nothing — a buffer whose file has been deleted —
+    /// still goes out absolute rather than being dropped.
+    fn mcp_path(&self, path: &Path) -> String {
+        let absolute =
+            if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) };
+        std::fs::canonicalize(&absolute).unwrap_or(absolute).to_string_lossy().into_owned()
+    }
+
+    /// Carries out one request from the MCP server.
+    ///
+    /// Only `open` exists, and deliberately so: reading has no blast radius, writing needs the
+    /// user's consent, and there is no UI yet to ask for it. An action nobody recognises is
+    /// dropped rather than guessed at.
+    fn apply_mcp_request(&mut self, request: crate::mcp::Request) {
+        if request.action != "open" {
+            return;
+        }
+        let path = PathBuf::from(&request.path);
+        // A relative path means "in this project", which is the only root the agent was told
+        // about — see the `root` field of the published state.
+        let path = if path.is_absolute() { path } else { self.root.join(path) };
+        self.show_beside_without_focus(path, request.line);
+    }
+
+    /// Opens a file in the pane that is *not* being typed in, and gives the keyboard straight
+    /// back — the rule the figures established in 0.9: show without taking.
+    ///
+    /// A file that is not there is passed over in silence. The request came from a program, not
+    /// from a key somebody pressed, and an error banner for a path an agent guessed wrong is
+    /// noise in the middle of somebody else's work.
+    fn show_beside_without_focus(&mut self, path: PathBuf, line: Option<usize>) {
+        if !path.is_file() {
+            return;
+        }
+        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
+            self.toggle_split_view();
+        }
+        if self.split_view {
+            self.editor_pane_focus = match was.1 {
+                EditorPane::Left => EditorPane::Right,
+                EditorPane::Right => EditorPane::Left,
+            };
+        }
+        self.open_file_in_tab(path);
+        if let Some(line) = line {
+            let idx = self.pane_editor_index(self.editor_pane_focus);
+            if let Some(editor) = self.editors.get_mut(idx) {
+                editor.goto_line(line);
+            }
+        }
+        // Everything about where the keyboard was, put back.
+        self.focus = was.0;
+        self.editor_pane_focus = was.1;
+        if self.split_view {
+            match was.1 {
+                EditorPane::Left => self.active_editor = was.2,
+                EditorPane::Right => self.active_editor_right = was.3,
+            }
+        }
+        // Nothing here came from an event, so nothing has marked the screen out of date.
+        self.mark_dirty();
     }
 
     // ---- Language server -----------------------------------------------------------------

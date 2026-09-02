@@ -16,6 +16,7 @@ mod i18n;
 mod locate;
 mod lsp;
 mod manual;
+mod mcp;
 mod menu;
 mod picker;
 mod preview;
@@ -126,6 +127,10 @@ OPTIONS:
     --install-font        Install the bundled Nerd Font, so the file tree icons render.
     --install-app         macOS: put a CleeCode launcher in /Applications, so it can live
                           in the Dock and be the app that opens a file or a folder.
+    --mcp                 Run as an MCP server on stdin/stdout, so an agent started in a
+                          CleeCode terminal can ask what is open, where the cursor is and
+                          what the language server said. Not typed by hand: it goes in the
+                          agent's own config — `claude mcp add clee -- clee --mcp`.
     --resume              Start in the project last worked in, wherever this was run from.
                           What the Dock launcher uses; a bare `clee` still uses the
                           directory you are standing in.
@@ -235,6 +240,14 @@ fn main() -> Result<()> {
         {
             eprintln!("clee --watch-workspace: {e}");
         }
+        return Ok(());
+    }
+    // CleeCode as an MCP server, spoken to on stdin and stdout by an agent that spawned it.
+    // Handled here for the same reason as the workspace viewer: it is a different program in
+    // the same binary — no alternate screen, no raw mode, no editor — and anything printed to
+    // stdout by the TUI would be a protocol violation the client could never recover from.
+    if args.iter().any(|a| a == "--mcp") {
+        mcp::serve_stdio();
         return Ok(());
     }
     let resume = args.iter().any(|a| a == "--resume");
@@ -595,6 +608,7 @@ fn run(
             app.poll_figures();
             app.poll_run_watch();
             app.poll_inspector();
+            app.poll_mcp();
             app.poll_terminal_output();
         }));
         if let Err(text) = polled {
