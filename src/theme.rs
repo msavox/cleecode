@@ -206,6 +206,104 @@ impl Theme {
     }
 }
 
+/// What `settings.toml` holds: a theme by name, or the standing instruction to ask the terminal.
+///
+/// The distinction is worth a type. A theme is what the editor is drawn in *right now*; a choice
+/// is what the user asked for, and "ask the terminal" is an answer that outlives any one session
+/// — the terminal can be a different colour tomorrow, and the setting should still be right.
+/// So the choice is what is saved and what the pickers show as selected, and the theme it
+/// resolves to is what everything else reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// Follow the terminal: light if its background is light, dark otherwise.
+    Auto,
+    /// This one, whatever the terminal is doing.
+    Fixed(Theme),
+}
+
+/// The key `Auto` is written into `settings.toml` under. No theme may take this name, which the
+/// tests below check rather than trust.
+const AUTO_KEY: &str = "auto";
+
+impl Default for ThemeChoice {
+    /// The dark theme, not `Auto`. Somebody who has been using CleeCode has no `theme` key in
+    /// their settings file, and a default of `Auto` would repaint their editor on the strength
+    /// of a terminal colour they never mentioned. A new default is a new setting's business.
+    fn default() -> Self {
+        ThemeChoice::Fixed(Theme::default())
+    }
+}
+
+impl ThemeChoice {
+    /// The theme to draw in, given what the terminal said its background was — `None` when it
+    /// was not asked or did not answer.
+    ///
+    /// Pure on purpose: the querying is somebody else's problem (see `preview::detect_background`),
+    /// and everything interesting about the decision can then be read and tested here.
+    pub fn resolve(self, background: Option<(u8, u8, u8)>) -> Theme {
+        match self {
+            ThemeChoice::Fixed(theme) => theme,
+            // A terminal that says nothing is assumed dark. It is what terminals mostly are, it
+            // is what CleeCode has always drawn for, and light text on an unknown background is
+            // the failure that costs least: dark text on a dark terminal is unreadable, light
+            // text on a light one is merely faint.
+            ThemeChoice::Auto => match background {
+                Some(rgb) if luminance(rgb) > 0.5 => Theme::CleeCodeLight,
+                _ => Theme::CleeCode,
+            },
+        }
+    }
+
+    /// Auto first, then the themes in the order they are listed in: this list is the drop-down.
+    /// Auto leads because it is the choice that needs no knowledge of the set below it.
+    pub fn all() -> Vec<ThemeChoice> {
+        std::iter::once(ThemeChoice::Auto).chain(Theme::ALL.map(ThemeChoice::Fixed)).collect()
+    }
+
+    /// What the picker shows. Untranslated for the same reason a theme's name is: "Auto" is the
+    /// word in every language the editor speaks, and the row beside it says "CleeCode".
+    pub fn name(self) -> &'static str {
+        match self {
+            ThemeChoice::Auto => "Auto",
+            ThemeChoice::Fixed(theme) => theme.name(),
+        }
+    }
+}
+
+/// How light a colour is, 0.0 for black and 1.0 for white.
+///
+/// Rec. 601 luma, the same weights `Palette::needs_its_own_background` decides its own version of
+/// this question with — one rule for "is this light", used in both places, rather than two that
+/// could disagree about a grey.
+pub fn luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
+}
+
+/// Written as the theme's own key, so a file that says `theme = "turbo"` today keeps saying it.
+impl Serialize for ThemeChoice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ThemeChoice::Auto => serializer.serialize_str(AUTO_KEY),
+            ThemeChoice::Fixed(theme) => theme.serialize(serializer),
+        }
+    }
+}
+
+/// One extra name on top of the theme keys. The theme half is handed to `Theme`'s own derived
+/// implementation rather than spelled out again here: the keys live in one place, and a name
+/// this does not know is still the error it always was.
+impl<'de> Deserialize<'de> for ThemeChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let key = String::deserialize(deserializer)?;
+        if key == AUTO_KEY {
+            return Ok(ThemeChoice::Auto);
+        }
+        Theme::deserialize(IntoDeserializer::<D::Error>::into_deserializer(key.as_str()))
+            .map(ThemeChoice::Fixed)
+    }
+}
+
 /// What the editor has always looked like. Every field is the colour that used to be written at
 /// the point of use, so the default theme draws the same frame it drew before the palette existed
 /// — which is the only way a change this wide can be checked by reading it.
@@ -599,6 +697,104 @@ mod tests {
     #[derive(Serialize, Deserialize)]
     struct Wrapper {
         theme: Theme,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ChoiceWrapper {
+        theme: ThemeChoice,
+    }
+
+    /// The settings file gained a value, not a spelling: every theme key still reads and writes
+    /// as itself, and `auto` is the one name added beside them.
+    #[test]
+    fn a_choice_is_written_as_a_theme_key_or_as_auto() {
+        for theme in Theme::ALL {
+            let choice = ThemeChoice::Fixed(theme);
+            let written = toml::to_string(&ChoiceWrapper { theme: choice }).unwrap();
+            let plain = toml::to_string(&Wrapper { theme }).unwrap();
+            assert_eq!(written, plain, "{} is written differently as a choice", theme.name());
+            let read: ChoiceWrapper = toml::from_str(&written).unwrap();
+            assert_eq!(read.theme, choice, "{} did not survive the round trip", theme.name());
+        }
+        let auto = toml::to_string(&ChoiceWrapper { theme: ThemeChoice::Auto }).unwrap();
+        assert_eq!(auto.trim(), "theme = \"auto\"");
+        let read: ChoiceWrapper = toml::from_str(&auto).unwrap();
+        assert_eq!(read.theme, ThemeChoice::Auto);
+    }
+
+    /// A name that is neither a theme nor `auto` is refused rather than quietly defaulted: the
+    /// settings loader has its own answer for a broken file, and swallowing the error here would
+    /// take that decision away from it.
+    #[test]
+    fn an_unknown_name_is_not_a_choice() {
+        assert!(toml::from_str::<ChoiceWrapper>("theme = \"dracula\"").is_err());
+        assert!(toml::from_str::<ChoiceWrapper>("theme = \"Auto\"").is_err());
+    }
+
+    /// No theme may be called `auto`, or the word would mean two things in the same file and the
+    /// one written down here would win silently.
+    #[test]
+    fn no_theme_answers_to_auto() {
+        for theme in Theme::ALL {
+            let written = toml::to_string(&Wrapper { theme }).unwrap();
+            assert_ne!(written.trim(), format!("theme = \"{AUTO_KEY}\""), "{}", theme.name());
+        }
+    }
+
+    /// The default is the editor as it was. A user with no `theme` key must not be repainted by
+    /// a terminal colour they never mentioned.
+    #[test]
+    fn the_default_choice_is_the_dark_theme_and_not_auto() {
+        assert_eq!(ThemeChoice::default(), ThemeChoice::Fixed(Theme::CleeCode));
+        assert_eq!(ThemeChoice::default().resolve(Some((255, 255, 255))), Theme::CleeCode);
+    }
+
+    /// What `auto` decides, and what it does when there is nothing to decide from.
+    #[test]
+    fn auto_follows_the_terminal_and_falls_back_to_dark() {
+        let light = |rgb| ThemeChoice::Auto.resolve(Some(rgb));
+        assert_eq!(light((255, 255, 255)), Theme::CleeCodeLight, "white paper");
+        assert_eq!(light((253, 246, 227)), Theme::CleeCodeLight, "solarized light's own surface");
+        assert_eq!(light((0, 0, 0)), Theme::CleeCode, "black");
+        assert_eq!(light((24, 24, 24)), Theme::CleeCode, "the default theme's own surface");
+        assert_eq!(light((0, 43, 54)), Theme::CleeCode, "solarized dark's own surface");
+        // A terminal that was never asked, or that said nothing: dark, which is what CleeCode
+        // has always drawn for.
+        assert_eq!(ThemeChoice::Auto.resolve(None), Theme::CleeCode);
+    }
+
+    /// Green weighs more than blue, and the answer stays inside the range the threshold is
+    /// stated in — a luminance above one would make "> 0.5" true for colours that are not light.
+    #[test]
+    fn luminance_runs_from_black_to_white() {
+        assert_eq!(luminance((0, 0, 0)), 0.0);
+        assert!((luminance((255, 255, 255)) - 1.0).abs() < 1e-6);
+        assert!(luminance((0, 255, 0)) > luminance((0, 0, 255)));
+        for rgb in [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)] {
+            let l = luminance(rgb);
+            assert!((0.0..=1.0).contains(&l), "{rgb:?} is outside the range");
+        }
+    }
+
+    /// The two themes `auto` picks between have to be one of each, or the setting is a switch
+    /// with the same thing on both ends.
+    #[test]
+    fn auto_picks_between_a_light_theme_and_a_dark_one() {
+        assert!(ThemeChoice::Auto.resolve(Some((255, 255, 255))).paints_its_own_background());
+        assert!(!ThemeChoice::Auto.resolve(None).paints_its_own_background());
+    }
+
+    /// Auto leads the list and every theme follows it, in the order the theme list is in: this
+    /// is what the drop-down draws, so a theme missing here is a theme nobody can choose.
+    #[test]
+    fn the_choice_list_is_auto_and_then_the_themes() {
+        let all = ThemeChoice::all();
+        assert_eq!(all.len(), Theme::ALL.len() + 1);
+        assert_eq!(all[0], ThemeChoice::Auto);
+        for (i, theme) in Theme::ALL.iter().enumerate() {
+            assert_eq!(all[i + 1], ThemeChoice::Fixed(*theme));
+        }
+        assert_eq!(all[0].name(), "Auto");
     }
 
     /// Names are what the picker shows and what `settings.toml` round-trips; two themes sharing

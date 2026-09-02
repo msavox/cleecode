@@ -319,6 +319,18 @@ fn main() -> Result<()> {
     // Both have their own timeout, so a silent terminal costs a coarser picture rather than a
     // stall, and neither can happen once frames are being drawn.
     preview::detect_terminal();
+    // A third question, asked only by those who need the answer: what colour is the terminal's
+    // background? It settles `theme = "auto"`, and for anyone who chose a theme by name it would
+    // be a hundred and fifty milliseconds spent on a fact nothing reads — so the setting is read
+    // first, here, rather than the query being made unconditionally.
+    //
+    // Reading the settings a second time (`run` loads them again, as does `App::new`) is the
+    // least invasive way to know this early: it is a few hundred bytes of TOML parsed once at
+    // startup, against threading a loaded copy through `run`, `App::new` and everything that
+    // builds an `App` in a test.
+    if Settings::load().theme == theme::ThemeChoice::Auto {
+        preview::detect_background();
+    }
     let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
     crossterm::execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     if enhanced {

@@ -925,7 +925,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // opaque background: the setting is about a terminal whose colours you want to keep, and a
     // light theme has no colours of the terminal's left to keep.
     let pal = app.palette();
-    let opaque = app.settings.opaque_background || app.settings.theme.paints_its_own_background();
+    let opaque = app.settings.opaque_background || app.theme.paints_its_own_background();
     draw_frame(f, app);
     // Last of all, once every widget has had its say about which cells it colours.
     if opaque {
@@ -1156,7 +1156,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         // What is actually on the screen, not what the setting says: with a theme that brings
         // its own surface the fill is on whatever the setting was left at, and a button showing
         // otherwise would be reporting a state the frame does not have.
-        let on = app.settings.opaque_background || app.settings.theme.paints_its_own_background();
+        let on = app.settings.opaque_background || app.theme.paints_its_own_background();
         // Lit like the open menu title when it is on, so "something has been switched on here"
         // reads the same way everywhere on this row.
         let style = if on {
@@ -2475,10 +2475,11 @@ pub fn theme_menu_rect(app: &App, full: Rect) -> Option<Rect> {
     if button.is_empty() {
         return None;
     }
-    let widest = crate::theme::Theme::ALL.iter().map(|t| columns(t.name())).max().unwrap_or(0);
+    let choices = crate::theme::ThemeChoice::all();
+    let widest = choices.iter().map(|c| columns(c.name())).max().unwrap_or(0);
     // Two for the borders, two for the marker that says which one is on.
     let width = (widest + 4).min(full.width);
-    let height = crate::theme::Theme::ALL.len() as u16 + 2;
+    let height = choices.len() as u16 + 2;
     Some(Rect {
         x: button.start.min(full.width.saturating_sub(width)),
         y: full.y + 1,
@@ -2496,13 +2497,15 @@ fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let items: Vec<ListItem> = crate::theme::Theme::ALL
-        .iter()
-        .map(|theme| {
-            // The dot marks the theme in use, not the row the cursor is on: arrowing down a list
-            // must not look like it has already changed anything.
-            let marker = if *theme == app.settings.theme { "\u{25cf} " } else { "  " };
-            ListItem::new(Line::from(format!("{marker}{}", theme.name())))
+    let items: Vec<ListItem> = crate::theme::ThemeChoice::all()
+        .into_iter()
+        .map(|choice| {
+            // The dot marks the choice in use, not the row the cursor is on: arrowing down a list
+            // must not look like it has already changed anything. The choice and not the theme,
+            // so "Auto" stays marked rather than the theme it resolved to — which is the honest
+            // answer to "what did I pick", and the only one that survives a change of terminal.
+            let marker = if choice == app.settings.theme { "\u{25cf} " } else { "  " };
+            ListItem::new(Line::from(format!("{marker}{}", choice.name())))
         })
         .collect();
     let mut state = ListState::default();
