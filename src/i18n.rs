@@ -154,6 +154,9 @@ pub enum Key {
     ItemGitPanel,
     ItemGoToDefinition,
     ItemJumpBack,
+    ItemFindReferences,
+    ItemDocumentSymbols,
+    ItemShowDiagnostics,
     ItemGitStatus,
     ItemGitChanges,
     ItemGitHistory,
@@ -197,6 +200,9 @@ pub enum Key {
     PickerOpenFile,
     PickerOpenFileCapped,
     PickerSearchResults,
+    PickerReferences,
+    PickerSymbols,
+    PickerDiagnostics,
     PickerVariables,
     PickerVenvBrowse,
     PickerWorkspaceOpen,
@@ -610,6 +616,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemGoToDefinition) => "Vai alla definizione",
         (Lang::En, ItemJumpBack) => "Back where you were",
         (Lang::It, ItemJumpBack) => "Torna dov'eri",
+        (Lang::En, ItemFindReferences) => "Find references",
+        (Lang::It, ItemFindReferences) => "Trova i riferimenti",
+        (Lang::En, ItemDocumentSymbols) => "Symbols in this file",
+        (Lang::It, ItemDocumentSymbols) => "Simboli del file",
+        (Lang::En, ItemShowDiagnostics) => "Everything that is wrong",
+        (Lang::It, ItemShowDiagnostics) => "Tutto quello che non va",
 
         // Each opens the panel on the tab it names. The panel's own tab strip does the same
         // thing in one keypress once it is open — these are for finding it in the first place.
@@ -732,6 +744,17 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, PickerSearchResults) => "Search results",
         (Lang::It, PickerSearchResults) => "Risultati della ricerca",
+
+        (Lang::En, PickerReferences) => "Where that is used",
+        (Lang::It, PickerReferences) => "Dove è usato",
+
+        (Lang::En, PickerSymbols) => "Symbols in this file",
+        (Lang::It, PickerSymbols) => "Simboli del file",
+
+        // Named for what the list actually holds: the servers only speak about the files that
+        // are open, so this is never the whole project however much it looks like it.
+        (Lang::En, PickerDiagnostics) => "What is wrong in the open files",
+        (Lang::It, PickerDiagnostics) => "Cosa non va nei file aperti",
 
         (Lang::En, PickerVariables) => "Variables",
         (Lang::It, PickerVariables) => "Variabili",
@@ -1713,6 +1736,48 @@ pub fn msg_lsp_no_definition(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "The server knows of no definition for that",
         Lang::It => "Il server non conosce nessuna definizione per quello",
+    }
+}
+
+pub fn msg_lsp_looking_references(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking where that is used…",
+        Lang::It => "Chiedo dov'è usato…",
+    }
+}
+
+pub fn msg_lsp_looking_symbols(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking what is in this file…",
+        Lang::It => "Chiedo cosa c'è in questo file…",
+    }
+}
+
+/// The same kind of answer as [`msg_lsp_no_definition`], and said for the same reason: on a
+/// keyword, in a comment, or before the server has finished indexing, an empty list is what
+/// comes back and an empty picker would look like a bug.
+pub fn msg_lsp_no_references(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server knows of nowhere that uses it",
+        Lang::It => "Il server non conosce nessun posto che lo usa",
+    }
+}
+
+pub fn msg_lsp_no_symbols(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server sees no names in this file",
+        Lang::It => "Il server non vede nomi in questo file",
+    }
+}
+
+/// Said when the diagnostics list is asked for and there is nothing in it.
+///
+/// Worded to say which files it looked at, because that is the honest scope: a server only
+/// speaks about the files it was told about, and those are the ones with a tab.
+pub fn msg_lsp_no_diagnostics(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing to report — no diagnostics on the open files",
+        Lang::It => "Niente da segnalare — nessun diagnostico sui file aperti",
     }
 }
 

@@ -593,6 +593,13 @@ pub struct App {
     /// One at a time, and the newest wins: both are questions about where the cursor is now, so
     /// an answer to where it was is not a late answer, it is an answer about somewhere else.
     lsp_asked: Option<PendingAsk>,
+    /// The one request for a list still out — references, or the names in a file.
+    ///
+    /// A slot of its own rather than a share of [`Self::lsp_asked`], and that is the whole
+    /// reason it exists: hovers fill that one on their own account, several a second, and a
+    /// list asked for on purpose would either be cancelled by the next one or be blocked by it
+    /// forever. Neither of those is something a key press should have to know about.
+    lsp_listing: Option<PendingAsk>,
     /// Where the cursor was when the last hover was asked, so the same question is not asked
     /// again every frame while nothing moves.
     lsp_hovered: Option<(PathBuf, usize, usize)>,
@@ -921,7 +928,7 @@ pub enum GitWanted {
     Commit,
 }
 
-/// A definition or hover request that has not been answered yet.
+/// A request that has not been answered yet — a definition, a hover, or a list.
 ///
 /// `from` is where the cursor was when it went out — checked when the answer arrives, since by
 /// then it may be somewhere else entirely, and used as the place to come back to after a jump.
@@ -1203,6 +1210,23 @@ fn empty_state_focus(show_sidebar: bool, show_terminal: bool) -> Focus {
         Focus::Terminal
     } else {
         Focus::Editor
+    }
+}
+
+/// How a row of a list of places reads: where it is, then what is there.
+///
+/// The same shape as a search result and for the same two reasons — the path is relative to the
+/// project because the part that repeats on every row is the part worth dropping, and the text
+/// goes through [`crate::search::shorten`] because a generated line is thousands of characters
+/// long and a picker row is one line. `line` is counted the way a person counts them.
+///
+/// A file that could not be read still gets a row, with the place and nothing after it: where
+/// it is is most of what was asked for, and a row missing from the list is a use gone missing.
+fn located_label(root: &Path, path: &Path, line: usize, text: Option<&str>) -> String {
+    let shown = path.strip_prefix(root).unwrap_or(path);
+    match text {
+        Some(text) => format!("{}:{}  {}", shown.display(), line, crate::search::shorten(text)),
+        None => format!("{}:{}", shown.display(), line),
     }
 }
 
@@ -2041,6 +2065,7 @@ impl App {
             lsp_paths: std::collections::HashMap::new(),
             lsp_completion: None,
             lsp_asked: None,
+            lsp_listing: None,
             lsp_hovered: None,
             lsp_what_it_is: None,
             jumps: Vec::new(),
@@ -3548,13 +3573,7 @@ impl App {
                 marks.iter().map(move |mark| crate::mcp::Diagnostic {
                     path: path.clone(),
                     line: mark.line + 1,
-                    severity: match mark.severity {
-                        crate::lsp::Severity::Error => "error",
-                        crate::lsp::Severity::Warning => "warning",
-                        crate::lsp::Severity::Info => "info",
-                        crate::lsp::Severity::Hint => "hint",
-                    }
-                    .to_string(),
+                    severity: mark.severity.word().to_string(),
                     message: mark.message.clone(),
                 })
             })
@@ -3776,6 +3795,10 @@ impl App {
                     self.absorb_lsp_completion(id, words);
                 }
                 crate::lsp::Event::Definition { id, target } => self.lsp_go_there(id, target),
+                crate::lsp::Event::References { id, targets } => {
+                    self.lsp_list_references(id, targets)
+                }
+                crate::lsp::Event::Symbols { id, symbols } => self.lsp_list_symbols(id, symbols),
                 crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
                 crate::lsp::Event::Answer { message } => {
                     // Straight back to the server that asked, on the thread that owns the pipe.
@@ -3806,6 +3829,7 @@ impl App {
                     record.worth_retrying = true;
                     self.lsp_completion = None;
                     self.lsp_asked = None;
+                    self.lsp_listing = None;
                     // The files it was serving are forgotten too, so the ones still open are
                     // announced again from scratch to whatever takes its place.
                     self.lsp_forget(&program);
@@ -4090,6 +4114,281 @@ impl App {
         // Counted as a person counts them, which is what `goto_line` takes; the stack holds the
         // editor's own zero-based line.
         self.open_file_at(path, line + 1, col);
+    }
+
+    /// Asks the server everywhere the thing under the cursor is used.
+    ///
+    /// The same opening as [`Self::lsp_go_to_definition`], down to sending the file first: the
+    /// question is about *this* text, and a list of places in the text of four hundred
+    /// milliseconds ago is a list of lines that have since moved.
+    pub fn lsp_find_references(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        let (line, col) = (editor.cursor_line, editor.cursor_col);
+        let line_text = editor.rope.line(line).to_string();
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let from = (path.clone(), line, col);
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        client.did_change(&absolute, &text);
+        match client.references(&absolute, line, &line_text, col) {
+            Some(id) => {
+                self.lsp_listing = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_lsp_looking_references(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Turns the uses the server named into a list to choose from.
+    fn lsp_list_references(&mut self, id: i64, targets: Vec<crate::lsp::Jump>) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_listing.take().filter(|a| a.id == id) else { return };
+        if targets.is_empty() {
+            self.status_message = i18n::msg_lsp_no_references(lang).to_string();
+            return;
+        }
+        // Back to the spelling the tabs use, for the same reason the jump does it: the server
+        // answers in resolved paths, and a row that opened a second tab on a file already open
+        // under another name would leave one file with two buffers.
+        let mut targets: Vec<crate::lsp::Jump> = targets
+            .into_iter()
+            .map(|mut target| {
+                target.path = self.lsp_paths.get(&target.path).cloned().unwrap_or(target.path);
+                target
+            })
+            .collect();
+        // By file and then by line. Servers answer in whatever order they indexed in, which is
+        // not an order anybody can read — and grouping the rows by file is also what lets each
+        // file be read off disk once instead of once per row.
+        targets.sort_by(|a, b| {
+            a.path.cmp(&b.path).then(a.line.cmp(&b.line)).then(a.column.cmp(&b.column))
+        });
+        let root = self.root.clone();
+        let mut items = Vec::with_capacity(targets.len());
+        let mut held: Option<(PathBuf, Vec<String>)> = None;
+        for target in &targets {
+            if held.as_ref().is_none_or(|(path, _)| path != &target.path) {
+                held = Some((target.path.clone(), self.file_lines(&target.path)));
+            }
+            let text = held.as_ref().and_then(|(_, lines)| lines.get(target.line));
+            let column = self.lsp_chars_for(
+                &target.path,
+                text.map(String::as_str).unwrap_or_default(),
+                target.column,
+            );
+            items.push(crate::picker::PickItem {
+                label: located_label(&root, &target.path, target.line + 1, text.map(String::as_str)),
+                shortcut: None,
+                action: crate::picker::PickAction::FileLine(
+                    target.path.clone(),
+                    target.line + 1,
+                    column,
+                ),
+            });
+        }
+        self.open_server_list(Key::PickerReferences, crate::picker::PickerKind::References, items, asked.from);
+    }
+
+    /// Asks the server what names the file holds.
+    ///
+    /// The file goes first here too. An outline of the text as it was before the last few
+    /// keystrokes is an outline whose every line number is off by however many lines have been
+    /// typed since — which is the one thing this list is for.
+    pub fn lsp_document_symbols(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        let from = (path.clone(), editor.cursor_line, editor.cursor_col);
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        client.did_change(&absolute, &text);
+        match client.document_symbols(&absolute) {
+            Some(id) => {
+                self.lsp_listing = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_lsp_looking_symbols(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Turns the file's names into a list to choose from.
+    ///
+    /// In document order, untouched. An outline is a picture of the file: sorted by name it
+    /// would be a picture of a different one, and the reason anybody opens this is to find the
+    /// function they know is *below* the one they are looking at.
+    fn lsp_list_symbols(&mut self, id: i64, symbols: Vec<crate::lsp::SymbolRow>) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_listing.take().filter(|a| a.id == id) else { return };
+        if symbols.is_empty() {
+            self.status_message = i18n::msg_lsp_no_symbols(lang).to_string();
+            return;
+        }
+        // One file, so one read: the rows are all places in the buffer the question was asked
+        // about, and the columns are all measured against its lines.
+        let path = asked.from.0.clone();
+        let lines = self.file_lines(&path);
+        let items = symbols
+            .iter()
+            .map(|row| crate::picker::PickItem {
+                // Two spaces a level. Enough to see the shape of the file at a glance, and
+                // little enough that a name four levels in still has room for itself.
+                label: format!("{}{}", "  ".repeat(row.depth), row.name),
+                // What kind of thing it is, in the right-hand column the palette uses for
+                // chords: it is the same job — the part of the row you read second.
+                shortcut: Some(row.kind.to_string()),
+                action: crate::picker::PickAction::FileLine(
+                    path.clone(),
+                    row.line + 1,
+                    self.lsp_chars_for(
+                        &path,
+                        lines.get(row.line).map(String::as_str).unwrap_or_default(),
+                        row.column,
+                    ),
+                ),
+            })
+            .collect();
+        self.open_server_list(Key::PickerSymbols, crate::picker::PickerKind::Symbols, items, asked.from);
+    }
+
+    /// Offers everything the servers have said is wrong, as a list to jump into.
+    ///
+    /// The honest scope is the files that are open, and the title says so. A diagnostic for a
+    /// file with no tab is dropped the moment it arrives — turning one into a [`crate::lsp::Mark`]
+    /// needs the text to measure its columns against, and there is none — so this cannot be a
+    /// picture of the project however much a column of `path:line` looks like one.
+    ///
+    /// No chord, unlike the other two. This is read after a build rather than mid-keystroke, and
+    /// the menu and the palette are where a thing like that is looked for.
+    fn open_diagnostics_picker(&mut self) {
+        let lang = self.settings.lang;
+        let root = self.root.clone();
+        let items: Vec<crate::picker::PickItem> = {
+            let mut rows: Vec<(&PathBuf, &crate::lsp::Mark)> = self
+                .diagnostics
+                .iter()
+                .flat_map(|(path, marks)| marks.iter().map(move |mark| (path, mark)))
+                .collect();
+            // Worst first, then by file and line. What anybody opens this for is the errors, and
+            // a list that opened on a hint about a doc comment is a list nobody scrolls.
+            rows.sort_by(|(left_path, left), (right_path, right)| {
+                right
+                    .severity
+                    .cmp(&left.severity)
+                    .then(left_path.cmp(right_path))
+                    .then(left.line.cmp(&right.line))
+                    .then(left.start.cmp(&right.start))
+            });
+            rows.iter()
+                .map(|(path, mark)| crate::picker::PickItem {
+                    // A compiler message is several lines when it wants to be, and a row of a
+                    // picker is one: the breaks become spaces rather than breaking the list.
+                    label: located_label(
+                        &root,
+                        path,
+                        mark.line + 1,
+                        Some(&mark.message.replace('\n', " ")),
+                    ),
+                    shortcut: Some(mark.severity.word().to_string()),
+                    // The column the mark starts at, which is already in characters — a
+                    // diagnostic was converted when it arrived, against the buffer it is about.
+                    action: crate::picker::PickAction::FileLine(
+                        (*path).clone(),
+                        mark.line + 1,
+                        mark.start,
+                    ),
+                })
+                .collect()
+        };
+        if items.is_empty() {
+            self.status_message = i18n::msg_lsp_no_diagnostics(lang).to_string();
+            return;
+        }
+        self.picker = Some(crate::picker::Picker::new(
+            i18n::t(lang, Key::PickerDiagnostics),
+            crate::picker::PickerKind::Diagnostics,
+            items,
+        ));
+    }
+
+    /// Puts one of the server's lists on screen and remembers where it was asked from, so
+    /// confirming a row is a jump that can be come back from.
+    fn open_server_list(
+        &mut self,
+        title: Key,
+        kind: crate::picker::PickerKind,
+        items: Vec<crate::picker::PickItem>,
+        origin: (PathBuf, usize, usize),
+    ) {
+        let lang = self.settings.lang;
+        let mut picker = crate::picker::Picker::new(i18n::t(lang, title), kind, items);
+        picker.origin = Some(origin);
+        self.picker = Some(picker);
+        // The list is the answer, so the line that said the question had gone out has done its
+        // job — and leaving "Asking…" under a list of answers reads as one still to come.
+        self.status_message = String::new();
+    }
+
+    /// Every line of a file, as it is now.
+    ///
+    /// Out of the buffer when a tab holds it, off the disk when none does. The buffer first is
+    /// the important half: it is the text the server was told about, and the file on disk may be
+    /// a save behind it — so a row built from disk would quote a line the server never saw.
+    ///
+    /// Empty when the file cannot be read at all. That is a list of rows that say where without
+    /// saying what, which is honest; inventing the text would not be.
+    fn file_lines(&self, path: &Path) -> Vec<String> {
+        if let Some(editor) = self.editors.iter().find(|e| e.path.as_deref() == Some(path)) {
+            return editor
+                .rope
+                .lines()
+                .map(|line| line.to_string().trim_end_matches('\n').to_string())
+                .collect();
+        }
+        std::fs::read_to_string(path)
+            .map(|text| text.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// A column the server sent, in the characters the editor counts, measured against the line
+    /// it belongs to.
+    ///
+    /// The path decides the units because the units are the *file's* server's: a project with
+    /// Rust and Python open is running two of them, and they need not have negotiated the same
+    /// counting. Defaults to UTF-16 for a file no server serves, which is what the protocol says
+    /// when nobody has said otherwise.
+    fn lsp_chars_for(&self, path: &Path, line_text: &str, column: usize) -> usize {
+        let utf16 = self
+            .lsp_argv_for(path)
+            .and_then(|argv| argv.first().cloned())
+            .and_then(|program| self.lsp.get(&program))
+            .map(crate::lsp::Client::utf16)
+            .unwrap_or(true);
+        if utf16 {
+            crate::lsp::utf16_to_chars(line_text, column)
+        } else {
+            // UTF-8 is not "the same number": it is a byte offset into the line, and a row on a
+            // line with an accent before the name lands to the right of it.
+            crate::lsp::utf8_to_chars(line_text, column)
+        }
     }
 
     /// Asks what the thing under the cursor is, once the cursor has stopped moving.
@@ -6252,7 +6551,15 @@ impl App {
             return;
         }
         if let Some((path, line, col)) = file_line {
+            // A list the server filled was asked for from somewhere, and choosing a row is a
+            // jump like any other — so the place it was asked from goes on the stack, and the
+            // key that comes back from a definition comes back from here too. Written down
+            // before the jump, so what is remembered is where the key was pressed.
+            let origin = self.picker.as_ref().and_then(|p| p.origin.clone());
             self.picker = None;
+            if let Some(origin) = origin {
+                self.jumps.push(origin);
+            }
             self.open_file_at(path, line, col);
             return;
         }
@@ -8349,6 +8656,12 @@ impl App {
             // in CleeCode uses a function key.
             Action::GoToDefinition => self.lsp_go_to_definition(),
             Action::JumpBack => self.lsp_jump_back(),
+            // Y and V, the two letters this layer still had. Neither is a mnemonic — R for
+            // references is the run key and S for symbols is save all — and neither had a
+            // better claim: what makes them findable is that the menu row beside Go to
+            // definition prints them, which is the same way J and L are found.
+            Action::FindReferences => self.lsp_find_references(),
+            Action::DocumentSymbols => self.lsp_document_symbols(),
             Action::GitPanel => self.toggle_git_panel(),
             // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
             // key that does two things is a key that does the wrong one.
@@ -8724,6 +9037,9 @@ impl App {
             MenuAction::GitCommit => self.git_ask_for_a_message_in_the_panel(),
             MenuAction::GoToDefinition => self.lsp_go_to_definition(),
             MenuAction::JumpBack => self.lsp_jump_back(),
+            MenuAction::FindReferences => self.lsp_find_references(),
+            MenuAction::DocumentSymbols => self.lsp_document_symbols(),
+            MenuAction::ShowDiagnostics => self.open_diagnostics_picker(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
             MenuAction::OpenOutside => self.open_outside(),

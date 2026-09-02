@@ -3,7 +3,8 @@
 
 Speaks just enough of the protocol to exercise CleeCode's side of it: answers `initialize`,
 publishes one warning and one error against whatever file it is told was opened, and answers
-`textDocument/completion`, `textDocument/definition` and `textDocument/hover`. It echoes back the
+`textDocument/completion`, `textDocument/definition`, `textDocument/references`,
+`textDocument/documentSymbol` and `textDocument/hover`. It echoes back the
 URI it was given rather than inventing one, which
 is the whole point — a canned URI would pass even if the client's path-to-URI encoding were
 broken, and that encoding is the part most likely to be.
@@ -143,6 +144,56 @@ def define(message):
     }})
 
 
+def references(message):
+    """Two uses of the word, built out of the question like every other answer here.
+
+    They are the two lines *after* the one asked about, in the file that was asked about. A
+    client that listed them against the wrong file, or that read the rows off its own cursor
+    instead of off the answer, lands somewhere the driver can see is wrong.
+
+    The `context` is read rather than ignored: without `includeDeclaration` only one use comes
+    back, so a client that dropped the one member this request carries beyond a position gets a
+    list one row short of the one the checks are written against."""
+    params = message.get("params", {})
+    uri = params.get("textDocument", {}).get("uri", "")
+    line = params.get("position", {}).get("line", 0)
+    declared = params.get("context", {}).get("includeDeclaration")
+    log(f"   listing the uses from line {line}, includeDeclaration={declared!r}")
+    offsets = (1, 2) if declared else (1,)
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": [
+        {"uri": uri, "range": {"start": {"line": line + at, "character": 0},
+                               "end": {"line": line + at, "character": 3}}}
+        for at in offsets
+    ]})
+
+
+def symbols(message):
+    """A small nested tree, named after the file it was asked about.
+
+    `documentSymbol` carries no position for an answer to be built out of, so the names carry
+    the document instead: a client that asked about the wrong file gets names that say so.
+
+    Nested rather than flat on purpose. CleeCode does not tell a server it can read the nested
+    shape and reads it anyway — servers send what they send — and this is the only place that
+    claim is put to a real client end to end."""
+    uri = message.get("params", {}).get("textDocument", {}).get("uri", "")
+    stem = uri.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    log(f"   listing the symbols of {stem}")
+
+    def span(line):
+        return {"start": {"line": line, "character": 0},
+                "end": {"line": line, "character": 3}}
+
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": [{
+        "name": "outer_%s" % stem, "kind": 12,
+        "range": span(0), "selectionRange": span(0),
+        # On the last line of the fixture, which is neither where the cursor is nor where its
+        # parent is: a client that jumped to the wrong row lands somewhere visibly else.
+        "children": [{"name": "inner_%s" % stem, "kind": 6,
+                      "range": span(3), "selectionRange": span(3)}],
+    }]})
+
+
 def hover(message):
     """A hover whose first line names the word and the place it was asked about.
 
@@ -189,6 +240,10 @@ def main():
             complete(message)
         elif method == "textDocument/definition":
             define(message)
+        elif method == "textDocument/references":
+            references(message)
+        elif method == "textDocument/documentSymbol":
+            symbols(message)
         elif method == "textDocument/hover":
             hover(message)
         elif method == "exit":

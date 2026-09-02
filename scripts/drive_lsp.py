@@ -14,6 +14,10 @@ scripts/lsp_stub.py is put on PATH under the name CleeCode looks for. It answers
 and publishes two diagnostics against whatever file it is told was opened, which also proves the
 path-to-URI encoding round-tripped: a stub inventing its own URI would pass with that broken.
 
+The same goes for the three lists — the uses of a name, the names in a file, and everything
+wrong at once. Each is a picker, so what is checked is what a picker is for: that the rows say
+where they point, and that Enter arrives there.
+
 pyte tracks colour and attributes per cell, not just characters, so "underlined" and "red" are
 things this can actually check rather than infer.
 """
@@ -248,6 +252,84 @@ def main():
         report.check("Ctrl+Shift+L comes back to the exact place the jump started from",
                      any("aaaY" in l for l in session.lines()), session,
                      note=repr([l.strip() for l in session.lines() if "aaa" in l][:1]))
+
+        # ---- the three lists ----------------------------------------------------------------
+        #
+        # The file now reads aaaY / Xbbb / ccc / ddd, and the cursor is at the end of its first
+        # line. The stub answers `references` with the two lines under that one, so both rows are
+        # readable off the screen and the second is somewhere the cursor has never been.
+        session.press(session.chord("y"), lambda s: "jump.rs:3" in s.text(), 12)
+        listed = session.text()
+        report.check("Ctrl+Shift+Y lists every use the server named",
+                     "jump.rs:2" in listed and "jump.rs:3" in listed, session,
+                     note="the two the stub answers with, one row each")
+        report.check("and each row shows the line it points at, not only its number",
+                     "jump.rs:2  Xbbb" in listed and "jump.rs:3  ccc" in listed, session)
+
+        # Down, then Enter: the second row, whose line the cursor has not been on. Read by
+        # typing into wherever it landed, as the jump above is.
+        session.press("\x1b[B", lambda s: True, 2)
+        session.press("\r", lambda s: True, 6)
+        session.press("Z", lambda s: any("Zccc" in l for l in s.lines()), 6)
+        report.check("Enter on a use goes to that line",
+                     any("Zccc" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "ccc" in l][:1]))
+
+        # A row is a jump like any other, so the key that comes back from a definition comes
+        # back from here — to the exact column the list was asked from, which is after the Y.
+        session.press(session.chord("l"), lambda s: True, 4)
+        session.press("B", lambda s: any("aaaYB" in l for l in s.lines()), 6)
+        report.check("Ctrl+Shift+L comes back from a row of the list too",
+                     any("aaaYB" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "aaa" in l][:1]))
+
+        # The outline. The stub names its symbols after the file it was asked about, so a client
+        # that asked about the wrong document shows names that say so — and it nests them, which
+        # CleeCode never says it can read and reads anyway.
+        session.press(session.chord("v"), lambda s: "inner_jump" in s.text(), 12)
+        report.check("Ctrl+Shift+V lists what the file contains",
+                     "outer_jump" in session.text() and "inner_jump" in session.text(), session,
+                     note="named after the file, so the wrong document could not pass")
+        outer, inner = session.column_of("outer_jump"), session.column_of("inner_jump")
+        report.check("a name inside another is drawn inside it",
+                     outer is not None and inner == outer + 2, session,
+                     note=f"outer at {outer}, inner at {inner}")
+        report.check("and each row says what kind of thing it is",
+                     "method" in session.text(), session)
+
+        session.press("\x1b[B", lambda s: True, 2)
+        session.press("\r", lambda s: True, 6)
+        session.press("W", lambda s: any("Wddd" in l for l in s.lines()), 6)
+        report.check("Enter on a symbol goes to it",
+                     any("Wddd" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "ddd" in l][:1]))
+
+        # And everything wrong at once, which has no chord: it is reached from the menu, and the
+        # palette is the menu with a search box. Which language the editor is speaking comes from
+        # settings this driver deliberately does not replace, so the label is asked for rather
+        # than assumed.
+        session.press("\x10", lambda s: "Command palette" in s.text()
+                      or "Palette dei comandi" in s.text(), 8)
+        italian = "Palette dei comandi" in session.text()
+        session.send("Tutto quello che non va" if italian else "Everything that is wrong")
+        session.wait(lambda s: True, 0.5)
+        session.press("\r", lambda s: "cannot find value" in s.text(), 8)
+        report.check("the diagnostics list opens on what the server published",
+                     "cannot find value" in session.text()
+                     and "unused variable" in session.text(), session,
+                     note="both severities, from both open files")
+        report.check("and each row is filed under how bad it is",
+                     "error" in session.text() and "warning" in session.text(), session)
+
+        # Narrowed to one row by typing, rather than by counting rows: which file sorts first is
+        # not what this check is about.
+        session.send("jump.rs:3")
+        session.wait(lambda s: True, 0.5)
+        session.press("\r", lambda s: True, 6)
+        session.press("Q", lambda s: any("ZcccQ" in l for l in s.lines()), 6)
+        report.check("Enter on a diagnostic goes to the line it is about",
+                     any("ZcccQ" in l for l in session.lines()), session,
+                     note=repr([l.strip() for l in session.lines() if "ccc" in l][:1]))
 
         Report.show("final screen", session)
     finally:
