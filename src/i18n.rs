@@ -157,6 +157,7 @@ pub enum Key {
     ItemFindReferences,
     ItemDocumentSymbols,
     ItemRenameSymbol,
+    ItemFormatDocument,
     ItemShowDiagnostics,
     ItemGitStatus,
     ItemGitChanges,
@@ -625,6 +626,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         // preview — so the label says the action and not the consequence.
         (Lang::En, ItemRenameSymbol) => "Rename symbol",
         (Lang::It, ItemRenameSymbol) => "Rinomina simbolo",
+        (Lang::En, ItemFormatDocument) => "Format document",
+        (Lang::It, ItemFormatDocument) => "Formatta il documento",
         (Lang::En, ItemShowDiagnostics) => "Everything that is wrong",
         (Lang::It, ItemShowDiagnostics) => "Tutto quello che non va",
 
@@ -1941,6 +1944,71 @@ pub fn msg_rename_cancelled(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Rename cancelled — nothing was changed",
         Lang::It => "Rename annullato — non ho cambiato niente",
+    }
+}
+
+// ---- Laying the file out ---------------------------------------------------------------------
+//
+// Shorter than the family above, and that is the difference between the two features rather than
+// an oversight: a format has no preview to cancel, no second file to be outside, and no name to
+// say twice. What is left is the line that says the question went out, the one that says nothing
+// needed doing, the one that says what was done, and the three refusals.
+
+pub fn msg_format_asking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking the server how this file should be laid out…",
+        Lang::It => "Chiedo al server come va impaginato questo file…",
+    }
+}
+
+/// The server answered with no edits at all, which is an answer: the file is already laid out the
+/// way it would lay it out.
+///
+/// Said out loud, and it is the message in this family that most needed writing. A key that does
+/// nothing visible is a key you press again, and "nothing happened" and "nothing needed to happen"
+/// look identical from the outside.
+pub fn msg_format_already(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server would change nothing — already formatted",
+        Lang::It => "Il server non cambierebbe niente — già formattato",
+    }
+}
+
+/// What was done, in the server's own count of edits, and the promise that it is one step.
+pub fn msg_format_applied(lang: Lang, edits: usize) -> String {
+    match lang {
+        Lang::En => format!("Formatted: {edits} change(s), one Ctrl+Z takes them all back"),
+        Lang::It => format!("Formattato: {edits} modifiche, un Ctrl+Z le rimette tutte a posto"),
+    }
+}
+
+/// The buffer cannot be typed in — a preview, or a file opened read-only. Said when the key is
+/// pressed rather than after a round trip, so it does not read as the server having refused.
+pub fn msg_format_read_only(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "This file is open read-only — nothing was changed",
+        Lang::It => "Questo file è aperto in sola lettura — non ho cambiato niente",
+    }
+}
+
+/// Two of the edits cover the same text, so their order would decide the result.
+pub fn msg_format_refused_overlap(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Two of the server's edits overlap — nothing was changed",
+        Lang::It => "Due modifiche del server si sovrappongono — non ho cambiato niente",
+    }
+}
+
+/// The buffer moved between the question and the answer: closed, reloaded from disk, or edited
+/// into a shape with fewer lines than the server is describing.
+///
+/// One message for all three, unlike the rename's two, because the reader's move is the same in
+/// every one of them — press the key again — and a refusal that distinguished them would be
+/// distinguishing causes nobody can act on differently.
+pub fn msg_format_refused_moved(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The text changed while the server was answering — nothing was changed, ask again",
+        Lang::It => "Il testo è cambiato mentre il server rispondeva — non ho cambiato niente, richiedi",
     }
 }
 

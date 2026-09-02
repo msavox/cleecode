@@ -23,6 +23,12 @@ preview says what would change before anything does, that Esc leaves the file ex
 that one Ctrl+Z takes back every occurrence at once, and that an answer touching a file no tab
 holds is refused whole rather than applied in part.
 
+The format writes more than any of them — a whole buffer, with nothing shown first — so it is
+checked for the two things that stand in for a preview: that the indentation it lands with is the
+editor's own setting rather than the formatter's default, and that one Ctrl+Z puts back exactly
+the file that was there. Both shapes of answer are driven, one edit over the document and several
+disjoint ones, because a client has to survive both and they fail in different places.
+
 pyte tracks colour and attributes per cell, not just characters, so "underlined" and "red" are
 things this can actually check rather than infer.
 """
@@ -68,6 +74,29 @@ DOT = "fn probe() {\n    let value_holder = 1;\n    let marker_word = 2;\n\n}\n"
 # A file no server is configured for. The `.` typed into it is the honest negative: it happens a
 # hundred times an hour, and here it has to stay a full stop.
 PLAIN = "plain words, nothing to complete\n"
+
+
+# Deliberately mis-indented, and by two different wrong amounts so that a format which fixed only
+# one of them would be visible rather than plausible. Every word in the three fixtures below is
+# its own, because these checks read the file's rows off the screen and a word shared with
+# another fixture would match a row from the wrong file.
+#
+# The stub lays a file out at whatever `tabSize` the client sent it, and falls back to *nine*
+# spaces when it was told nothing. So a screen indented by four is not only "it formatted": it is
+# proof the editor's own tab_size crossed the wire, which no canned answer could fake.
+MESSY = "fn whole() {\n       one_whole();\n   two_whole();\n}\n"
+
+
+# The same mess, in the file whose name makes the stub answer with one small edit per bad line
+# instead of one edit over the document. Two shapes of the same answer, and they fail
+# differently: the whole-file edit tests the clamp on an end past the last line, and these test
+# the rebuild that turns several disjoint spans into a single replacement.
+MESSY_PARTS = "fn parts() {\n     one_part();\n         two_part();\n}\n"
+
+
+# Already laid out at four. The stub answers this one with an empty list, which is what a real
+# formatter sends and the one answer that is not a refusal — it has to be said out loud.
+TIDY = "fn tidy() {\n    ok_tidy();\n}\n"
 
 
 def install_stub(root):
@@ -137,6 +166,16 @@ def main():
     # its words have to be words no other check is looking at.
     with open(os.path.join(root, "src", "dot.rs"), "w") as handle:
         handle.write(DOT)
+    # And three for the formatting, each written to be overwritten: the format checks rewrite a
+    # whole buffer and undo it again, which is not something to do to a file another check is
+    # still reading rows out of. The names are load-bearing — the stub answers a stem with
+    # `parts` in it with one edit per line and everything else with one edit over the document.
+    with open(os.path.join(root, "src", "whole.rs"), "w") as handle:
+        handle.write(MESSY)
+    with open(os.path.join(root, "src", "parts.rs"), "w") as handle:
+        handle.write(MESSY_PARTS)
+    with open(os.path.join(root, "src", "tidy.rs"), "w") as handle:
+        handle.write(TIDY)
     # Deliberately not in src/ and deliberately not Rust: nothing here has a server behind it.
     with open(os.path.join(root, "notes.txt"), "w") as handle:
         handle.write(PLAIN)
@@ -543,6 +582,101 @@ def main():
                      note=repr(session.lines()[-1].strip()))
         report.check("and the refusal says so on the status line rather than in silence",
                      bool(session.lines()[-1].strip()), session,
+                     note=repr(session.lines()[-1].strip()))
+
+        # ---- laying a file out ---------------------------------------------------------------
+        #
+        # The other request that writes, and the one that writes the most: a whole buffer at once,
+        # with no preview in front of it. So the checks are the two promises that stand in for
+        # one — that what lands is what the *editor's* settings asked for, not the formatter's own
+        # idea of a tab, and that a single Ctrl+Z puts back exactly the file that was there.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "whole.rs" in s.text(), 8)
+        session.send("whole.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        opened = session.wait(
+            lambda s: any(re.search(r"\s2 {8}one_whole\(\);", l) for l in s.lines()), 8)
+        report.check("the mis-indented fixture opens with its mess intact", opened, session,
+                     note=repr([l.strip() for l in session.lines() if "one_whole" in l][:1]))
+
+        # Four spaces, which is CleeCode's own tab_size. The stub indents by nine when it is sent
+        # no options at all, so this row could not read this way unless `tabSize` arrived.
+        session.press(session.chord("q"),
+                      lambda s: any(re.search(r"\s2 {5}one_whole\(\);", l) for l in s.lines()), 12)
+        rows = session.lines()
+        report.check("Ctrl+Shift+Q lays the file out, at the editor's own tab size",
+                     any(re.search(r"\s2 {5}one_whole\(\);", l) for l in rows)
+                     and any(re.search(r"\s3 {5}two_whole\(\);", l) for l in rows), session,
+                     note=repr([l.rstrip() for l in rows if "_whole(" in l][:2]))
+        report.check("and it says how much it changed rather than changing it in silence",
+                     bool(session.lines()[-1].strip()), session,
+                     note=repr(session.lines()[-1].strip()))
+
+        # One step, not one per line: the whole reason the edits are rebuilt into a single
+        # replacement. Checked against the mess coming back *exactly*, both wrong indents.
+        session.press("\x1a",
+                      lambda s: any(re.search(r"\s2 {8}one_whole\(\);", l) for l in s.lines()), 8)
+        rows = session.lines()
+        report.check("one Ctrl+Z puts the mess back exactly",
+                     any(re.search(r"\s2 {8}one_whole\(\);", l) for l in rows)
+                     and any(re.search(r"\s3 {4}two_whole\(\);", l) for l in rows), session,
+                     note=repr([l.rstrip() for l in rows if "_whole(" in l][:2]))
+
+        # The other shape of the same answer: several disjoint edits instead of one over the
+        # document. It has to land the same way and still be one step.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "parts.rs" in s.text(), 8)
+        session.send("parts.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the fixture the server answers in several edits opens",
+                     session.wait(lambda s: "one_part();" in s.text(), 8), session)
+        session.press(session.chord("q"),
+                      lambda s: any(re.search(r"\s2 {5}one_part\(\);", l) for l in s.lines()), 12)
+        rows = session.lines()
+        report.check("several disjoint edits land as one formatted file",
+                     any(re.search(r"\s2 {5}one_part\(\);", l) for l in rows)
+                     and any(re.search(r"\s3 {5}two_part\(\);", l) for l in rows), session,
+                     note=repr([l.rstrip() for l in rows if "_part(" in l][:2]))
+        session.press("\x1a",
+                      lambda s: any(re.search(r"\s2 {6}one_part\(\);", l) for l in s.lines()), 8)
+        rows = session.lines()
+        report.check("and they are still a single step of undo",
+                     any(re.search(r"\s2 {6}one_part\(\);", l) for l in rows)
+                     and any(re.search(r"\s3 {10}two_part\(\);", l) for l in rows), session,
+                     note=repr([l.rstrip() for l in rows if "_part(" in l][:2]))
+
+        # A file with nothing to fix. The server answers with no edits at all, which is an answer
+        # and not a failure — and a key that appeared to do nothing would be pressed again.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "tidy.rs" in s.text(), 8)
+        session.send("tidy.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the already-tidy fixture opens",
+                     session.wait(lambda s: "ok_tidy();" in s.text(), 8), session)
+        said = session.press(session.chord("q"),
+                             lambda s: "already formatted" in s.lines()[-1], 12)
+        rows = session.lines()
+        report.check("a file that is already laid out is told so, not silently left alone",
+                     said, session, note=repr(session.lines()[-1].strip()))
+        report.check("and nothing in it moved",
+                     any(re.search(r"\s2 {5}ok_tidy\(\);", l) for l in rows), session,
+                     note=repr([l.rstrip() for l in rows if "ok_tidy" in l][:1]))
+
+        # And the honest negative, the same one every other request here gets: a file no server
+        # is configured for says so rather than appearing to work.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "notes.txt" in s.text(), 8)
+        session.send("notes.txt")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: "plain words" in s.text(), 8)
+        refused = session.press(session.chord("q"),
+                                lambda s: "No language server" in s.lines()[-1], 8)
+        report.check("formatting a file no server serves says so",
+                     refused and "plain words, nothing to complete" in session.text(), session,
                      note=repr(session.lines()[-1].strip()))
 
         Report.show("final screen", session)

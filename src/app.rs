@@ -627,6 +627,18 @@ pub struct App {
     /// share a slot with that — a rename quietly displaced by a hover is a key that appeared to
     /// do nothing to a file the user believed they had changed.
     lsp_editing: Option<PendingRename>,
+    /// The one format still out.
+    ///
+    /// A fourth slot, for the reason the third one exists and one more besides. It holds an
+    /// answer that writes, so it cannot share with the hovers; and it is not the rename, because
+    /// the two are asked of different things and neither cancels the other — a format asked while
+    /// a rename is still out would otherwise displace it, and the buffer the user was renaming in
+    /// would quietly stop changing.
+    ///
+    /// `from` is where the cursor was when the key was pressed, which is where it goes back
+    /// afterwards. Nothing else in it is read: a format is about the whole file, so there is no
+    /// position for the answer to be checked against.
+    lsp_formatting: Option<PendingAsk>,
     /// Where the cursor was when the last hover was asked, so the same question is not asked
     /// again every frame while nothing moves.
     lsp_hovered: Option<(PathBuf, usize, usize)>,
@@ -992,9 +1004,16 @@ pub struct SymbolRename {
 ///
 /// Absolute char indices, half-open, which is what [`Editor::replace_char_range`] takes — and
 /// they are only true while the buffer has not moved, which is what [`RenameFile::revision`]
-/// exists to check. `line` rides along because two things want it: the preview groups the rows
-/// by line, and the cursor is put back by counting the edits before it on its own line.
-pub struct RenameEdit {
+/// exists to check. `line` is the line the replacement *starts* on, and it rides along because
+/// two things in the rename want it: the preview groups its rows by line, and the cursor is put
+/// back by counting the edits before it on its own line.
+///
+/// Shared with the formatter, which produces the same thing out of a different question — one
+/// span, replaced by one string — and reads none of it back: a formatter's spans routinely run
+/// over several lines, so `line` names only where each begins and the format path neither draws
+/// rows nor counts edits along one. What the two share is the rebuild below, which is the part
+/// that must not exist twice.
+pub struct BufferEdit {
     pub start: usize,
     pub end: usize,
     pub line: usize,
@@ -1011,7 +1030,7 @@ pub struct RenameFile {
     /// describes text that is no longer in the rope. Checked again at the moment Enter is
     /// pressed, because that is the only moment at which it matters.
     pub revision: u64,
-    pub edits: Vec<RenameEdit>,
+    pub edits: Vec<BufferEdit>,
 }
 
 /// What a rename would change, ready to be read and then applied.
@@ -1331,21 +1350,26 @@ fn empty_state_focus(show_sidebar: bool, show_terminal: bool) -> Focus {
 ///
 /// A file that could not be read still gets a row, with the place and nothing after it: where
 /// it is is most of what was asked for, and a row missing from the list is a use gone missing.
-/// One file's whole share of a rename, as the single replacement that carries it out: where it
+/// A whole set of edits to one buffer, as the single replacement that carries them out: where it
 /// starts, where it ends, and what goes there.
 ///
-/// The [`App::replace_all`] pattern, and for the same reason. A rename is one action, so it has to
-/// be one step to undo — replacing each occurrence on its own would put a whole copy of the file
-/// on the undo stack per occurrence, and taking back a forty-site rename would mean forty Ctrl+Z.
-/// So the run from the first edit to the last is rebuilt here, replacements where the edits were
-/// and the text between them carried over verbatim, and written back in a single edit.
+/// The [`App::replace_all`] pattern, and for the same reason. A rename is one action and so is a
+/// format, so each has to be one step to undo — replacing every site on its own would put a whole
+/// copy of the file on the undo stack per site, and taking back a forty-site rename would mean
+/// forty Ctrl+Z, a reformatted file rather more than that. So the run from the first edit to the
+/// last is rebuilt here, replacements where the edits were and the text between them carried over
+/// verbatim, and written back in a single edit.
+///
+/// Written once and used by both, which is why it says nothing about *why* the edits exist. The
+/// arithmetic is the part that must never be written twice: a second copy of it would be a second
+/// place for an off-by-one to eat a character, and only on files with edits of unequal length.
 ///
 /// Every slice is taken before anything is written, which is not a nicety: replacing the first
 /// character would move every offset measured after it.
 ///
 /// `edits` must be ascending and non-overlapping. `None` for an empty list, which is a file the
 /// server named and then asked nothing of.
-fn rename_span(editor: &Editor, edits: &[RenameEdit]) -> Option<(usize, usize, String)> {
+fn edits_as_one_span(editor: &Editor, edits: &[BufferEdit]) -> Option<(usize, usize, String)> {
     let span_start = edits.first()?.start;
     let span_end = edits.last()?.end;
     let mut rebuilt = String::new();
@@ -1358,6 +1382,82 @@ fn rename_span(editor: &Editor, edits: &[RenameEdit]) -> Option<(usize, usize, S
         carried = edit.end;
     }
     Some((span_start, span_end, rebuilt))
+}
+
+/// Why a whole format is being refused. Two reasons, and the caller turns each into a sentence —
+/// the arithmetic below is a free function so it can be tested, and a free function has no
+/// business knowing which language the status bar is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FormatRefusal {
+    /// A line the buffer does not have, or a file that is no longer open under that name.
+    Moved,
+    /// Two edits over the same characters.
+    Overlap,
+}
+
+/// A formatter's answer, converted from the server's line-and-column spans into the absolute,
+/// ascending, non-overlapping character ranges [`edits_as_one_span`] takes.
+///
+/// The general converter the rename does not have, and deliberately not a loosening of the one it
+/// does. A rename refuses a span that crosses a line — see [`crate::lsp::SpanEdit::spans_lines`],
+/// which stays exactly as strict as it was — because a rename that spans lines is a server
+/// describing something other than a name. For a formatter it is the ordinary case: replacing a
+/// file with a laid-out copy is one edit from the top to past the bottom. So *both* ends are
+/// converted against the line each actually sits on, which is the whole of what makes this
+/// general: measuring the end column on the start line is right for a name and silently wrong
+/// for everything else.
+///
+/// `chars_for` turns a column the server sent into the characters the editor counts, measured
+/// against the line it belongs to. Passed in rather than chosen here because the units are the
+/// file's server's, and this function has never heard of a server.
+///
+/// `lines` is the buffer's lines with their newlines stripped, which is what makes a column past
+/// the end of a line clamp to the end of that line rather than reaching into the next one.
+///
+/// Every `Err` refuses the whole format. Half a laid-out file is worse than an unlaid one: it is
+/// a file nobody wrote, in a buffer whose next Ctrl+Z takes back something the reader never saw
+/// arrive.
+fn format_spans(
+    rope: &ropey::Rope,
+    lines: &[String],
+    chars_for: &dyn Fn(&str, usize) -> usize,
+    edits: &[crate::lsp::SpanEdit],
+) -> Result<Vec<BufferEdit>, FormatRefusal> {
+    let last = rope.len_chars();
+    let mut converted = Vec::with_capacity(edits.len());
+    for edit in edits {
+        // A start line the buffer does not have is the server describing text that is no longer
+        // here. Refused rather than clamped, exactly as the rename refuses it and for the same
+        // reason: a replacement in the wrong place is damage, not noise.
+        let start_text = lines.get(edit.start_line).ok_or(FormatRefusal::Moved)?;
+        let start = rope.line_to_char(edit.start_line) + chars_for(start_text, edit.start_col);
+        let end = match lines.get(edit.end_line) {
+            Some(end_text) => rope.line_to_char(edit.end_line) + chars_for(end_text, edit.end_col),
+            // The one end clamped instead of refused, because it is not a server being wrong.
+            // "To the end of the document" is spelled as a line one past the last — a count of
+            // lines is one more than the last index — and some servers spell it `u32::MAX`
+            // instead. Both mean the end, and the end is a place this file certainly has.
+            None => last,
+        };
+        let start = start.min(last);
+        converted.push(BufferEdit {
+            start,
+            // Clamped forward rather than refused, as the rename clamps a backwards span: read
+            // as zero-width it becomes an insertion, which is a thing a formatter really does
+            // ask for — a blank line between two functions is an edit that deletes nothing.
+            end: end.min(last).max(start),
+            line: edit.start_line,
+            new_text: edit.new_text.clone(),
+        });
+    }
+    converted.sort_by_key(|e| (e.start, e.end));
+    // Two edits over the same characters would make the result depend on which was applied
+    // first, and the rebuild has no order that is more right than the other. Adjacent is fine —
+    // one ending exactly where the next begins is two runs of text, not one.
+    if converted.windows(2).any(|pair| pair[1].start < pair[0].end) {
+        return Err(FormatRefusal::Overlap);
+    }
+    Ok(converted)
 }
 
 /// The rows one file contributes to a rename preview: for every line an edit touches, the line as
@@ -1375,7 +1475,7 @@ fn rename_span(editor: &Editor, edits: &[RenameEdit]) -> Option<(usize, usize, S
 /// exist.
 ///
 /// `edits` must be ascending and non-overlapping, which is what the caller has just checked.
-fn preview_rows(editor: &Editor, lines: &[String], edits: &[RenameEdit]) -> Vec<String> {
+fn preview_rows(editor: &Editor, lines: &[String], edits: &[BufferEdit]) -> Vec<String> {
     let mut rows = Vec::new();
     let mut at = 0usize;
     while at < edits.len() {
@@ -2248,6 +2348,7 @@ impl App {
             lsp_asked: None,
             lsp_listing: None,
             lsp_editing: None,
+            lsp_formatting: None,
             lsp_hovered: None,
             lsp_what_it_is: None,
             jumps: Vec::new(),
@@ -3995,6 +4096,7 @@ impl App {
                 }
                 crate::lsp::Event::Symbols { id, symbols } => self.lsp_list_symbols(id, symbols),
                 crate::lsp::Event::Rename { id, plan } => self.lsp_rename_answer(id, plan),
+                crate::lsp::Event::Formatting { id, edits } => self.lsp_format_answer(id, edits),
                 crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
                 crate::lsp::Event::Answer { message } => {
                     // Straight back to the server that asked, on the thread that owns the pipe.
@@ -4029,6 +4131,7 @@ impl App {
                     // The preview, if one is up, is not cleared with it: it holds offsets into
                     // buffers this editor owns and needs nothing from the server to apply them.
                     self.lsp_editing = None;
+                    self.lsp_formatting = None;
                     // The files it was serving are forgotten too, so the ones still open are
                     // announced again from scratch to whatever takes its place.
                     self.lsp_forget(&program);
@@ -4736,7 +4839,7 @@ impl App {
                 // preview then shows for what it is, character for character.
                 let end_col = self.lsp_chars_for(&file.path, text, edit.end_col).max(start_col);
                 let line_start = editor.rope.line_to_char(edit.start_line);
-                edits.push(RenameEdit {
+                edits.push(BufferEdit {
                     start: line_start + start_col,
                     end: line_start + end_col,
                     line: edit.start_line,
@@ -4847,7 +4950,8 @@ impl App {
                 continue;
             };
             let editor = &mut self.editors[index];
-            let Some((span_start, span_end, rebuilt)) = rename_span(editor, &target.edits) else {
+            let Some((span_start, span_end, rebuilt)) = edits_as_one_span(editor, &target.edits)
+            else {
                 continue;
             };
             editor.replace_char_range(span_start, span_end, &rebuilt);
@@ -4894,6 +4998,149 @@ impl App {
         editor.cursor_line = (*line).min(editor.rope.len_lines().saturating_sub(1));
         let wanted = (*col as isize + delta).max(0) as usize;
         editor.cursor_col = wanted.min(editor.line_char_len(editor.cursor_line));
+    }
+
+    // ---- Laying the file out ------------------------------------------------------------------
+    //
+    // The second thing here that writes, and the one place it differs from the rename is worth
+    // saying once rather than in each of the three functions below: there is no preview.
+    //
+    // A rename reaches files nobody is looking at, changes a handful of characters in each, and
+    // can only be judged by reading what it would do — so it is read first. A format rewrites the
+    // one buffer already on screen, and the reader is looking straight at the answer the moment it
+    // lands. A diff of a whole file would be longer than the file, shown in a box smaller than the
+    // editor behind it, and answered yes every single time. What makes it safe is not a question
+    // asked beforehand but the thing the roadmap asked for: *un edit unico*, one step of undo, so
+    // a format nobody liked is one Ctrl+Z away from never having happened.
+
+    /// Asks the server how the current file should be laid out.
+    ///
+    /// The same opening as [`Self::lsp_find_references`], down to sending the file first, and for
+    /// a sharper version of the same reason: a formatter answers in spans measured against the
+    /// text it was last told about, and applying those to text that has since been typed into
+    /// would not move a mark, it would delete the wrong characters.
+    ///
+    /// No arguments and no box. Which file is the question — there is only ever one — and the
+    /// tab size and whether it is spaces come from the settings rather than from a prompt: they
+    /// are already answered, in the two settings the editor itself indents by, and asking again
+    /// would be an invitation to give a formatter a different answer from the one Tab gives.
+    pub fn lsp_format_document(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        // Asked before the question goes out, not when the answer lands. A buffer that cannot be
+        // typed in cannot be laid out either, and the honest moment to say so is the one the key
+        // was pressed in — a round trip first would make it look as though the server refused.
+        if editor.read_only {
+            self.status_message = i18n::msg_format_read_only(lang).to_string();
+            return;
+        }
+        let from = (path.clone(), editor.cursor_line, editor.cursor_col);
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        // Read before the client is borrowed, since both come out of `self`.
+        let (tab_size, insert_spaces) = (self.settings.tab_size, self.settings.insert_spaces);
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        client.did_change(&absolute, &text);
+        match client.formatting(&absolute, tab_size, insert_spaces) {
+            Some(id) => {
+                self.lsp_formatting = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_format_asking(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Reads the server's answer and writes it into the buffer, or says why it will not.
+    ///
+    /// The id is the whole guard against a stale reply, as everywhere else here: by the time this
+    /// arrives the tab may have been closed, the file reloaded, or a second format asked for. An
+    /// answer to a question this is no longer waiting for is dropped rather than applied.
+    fn lsp_format_answer(&mut self, id: i64, edits: Result<Vec<crate::lsp::SpanEdit>, String>) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_formatting.take().filter(|a| a.id == id) else { return };
+        let edits = match edits {
+            Ok(edits) => edits,
+            // The server's own sentence, unwrapped and unexplained, for the reason the rename
+            // gives: it is the only party that knows why.
+            Err(complaint) => {
+                self.status_message = complaint;
+                return;
+            }
+        };
+        // Nothing to do, said out loud. This is the answer a well-laid-out file gets, and it is
+        // the one place a silent key would be actively misleading: "the format did nothing"
+        // looks exactly like "the format did not happen", and only one of them is worth acting
+        // on. The empty list is why a server's *refusal* is carried separately.
+        if edits.is_empty() {
+            self.status_message = i18n::msg_format_already(lang).to_string();
+            return;
+        }
+        let (path, line, col) = asked.from;
+        let converted = match self.format_edits_for(&path, &edits) {
+            Ok(converted) => converted,
+            Err(refusal) => {
+                self.status_message = refusal;
+                return;
+            }
+        };
+        let Some(index) =
+            self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            self.status_message = i18n::msg_format_refused_moved(lang).to_string();
+            return;
+        };
+        let count = converted.len();
+        let editor = &mut self.editors[index];
+        let Some((start, end, rebuilt)) = edits_as_one_span(editor, &converted) else { return };
+        editor.replace_char_range(start, end, &rebuilt);
+        // Where the cursor was, clamped to what the file now has — line and column, not the
+        // offset the rename puts back. The rename can be exact because it knows how much text
+        // each of its edits added or removed before the caret; a formatter moves whole lines
+        // around, and an offset carried through that lands somewhere arithmetically defensible
+        // and visibly wrong. The line you were reading is the honest thing to keep.
+        editor.cursor_line = line.min(editor.rope.len_lines().saturating_sub(1));
+        editor.cursor_col = col.min(editor.line_char_len(editor.cursor_line));
+        // Nothing is told to the server here, as after a rename: the revision the buffer just
+        // bumped is what the debounced `didChange` in the frame loop watches.
+        self.status_message = i18n::msg_format_applied(lang, count);
+    }
+
+    /// Every span the server's answer asks to be replaced, in absolute character indices, or the
+    /// one sentence saying why none of it is going to happen.
+    ///
+    /// The finding and the wording; the arithmetic is in [`format_spans`], which is a free
+    /// function so it can be tested against a rope and a list of edits rather than against an
+    /// application with two shells running in it.
+    fn format_edits_for(
+        &self,
+        path: &Path,
+        edits: &[crate::lsp::SpanEdit],
+    ) -> Result<Vec<BufferEdit>, String> {
+        let lang = self.settings.lang;
+        let Some(editor) = self.editors.iter().find(|e| e.path.as_deref() == Some(path)) else {
+            return Err(i18n::msg_format_refused_moved(lang).to_string());
+        };
+        // Asked again, and not out of doubt about the first one: between the key press and this
+        // answer the file may have been reopened read-only, and `replace_char_range` would then
+        // return in silence and let the status line report a format that never happened.
+        if editor.read_only {
+            return Err(i18n::msg_format_read_only(lang).to_string());
+        }
+        let lines = self.file_lines(path);
+        format_spans(&editor.rope, &lines, &|text, col| self.lsp_chars_for(path, text, col), edits)
+            .map_err(|refusal| match refusal {
+                FormatRefusal::Moved => i18n::msg_format_refused_moved(lang).to_string(),
+                FormatRefusal::Overlap => i18n::msg_format_refused_overlap(lang).to_string(),
+            })
     }
 
     /// Offers everything the servers have said is wrong, as a list to jump into.
@@ -9299,11 +9546,17 @@ impl App {
             // definition prints them, which is the same way J and L are found.
             Action::FindReferences => self.lsp_find_references(),
             Action::DocumentSymbols => self.lsp_document_symbols(),
-            // C for change, and the last letter of the free three: Z is redo by every habit
-            // anybody brings here, and Q sits against Ctrl+Q. Some Linux terminal emulators bind
+            // C for change, and the first of the free three: Z is redo by every habit anybody
+            // brings here, which leaves Q for the one below. Some Linux terminal emulators bind
             // Ctrl+Shift+C to copy — a trade this project already made with T, N and W, and the
             // one chord in the list a `[keys]` entry is most likely to be moved off.
             Action::RenameSymbol => self.lsp_rename_symbol(),
+            // Q, which is what was left, and it is not a bad place: it sits beside Ctrl+Q rather
+            // than on top of it, and of the two things a slipped Shift can do here — quit, or
+            // lay the file out — one prompts about unsaved work and the other is one Ctrl+Z from
+            // undone. The mnemonic keys for this were spent long ago; the menu row prints the
+            // chord, which is how J, L, Y and V are found too.
+            Action::FormatDocument => self.lsp_format_document(),
             Action::GitPanel => self.toggle_git_panel(),
             // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
             // key that does two things is a key that does the wrong one.
@@ -9682,6 +9935,7 @@ impl App {
             MenuAction::FindReferences => self.lsp_find_references(),
             MenuAction::DocumentSymbols => self.lsp_document_symbols(),
             MenuAction::RenameSymbol => self.lsp_rename_symbol(),
+            MenuAction::FormatDocument => self.lsp_format_document(),
             MenuAction::ShowDiagnostics => self.open_diagnostics_picker(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
@@ -12872,13 +13126,13 @@ mod tests {
     }
 
     /// Every occurrence of `word` in `text`, as the converted edits a preview would hold.
-    fn edits_over(editor: &Editor, word: &str, new_text: &str) -> Vec<RenameEdit> {
+    fn edits_over(editor: &Editor, word: &str, new_text: &str) -> Vec<BufferEdit> {
         let text = editor.rope.to_string();
         let chars: Vec<char> = text.chars().collect();
         let target: Vec<char> = word.chars().collect();
         (0..chars.len().saturating_sub(target.len() - 1))
             .filter(|&at| chars[at..at + target.len()] == target[..])
-            .map(|at| RenameEdit {
+            .map(|at| BufferEdit {
                 start: at,
                 end: at + target.len(),
                 line: editor.rope.char_to_line(at),
@@ -12894,7 +13148,7 @@ mod tests {
         let editor = buffer("let count = count + 1;\nprintln!(\"{count}\");\n");
         let edits = edits_over(&editor, "count", "total");
         assert_eq!(edits.len(), 3, "two on the first line and one on the second");
-        let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &edits).unwrap();
         // From the first occurrence to the last, and everything in between carried over as it is.
         assert_eq!((start, end), (4, 39));
         assert_eq!(rebuilt, "total = total + 1;\nprintln!(\"{total");
@@ -12914,7 +13168,7 @@ mod tests {
             let editor = buffer("xx\nvalue.value(value)\nyy\n");
             let edits = edits_over(&editor, "value", new_name);
             assert_eq!(edits.len(), 3);
-            let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+            let (start, end, rebuilt) = edits_as_one_span(&editor, &edits).unwrap();
             let mut applied = buffer(&editor.rope.to_string());
             applied.replace_char_range(start, end, &rebuilt);
             assert_eq!(
@@ -12924,16 +13178,161 @@ mod tests {
         }
     }
 
+    /// The lines a buffer would hand the converter: its own, with the newlines off, which is what
+    /// makes a column past the end of a line stop at that line.
+    fn lines_of(editor: &Editor) -> Vec<String> {
+        editor.rope.lines().map(|l| l.to_string().trim_end_matches('\n').to_string()).collect()
+    }
+
+    /// The column conversion for a server counting in UTF-8, which is what the fixtures are.
+    fn as_bytes(text: &str, col: usize) -> usize {
+        crate::lsp::utf8_to_chars(text, col)
+    }
+
+    fn span(start: (usize, usize), end: (usize, usize), new_text: &str) -> crate::lsp::SpanEdit {
+        crate::lsp::SpanEdit {
+            start_line: start.0,
+            start_col: start.1,
+            end_line: end.0,
+            end_col: end.1,
+            new_text: new_text.to_string(),
+        }
+    }
+
+    /// The whole file replaced by a laid-out copy: one edit, both ends on different lines, which
+    /// is the shape a rename refuses and a format gets constantly. The end is converted against
+    /// the line it is actually on — measuring it on the *start* line is the mistake this exists
+    /// to catch, and on line 0 of a four-line file it would land three lines short.
+    #[test]
+    fn a_whole_file_format_converts_both_ends_on_their_own_lines() {
+        let editor = buffer("fn a() {\n        one();\n  two();\n}\n");
+        let lines = lines_of(&editor);
+        let laid_out = "fn a() {\n    one();\n    two();\n}\n";
+        // From the top to the empty line after the last newline, which is how a server names the
+        // whole document when it can count the buffer's lines.
+        let edits = vec![span((0, 0), (4, 0), laid_out)];
+        let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!((converted[0].start, converted[0].end), (0, editor.rope.len_chars()));
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(applied.rope.to_string(), laid_out);
+    }
+
+    /// The other shape: two disjoint edits that reindent two lines and leave the rest alone. They
+    /// come back as one replacement spanning both, with the untouched text between them carried
+    /// over verbatim — which is what makes a format one step of undo rather than one per line.
+    #[test]
+    fn two_disjoint_format_edits_become_one_replacement() {
+        let editor = buffer("fn a() {\n        one();\n  two();\n}\n");
+        let lines = lines_of(&editor);
+        let edits = vec![
+            span((1, 0), (1, 8), "    "),
+            span((2, 0), (2, 2), "    "),
+        ];
+        let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
+        assert_eq!(converted.len(), 2);
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(applied.rope.to_string(), "fn a() {\n    one();\n    two();\n}\n");
+    }
+
+    /// "To the end of the document", in both of the ways servers spell it: the line *after* the
+    /// last, since a count is one more than the last index, and `u32::MAX`. Clamped to the end of
+    /// the rope rather than refused — this is the shape of a whole-file format, not a server
+    /// describing text that has moved.
+    #[test]
+    fn an_end_past_the_last_line_clamps_to_the_end_of_the_file() {
+        let editor = buffer("one\ntwo\n");
+        let lines = lines_of(&editor);
+        for past in [lines.len(), 4_294_967_295] {
+            let edits = vec![span((0, 0), (past, 0), "laid out\n")];
+            let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
+            assert_eq!((converted[0].start, converted[0].end), (0, editor.rope.len_chars()));
+        }
+    }
+
+    /// A *start* line the buffer does not have is the other case entirely, and it is refused: the
+    /// server is describing text that is no longer here, and there is no honest place to put the
+    /// replacement. The line that separates this test from the one above is the whole rule.
+    #[test]
+    fn a_start_line_the_buffer_lacks_refuses_the_whole_format() {
+        let editor = buffer("one\ntwo\n");
+        let lines = lines_of(&editor);
+        let edits = vec![span((0, 0), (0, 3), "x"), span((9, 0), (9, 1), "y")];
+        assert_eq!(
+            format_spans(&editor.rope, &lines, &as_bytes, &edits).err(),
+            Some(FormatRefusal::Moved),
+            "and the edit it could have applied is not applied either"
+        );
+    }
+
+    /// Two edits over the same characters, which the rebuild has no right answer for. Refused
+    /// whole, and refused whichever order the server sent them in — they are sorted first.
+    #[test]
+    fn overlapping_format_edits_are_refused_whole() {
+        let editor = buffer("aaaa bbbb\n");
+        let lines = lines_of(&editor);
+        let overlapping = vec![span((0, 0), (0, 6), "x"), span((0, 4), (0, 9), "y")];
+        assert_eq!(
+            format_spans(&editor.rope, &lines, &as_bytes, &overlapping).err(),
+            Some(FormatRefusal::Overlap)
+        );
+        let mut backwards = overlapping;
+        backwards.reverse();
+        assert_eq!(
+            format_spans(&editor.rope, &lines, &as_bytes, &backwards).err(),
+            Some(FormatRefusal::Overlap),
+            "the order it arrived in is not the question"
+        );
+        // Meeting exactly is not overlapping: one run of text ends where the next begins.
+        let touching = vec![span((0, 0), (0, 4), "x"), span((0, 4), (0, 9), "y")];
+        assert!(format_spans(&editor.rope, &lines, &as_bytes, &touching).is_ok());
+    }
+
+    /// The server may answer in any order it likes; the rebuild needs them ascending. Sorted
+    /// here rather than trusted, because an unsorted list would not fail loudly — it would
+    /// rebuild a span with the pieces swapped and write it out looking plausible.
+    #[test]
+    fn format_edits_are_sorted_before_they_are_rebuilt() {
+        let editor = buffer("one\ntwo\nsix\n");
+        let lines = lines_of(&editor);
+        let edits = vec![span((2, 0), (2, 3), "three"), span((0, 0), (0, 3), "ONE")];
+        let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
+        assert!(converted[0].start < converted[1].start);
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(applied.rope.to_string(), "ONE\ntwo\nthree\n");
+    }
+
+    /// A zero-width span is an insertion, and a formatter really does send them — a blank line
+    /// put between two functions deletes nothing. It survives the conversion as itself.
+    #[test]
+    fn a_zero_width_format_edit_is_an_insertion() {
+        let editor = buffer("fn a() {}\nfn b() {}\n");
+        let lines = lines_of(&editor);
+        let edits = vec![span((1, 0), (1, 0), "\n")];
+        let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
+        assert_eq!((converted[0].start, converted[0].end), (10, 10));
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(applied.rope.to_string(), "fn a() {}\n\nfn b() {}\n");
+    }
+
     /// Two edits that meet exactly are two names, not an overlap, and the text between them is
     /// nothing rather than a character to carry over.
     #[test]
     fn adjacent_edits_leave_nothing_between_them() {
         let editor = buffer("abab\n");
         let edits = vec![
-            RenameEdit { start: 0, end: 2, line: 0, new_text: "X".to_string() },
-            RenameEdit { start: 2, end: 4, line: 0, new_text: "Y".to_string() },
+            BufferEdit { start: 0, end: 2, line: 0, new_text: "X".to_string() },
+            BufferEdit { start: 2, end: 4, line: 0, new_text: "Y".to_string() },
         ];
-        let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &edits).unwrap();
         assert_eq!((start, end, rebuilt.as_str()), (0, 4, "XY"));
     }
 
