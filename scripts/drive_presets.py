@@ -14,7 +14,13 @@ A stub on `PATH` proves that better than the real program would, because it can 
 reached its prompt — which is how the last two checks read `Ctrl+Shift+A` for what it is: the
 context arrives, and *nothing is submitted* until Enter is pressed.
 
-Skips a language whose interpreter is not installed rather than passing quietly.
+One check is not about a preset at all: an agent typed by hand into a plain shell, installed the
+way npm installs Claude Code. There the process table says `node`, nothing has declared the pane
+an agent's, and finding it is entirely the process table's job — which is the case the presets
+cannot exercise, because a preset pane always carries the command it was opened with.
+
+Skips a language whose interpreter is not installed rather than passing quietly, and skips the
+npm-shaped check where there is no node to reproduce it with.
 """
 
 import os
@@ -41,6 +47,19 @@ echo "AGENT-STUB %s ready"
 while IFS= read -r line; do
     echo "SUBMITTED: $line"
 done
+"""
+
+# The same stand-in wearing the shape npm installs Claude Code in: a JavaScript file with a node
+# shebang, so running it runs *node*, and the process table shows `node` with this file as its
+# argument. That is the whole bug this reproduces — a `claude` started by hand in an ordinary
+# shell was invisible to Ctrl+Shift+A, because CleeCode looked for a process called `claude` and
+# there is none. Written as a real script run by a real node rather than faked, because a stub
+# that only pretended to be node would prove nothing about what the process table says.
+NODE_STUB = """#!/usr/bin/env node
+process.stdout.write("AGENT-STUB claude ready\\n");
+require("readline")
+    .createInterface({ input: process.stdin, terminal: false })
+    .on("line", (line) => process.stdout.write("SUBMITTED: " + line + "\\n"));
 """
 
 
@@ -136,6 +155,66 @@ def check_agent_preset(binary, name, report):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_npm_wrapper(binary, report):
+    """A `claude` typed by hand into a plain shell, installed the way npm installs it.
+
+    Deliberately not a preset. A preset pane carries the command it was opened with, and that
+    command is CleeCode's second answer to "is there an agent in here" — so a check run against a
+    preset would pass whether or not the process table is read correctly. Here nothing has been
+    declared: an ordinary shell, in an ordinary window, with the agent started by typing its name.
+    The only thing that can find it is the process table, where it appears as `node`.
+    """
+    if shutil.which("node") is None:
+        print("  SKIP  npm wrapper: node is not installed, so the npm shape cannot be reproduced")
+        return
+    root = tempfile.mkdtemp(prefix="clee_npm_")
+    with open(os.path.join(root, "demo.py"), "w") as handle:
+        handle.write("value = 1\nprint(value)\n")
+    bin_dir = os.path.join(root, "npmbin")
+    os.makedirs(bin_dir, exist_ok=True)
+    wrapper = os.path.join(bin_dir, "claude")
+    with open(wrapper, "w") as handle:
+        handle.write(NODE_STUB)
+    os.chmod(wrapper, 0o755)
+    env = {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")}
+
+    session = Session(binary, root, env=env, cols=190)
+    try:
+        started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
+        report.check("npm wrapper: the editor opens", started, session)
+        if not started:
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 8)
+
+        # Into the terminal, and type the agent's name at it — which is what somebody who has
+        # Claude Code from npm does, every time.
+        session.press("\x1b[1;7B", lambda s: True, 1)               # Ctrl+Alt+↓, focus terminal
+        session.send("claude\r")
+        ready = session.wait(lambda s: "AGENT-STUB claude ready" in s.text(), 30)
+        report.check("npm wrapper: the agent starts, running as a node process", ready, session)
+        if not ready:
+            return
+
+        if not open_file(session, "demo"):
+            report.check("npm wrapper: the file opens", False, session)
+            return
+        session.wait(lambda s: "value = 1" in s.text(), 8)
+        session.send(session.chord("a"))
+        arrived = session.wait(
+            lambda s: "demo.py:1" in "\n".join(s.frame_of("AGENT-STUB claude ready")), 8)
+        report.check("npm wrapper: Ctrl+Shift+A finds the agent hiding behind `node`",
+                     arrived, session,
+                     note="nothing declared this pane an agent's; only the process table knows")
+        # Same discipline as everywhere else: the text is there and the question is still the
+        # user's to ask.
+        report.check("npm wrapper: nothing was submitted", "SUBMITTED" not in session.text(),
+                     session)
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def open_preset(binary, name, root, cols):
     """A session started as `clee -w <name> .`, in a window `cols` wide."""
     return Session(binary, root, args=["-w", name], cols=cols)
@@ -219,6 +298,7 @@ def main():
     # No skip here: an agent preset needs no agent installed, only a program of that name.
     for name in AGENTS:
         check_agent_preset(binary, name, report)
+    check_npm_wrapper(binary, report)
     return report.finish()
 
 

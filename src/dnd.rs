@@ -198,8 +198,10 @@ pub fn shell_running(language: crate::session::Language, shell_pids: &[Option<u3
     let sys = process_snapshot();
     shell_pids.iter().position(|pid| {
         pid.is_some_and(|pid| {
-            descendant_matching(&sys, pid, |name| language.is_interpreter(name).then_some(()))
-                .is_some()
+            descendant_matching(&sys, pid, |process| {
+                language.is_interpreter(&process.name().to_string_lossy()).then_some(())
+            })
+            .is_some()
         })
     })
 }
@@ -208,25 +210,39 @@ pub fn shell_running(language: crate::session::Language, shell_pids: &[Option<u3
 /// opencode or codex running inside it, and which of the three it is.
 ///
 /// One snapshot for all the shells, like `shell_running` and for the same reason. `None` where
-/// the table cannot be read, or where an agent is there under a name the table does not show —
-/// `claude` from npm is a script that execs `node`, and no list of process names fixes that. The
-/// caller has a second answer for that case: the command the pane was started with.
+/// the table cannot be read.
+///
+/// The name in the table is not enough on its own: `claude` from npm is a script, so what runs is
+/// `node` with the script as its argument, and a search by name found nothing while the agent sat
+/// at its prompt. So each process is offered by name *and* by argument list — see
+/// [`crate::session::Agent::of_process`], which is where that decision lives and is tested. The
+/// caller still has a third answer for the cases neither reaches: the command the pane was
+/// started with.
 pub fn agent_running(shell_pids: &[Option<u32>]) -> Option<(usize, crate::session::Agent)> {
     let sys = process_snapshot();
     shell_pids.iter().enumerate().find_map(|(index, pid)| {
-        let found = descendant_matching(&sys, (*pid)?, crate::session::Agent::of_program)?;
+        let found = descendant_matching(&sys, (*pid)?, |process| {
+            // The argument list is built only for the process being asked about, and the tree
+            // under one shell is a handful of processes deep at most.
+            let argv: Vec<String> =
+                process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            crate::session::Agent::of_process(&process.name().to_string_lossy(), &argv)
+        })?;
         Some((index, found))
     })
 }
 
-/// The first process under `shell_pid` that `recognise` says something about, by name.
+/// The first process under `shell_pid` that `recognise` says something about.
 ///
 /// Descendants rather than direct children only, because a launcher — `octave` is one, and so is
 /// a shell script wrapping an agent — can sit between the shell and the program being looked for.
+///
+/// The whole process is handed over rather than its name, because a name is not always the
+/// answer: an npm-installed agent runs as `node` and is only recognisable from its arguments.
 fn descendant_matching<T>(
     sys: &sysinfo::System,
     shell_pid: u32,
-    recognise: impl Fn(&str) -> Option<T>,
+    recognise: impl Fn(&sysinfo::Process) -> Option<T>,
 ) -> Option<T> {
     let mut frontier = vec![sysinfo::Pid::from_u32(shell_pid)];
     let mut visited = 0;
@@ -241,7 +257,7 @@ fn descendant_matching<T>(
             if process.parent() != Some(parent) {
                 continue;
             }
-            if let Some(found) = recognise(&process.name().to_string_lossy()) {
+            if let Some(found) = recognise(process) {
                 return Some(found);
             }
             frontier.push(process.pid());

@@ -92,6 +92,7 @@ pub enum Key {
     MenuGit,
     ItemRunFile,
     ItemRunSelection,
+    ItemSendToAgent,
     ItemToggleBreakpoint,
     ItemShowWorkspacePanel,
     ItemInspectVariable,
@@ -411,6 +412,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemRunFile) => "Esegui file corrente",
         (Lang::En, ItemRunSelection) => "Run selection or cell",
         (Lang::It, ItemRunSelection) => "Esegui selezione o cella",
+        // "To the agent's prompt", not "ask the agent": nothing is submitted and nothing is
+        // asked. The text arrives where you type, and the question stays yours to press Enter on.
+        (Lang::En, ItemSendToAgent) => "Send where you are to the agent",
+        (Lang::It, ItemSendToAgent) => "Manda dove sei all'agente",
         (Lang::En, ItemShowWorkspacePanel) => "Show session variables",
         (Lang::It, ItemShowWorkspacePanel) => "Mostra le variabili della sessione",
         (Lang::En, ItemToggleBreakpoint) => "Breakpoint on this line",
