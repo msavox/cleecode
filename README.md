@@ -146,6 +146,44 @@ pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 
 ![CleeCode main view](docs/screenshots/main.png)
 
+**Your coding agent, inside the editor.** `clee -w claude`, `clee -w opencode` or `clee -w codex`
+opens the editor with the agent running in one terminal tab and a plain shell in the next. The
+agent is the TUI you already have, with the subscription you already pay for — CleeCode holds no
+API key and rebuilds no chat. `Ctrl+Shift+A` writes where you are at the agent's prompt —
+selection, diagnostic or cursor line, as `path:line` — and never presses Enter for you; it finds
+the agent even where the process table calls it `node`, which is what a `claude` installed from
+npm runs as. The files the agent rewrites reload on their own, the new lines lit in the gutter
+until you type again; follow mode (*View → Follow edits made outside*, off until you ask) opens
+the files you did not have open beside your work, without ever taking the keyboard.
+
+The editor can also answer the agent's questions. `clee --mcp` makes it an MCP server with four
+read-only tools — the open files, the selection, the diagnostics, and `open_file`, which shows
+you a file beside your work without touching your keyboard. One line of configuration per agent.
+Claude Code:
+
+```
+claude mcp add clee -- clee --mcp
+```
+
+codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.clee]
+command = "clee"
+args = ["--mcp"]
+```
+
+opencode, in `~/.config/opencode/opencode.json`:
+
+```json
+{ "mcp": { "clee": { "type": "local", "command": ["clee", "--mcp"], "enabled": true } } }
+```
+
+Then start the agent inside a CleeCode terminal: the wiring works by inheritance, so an agent
+started anywhere else is told it is not in a session rather than handed a wrong answer. The
+Claude Code line is the one verified against a running agent; the other two are written from
+those projects' documented shapes.
+
 **Editing.** Multi-file tabs, a split editor, find and replace with regular expressions,
 project-wide search, code folding, column selection, and a git panel that stages, commits and
 switches branch. Words already in your buffers are offered as you type — along with what a
