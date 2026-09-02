@@ -492,6 +492,17 @@ impl TerminalPanel {
         // Marks the shell as running inside CleeCode, so a user's rc can skip heavy startup
         // work (e.g. `fastfetch`) here — `if not set -q CLEECODE; fastfetch; end` in fish.
         cmd.env("CLEECODE", "1");
+        // Where this editor publishes what it knows, for `clee --mcp` to read.
+        //
+        // Exported here and nowhere else on purpose. An agent run in a pane inherits it, and the
+        // MCP server the agent spawns inherits it in turn — so the server is joined to *this*
+        // CleeCode by descent rather than by searching for one, which is the only way to get it
+        // right when two are open at once. Set on every shell for the same reason as the
+        // interpreter variables below: guessing at spawn time what somebody is about to type
+        // costs more than an unread name in the environment.
+        if let Some(session) = crate::mcp::session_dir() {
+            cmd.env(crate::mcp::SESSION_ENV, session);
+        }
         // What the program in this pane is actually talking to.
         //
         // Inherited, `TERM` names the terminal CleeCode is *displayed in* — and the pane is not
