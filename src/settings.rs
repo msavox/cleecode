@@ -165,8 +165,13 @@ pub struct Settings {
     // Which set of colours the interface is drawn in. Defaults to the one the editor has always
     // used, so an existing settings.toml — which has no such key — loads into exactly the editor
     // it was written by.
+    //
+    // A *choice* rather than a theme: `theme = "auto"` is an instruction to ask the terminal
+    // what colour it is, which is a question with a different answer on a different machine and
+    // so cannot be stored as its answer. What the editor draws in is `App::theme`, resolved from
+    // this once at startup.
     #[serde(default)]
-    pub theme: crate::theme::Theme,
+    pub theme: crate::theme::ThemeChoice,
     // Workspace resume: which project folder and which of its files were open, so
     // launching cleecode with no arguments picks up where the last session left off.
     #[serde(default)]
@@ -348,7 +353,7 @@ impl Default for Settings {
             plots_in_tabs: true,
             show_splash: true,
             opaque_background: false,
-            theme: crate::theme::Theme::default(),
+            theme: crate::theme::ThemeChoice::default(),
             last_root: None,
             last_open_files: Vec::new(),
             last_active_file: None,
@@ -577,13 +582,34 @@ mod tests {
     #[test]
     fn a_file_with_one_key_keeps_that_key_and_defaults_the_rest() {
         let one_line: Settings = toml::from_str("theme = \"turbo\"").expect("a partial file loads");
-        assert_eq!(one_line.theme, crate::theme::Theme::Turbo);
+        assert_eq!(one_line.theme, crate::theme::ThemeChoice::Fixed(crate::theme::Theme::Turbo));
         let fresh = Settings::default();
         assert_eq!(one_line.tab_size, fresh.tab_size, "the rest is the defaults, not nothing");
         assert_eq!(one_line.show_line_numbers, fresh.show_line_numbers);
         // And an empty file is every default, rather than an error.
         let empty: Settings = toml::from_str("").expect("an empty file loads");
         assert_eq!(empty.theme, fresh.theme);
+    }
+
+    /// `auto` is a theme name like any other as far as the file is concerned: it loads on top of
+    /// the defaults and takes nothing else with it. Written down here as well as in `theme.rs`
+    /// because this is the file somebody hand-edits, and the failure it guards against — one
+    /// unknown key setting the whole file aside — is this module's to prevent.
+    #[test]
+    fn a_file_asking_for_the_automatic_theme_keeps_the_rest() {
+        let auto: Settings = toml::from_str("theme = \"auto\"\ntab_size = 3\n")
+            .expect("a partial file asking for auto loads");
+        assert_eq!(auto.theme, crate::theme::ThemeChoice::Auto);
+        assert_eq!(auto.tab_size, 3, "the key beside it is still read");
+        let fresh = Settings::default();
+        assert_eq!(auto.show_line_numbers, fresh.show_line_numbers, "and the rest defaults");
+        assert_eq!(auto.lang, fresh.lang);
+        // And it survives being written back out on exit, which is what would otherwise quietly
+        // turn the choice into whichever theme it happened to resolve to.
+        let round_trip: Settings =
+            toml::from_str(&toml::to_string_pretty(&auto).expect("settings serialise"))
+                .expect("what was written loads");
+        assert_eq!(round_trip.theme, crate::theme::ThemeChoice::Auto);
     }
 
     use super::*;

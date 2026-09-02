@@ -35,6 +35,146 @@ fn picker() -> Option<&'static Picker> {
     PICKER.get()
 }
 
+/// What colour the terminal said it paints behind everything, asked once at startup. A fact
+/// about the session like the one above, and held the same way — see `detect_background` for why
+/// it cannot be asked again later.
+static BACKGROUND: OnceLock<Option<(u8, u8, u8)>> = OnceLock::new();
+
+/// How long the background query waits for an answer.
+///
+/// The same order as the queries beside it. It is the whole cost of asking a terminal that will
+/// never reply — every terminal that implements OSC 11 answers it in the same breath it was
+/// asked, so this is not a budget being spent, it is the ceiling on a mistake.
+const BACKGROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Asks the terminal what colour its background is (OSC 11), for `theme = "auto"`.
+///
+/// Called from `main` only when the theme is `auto`, and only where the other startup queries
+/// are: before the mouse is captured. Both halves matter. A terminal that does not implement
+/// OSC 11 says nothing at all, and the answer to a question nobody asked is a hundred and fifty
+/// milliseconds of a cold start — so it is not asked unless it changes something. And with mouse
+/// reporting on, the reply would arrive in a stdin already filling with pointer movement, which
+/// is the same trap documented at the call site.
+///
+/// The answer is kept for the session because the question cannot be repeated: by the time the
+/// theme drop-down is open the mouse is captured and the event loop owns stdin, so choosing
+/// `Auto` at runtime resolves against what was learned at startup — or, if the theme was fixed
+/// then and nothing was asked, against nothing, which means dark until the next launch.
+pub fn detect_background() {
+    let _ = BACKGROUND.set(query_background());
+}
+
+/// The terminal's background as it was at startup: `None` when it was not asked, when it did not
+/// answer, or when it answered something this could not read.
+pub fn background() -> Option<(u8, u8, u8)> {
+    BACKGROUND.get().copied().flatten()
+}
+
+/// Writes the query and reads the reply, giving up after `BACKGROUND_TIMEOUT`.
+///
+/// Synchronous, and deliberately not a thread: a thread parked in `read` on a terminal that never
+/// answers would still be there when the user types, and would eat the first key they press.
+/// `poll` asks whether there is anything to read before reading, so a silent terminal costs the
+/// timeout and takes nothing with it.
+#[cfg(unix)]
+fn query_background() -> Option<(u8, u8, u8)> {
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]11;?\x1b\\").ok()?;
+    out.flush().ok()?;
+
+    let deadline = Instant::now() + BACKGROUND_TIMEOUT;
+    let mut reply = String::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !stdin_is_ready(left) {
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        let read = std::io::stdin().read(&mut buf).ok()?;
+        if read == 0 {
+            return None;
+        }
+        // Lossy because this is a reply, not text: a terminal answering something that is not
+        // UTF-8 is answering something this cannot use either way, and a replacement character
+        // fails the parse exactly as the bytes would have.
+        reply.push_str(&String::from_utf8_lossy(&buf[..read]));
+        if let Some(rgb) = parse_background(&reply) {
+            return Some(rgb);
+        }
+        // A terminal that keeps talking without ever completing the reply — or a key held down
+        // while CleeCode starts — must not keep this loop going to the deadline on a string that
+        // grows forever.
+        if reply.len() > 512 {
+            return None;
+        }
+    }
+}
+
+/// Windows has no `poll` on the console, and the ways round it are a Win32 surface this project
+/// does not otherwise use. `auto` there is the fallback: the dark theme, which is what the
+/// terminals shipped with Windows are.
+#[cfg(not(unix))]
+fn query_background() -> Option<(u8, u8, u8)> {
+    None
+}
+
+/// Whether stdin has something to read, waiting at most `within`. Anything other than a plain
+/// "yes" — an error, a signal interrupting the wait — is treated as "no": the caller's answer to
+/// not knowing is the same as its answer to a silent terminal.
+#[cfg(unix)]
+fn stdin_is_ready(within: std::time::Duration) -> bool {
+    let mut fd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+    let millis = within.as_millis().min(i32::MAX as u128) as i32;
+    // Safe: one descriptor, its lifetime is this stack frame, and `poll` only writes `revents`.
+    let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+    ready > 0 && fd.revents & libc::POLLIN != 0
+}
+
+/// Pulls the background colour out of an OSC 11 reply.
+///
+/// The shape is `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` followed by a terminator, which is either ST
+/// (`ESC \`) or BEL — terminals disagree about which, and both are in the wild. Anything before
+/// it is skipped rather than matched: the reply can arrive behind the tail of another query's
+/// answer, and what identifies it is the `]11;` it opens with, not its position.
+///
+/// The `11` is checked and not assumed. `]10;` is the foreground in the same shape, and a
+/// terminal that volunteers one — or a stale answer to a query somebody else made — would
+/// otherwise be read as the background and could invert the theme.
+///
+/// `None` while the reply is still incomplete, which is what keeps the reader reading, and
+/// `None` for a reply that never becomes one, which is what makes the timeout the only way out.
+pub fn parse_background(reply: &str) -> Option<(u8, u8, u8)> {
+    let body = reply.split("]11;").nth(1)?.split("rgb:").nth(1)?;
+    // Nothing is parsed until the terminator has arrived: half of `1e1e` is a valid number and
+    // an entirely different colour, and a reply read in two pieces is normal.
+    let (body, _) = body.split_once(['\x07', '\x1b'])?;
+    let mut parts = body.split('/');
+    let colour = (component(parts.next()?)?, component(parts.next()?)?, component(parts.next()?)?);
+    // Three components, no more: a fourth field means this is not the reply it looks like.
+    parts.next().is_none().then_some(colour)
+}
+
+/// One component of an X11 colour name, scaled to eight bits.
+///
+/// The width is the terminal's choice — `rgb:1/2/3`, `rgb:1e/1e/1e` and `rgb:1e1e/1e1e/1e1e` are
+/// all legal and, per X11, all name the same colour: each is a fraction of its own maximum, not
+/// a number to be truncated. Taking the top byte of whatever arrives (the obvious shortcut) reads
+/// `rgb:ff/ff/ff` as black, which is white reported as the darkest colour there is — the one
+/// mistake here that would flip the theme the wrong way round.
+fn component(text: &str) -> Option<u8> {
+    let digits = text.len();
+    if digits == 0 || digits > 4 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(text, 16).ok()?;
+    let max = (1u32 << (4 * digits)) - 1;
+    // Rounded rather than floored, so the widest form of a colour and the narrowest agree.
+    Some(((value * 255 + max / 2) / max) as u8)
+}
+
 /// How the picture will actually be drawn, for saying so in the tab.
 pub fn protocol_name() -> &'static str {
     match picker().map(Picker::protocol_type) {
@@ -1183,6 +1323,65 @@ pub fn render_markdown(source: &str, pal: crate::theme::Palette) -> Vec<ratatui:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reply the theme is chosen from, in the forms terminals actually send it in. Get this
+    /// wrong in the direction of "light" and `auto` paints dark text on a black terminal, which
+    /// is the unreadable screen the themes exist to fix.
+    #[test]
+    fn an_osc_11_reply_is_read_at_any_width_and_either_terminator() {
+        // Four digits per component, ST-terminated: xterm, kitty, Ghostty, foot.
+        assert_eq!(parse_background("\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Some((255, 255, 255)));
+        // Two digits, BEL-terminated: the other half of the wild.
+        assert_eq!(parse_background("\x1b]11;rgb:1e/1e/1e\x07"), Some((30, 30, 30)));
+        // One and three digits are legal too, and name the same colour as the wide form.
+        assert_eq!(parse_background("\x1b]11;rgb:f/f/f\x07"), Some((255, 255, 255)));
+        assert_eq!(parse_background("\x1b]11;rgb:000/000/000\x07"), Some((0, 0, 0)));
+        assert_eq!(
+            parse_background("\x1b]11;rgb:2828/2c2c/3434\x1b\\"),
+            parse_background("\x1b]11;rgb:28/2c/34\x07"),
+            "the same colour written two ways must read the same",
+        );
+        // A reply that arrived behind somebody else's answer is still this one.
+        assert_eq!(parse_background("\x1b[?62;4c\x1b]11;rgb:00/00/00\x07"), Some((0, 0, 0)));
+    }
+
+    /// Nothing is answered from a reply that has not finished arriving: a read can land in the
+    /// middle of one, and `1e` of `1e1e` is a legal number and a different colour.
+    #[test]
+    fn a_half_arrived_reply_is_not_an_answer_yet() {
+        assert_eq!(parse_background("\x1b]11;rgb:ffff/ffff/ff"), None);
+        assert_eq!(parse_background("\x1b]11;rgb:"), None);
+        assert_eq!(parse_background("\x1b]1"), None);
+    }
+
+    /// A reply this cannot read is `None` rather than a guess. The caller's answer to `None` is
+    /// the dark theme, which is right for "the terminal said nothing this understands".
+    #[test]
+    fn a_malformed_reply_is_refused() {
+        for reply in [
+            "",
+            "\x1b]11;rgb:zz/zz/zz\x07",         // not hex
+            "\x1b]11;rgb:ffff/ffff\x07",        // two components
+            "\x1b]11;rgb:ff/ff/ff/ff\x07",      // four
+            "\x1b]11;rgb:fffff/0/0\x07",        // wider than a component can be
+            "\x1b]11;rgb://\x07",               // empty components
+            "\x1b]11;#ffffff\x07",              // the other spelling, which no terminal sends
+            "\x1b]10;rgb:ff/ff/ff\x07x",        // the foreground, answered without the background
+        ] {
+            assert_eq!(parse_background(reply), None, "{reply:?} was read as a colour");
+        }
+    }
+
+    /// The end the whole feature turns on: a reply read as a colour, and that colour turned into
+    /// a theme.
+    #[test]
+    fn a_light_terminal_gets_the_light_theme() {
+        use crate::theme::{Theme, ThemeChoice};
+        let of = |reply| ThemeChoice::Auto.resolve(parse_background(reply));
+        assert_eq!(of("\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Theme::CleeCodeLight);
+        assert_eq!(of("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\"), Theme::CleeCode);
+        assert_eq!(of("garbage"), Theme::CleeCode);
+    }
 
     /// typst is told where its root is, because pandoc hands it absolute paths into the
     /// temporary directory it extracted the document's pictures to — and typst reads an absolute

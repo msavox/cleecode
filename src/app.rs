@@ -440,6 +440,12 @@ pub struct App {
     /// is the one bit of the interface that has to react to the mouse merely being somewhere.
     pointer: Option<(u16, u16)>,
     pub settings: Settings,
+    /// The colours being drawn in, which is the *resolved* form of `settings.theme`: the same
+    /// thing for a theme chosen by name, and for `auto` whichever of the two the terminal's own
+    /// background asked for. Kept beside the setting rather than worked out per frame, because
+    /// resolving reads a fact about the session that only exists once (see `preview::background`)
+    /// and because the setting is what gets saved while this is what gets painted.
+    pub theme: crate::theme::Theme,
     pub show_settings: bool,
     pub settings_selected: usize,
     pub highlighter: Highlighter,
@@ -476,7 +482,8 @@ pub struct App {
     /// The run-target drop-down, while it is open under its toolbar button.
     pub run_menu: Option<RunMenu>,
     /// The theme drop-down, while it is open under its button on the menu bar. Just the row the
-    /// cursor is on: the list itself is `Theme::ALL`, which cannot change while it is open.
+    /// cursor is on: the list itself is `ThemeChoice::all()`, which cannot change while it is
+    /// open.
     pub theme_menu: Option<usize>,
     /// Which step the "register a venv" box is on, when it's open.
     pub venv_register: Option<VenvRegisterStep>,
@@ -1855,6 +1862,10 @@ impl App {
         // Read before `settings` is moved into the struct below, where the field that holds it
         // is initialised ahead of this one.
         let show_splash = settings.show_splash;
+        // Resolved once, here: `auto` is answered by what the terminal said its background was
+        // when it was asked, at startup, and that answer does not change for the life of the
+        // session.
+        let theme = settings.theme.resolve(crate::preview::background());
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
@@ -1900,8 +1911,9 @@ impl App {
             status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
             editor_viewport: (0, 0),
             pointer: None,
-            highlighter: Highlighter::for_theme(settings.theme),
+            highlighter: Highlighter::for_theme(theme),
             settings,
+            theme,
             show_settings: false,
             settings_selected: 0,
             menu: MenuBar::new(),
@@ -2042,11 +2054,11 @@ impl App {
     /// The plot destination is the *effective* one and not the stored preference: a machine with
     /// no screen captures whatever the setting says, so reading the setting out would have the
     /// menu claim "windows" while every figure kept arriving as a tab.
-    /// The colours to draw this frame in. Read from the settings every time rather than cached:
+    /// The colours to draw this frame in. Built from the theme every time rather than cached:
     /// it is a couple of dozen `Color`s copied once per frame, and a cache would be one more
     /// thing to remember to invalidate when the theme changes.
     pub fn palette(&self) -> crate::theme::Palette {
-        self.settings.theme.palette()
+        self.theme.palette()
     }
 
     pub fn menu_states(&self) -> crate::menu::MenuStates {
@@ -6174,11 +6186,9 @@ impl App {
         // A theme that paints its own surface is painting it either way, so the switch has
         // nothing to turn off. Refused out loud rather than silently ignored: a control that
         // moves and changes nothing is worse than one that explains itself.
-        if self.settings.theme.paints_its_own_background() {
-            self.status_message = i18n::msg_background_owned_by_theme(
-                self.settings.lang,
-                self.settings.theme.name(),
-            );
+        if self.theme.paints_its_own_background() {
+            self.status_message =
+                i18n::msg_background_owned_by_theme(self.settings.lang, self.theme.name());
             return;
         }
         self.settings.opaque_background = !self.settings.opaque_background;
@@ -7207,21 +7217,24 @@ impl App {
     /// Opens the theme drop-down on the row of the theme in use, so the list opens showing where
     /// you are rather than at the top.
     pub fn open_theme_menu(&mut self) {
-        let here = crate::theme::Theme::ALL.iter().position(|t| *t == self.settings.theme);
+        let here = crate::theme::ThemeChoice::all().iter().position(|c| *c == self.settings.theme);
         self.theme_menu = Some(here.unwrap_or(0));
         self.redraw = true;
     }
 
     fn handle_theme_menu_key(&mut self, key: KeyEvent) {
         let Some(selected) = self.theme_menu else { return };
-        let len = crate::theme::Theme::ALL.len();
+        let choices = crate::theme::ThemeChoice::all();
+        let len = choices.len();
         match key.code {
             KeyCode::Esc => self.theme_menu = None,
             KeyCode::Up => self.theme_menu = Some((selected + len - 1) % len),
             KeyCode::Down => self.theme_menu = Some((selected + 1) % len),
             KeyCode::Enter => {
                 self.theme_menu = None;
-                self.set_theme(crate::theme::Theme::ALL[selected]);
+                if let Some(choice) = choices.get(selected) {
+                    self.set_theme(*choice);
+                }
             }
             _ => {}
         }
@@ -7235,17 +7248,29 @@ impl App {
     /// poor answer. The highlighter is rebuilt rather than re-tinted — its syntect theme is what
     /// every coloured line borrows from — and every open buffer is told its colours are stale, so
     /// the next frame recolours the lines it is about to draw and no others.
-    pub fn set_theme(&mut self, theme: crate::theme::Theme) {
-        if self.settings.theme == theme {
+    ///
+    /// `Auto` resolves against what the terminal answered at startup, because the question cannot
+    /// be asked again from here: the mouse is captured and the event loop owns stdin, so a query
+    /// written now would have its reply read as a keypress. If the theme was fixed at startup
+    /// nothing was asked, and choosing `Auto` gives the dark theme now and the right one from the
+    /// next launch on. Said out loud rather than silently, which is what the status line is for.
+    pub fn set_theme(&mut self, choice: crate::theme::ThemeChoice) {
+        if self.settings.theme == choice {
             return;
         }
-        self.settings.theme = theme;
+        self.settings.theme = choice;
         self.settings.save();
+        let theme = choice.resolve(crate::preview::background());
+        self.theme = theme;
         self.highlighter = Highlighter::for_theme(theme);
         for editor in &mut self.editors {
             editor.forget_highlight();
         }
-        self.status_message = theme.name().to_string();
+        self.status_message = match choice {
+            // Which theme "follow the terminal" turned out to mean is the half worth reading.
+            crate::theme::ThemeChoice::Auto => format!("Auto \u{00b7} {}", theme.name()),
+            crate::theme::ThemeChoice::Fixed(theme) => theme.name().to_string(),
+        };
         self.redraw = true;
     }
 
@@ -9576,8 +9601,8 @@ impl App {
                         Some(inner) => {
                             let picked = (row - inner.y) as usize;
                             self.theme_menu = None;
-                            if let Some(theme) = crate::theme::Theme::ALL.get(picked) {
-                                self.set_theme(*theme);
+                            if let Some(choice) = crate::theme::ThemeChoice::all().get(picked) {
+                                self.set_theme(*choice);
                             }
                         }
                         None => self.theme_menu = None,
