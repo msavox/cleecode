@@ -2236,13 +2236,29 @@ riscritti con la strada temp+rename.
   giro del focus, il resize coi seam, il mouse e il formato workspace (campo nuovo,
   versionato). Il rendering invece si riusa intero, perché dentro è una finestra terminale
   come le altre. Il cassetto assorbe la composizione — `octave+claude` diventa il preset
-  con il cassetto già aperto — e `Ctrl+Shift+A` dà precedenza al suo agente. Da decidere
-  allora: quale agente evoca il tasto la prima volta, un'impostazione o un picker al primo
-  uso. E il cassetto ha due modi, da impostazione: **pin**, aperto finché non lo chiudi tu,
+  con il cassetto già aperto — e `Ctrl+Shift+A` dà precedenza al suo agente. La domanda
+  "quale agente evoca il tasto" si risolve da sé: **lo stato vuoto è il selettore**. Un
+  cassetto aperto senza agente dentro mostra i quattro nomi — claude, opencode, gemini,
+  codex — scritti grandi in ASCII, cliccabili e scorribili con le frecce, Invio avvia.
+  Wordmark e non logo, per la stessa regola dei temi: nominare un programma per lanciarlo
+  è uso nominativo, ridisegnarne il marchio è un'altra cosa. Chi non è sul PATH si mostra
+  lo stesso, spento e con la frase onesta — il selettore vuoto è anche il posto dove si
+  scopre cosa è supportato — e l'ultimo usato si ricorda ed evidenzia. Nota: gemini è un
+  agente in più nel seam (`enum Agent` è fatto apposta: un agente aggiunto lì ottiene
+  preset e riconoscimento da sé, e gemini-cli è un wrapper npm che gira come `node`,
+  coperto dal riconoscimento per argomenti della 0.15.1 con uno stem in più) — si può
+  aggiungere prima del cassetto, per conto suo. E il cassetto ha due modi, da impostazione: **pin**, aperto finché non lo chiudi tu,
   e **autocollapse**, che si ritira da solo quando il focus torna all'editor e si riapre
   all'evocazione — in una TUI il segnale è il focus, non il mouse che passa. Il default è
   pin, perché un pannello che si muove da sé è una sorpresa finché non sei tu ad averla
-  chiesta. Un frame dedicato agli LLM nella *split dell'editor* resta valutato e rimandato:
+  chiesta. Da decidere se e quando la comparsa *ridimensiona* gli altri frame o gli va
+  temporaneamente *sopra* — e la decisione ha un driver tecnico, non estetico: rifluire è
+  un SIGWINCH a ogni pty (l'interprete e ogni TUI nei pane si ridisegnano per intero, due
+  volte per evocazione), sovrapporsi è dipingere celle sopra come già fa il pannello Git,
+  senza toccare nessun pty. L'ipotesi di lavoro accoppia i modi: il cassetto in pin
+  rifluisce, perché è parte del layout e tutto gli fa posto; quello in autocollapse si
+  sovrappone, perché una domanda al volo non deve far ridisegnare mezzo schermo all'andata
+  e al ritorno. Un frame dedicato agli LLM nella *split dell'editor* resta valutato e rimandato:
   la split ospita buffer, un pty lì dentro tocca focus e routing per comprare solo estetica. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
   `Ctrl+Shift+W` — quindi la voce non è renderlo possibile: è renderlo di serie, col
   layout giusto e un nome che si legge da solo nella lista di `clee -w`. Il flusso che ne
