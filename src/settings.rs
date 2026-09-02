@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 13;
+pub const SETTINGS_COUNT: usize = 14;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -147,6 +147,13 @@ pub struct Settings {
     // before the rename keeps working.
     #[serde(default = "default_true", alias = "diagnostics_figures")]
     pub plots_in_tabs: bool,
+    // Whether a file something else has just touched — an agent in one of the terminal panes, a
+    // formatter, a `sed` in a shell — opens itself beside what you are reading. Off by default:
+    // tabs appearing without being asked for is exactly the kind of help that has to be opted
+    // into. It never takes the keyboard, and outside a git repository it does nothing at all and
+    // says so, because the detection is the difference between two `git status` sweeps.
+    #[serde(default)]
+    pub follow_agent_edits: bool,
     // Whether the title card appears at startup. On, because it is where a named workspace
     // announces itself and it costs under two seconds — but it is still two seconds in front of
     // the file you opened the editor to change, and somebody starting CleeCode twenty times a
@@ -362,6 +369,7 @@ impl Default for Settings {
             completion: true,
             language_server: true,
             plots_in_tabs: true,
+            follow_agent_edits: false,
             show_splash: true,
             opaque_background: false,
             theme: crate::theme::ThemeChoice::default(),
@@ -1035,6 +1043,10 @@ impl Settings {
                 value: b(self.language_server),
             },
             SettingRow {
+                label: i18n::t(lang, Key::SettingFollowAgentEdits),
+                value: b(self.follow_agent_edits),
+            },
+            SettingRow {
                 label: i18n::t(lang, Key::SettingPlotsInTabs),
                 value: plots_value(lang, self.plots_in_tabs, crate::wsnap::can_open_a_window()),
             },
@@ -1056,18 +1068,19 @@ impl Settings {
             6 => self.auto_indent = !self.auto_indent,
             7 => self.completion = !self.completion,
             8 => self.language_server = !self.language_server,
+            9 => self.follow_agent_edits = !self.follow_agent_edits,
             // Refused where it would mean nothing: see `plots_value`. The row still moves under
             // the cursor and still reads out the state — it is disabled, not hidden, because
             // "why can I not turn this off" is a question the value answers and an absence
             // does not.
-            9 => {
+            10 => {
                 if crate::wsnap::can_open_a_window() {
                     self.plots_in_tabs = !self.plots_in_tabs;
                 }
             }
-            10 => self.show_splash = !self.show_splash,
-            11 => self.mouse_enabled = !self.mouse_enabled,
-            12 => self.lang = self.lang.next(),
+            11 => self.show_splash = !self.show_splash,
+            12 => self.mouse_enabled = !self.mouse_enabled,
+            13 => self.lang = self.lang.next(),
             _ => {}
         }
     }

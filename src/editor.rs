@@ -83,6 +83,12 @@ pub struct Editor {
     pub selection_block: bool,
     /// Active (collapsed) fold regions as (start_line, end_line), inclusive, sorted by start.
     pub folds: Vec<(usize, usize)>,
+    /// The lines the last reload from disk brought in: what somebody else — an agent, a
+    /// formatter, a branch switched underneath — wrote while the file was open. Ascending, so
+    /// the gutter can ask about one line with a binary search rather than a scan.
+    ///
+    /// Emptied by the first edit of your own, wherever it comes from: see `mark_edited_from`.
+    changed_lines: Vec<usize>,
     /// Line-ending style detected on open, reapplied on save.
     pub line_ending: LineEnding,
     /// Whether the file ended with a trailing newline when opened; preserved on save.
@@ -127,6 +133,7 @@ impl Editor {
             selection_anchor: None,
             selection_block: false,
             folds: Vec::new(),
+            changed_lines: Vec::new(),
             line_ending: LineEnding::Lf,
             final_newline: false,
             read_only: false,
@@ -267,7 +274,13 @@ impl Editor {
         };
         self.line_ending = if content.contains("\r\n") { LineEnding::Crlf } else { LineEnding::Lf };
         self.final_newline = content.ends_with('\n');
-        self.rope = Rope::from_str(&content.replace("\r\n", "\n"));
+        let arriving = content.replace("\r\n", "\n");
+        // Worked out here because here is the last moment both texts exist: one line further
+        // down the old rope is gone. Both sides are the normalized text, so a file that only
+        // changed its line endings does not light up as though every line had been rewritten.
+        let leaving = self.rope.to_string();
+        self.changed_lines = changed_lines(&leaving, &arriving);
+        self.rope = Rope::from_str(&arriving);
         self.disk_mtime = Some(mtime);
         self.syntax_dirty = true;
         self.revision = self.revision.wrapping_add(1);
@@ -280,6 +293,24 @@ impl Editor {
         self.cursor_line = self.cursor_line.min(max_line);
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
         Some(i18n::msg_externally_reloaded(lang, &self.title(lang)))
+    }
+
+    /// Whether line `line` arrived in the last reload and has not been typed over since.
+    pub fn line_arrived(&self, line: usize) -> bool {
+        self.changed_lines.binary_search(&line).is_ok()
+    }
+
+    /// The lines the last reload brought in, ascending. The gutter asks one line at a time
+    /// through `line_arrived`; this is for the tests, which are about the whole set.
+    #[cfg(test)]
+    pub fn arrived_lines(&self) -> &[usize] {
+        &self.changed_lines
+    }
+
+    /// Puts the lights out. Esc asks for this directly; every edit does it through
+    /// `mark_edited_from` without having to know the feature exists.
+    pub fn forget_arrived_lines(&mut self) {
+        self.changed_lines.clear();
     }
 
     pub fn title(&self, lang: Lang) -> String {
@@ -1695,6 +1726,12 @@ impl Editor {
     fn mark_edited_from(&mut self, line: usize) {
         self.note_edit_line(line);
         let from = self.pending_edit_line.take().unwrap_or(line).min(self.cursor_line);
+        // The marks say "this arrived from outside since you last touched the file", and the
+        // moment you touch it that sentence stops being true. Put out here rather than at each
+        // key, because every edit there is — typing, pasting, undo, a line moved, a comment
+        // toggled, a replacement from the Find box — ends up in this one function, and the one
+        // added next month will too.
+        self.changed_lines.clear();
         self.dirty = true;
         self.revision = self.revision.wrapping_add(1);
         self.highlighted.truncate(self.syntax_cache.invalidate_from(from));
@@ -1905,6 +1942,95 @@ pub fn comment_token(path: Option<&std::path::Path>) -> Option<&'static str> {
         _ => return None,
     };
     Some(token)
+}
+
+/// How wide a run of differing lines this is still willing to align, per side.
+///
+/// The comparison below is a longest common subsequence, which costs one table entry per pair of
+/// lines — quadratic in both time and memory, and a file against itself at twenty thousand lines
+/// would ask for a gigabyte of it. The trimming that happens first means this ceiling applies to
+/// the *differing* part rather than to the file: a hundred-thousand-line file with a paragraph
+/// rewritten in the middle is a problem a few lines wide and is answered exactly.
+const DIFFERING_LINES_CAP: usize = 2_000;
+
+/// The lines of `after` that were not already in `before`, as indices into `after`.
+///
+/// This is what makes an agent's edit visible. An agent does not type: it writes the whole file
+/// at every change, so what arrives is a new text, and the only interesting question about it is
+/// which of its lines are new. Deletions produce nothing — there is no line left to light — and
+/// a file that came back identical produces nothing either.
+///
+/// Common leading and trailing lines are peeled off first, which is both an optimisation and the
+/// honest description of the usual case: a file rewritten with a few lines different somewhere
+/// inside it. What is left is aligned with a longest common subsequence; past
+/// [`DIFFERING_LINES_CAP`] lines on either side the answer is *nothing at all* rather than
+/// everything. A gutter lit from top to bottom tells the reader as little as an empty one, and
+/// spends a screenful of colour saying it.
+pub fn changed_lines(before: &str, after: &str) -> Vec<usize> {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+
+    let shorter = old.len().min(new.len());
+    let mut head = 0;
+    while head < shorter && old[head] == new[head] {
+        head += 1;
+    }
+    let mut tail = 0;
+    while tail < shorter - head && old[old.len() - 1 - tail] == new[new.len() - 1 - tail] {
+        tail += 1;
+    }
+    let old_mid = &old[head..old.len() - tail];
+    let new_mid = &new[head..new.len() - tail];
+
+    // Nothing left on the old side: everything in the middle is new, and no alignment is needed
+    // to know it. This is a pure insertion — a block pasted in, or a file that grew.
+    if old_mid.is_empty() {
+        return (head..head + new_mid.len()).collect();
+    }
+    // Nothing left on the new side: lines went away and none arrived.
+    if new_mid.is_empty() {
+        return Vec::new();
+    }
+    if old_mid.len() > DIFFERING_LINES_CAP || new_mid.len() > DIFFERING_LINES_CAP {
+        return Vec::new();
+    }
+
+    let (n, m) = (old_mid.len(), new_mid.len());
+    // Lengths of the longest common subsequence of the two suffixes starting at (i, j). `u16`
+    // because the cap keeps every value under it, and the table is the memory that matters.
+    let mut lcs = vec![0u16; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[at(i, j)] = if old_mid[i] == new_mid[j] {
+                lcs[at(i + 1, j + 1)] + 1
+            } else {
+                lcs[at(i + 1, j)].max(lcs[at(i, j + 1)])
+            };
+        }
+    }
+
+    // Walked forwards from the top, so the lines come out ascending and the gutter can binary
+    // search them. A tie goes to the old side: given the choice, a line is called deleted rather
+    // than inserted, which keeps a replaced line from lighting its neighbour as well.
+    let mut arrived = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if old_mid[i] == new_mid[j] {
+            i += 1;
+            j += 1;
+        } else if lcs[at(i + 1, j)] >= lcs[at(i, j + 1)] {
+            i += 1;
+        } else {
+            arrived.push(head + j);
+            j += 1;
+        }
+    }
+    while j < m {
+        arrived.push(head + j);
+        j += 1;
+    }
+    arrived
 }
 
 #[cfg(test)]
@@ -2748,6 +2874,101 @@ mod tests {
         assert!(msg.is_some());
         assert_eq!(ed.rope.to_string(), "changed on disk");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The safety rule of 0.13, which the live-file work must not have loosened: a buffer with
+    /// unsaved edits is never overwritten by what is on disk, however new that is. The user's
+    /// work wins over the agent's, always — and nothing lights up in the gutter either, because
+    /// the text on screen is still the text you typed.
+    #[test]
+    fn a_dirty_buffer_is_never_reloaded_underneath_you() {
+        let dir = std::env::temp_dir().join(format!("clee_dirty_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mine.txt");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut ed = Editor::open(path.clone()).unwrap();
+        ed.insert_str("hand-typed ");
+        assert!(ed.dirty);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, "written by somebody else\n").unwrap();
+
+        let said = ed.check_external_changes(Lang::En);
+        assert!(said.is_some(), "the status line has to say the two versions have parted");
+        assert_eq!(ed.rope.to_string(), "hand-typed one\ntwo\n", "unsaved work was thrown away");
+        assert!(ed.arrived_lines().is_empty());
+        // And it says it once: the new mtime is remembered even though nothing was loaded, so
+        // the message does not come back every tick.
+        assert!(ed.check_external_changes(Lang::En).is_none());
+        assert_eq!(ed.rope.to_string(), "hand-typed one\ntwo\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The whole of 3a end to end: a file rewritten from outside lights the lines that arrived,
+    /// and the first key of your own puts them out.
+    #[test]
+    fn a_reload_lights_the_lines_that_arrived_and_an_edit_puts_them_out() {
+        let dir = std::env::temp_dir().join(format!("clee_arrived_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut ed = Editor::open(path.clone()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // What an agent does: the whole file, written again, with one line different.
+        std::fs::write(&path, "one\nTWO\nthree\n").unwrap();
+
+        assert!(ed.check_external_changes(Lang::En).is_some());
+        assert_eq!(ed.arrived_lines(), [1]);
+        assert!(!ed.line_arrived(0) && !ed.line_arrived(2));
+
+        ed.insert_char('x');
+        assert!(ed.arrived_lines().is_empty(), "typing leaves the marks describing a file that is gone");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The diff itself, away from any file: insertions, deletions, replacements, a file that
+    /// came back identical, and the ceiling.
+    #[test]
+    fn the_line_diff_names_the_lines_that_are_new() {
+        // Identical: nothing arrived, however long the file.
+        assert!(changed_lines("a\nb\nc\n", "a\nb\nc\n").is_empty());
+
+        // An insertion in the middle: only the inserted line, and it is named by its place in
+        // the *new* text.
+        assert_eq!(changed_lines("a\nb\n", "a\nnew\nb\n"), vec![1]);
+
+        // A deletion leaves nothing to light.
+        assert!(changed_lines("a\nb\nc\n", "a\nc\n").is_empty());
+
+        // A replacement is one line, not two: the lines around it are recognised.
+        assert_eq!(changed_lines("a\nb\nc\n", "a\nB\nc\n"), vec![1]);
+
+        // A block appended, and a block prepended.
+        assert_eq!(changed_lines("a\n", "a\nb\nc\n"), vec![1, 2]);
+        assert_eq!(changed_lines("a\n", "b\nc\na\n"), vec![0, 1]);
+
+        // From nothing, and to nothing.
+        assert_eq!(changed_lines("", "a\nb\n"), vec![0, 1]);
+        assert!(changed_lines("a\nb\n", "").is_empty());
+
+        // Lines that moved rather than changed: the longest common subsequence keeps the run it
+        // can and calls the rest arrivals, which is what a reader wants to look at.
+        assert_eq!(changed_lines("a\nb\nc\nd\n", "a\nc\nb\nd\n"), vec![2]);
+    }
+
+    /// Past the ceiling nothing is marked — the documented answer, and the one that keeps a
+    /// quadratic table from being asked for on a file where it would not fit.
+    #[test]
+    fn a_wide_enough_difference_is_left_unmarked() {
+        let old: String = (0..DIFFERING_LINES_CAP + 1).map(|i| format!("old {i}\n")).collect();
+        let new: String = (0..DIFFERING_LINES_CAP + 1).map(|i| format!("new {i}\n")).collect();
+        assert!(changed_lines(&old, &new).is_empty(), "the ceiling is meant to give up quietly");
+
+        // The ceiling is on the differing part, not on the file: a long file with one line
+        // rewritten in the middle is still answered exactly.
+        let mut lines: Vec<String> = (0..20_000).map(|i| format!("line {i}\n")).collect();
+        let long: String = lines.concat();
+        lines[9_999] = "written by somebody else\n".to_string();
+        assert_eq!(changed_lines(&long, &lines.concat()), vec![9_999]);
     }
 
     /// What decides whether opening a file makes a buffer or shows the file instead, so it has
