@@ -26,6 +26,38 @@ pub fn compile(query: &str, regex: bool, case_sensitive: bool) -> Result<Regex, 
     RegexBuilder::new(&pattern).build().map_err(|e| first_line(&e.to_string(), "invalid pattern"))
 }
 
+/// What one match becomes once its capture groups are resolved.
+///
+/// `at` is where the match starts *in `text`*, in bytes, and the pattern is run there again
+/// rather than against the matched characters on their own. That distinction is the difference
+/// between working and quietly doing nothing: `foo(?=bar)` matches `foo` in `foobar`, and the
+/// same pattern asked about `foo` alone matches nothing — so a replacement worked out from the
+/// excised match comes back as the template written out literally. Anchors are the same story:
+/// `^` holds at the start of the text it was found in and nowhere in the three characters next
+/// to it. Lookaround is the reason this project uses fancy-regex at all, so it has to survive
+/// the replacement too.
+///
+/// The one place a `$1` becomes a group, shared by the Find box and by the sweep across the
+/// project for the same reason [`compile`] is shared: what `$1` means cannot depend on which of
+/// the two boxes it was typed into.
+///
+/// A literal search is *not* this function's business — it has no groups to resolve, so there a
+/// `$` is just a dollar and the caller hands the template back untouched.
+///
+/// The template written out as it stands is the answer when the pattern gave up, or when the
+/// text has moved on since it was scanned. It is a poor answer, and it is a better one than
+/// nothing.
+pub fn expand_at(re: &Regex, text: &str, at: usize, template: &str) -> String {
+    match re.captures_from_pos(text, at) {
+        Ok(Some(caps)) => {
+            let mut out = String::new();
+            caps.expand(template, &mut out);
+            out
+        }
+        _ => template.to_string(),
+    }
+}
+
 /// Shortens `text` to `budget` characters, marking that it was cut. Newlines and tabs become
 /// spaces first: a match can span a line break, and a preview that broke its own row in two
 /// would push the rest of the box down as you typed.
@@ -167,12 +199,13 @@ impl FindState {
     /// groups (`$1`, `${name}`); a literal search has no groups to refer to, so there a `$` is
     /// just a dollar and is left alone.
     ///
-    /// The groups are resolved by running the pattern again *where the match was found*, in the
-    /// text it was found in, rather than against the matched text on its own. That distinction is
-    /// the difference between working and quietly doing nothing: `foo(?=bar)` matches `foo` in
-    /// `foobar`, and the same pattern asked about `foo` alone matches nothing, so the replacement
-    /// would hand back the text unchanged and Replace would look broken. Lookaround is the reason
-    /// this project uses fancy-regex at all, so it has to survive the replacement too.
+    /// The groups are resolved by [`expand_at`], which runs the pattern again *where the match
+    /// was found*, in the text it was found in, rather than against the matched text on its own —
+    /// see there for why that is the difference between working and quietly doing nothing.
+    ///
+    /// What is left here is the part only this box knows: which match the caller means. Nothing
+    /// above `haystack` is a pattern search, so a literal query never reaches the expansion at
+    /// all and its dollars stay dollars.
     pub fn replacement_for(&self, matched: &str) -> String {
         let (Some(re), Some(text)) = (&self.compiled, &self.haystack) else {
             return self.replace.clone();
@@ -185,16 +218,7 @@ impl FindState {
         else {
             return self.replace.clone();
         };
-        match re.captures_from_pos(text, at) {
-            Ok(Some(caps)) => {
-                let mut out = String::new();
-                caps.expand(&self.replace, &mut out);
-                out
-            }
-            // The pattern gave up, or the text has moved on since it was scanned. The template
-            // written out as it stands is a poor answer, and it is a better one than nothing.
-            _ => self.replace.clone(),
-        }
+        expand_at(re, text, at, &self.replace)
     }
 
     /// One line showing what the current match turns into, so "replace all" can be read before
@@ -432,6 +456,30 @@ mod tests {
         assert_eq!(f.replacement_for(&first), "bellissima città");
         let second: String = text.chars().take(39).skip(27).collect();
         assert_eq!(f.replacement_for(&second), "grande città");
+    }
+
+    /// The expansion on its own, because it now has a second caller: the sweep across the
+    /// project resolves its groups against one *line* rather than against a whole buffer, and
+    /// the two have to agree about what `$1` means or the same query would replace two different
+    /// things depending on which box it was typed into.
+    #[test]
+    fn a_group_expands_where_the_match_was_and_nowhere_else() {
+        let re = compile(r"(\w+)@(\w+)", true, true).unwrap();
+        let text = "ada@lovelace and alan@turing";
+        assert_eq!(expand_at(&re, text, 0, "$2.$1"), "lovelace.ada");
+        assert_eq!(expand_at(&re, text, 17, "$2.$1"), "turing.alan");
+
+        // Lookaround only holds in the text the match was found in, which is the whole reason
+        // the position is passed rather than the matched characters.
+        let re = compile("foo(?=bar)", true, true).unwrap();
+        assert_eq!(expand_at(&re, "foobar", 0, "X"), "X");
+        assert_eq!(expand_at(&re, "foo", 0, "X"), "X", "no match: the template as it stands");
+
+        // An anchor is asked about the text it is given, so a line is a line and a buffer is a
+        // buffer. Both are legitimate questions, and each caller asks the one it means.
+        let re = compile(r"^(\w+)", true, true).unwrap();
+        assert_eq!(expand_at(&re, "due", 0, "[$1]"), "[due]");
+        assert_eq!(expand_at(&re, "uno\ndue", 4, "[$1]"), "[$1]", "^ does not hold mid-buffer");
     }
 
     /// A pattern is typed one character at a time, so it spends most of its life invalid. That

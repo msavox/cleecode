@@ -2162,6 +2162,34 @@ l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale anc
 applicazione atomica, buffer aperti aggiornati in un passo di undo ciascuno, file su disco
 riscritti con la strada temp+rename.
 
+> **Fatto (2026-09-02), ed è il rename allargato ai file che nessuno ha aperto.** La casella
+> di Ctrl+Shift+H ha un secondo campo, si raggiunge con Tab: vuoto, Invio è la ricerca di
+> sempre e apre la lista; pieno, apre l'anteprima a forma di diff sullo stesso telaio del
+> rename, con gli stessi tasti. La riga di menu "Sostituisci nel progetto" apre la stessa
+> casella sul secondo campo — nessuna corda nuova, la casella *è* l'ingresso.
+>
+> Il discriminante per file è tutta la sicurezza: **buffer aperto** (guardia di revisione,
+> un `replace_char_range` e quindi un Ctrl+Z) oppure **disco** (guardia di mtime, temp+rename
+> via `write_atomic`). Un file con una tab non prende *mai* la strada del disco: lo sweep dei
+> 700 ms ricaricherebbe il buffer pulito buttando via l'undo, e su un buffer sporco i due
+> testi divergerebbero in silenzio. Il campo vuoto lascia la ricerca identica a prima, e la
+> casella lo azzera a ogni apertura — un residuo trasformerebbe la prossima ricerca in una
+> passata che nessuno ha chiesto.
+>
+> `search::Hit` non basta a sostituire — è *una riga*, con l'inizio del match e non la fine,
+> una sola per riga — quindi l'anteprima riscandisce, con lo stesso `find::compile` e gli
+> stessi flag, riga per riga come ha fatto la ricerca: tutti i match di ogni riga, e i gruppi
+> risolti dove il match è stato trovato (`find::expand_at`, estratto da `replacement_for`).
+> Su disco il CRLF e l'ultima newline si rileggono e si riscrivono come li ha trovati.
+> Rifiuti onesti con la loro frase: sola lettura, ricerca fermata al limite ("più di quanto
+> una passata regga"), niente più da sostituire, revisione o mtime spostati. La metà su disco
+> non ha undo, e dirlo — "N file riscritti su disco" — è l'onestà disponibile.
+>
+> *Come è stato provato:* `scripts/drive_replace.py`, 28 controlli, in CI col resto del
+> sottoinsieme deterministico. Legge i **byte** dei fixture, non lo schermo: Esc lascia
+> ogni file identico anche nell'mtime, il file CRLF torna CRLF, quello senza newline finale
+> continua a non averla, e il file con la tab non viene toccato su disco affatto.
+
 ## 0.17 — La potenza sotto le dita
 
 - **Gli edit dell'agente si vedono anche nel testo, non solo nel gutter.** (2026-09-02, dal

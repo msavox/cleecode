@@ -93,7 +93,7 @@ jobs:
           git config --global user.email ci@cleecode.invalid
           git config --global user.name "CleeCode CI"
           git config --global init.defaultBranch master
-      # These five are the deterministic subset: no Octave, no matplotlib, no display. The rest
+      # These six are the deterministic subset: no Octave, no matplotlib, no display. The rest
       # (drive_cells, drive_workspace, drive_figures, drive_presets, drive_inspect, drive_debug,
       # drive_python) need real interpreters and stay manual for now — each is its own step so a
       # failure names itself rather than hiding in a combined log.
@@ -101,6 +101,9 @@ jobs:
       - run: python3 scripts/drive_jump.py target/debug/clee
       - run: python3 scripts/drive_git.py target/debug/clee
       - run: python3 scripts/drive_lsp.py target/debug/clee
+      # Writes files in a throwaway tree and reads the bytes back, which is the only way to check
+      # a line ending survived — nothing installed, nothing on the network.
+      - run: python3 scripts/drive_replace.py target/debug/clee
       # Needs nothing installed either: the agent's side of the MCP bridge is a second copy of
       # the same binary, spoken to on a pipe.
       - run: python3 scripts/drive_mcp.py target/debug/clee
