@@ -298,6 +298,16 @@ struct PendingCompletion {
     id: i64,
     editor: usize,
     start: usize,
+    /// Whether a trigger character asked this, in which case the answer may *open* a popup rather
+    /// than only feed one.
+    ///
+    /// The two questions look identical on the wire and are opposite in what they promise. A
+    /// popup that is already up wants names folded into it and carries on without them; a `.`
+    /// that has just been typed has no popup at all, and the answer is the only thing that could
+    /// put one there. Recorded when the question goes out because that is the only moment the
+    /// difference is known — by the time the words come back there is nothing on screen to read
+    /// it off.
+    triggered: bool,
 }
 
 /// How long a dead server is left alone before it is started again.
@@ -4074,7 +4084,14 @@ impl App {
     /// text of four hundred milliseconds ago is not a slower right answer, it is a wrong one.
     /// It costs one extra message per word typed, which is still far less than the editors that
     /// send one per keystroke.
-    fn lsp_ask_completion(&mut self, editor_index: usize, start: usize) {
+    ///
+    /// `trigger` says a character asked rather than a popup, and it is passed on twice: to the
+    /// server, which answers a dot differently from a bare position, and to the slot, so the
+    /// reply knows it is allowed to open a list of its own. Every guard below is the same in both
+    /// cases, and the quiet one matters most here: a file with no server configured returns
+    /// without a word. A `.` is typed a hundred times an hour, and a message about it — even a
+    /// helpful one — would be the editor talking over the typing.
+    fn lsp_ask_completion(&mut self, editor_index: usize, start: usize, trigger: Option<char>) {
         self.lsp_completion = None;
         if self.lsp.is_empty() {
             return;
@@ -4098,24 +4115,38 @@ impl App {
             return;
         }
         client.did_change(&absolute, &text);
-        let asked = client.completion(&absolute, line, &line_text, col);
+        let asked = client.completion(&absolute, line, &line_text, col, trigger);
         // Recorded as sent, so the debounce does not turn round and send the same revision again.
         self.lsp_sent.insert(path, revision);
-        self.lsp_completion =
-            asked.map(|id| PendingCompletion { id, editor: editor_index, start });
+        self.lsp_completion = asked.map(|id| PendingCompletion {
+            id,
+            editor: editor_index,
+            start,
+            triggered: trigger.is_some(),
+        });
     }
 
-    /// Folds a server's answer into the popup that asked for it, or drops it.
+    /// Folds a server's answer into the popup that asked for it, opens one on it, or drops it.
     ///
     /// Three ways it is dropped, and none of them is an error: it answers a question we are no
     /// longer waiting for, the popup has closed or moved on, or the server had nothing to say.
     /// The popup carries on with the words from the buffer in every one of those cases, which is
     /// the property worth protecting — the list was never waiting on this.
+    ///
+    /// A trigger character's answer is the one that has no popup to fold into: it *is* the popup,
+    /// and see [`Self::open_triggered_completion`] for why it waits until here to become one.
     fn absorb_lsp_completion(&mut self, id: i64, words: Vec<String>) {
         let Some(pending) = self.lsp_completion.as_ref().filter(|p| p.id == id) else { return };
-        let (editor, start) = (pending.editor, pending.start);
+        let (editor, start, triggered) = (pending.editor, pending.start, pending.triggered);
         self.lsp_completion = None;
-        if words.is_empty() || !self.completion_live() {
+        if words.is_empty() {
+            return;
+        }
+        if triggered {
+            self.open_triggered_completion(editor, start, words);
+            return;
+        }
+        if !self.completion_live() {
             return;
         }
         let Some(popup) = self.completion.as_mut() else { return };
@@ -4125,6 +4156,42 @@ impl App {
             return;
         }
         popup.absorb(crate::complete::lsp_candidates(&words));
+    }
+
+    /// Puts up the popup a trigger character asked for, now that there is something to put in it.
+    ///
+    /// Nothing opened when the `.` was typed, on purpose. The buffer's words are not a stand-in
+    /// for a member list — they are the wrong answer to a different question — so a list that
+    /// flashed up full of them and rearranged itself two frames later would be worse than the one
+    /// list that appears once, already right. The cost of waiting is that this can arrive into an
+    /// editor that has moved on, so the anchor is checked here exactly as [`Self::completion_live`]
+    /// checks it afterwards: same buffer, and everything typed since the dot still a word.
+    ///
+    /// A popup that opened in the meantime is left alone. Between the dot and the answer the user
+    /// can have typed two more letters and brought up the ordinary list; that one is on screen,
+    /// has been filtered against what is under the cursor, and replacing it under a finger that
+    /// may already be on the arrows is the one thing this whole file is arranged to avoid. Its
+    /// own request went out when it opened, so the server's names are not lost either.
+    fn open_triggered_completion(&mut self, editor: usize, start: usize, words: Vec<String>) {
+        if self.completion.is_some() || self.focus != Focus::Editor {
+            return;
+        }
+        let idx = self.active_editor_index();
+        if idx != editor {
+            return;
+        }
+        let Some(ed) = self.editors.get(idx) else { return };
+        let Some(prefix) =
+            crate::complete::prefix_from(&ed.rope, start, ed.cursor_line, ed.cursor_col)
+        else {
+            return;
+        };
+        self.completion = crate::complete::Popup::from_trigger(
+            idx,
+            start,
+            prefix,
+            crate::complete::lsp_candidates(&words),
+        );
     }
 
     /// Tells the server what is open, what has changed once the typing has stopped, and what has
@@ -10596,6 +10663,15 @@ impl App {
             return false;
         }
         let Some(ed) = self.editors.get(idx) else { return false };
+        // A popup a trigger opened lives on its anchor rather than on the word under the cursor,
+        // and the difference is not a nicety: right after a `.` there is no word to read
+        // backwards, and `prefix_at` would find the one before the dot — the single word the list
+        // is not about. Forwards from the anchor, an empty run included. Backspacing over the dot
+        // puts the cursor behind it and the popup shuts, which is the same rule seen from behind.
+        if popup.triggered {
+            return crate::complete::prefix_from(&ed.rope, popup.start, ed.cursor_line, ed.cursor_col)
+                .is_some_and(|prefix| prefix == popup.prefix);
+        }
         match crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col) {
             Some((start, prefix)) => start == popup.start && prefix == popup.prefix,
             None => false,
@@ -10648,23 +10724,61 @@ impl App {
 
     /// Called after the editor has seen the key, which is the point: the word to filter against
     /// is the one now in the buffer, not the one that was there before the edit.
+    ///
+    /// Three things can happen here and they are tried in that order: an open popup narrows or
+    /// closes, a trigger character asks a server what can go in this position, and a word being
+    /// typed brings the ordinary list up. The first two are not exclusive, and that is the one
+    /// subtle thing in this function. Typing `value.` usually has a popup open on `value` at the
+    /// moment the dot lands; the dot closes it — correctly, since the list was about a word that
+    /// is now finished — and then the dot is *still* a trigger. Returning early there because a
+    /// popup happened to be up would mean the feature worked only when nothing was on screen,
+    /// which is the half of the time nobody would notice was missing.
     fn follow_completion(&mut self, key: KeyEvent, ctrl: bool) {
         let idx = self.active_editor_index();
         let Some(ed) = self.editors.get(idx) else { return };
         let here = crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col);
+        // Everything read out of the buffer is read here, before the popup is borrowed: the line
+        // to the left of the cursor for the trigger, and the anchor's run for a triggered popup.
+        let before: String = ed.rope.line(ed.cursor_line).chars().take(ed.cursor_col).collect();
+        let cursor = ed.rope.line_to_char(ed.cursor_line) + ed.cursor_col;
+        let anchored = self
+            .completion
+            .as_ref()
+            .filter(|popup| popup.triggered)
+            .and_then(|popup| {
+                crate::complete::prefix_from(&ed.rope, popup.start, ed.cursor_line, ed.cursor_col)
+            });
         if let Some(popup) = self.completion.as_mut() {
-            let alive = match &here {
-                Some((start, prefix)) if *start == popup.start && idx == popup.editor => {
-                    popup.refilter(prefix)
+            let alive = if popup.triggered {
+                match &anchored {
+                    Some(prefix) if idx == popup.editor => popup.refilter(prefix),
+                    _ => false,
                 }
-                _ => false,
+            } else {
+                match &here {
+                    Some((start, prefix)) if *start == popup.start && idx == popup.editor => {
+                        popup.refilter(prefix)
+                    }
+                    _ => false,
+                }
             };
             if !alive {
                 self.completion = None;
             }
-            return;
+            // Still up means still about this word, and there is nothing else to do. Closed means
+            // the key that closed it goes on to be judged on its own below.
+            if self.completion.is_some() {
+                return;
+            }
         }
         if !self.settings.completion {
+            return;
+        }
+        // The question goes out and nothing opens yet: the popup is built out of the answer, in
+        // `open_triggered_completion`. With no server for this file the ask does nothing at all,
+        // and a `.` in a text file stays a `.`.
+        if let Some(trigger) = crate::complete::trigger_at(key.code, ctrl, &before) {
+            self.lsp_ask_completion(idx, cursor, Some(trigger));
             return;
         }
         if crate::complete::opens_on(key.code, ctrl, here.as_ref().map(|(_, p)| p.as_str())) {
@@ -10716,7 +10830,7 @@ impl App {
         // Asked only once the popup is actually up. A question whose answer has nowhere to land
         // is a question not worth putting to a server that has to think about it.
         if self.completion.is_some() {
-            self.lsp_ask_completion(idx, start);
+            self.lsp_ask_completion(idx, start, None);
         }
     }
 
