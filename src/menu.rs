@@ -73,6 +73,9 @@ pub enum MenuAction {
     GitCommit,
     GoToDefinition,
     JumpBack,
+    FindReferences,
+    DocumentSymbols,
+    ShowDiagnostics,
     NewFile,
     NewFolder,
     OpenOutside,
@@ -183,6 +186,9 @@ impl MenuAction {
         MenuAction::GitCommit,
         MenuAction::GoToDefinition,
         MenuAction::JumpBack,
+        MenuAction::FindReferences,
+        MenuAction::DocumentSymbols,
+        MenuAction::ShowDiagnostics,
         MenuAction::NewFile,
         MenuAction::NewFolder,
         MenuAction::OpenOutside,
@@ -371,6 +377,16 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // works depends on the file, not on which menu it was found in.
                 group(Key::ItemGoToDefinition, MenuAction::GoToDefinition, Some("Ctrl+Shift+J")),
                 item(Key::ItemJumpBack, MenuAction::JumpBack, Some("Ctrl+Shift+L")),
+                // The three lists the same server can fill, beside the jump it already answers.
+                // All of them arrive as a picker rather than as a pane: they are read once, on
+                // the way to somewhere, and a panel that stayed open would be a second place to
+                // look at the file from.
+                item(Key::ItemFindReferences, MenuAction::FindReferences, Some("Ctrl+Shift+Y")),
+                item(Key::ItemDocumentSymbols, MenuAction::DocumentSymbols, Some("Ctrl+Shift+V")),
+                // No chord: the comfortable ones are spent, and this is the one of the three
+                // nobody reaches for mid-keystroke — it is looked at after a build, not while
+                // typing a name.
+                item(Key::ItemShowDiagnostics, MenuAction::ShowDiagnostics, None),
                 group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+K")),
                 item(Key::ItemDuplicateLine, MenuAction::DuplicateLine, Some("Alt+Shift+↓")),
                 item(Key::ItemMoveLineUp, MenuAction::MoveLineUp, Some("Alt+↑")),

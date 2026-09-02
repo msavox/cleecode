@@ -57,6 +57,17 @@ pub enum Event {
     /// rather than dropped: "nothing is defined there" is an answer, and a key that silently
     /// does nothing is a key you press again.
     Definition { id: i64, target: Option<Jump> },
+    /// Everywhere the thing under the cursor is used, in the order the server listed them.
+    ///
+    /// A list and not a first entry, which is the whole difference from [`Self::Definition`]:
+    /// a definition is a place to go and the uses are a thing to read, so they arrive whole and
+    /// are chosen from. An empty list is delivered rather than dropped, for the same reason the
+    /// absent definition is: "nothing uses that" is an answer.
+    References { id: i64, targets: Vec<Jump> },
+    /// What the file contains, as the server sees it: names, what kind of thing each is, and
+    /// how deeply nested. Flat or nested on the wire and always flat by the time it arrives —
+    /// see [`symbol_rows`].
+    Symbols { id: i64, symbols: Vec<SymbolRow> },
     /// What the thing under the cursor is, in one line. `None` when the server had nothing.
     Hover { id: i64, text: Option<String> },
     /// A reply the server is owed, already written and waiting to be put on the wire.
@@ -93,6 +104,19 @@ pub enum Severity {
 }
 
 impl Severity {
+    /// The one word for it, in the spelling the protocol uses for these four.
+    ///
+    /// Not translated, and that is the point: it is the same word on the wire to an agent and in
+    /// the column beside a diagnostic, and a reader who has seen one recognises the other.
+    pub fn word(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        }
+    }
+
     fn from_lsp(value: Option<DiagnosticSeverity>) -> Severity {
         match value {
             Some(DiagnosticSeverity::ERROR) => Severity::Error,
@@ -435,6 +459,8 @@ pub fn server_for(path: &Path, configured: &BTreeMap<String, String>) -> Option<
 pub enum Ask {
     Completion,
     Definition,
+    References,
+    Symbols,
     Hover,
 }
 
@@ -450,11 +476,25 @@ pub struct Jump {
     pub column: usize,
 }
 
-/// The one place a definition answer is read, in any of the three shapes a server may send it.
+/// One place, in any of the shapes a server may name one in.
 ///
-/// `Location`, an array of them, or `LocationLink` — which names the same two fields
-/// `targetUri` and `targetSelectionRange`. Servers pick whichever they like and are all correct,
-/// so this reads whichever arrived rather than declaring a preference and losing the others.
+/// `Location` or `LocationLink` — which names the same two fields `targetUri` and
+/// `targetSelectionRange`. Servers pick whichever they like and are all correct, so this reads
+/// whichever arrived rather than declaring a preference and losing the others.
+fn one_location(value: &Value) -> Option<Jump> {
+    let uri = value.get("uri").or_else(|| value.get("targetUri"))?.as_str()?;
+    let range = value
+        .get("range")
+        .or_else(|| value.get("targetSelectionRange"))
+        .or_else(|| value.get("targetRange"))?;
+    let line = range.pointer("/start/line")?.as_u64()? as usize;
+    let column = range.pointer("/start/character")?.as_u64()? as usize;
+    let uri: Uri = uri.parse().ok()?;
+    Some(Jump { path: path_for(&uri)?, line, column })
+}
+
+/// The one place a definition answer is read, in any of the three shapes a server may send it:
+/// one location, an array of them, or a link. See [`one_location`] for the last two spellings.
 ///
 /// The first of an array, deliberately. More than one definition is real — a trait method with
 /// several implementations — and a picker for them is a feature of its own; going to the first
@@ -462,15 +502,127 @@ pub struct Jump {
 pub fn first_location(result: Option<&Value>) -> Option<Jump> {
     let value = result?;
     let one = if value.is_array() { value.get(0)? } else { value };
-    let uri = one.get("uri").or_else(|| one.get("targetUri"))?.as_str()?;
-    let range = one
-        .get("range")
-        .or_else(|| one.get("targetSelectionRange"))
-        .or_else(|| one.get("targetRange"))?;
-    let line = range.pointer("/start/line")?.as_u64()? as usize;
-    let column = range.pointer("/start/character")?.as_u64()? as usize;
-    let uri: Uri = uri.parse().ok()?;
-    Some(Jump { path: path_for(&uri)?, line, column })
+    one_location(one)
+}
+
+/// Every place an answer names, for the questions whose answer is a list rather than a
+/// destination.
+///
+/// The same three shapes as [`first_location`], because a server that sends a bare `Location`
+/// for a definition sends one for a single reference too — and an answer read as nothing is
+/// indistinguishable, on screen, from a name nothing uses. Entries that cannot be read are
+/// dropped one by one rather than costing the whole list: a `references` answer with one
+/// unparseable URI in it is still an answer about everywhere else.
+///
+/// Columns stay in the server's units here, as [`Jump`] says they do.
+pub fn all_locations(result: Option<&Value>) -> Vec<Jump> {
+    let Some(value) = result else { return Vec::new() };
+    match value.as_array() {
+        Some(items) => items.iter().filter_map(one_location).collect(),
+        None => one_location(value).into_iter().collect(),
+    }
+}
+
+/// One name a file contains, as a row of the outline.
+///
+/// `depth` is what makes this a tree without being one: the rows arrive in document order and
+/// each carries how far in it sits, which is everything a list of lines needs to be indented
+/// correctly and nothing more. A tree of children would have to be flattened to be drawn, and
+/// the flattening is the only part anything here uses.
+///
+/// `column` is in the server's units, for the same reason [`Jump`]'s is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SymbolRow {
+    pub name: String,
+    /// What kind of thing it is, in one lowercase word — see [`symbol_kind`].
+    pub kind: &'static str,
+    pub depth: usize,
+    /// Zero-based line, as the protocol counts them.
+    pub line: usize,
+    pub column: usize,
+}
+
+/// A `SymbolKind` number as a word short enough to sit in a column beside the name.
+///
+/// Total and deliberately dull: every number the protocol defines has a word, and anything else
+/// — a number from a version of the specification this predates, or a server counting wrong —
+/// is `sym` rather than a row that goes missing. The words are the ones the languages use for
+/// themselves where they differ from the protocol's: an interface is a `trait` here because the
+/// servers that send that number for Rust mean one.
+fn symbol_kind(number: Option<u64>) -> &'static str {
+    match number {
+        Some(1) => "file",
+        Some(2) => "mod",
+        Some(3) => "ns",
+        Some(4) => "pkg",
+        Some(5) => "class",
+        Some(6) => "method",
+        Some(7) => "prop",
+        Some(8) => "field",
+        Some(9) => "ctor",
+        Some(10) => "enum",
+        Some(11) => "trait",
+        Some(12) => "fn",
+        Some(13) => "var",
+        Some(14) => "const",
+        Some(15) => "str",
+        Some(16) => "num",
+        Some(17) => "bool",
+        Some(18) => "array",
+        Some(19) => "object",
+        Some(20) => "key",
+        Some(21) => "null",
+        Some(22) => "variant",
+        Some(23) => "struct",
+        Some(24) => "event",
+        Some(25) => "operator",
+        Some(26) => "type",
+        _ => "sym",
+    }
+}
+
+/// The one place a `documentSymbol` answer is read, in both of the shapes it comes in.
+///
+/// The protocol has two and a client may be sent either. `SymbolInformation[]` is flat and puts
+/// the position under `location.range`; `DocumentSymbol[]` nests, and names the position twice —
+/// `range` is the whole item, braces and body included, and `selectionRange` is just the name.
+/// The name is what a jump should land on, so that is preferred where both are there.
+///
+/// CleeCode does not ask for the nested shape in the handshake, and reads it anyway. The three
+/// spellings of a definition answer taught that lesson: what a server sends is decided by the
+/// server, and a client that only reads what it asked for shows an empty list on the day one
+/// of them sends the other thing.
+pub fn symbol_rows(result: Option<&Value>) -> Vec<SymbolRow> {
+    let mut rows = Vec::new();
+    if let Some(items) = result.and_then(Value::as_array) {
+        gather_symbols(items, 0, &mut rows);
+    }
+    rows
+}
+
+/// Walks one level of the answer, depth first, so the rows come out in document order.
+fn gather_symbols(items: &[Value], depth: usize, rows: &mut Vec<SymbolRow>) {
+    for item in items {
+        let start = item
+            .pointer("/selectionRange/start")
+            .or_else(|| item.pointer("/location/range/start"))
+            .or_else(|| item.pointer("/range/start"));
+        // A row with no name or no position is not a row: there would be nothing to read and
+        // nowhere to go. Its children are still walked, because one unreadable container should
+        // not take everything inside it off the list with it.
+        if let (Some(name), Some(start)) = (item.get("name").and_then(Value::as_str), start) {
+            rows.push(SymbolRow {
+                name: name.to_string(),
+                kind: symbol_kind(item.get("kind").and_then(Value::as_u64)),
+                depth,
+                line: start.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
+                column: start.get("character").and_then(Value::as_u64).unwrap_or(0) as usize,
+            });
+        }
+        if let Some(children) = item.get("children").and_then(Value::as_array) {
+            gather_symbols(children, depth + 1, rows);
+        }
+    }
 }
 
 /// A hover answer, reduced to the one line that fits in a status bar.
@@ -748,31 +900,82 @@ impl Client {
     /// waiting for the debounce: the question is about *this* text, and an answer about the text
     /// of four hundred milliseconds ago is not a slower right answer, it is a wrong one.
     pub fn definition(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
-        self.position_request("textDocument/definition", Ask::Definition, path, line, line_text, col)
+        self.position_request(
+            "textDocument/definition",
+            Ask::Definition,
+            path,
+            (line, line_text, col),
+            Value::Null,
+        )
+    }
+
+    /// Asks where the thing under the cursor is used.
+    ///
+    /// `includeDeclaration` is asked for, so the list holds the definition as well as the uses.
+    /// It is the honest answer to "where is this name" — the place it comes from is one of the
+    /// places it appears — and a list that silently left out the one row somebody was looking
+    /// for would be read as the server not knowing about it.
+    pub fn references(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+        self.position_request(
+            "textDocument/references",
+            Ask::References,
+            path,
+            (line, line_text, col),
+            json!({ "context": { "includeDeclaration": true } }),
+        )
     }
 
     /// Asks what the thing under the cursor is.
     pub fn hover(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
-        self.position_request("textDocument/hover", Ask::Hover, path, line, line_text, col)
+        self.position_request("textDocument/hover", Ask::Hover, path, (line, line_text, col), Value::Null)
     }
 
-    /// The shape both of those share: a method name, a file and a place in it.
+    /// The shape those three share: a method name, a file and a place in it.
+    ///
+    /// `at` is the place, as the editor holds it: the line, that line's text, and the column in
+    /// *characters*. The text travels with the column because it is what the column is measured
+    /// against — see [`Self::column_for`], which is the one place that arithmetic is written.
+    ///
+    /// `extra` is merged into the params for the methods that carry more than a position —
+    /// `references` and its `context` — and is `Value::Null` for the ones that do not. Merged
+    /// here rather than in a second copy of this function, because the conversion below is the
+    /// part that must never be written twice: the two spellings of it drifted apart once already.
     fn position_request(
         &mut self,
         method: &str,
         ask: Ask,
         path: &Path,
-        line: usize,
-        line_text: &str,
-        col: usize,
+        at: (usize, &str, usize),
+        extra: Value,
     ) -> Option<i64> {
+        let (line, line_text, col) = at;
         let uri = uri_for(path)?;
         let character = self.column_for(line_text, col);
-        let params = json!({
+        let mut params = json!({
             "textDocument": { "uri": uri.as_str() },
             "position": { "line": line, "character": character },
         });
+        if let (Some(target), Some(more)) = (params.as_object_mut(), extra.as_object()) {
+            for (key, value) in more {
+                target.insert(key.clone(), value.clone());
+            }
+        }
         let id = self.request(method, params).ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, ask);
+        }
+        Some(id)
+    }
+
+    /// Asks what names the file holds.
+    pub fn document_symbols(&mut self, path: &Path) -> Option<i64> {
+        self.document_request("textDocument/documentSymbol", Ask::Symbols, path)
+    }
+
+    /// The shape a question about a whole file takes: no position, so no column to convert.
+    fn document_request(&mut self, method: &str, ask: Ask, path: &Path) -> Option<i64> {
+        let uri = uri_for(path)?;
+        let id = self.request(method, json!({ "textDocument": { "uri": uri.as_str() } })).ok()?;
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, ask);
         }
@@ -989,6 +1192,10 @@ fn read_loop(
                         Ask::Definition => {
                             Event::Definition { id, target: first_location(result) }
                         }
+                        Ask::References => {
+                            Event::References { id, targets: all_locations(result) }
+                        }
+                        Ask::Symbols => Event::Symbols { id, symbols: symbol_rows(result) },
                         Ask::Hover => Event::Hover { id, text: hover_text(result) },
                     });
                     continue;
@@ -1576,6 +1783,118 @@ mod tests {
         assert_eq!(first_location(Some(&Value::Null)), None);
         assert_eq!(first_location(Some(&json!([]))), None);
         assert_eq!(first_location(None), None);
+    }
+
+    /// The uses of a name arrive in the same three shapes a definition does, and here the whole
+    /// list is kept — which is the one difference, and the one thing worth checking.
+    #[test]
+    fn every_use_of_a_name_is_read_whichever_shape_it_arrives_in() {
+        let here = json!({
+            "uri": "file:///src/main.rs",
+            "range": { "start": { "line": 41, "character": 8 }, "end": { "line": 41, "character": 12 } }
+        });
+        let there = json!({
+            "uri": "file:///src/other.rs",
+            "range": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 4 } }
+        });
+        assert_eq!(
+            all_locations(Some(&json!([here, there]))),
+            vec![
+                Jump { path: PathBuf::from("/src/main.rs"), line: 41, column: 8 },
+                Jump { path: PathBuf::from("/src/other.rs"), line: 3, column: 0 },
+            ],
+            "both of them, in the order the server listed them"
+        );
+        // Links, which name the same two things differently — and whose selection range is the
+        // name rather than the body it opens.
+        let links = json!([{
+            "targetUri": "file:///src/main.rs",
+            "targetRange": { "start": { "line": 40, "character": 0 }, "end": { "line": 45, "character": 1 } },
+            "targetSelectionRange": { "start": { "line": 41, "character": 8 }, "end": { "line": 41, "character": 12 } }
+        }]);
+        assert_eq!(
+            all_locations(Some(&links)),
+            vec![Jump { path: PathBuf::from("/src/main.rs"), line: 41, column: 8 }]
+        );
+        // A single use, sent bare rather than in an array of one. Reading this as nothing would
+        // put "nothing uses that" on screen for a name that is used exactly once.
+        assert_eq!(
+            all_locations(Some(&here)),
+            vec![Jump { path: PathBuf::from("/src/main.rs"), line: 41, column: 8 }]
+        );
+        // Nothing uses it, said as null or as an empty array.
+        assert!(all_locations(Some(&Value::Null)).is_empty());
+        assert!(all_locations(Some(&json!([]))).is_empty());
+        assert!(all_locations(None).is_empty());
+    }
+
+    /// A file's names arrive flat or nested, both are in the specification, and CleeCode asks
+    /// for neither — so both are read. The rows come out the same shape either way.
+    #[test]
+    fn a_files_names_are_read_flat_or_nested() {
+        // The flat shape: `SymbolInformation`, whose position hides under `location`.
+        let flat = json!([
+            { "name": "main", "kind": 12,
+              "location": { "uri": "file:///src/main.rs",
+                            "range": { "start": { "line": 0, "character": 3 },
+                                       "end": { "line": 4, "character": 1 } } } },
+            { "name": "Config", "kind": 23, "containerName": "",
+              "location": { "uri": "file:///src/main.rs",
+                            "range": { "start": { "line": 6, "character": 7 },
+                                       "end": { "line": 9, "character": 1 } } } },
+        ]);
+        assert_eq!(
+            symbol_rows(Some(&flat)),
+            vec![
+                SymbolRow { name: "main".into(), kind: "fn", depth: 0, line: 0, column: 3 },
+                SymbolRow { name: "Config".into(), kind: "struct", depth: 0, line: 6, column: 7 },
+            ],
+            "flat is flat: nothing is nested in anything"
+        );
+
+        // The nested shape: `DocumentSymbol`, which names the position twice and carries its
+        // children with it. The selection range is the name; the range is the whole body, and
+        // landing on its first brace is landing in the wrong place.
+        let nested = json!([{
+            "name": "Config", "kind": 23,
+            "range": { "start": { "line": 6, "character": 0 }, "end": { "line": 12, "character": 1 } },
+            "selectionRange": { "start": { "line": 6, "character": 7 }, "end": { "line": 6, "character": 13 } },
+            "children": [
+                { "name": "path", "kind": 8,
+                  "range": { "start": { "line": 7, "character": 4 }, "end": { "line": 7, "character": 20 } },
+                  "selectionRange": { "start": { "line": 7, "character": 4 }, "end": { "line": 7, "character": 8 } } },
+                { "name": "load", "kind": 6,
+                  "range": { "start": { "line": 9, "character": 4 }, "end": { "line": 11, "character": 5 } },
+                  "selectionRange": { "start": { "line": 9, "character": 7 }, "end": { "line": 9, "character": 11 } },
+                  "children": [
+                      { "name": "attempt", "kind": 13,
+                        "selectionRange": { "start": { "line": 10, "character": 12 },
+                                            "end": { "line": 10, "character": 19 } } }
+                  ] },
+            ]
+        }]);
+        assert_eq!(
+            symbol_rows(Some(&nested)),
+            vec![
+                SymbolRow { name: "Config".into(), kind: "struct", depth: 0, line: 6, column: 7 },
+                SymbolRow { name: "path".into(), kind: "field", depth: 1, line: 7, column: 4 },
+                SymbolRow { name: "load".into(), kind: "method", depth: 1, line: 9, column: 7 },
+                SymbolRow { name: "attempt".into(), kind: "var", depth: 2, line: 10, column: 12 },
+            ],
+            "document order, each row carrying how far in it sits"
+        );
+
+        // A kind nothing here has a word for still gets a row: the name is the part being
+        // looked for, and a number out of a newer specification is not a reason to lose it.
+        let odd = json!([{ "name": "?", "kind": 99,
+                           "selectionRange": { "start": { "line": 1, "character": 0 },
+                                               "end": { "line": 1, "character": 1 } } }]);
+        assert_eq!(symbol_rows(Some(&odd))[0].kind, "sym");
+
+        // Nothing in the file, and nothing asked.
+        assert!(symbol_rows(Some(&json!([]))).is_empty());
+        assert!(symbol_rows(Some(&Value::Null)).is_empty());
+        assert!(symbol_rows(None).is_empty());
     }
 
     /// A hover is documentation — a signature, a rule, then paragraphs. One line of a status bar

@@ -42,6 +42,15 @@ pub enum PickerKind {
     SearchResults,
     /// The names a live interpreter is holding, to pick one to look inside.
     Variables,
+    /// Everywhere the language server says a name is used. A fixed list, like the search
+    /// results, and narrowed the same way — which is what makes a name used in eighty places
+    /// still usable: type the file you meant.
+    References,
+    /// What the open file contains, in document order. The outline is a chooser and not a pane:
+    /// it is opened to go somewhere, and it closes when you get there.
+    Symbols,
+    /// Everything the servers have said is wrong, across the files that are open.
+    Diagnostics,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds
@@ -59,6 +68,14 @@ pub struct Picker {
     /// True while the query is being read as a filesystem path rather than a project-file
     /// search, so the owner only rebuilds the list when the mode actually flips.
     pub path_mode: bool,
+    /// Where this list was asked from, for the lists that are asked from somewhere in
+    /// particular: confirming a row pushes it onto the jump stack, so the key that comes back
+    /// from a definition also comes back from a reference.
+    ///
+    /// Held here rather than on the application because it dies with the picker. A slot beside
+    /// the others would outlive the list it belongs to, and the next Enter in an unrelated
+    /// chooser would jump back to somewhere nobody had left.
+    pub origin: Option<(PathBuf, usize, usize)>,
 }
 
 impl Picker {
@@ -72,6 +89,7 @@ impl Picker {
             selected: 0,
             filter_override: None,
             path_mode: false,
+            origin: None,
         };
         p.refilter();
         p

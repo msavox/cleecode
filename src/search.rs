@@ -127,7 +127,11 @@ fn run(root: &Path, query: String, regex: bool, case_sensitive: bool, show_hidde
 }
 
 /// A line as it appears in the results: no indentation, no more than `TEXT_LIMIT` characters.
-fn shorten(line: &str) -> String {
+///
+/// Shared with the lists a language server fills, which have the same row to draw and the same
+/// two ways of ruining it: a deeply indented line that pushes its own text off the right of the
+/// picker, and a generated line thousands of characters long.
+pub fn shorten(line: &str) -> String {
     let trimmed = line.trim_start();
     if trimmed.chars().count() <= TEXT_LIMIT {
         return trimmed.to_string();
