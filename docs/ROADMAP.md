@@ -2213,6 +2213,22 @@ riscritti con la strada temp+rename.
   fotogramma bianco fra due, e un file i cui frame non stanno in memoria dichiara il limite
   invece di scoprirlo congelandosi.
 
+- **I workspace componibili: `clee -w octave+claude`** (pensato il 2026-09-02). Il capitolo
+  numerico e l'agente nello stesso posto di lavoro: il primo nome un preset di sessione, il
+  secondo un agente, e il builder monta la composizione — niente nove preset in `BUILT_INS`,
+  perché 3 linguaggi × 3 agenti non direbbero niente che `+` non dica da sé. Il layout è
+  quello classico con tre finestre sotto — interprete, agente, shell — perché il pannello le
+  tila già e perché l'agente in finestra propria resta a schermo, che non è estetica:
+  `Ctrl+Shift+A` guarda solo la scheda visibile di ogni finestra, e un agente dietro la
+  scheda dell'interprete sarebbe invisibile al tasto. Sotto una soglia di larghezza tre
+  finestre fanno trenta colonne l'una e una TUI si impasta: lì l'agente degrada a scheda,
+  col limite detto. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
+  `Ctrl+Shift+W` — quindi la voce non è renderlo possibile: è renderlo di serie, col
+  layout giusto e un nome che si legge da solo nella lista di `clee -w`. Il flusso che ne
+  esce non ce l'ha nessun editor intero: l'agente vede diagnostici e selezione via MCP,
+  Ctrl+Shift+A gli dà il punto dello script, i suoi edit si ricaricano in diretta, e
+  Ctrl+Shift+R fa girare il file nella sessione che tiene lo stato e le figure.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
