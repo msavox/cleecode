@@ -299,4 +299,8 @@ def binary_from_argv(argv):
     path = os.path.abspath(argv[1] if len(argv) > 1 else "target/debug/clee")
     if not os.access(path, os.X_OK):
         sys.exit(f"no runnable binary at {path} — cargo build first")
+    # Said out loud, because the default is a path and not a build: a stale target/debug/clee
+    # sits there being executable for as long as nobody rebuilds it, and every driver run
+    # against it passes or fails on behalf of a version nobody is looking at.
+    print(f"driving {path}")
     return path

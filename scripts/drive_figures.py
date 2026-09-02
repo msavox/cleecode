@@ -77,10 +77,18 @@ def button_at(session, label):
     Found by its label on screen rather than by working the layout out again here. A hit-test
     that recomputes the layout is a hit-test that will one day disagree with what is drawn —
     which is the reason `nav_bar_layout` is one function used by both sides in the first place,
-    and the reason this driver reads the screen instead of doing arithmetic."""
+    and the reason this driver reads the screen instead of doing arithmetic.
+
+    The row is picked out by the two word-labelled controls a figure's bar has and nothing else
+    on screen does, `reset` and `save`. A plain search for the arrow would not do: `◂` is also
+    the grip of a horizontal split, and `◂` with `→` under it is the page-back button of a
+    document. But the landmark has to be part of the figure's own controls. It used to be
+    `invert`, which belongs to the picture controls further along the bar — and those are drawn
+    only while there is room for them, so on a bar too narrow for the last one this looked at
+    a fully drawn figure bar and said there was none."""
     for row, line in enumerate(session.lines()):
         at = line.find(label)
-        if at >= 0 and "reset" in line and "invert" in line:
+        if at >= 0 and "reset" in line and "save" in line:
             return at, row
     return None
 
