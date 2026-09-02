@@ -4,7 +4,8 @@
 Speaks just enough of the protocol to exercise CleeCode's side of it: answers `initialize`,
 publishes one warning and one error against whatever file it is told was opened, and answers
 `textDocument/completion`, `textDocument/definition`, `textDocument/references`,
-`textDocument/documentSymbol`, `textDocument/hover` and `textDocument/rename`. It echoes back the
+`textDocument/documentSymbol`, `textDocument/hover`, `textDocument/rename` and
+`textDocument/formatting`. It echoes back the
 URI it was given rather than inventing one, which
 is the whole point — a canned URI would pass even if the client's path-to-URI encoding were
 broken, and that encoding is the part most likely to be.
@@ -307,6 +308,81 @@ def rename(message):
     send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"changes": changes}})
 
 
+def laid_out(text, unit):
+    """The file as this stub thinks it should look: every line's indentation thrown away and
+    rebuilt out of the brace depth it sits at, one `unit` per level.
+
+    A rule rather than a canned answer, for the reason every other answer here is built out of
+    the question: a canned clean copy would pass with the file never sent, and this is the one
+    request whose answer overwrites the buffer."""
+    out = []
+    depth = 0
+    for row in text.split("\n"):
+        body = row.strip()
+        opens, closes = body.count("{"), body.count("}")
+        # A line that begins by closing is drawn one level out from the block it ends, which is
+        # the one indentation rule everybody has an opinion about and everybody writes this way.
+        if body.startswith("}"):
+            depth = max(0, depth - 1)
+            closes -= 1
+        out.append(unit * depth + body if body else "")
+        depth = max(0, depth + opens - closes)
+    return "\n".join(out)
+
+
+def formatting(message):
+    """How the whole file should be laid out, in either of the two shapes an answer takes.
+
+    The options are *used*, not logged and ignored: `tabSize` is how wide a level is here, and a
+    client that sent none gets nine spaces — a width nothing in CleeCode would produce by itself,
+    so a screen indented by four can only mean the editor's own setting came across the wire.
+    `insertSpaces` picks between that and a tab, for the same reason.
+
+    Two shapes, chosen by the file's name, because a client has to survive both and they fail
+    differently. A stem with `parts` in it gets one small edit per badly indented line — disjoint
+    spans, all inside their own line, which is what the span rebuild is for. Anything else gets a
+    single edit covering the whole document, from `0:0` to the line *after* the last: a count of
+    lines is one past the last index, which is how a server says "to the end", and a client that
+    did not clamp it would refuse a perfectly ordinary answer.
+
+    A file already laid out gets the empty list, which is what a real formatter sends and the one
+    answer that means something other than a refusal."""
+    params = message.get("params", {})
+    uri = params.get("textDocument", {}).get("uri", "")
+    options = params.get("options") or {}
+    tab_size = options.get("tabSize", 9)
+    insert_spaces = options.get("insertSpaces", True)
+    log(f"   formatting {uri} with tabSize={tab_size} insertSpaces={insert_spaces!r}")
+    text = TEXTS.get(uri, "")
+    unit = " " * tab_size if insert_spaces else "\t"
+    wanted = laid_out(text, unit)
+    if wanted == text:
+        log("   it is already laid out, so there is nothing to change")
+        send({"jsonrpc": "2.0", "id": message.get("id"), "result": []})
+        return
+    stem = uri.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    rows = text.split("\n")
+    if "parts" in stem:
+        edits = []
+        for row, (was, now) in enumerate(zip(rows, wanted.split("\n"))):
+            if was == now:
+                continue
+            edits.append({
+                "range": {"start": {"line": row, "character": 0},
+                          "end": {"line": row, "character": len(was) - len(was.lstrip())}},
+                "newText": now[:len(now) - len(now.lstrip())],
+            })
+        log(f"   {len(edits)} edits, one per line whose indentation was wrong")
+    else:
+        edits = [{
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": len(rows), "character": 0}},
+            "newText": wanted,
+        }]
+        log(f"   one edit over the whole document, ending at line {len(rows)}")
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": edits})
+
+
 def hover(message):
     """A hover whose first line names the word and the place it was asked about.
 
@@ -367,6 +443,8 @@ def main():
             hover(message)
         elif method == "textDocument/rename":
             rename(message)
+        elif method == "textDocument/formatting":
+            formatting(message)
         elif method == "exit":
             return 0
 

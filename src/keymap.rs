@@ -65,6 +65,7 @@ pub enum Action {
     FindReferences,
     DocumentSymbols,
     RenameSymbol,
+    FormatDocument,
     GitPanel,
     FindInProject,
     NextTab,
@@ -115,6 +116,14 @@ fn build_table() -> Vec<(Action, &'static str, Chord)> {
         (Action::FindReferences, "find-references", letter('y')),
         (Action::DocumentSymbols, "document-symbols", letter('v')),
         (Action::RenameSymbol, "rename-symbol", letter('c')),
+        // Q, and it was accepted rather than chosen. After Y, V and C the application layer has
+        // Q, Z and the digits left: Z is redo by every habit anybody brings here — docs/features
+        // lists Ctrl+Shift+Z as one — and a digit is a key nobody remembers and nothing spells.
+        // Q sits one Shift away from Ctrl+Q, which quits, and the fat finger costs almost
+        // nothing in either direction: quitting prompts when there is unsaved work, and a format
+        // arrived at by accident is one Ctrl+Z from never having happened. A chord that could
+        // silently destroy something would not have been allowed to sit there.
+        (Action::FormatDocument, "format-document", letter('q')),
         (Action::GitPanel, "git-panel", letter('d')),
         (Action::FindInProject, "find-in-project", letter('h')),
         (Action::NextTab, "next-tab", chord(KeyCode::Right)),

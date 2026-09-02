@@ -15,10 +15,13 @@
 //! account — a completion is accepted by the same keystroke and the same one-step edit as a word
 //! scraped out of the buffer, and the server only ever adds names to a list that already exists.
 //!
-//! Rename is the one request whose answer is a set of edits, and it is still not something this
-//! module applies: it is parsed into a [`RenamePlan`] — a neutral description of what the server
-//! wants changed — and handed over. What the application does with it is shown to the user
-//! before any of it reaches a buffer, and refused whole where it cannot be shown honestly.
+//! Rename and formatting are the two requests whose answers are sets of edits, and neither is
+//! something this module applies: they are parsed into a [`RenamePlan`] and a list of
+//! [`SpanEdit`]s — neutral descriptions of what the server wants changed — and handed over. What
+//! the application does with a rename is shown to the user before any of it reaches a buffer,
+//! and refused whole where it cannot be shown honestly. A format is shown to nobody first, and
+//! the difference is the scope: a rename reaches files nobody is looking at, a format rewrites
+//! the one buffer on screen and lands as a single edit that one Ctrl+Z takes back.
 
 use lsp_types::{
     ClientCapabilities, CompletionClientCapabilities, CompletionItem, CompletionItemCapability,
@@ -83,6 +86,18 @@ pub enum Event {
     /// for, and "you cannot rename that" is the answer: reporting it as "no changes" would be
     /// the editor putting its own words in the server's mouth.
     Rename { id: i64, plan: Result<RenamePlan, String> },
+    /// How the server would lay one file out, or what it said instead.
+    ///
+    /// A bare list of spans rather than a [`RenamePlan`], because that is what the answer is:
+    /// `textDocument/formatting` is asked about one document and answers about that document, so
+    /// there is no second URI to read and no resource operation to refuse. The spans are in the
+    /// server's units, like every other position that arrives here.
+    ///
+    /// Carries an error for the same reason [`Self::Rename`] does. A format is asked for on
+    /// purpose and waited for, and an empty list already means something else here — "the file
+    /// is already laid out the way I would lay it out" — so reporting a refusal as one would be
+    /// the editor telling the user the opposite of what the server said.
+    Formatting { id: i64, edits: Result<Vec<SpanEdit>, String> },
     /// A reply the server is owed, already written and waiting to be put on the wire.
     ///
     /// It travels this way round because the reader thread has no writer: the pipe into the
@@ -476,6 +491,7 @@ pub enum Ask {
     Symbols,
     Hover,
     Rename,
+    Formatting,
 }
 
 /// Where a definition is, before the file it names has been opened.
@@ -792,6 +808,29 @@ pub fn rename_plan(result: Option<&Value>) -> RenamePlan {
         }
     }
     plan
+}
+
+/// The edits one `textDocument/formatting` answer asks for, in the server's own units.
+///
+/// A bare array, and that is the whole difference from [`rename_plan`]: this answer is about the
+/// document the question named and nothing else, so there is no URI to read, no second shape to
+/// accept and no resource operation to guard against. `null` is a legal answer — it is how a
+/// server says it would change nothing — and reads as the empty list, which is what it means.
+///
+/// The spans a formatter sends routinely cross lines: replacing the whole file with a laid-out
+/// copy is one edit from `0:0` to past the last line, and that is the ordinary case rather than
+/// the odd one. So nothing here refuses a multi-line span the way [`SpanEdit::spans_lines`] has
+/// a rename refuse one — the two are asking different questions of the same struct, and the
+/// application converts these against the buffer at both ends instead of clamping to a line.
+///
+/// An entry that cannot be read is dropped rather than costing the whole answer, as everywhere
+/// else here: a stray member in one range should not be the reason a file cannot be laid out.
+/// What it costs is a run of text carried over unformatted, which the reader can see.
+pub fn format_edits(result: Option<&Value>) -> Vec<SpanEdit> {
+    result
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(one_edit).collect())
+        .unwrap_or_default()
 }
 
 /// What a server said went wrong, as the one sentence a status line has room for.
@@ -1190,13 +1229,50 @@ impl Client {
 
     /// Asks what names the file holds.
     pub fn document_symbols(&mut self, path: &Path) -> Option<i64> {
-        self.document_request("textDocument/documentSymbol", Ask::Symbols, path)
+        self.document_request("textDocument/documentSymbol", Ask::Symbols, path, Value::Null)
+    }
+
+    /// Asks how the whole file should be laid out.
+    ///
+    /// The second request whose answer is a set of edits, and the first that is about a file
+    /// rather than about a place in one — which is why it is here and not beside the rename.
+    /// It is still only a question: the answer arrives as [`Event::Formatting`] and nothing on
+    /// this side of the wire touches a buffer.
+    ///
+    /// `tab_size` and `insert_spaces` are the editor's own settings and travel with the request
+    /// because `FormattingOptions` requires both. A server told nothing lays the file out to its
+    /// own default, which is how a two-space project gets a file back indented with four — and
+    /// the user would have no way of telling that from the formatter simply disagreeing.
+    pub fn formatting(&mut self, path: &Path, tab_size: usize, insert_spaces: bool) -> Option<i64> {
+        self.document_request(
+            "textDocument/formatting",
+            Ask::Formatting,
+            path,
+            json!({ "options": { "tabSize": tab_size, "insertSpaces": insert_spaces } }),
+        )
     }
 
     /// The shape a question about a whole file takes: no position, so no column to convert.
-    fn document_request(&mut self, method: &str, ask: Ask, path: &Path) -> Option<i64> {
+    ///
+    /// `extra` is merged into the params for the method that carries more than a document —
+    /// `formatting` and its `options` — and is `Value::Null` for the one that does not, exactly
+    /// as [`Self::position_request`] takes the members that ride along with a position. Merged
+    /// here rather than in a second function for the same reason it is merged there.
+    fn document_request(
+        &mut self,
+        method: &str,
+        ask: Ask,
+        path: &Path,
+        extra: Value,
+    ) -> Option<i64> {
         let uri = uri_for(path)?;
-        let id = self.request(method, json!({ "textDocument": { "uri": uri.as_str() } })).ok()?;
+        let mut params = json!({ "textDocument": { "uri": uri.as_str() } });
+        if let (Some(target), Some(more)) = (params.as_object_mut(), extra.as_object()) {
+            for (key, value) in more {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        let id = self.request(method, params).ok()?;
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id, ask);
         }
@@ -1424,16 +1500,24 @@ fn read_loop(
                         }
                         Ask::Symbols => Event::Symbols { id, symbols: symbol_rows(result) },
                         Ask::Hover => Event::Hover { id, text: hover_text(result) },
-                        // The one place an `error` member is read rather than passed over. For
+                        // The two places an `error` member is read rather than passed over. For
                         // every other question above, a response carrying an error instead of a
                         // result has no `result` to read and becomes the same empty answer as a
                         // server that simply knew nothing — which is the truth as far as the
-                        // screen is concerned. See [`Event::Rename`] for why this one is not.
+                        // screen is concerned. These two were asked for by a keypress and waited
+                        // for; see [`Event::Rename`] and [`Event::Formatting`].
                         Ask::Rename => Event::Rename {
                             id,
                             plan: match value.get("error") {
                                 Some(error) => Err(complaint(error)),
                                 None => Ok(rename_plan(result)),
+                            },
+                        },
+                        Ask::Formatting => Event::Formatting {
+                            id,
+                            edits: match value.get("error") {
+                                Some(error) => Err(complaint(error)),
+                                None => Ok(format_edits(result)),
                             },
                         },
                     });
@@ -2394,6 +2478,111 @@ mod tests {
                 assert_eq!(plan.as_ref().err().map(String::as_str), Some("cannot rename this element"));
             }
             _ => panic!("the error did not come back as the answer to the rename"),
+        }
+    }
+
+    /// The formatter's answer is a bare array, and the spans in it cross lines as a matter of
+    /// course. Read as they were sent: a formatter replacing the whole file sends one edit from
+    /// the top to past the bottom, and a parser that clamped it to its first line would delete
+    /// the first line and call the file formatted.
+    #[test]
+    fn a_formatting_answer_is_a_bare_list_of_spans() {
+        let answer = json!([
+            {"range": {"start": {"line": 0, "character": 0},
+                       "end": {"line": 3, "character": 0}},
+             "newText": "fn main() {\n    ok();\n}\n"},
+        ]);
+        let edits = format_edits(Some(&answer));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0],
+            SpanEdit {
+                start_line: 0,
+                start_col: 0,
+                end_line: 3,
+                end_col: 0,
+                new_text: "fn main() {\n    ok();\n}\n".to_string(),
+            }
+        );
+        assert!(edits[0].spans_lines(), "and it is the shape a rename refuses");
+    }
+
+    /// A whole-file format ends past the last line the buffer has, because a line *count* is one
+    /// more than the last index — which is how a server spells "to the end of the document".
+    ///
+    /// Nothing is clamped here, and this test is the marker for that: the number arrives as it
+    /// was sent, and the application clamps it against the rope, which is the only side that
+    /// knows how many lines there are. A parser that clamped would have to guess.
+    #[test]
+    fn an_end_past_the_last_line_arrives_as_it_was_sent() {
+        let answer = json!([
+            {"range": {"start": {"line": 0, "character": 0},
+                       "end": {"line": 4_294_967_295u32, "character": 0}},
+             "newText": "laid out\n"},
+        ]);
+        let edits = format_edits(Some(&answer));
+        assert_eq!(edits[0].end_line, 4_294_967_295);
+    }
+
+    /// Two smaller edits rather than one big one — reindenting two lines and leaving the rest —
+    /// which is the other thing formatters do and the case the span rebuild is for.
+    #[test]
+    fn several_formatting_edits_all_arrive() {
+        let answer = json!([
+            {"range": {"start": {"line": 1, "character": 0},
+                       "end": {"line": 1, "character": 8}}, "newText": "    "},
+            {"range": {"start": {"line": 2, "character": 0},
+                       "end": {"line": 2, "character": 6}}, "newText": "    "},
+        ]);
+        let edits = format_edits(Some(&answer));
+        assert_eq!(edits.len(), 2);
+        assert_eq!((edits[0].start_line, edits[1].start_line), (1, 2));
+    }
+
+    /// Nothing to do, said in each of the ways a server says it, is the empty list rather than a
+    /// panic — and an entry with no range costs its own row and no more.
+    #[test]
+    fn an_unreadable_formatting_answer_costs_only_itself() {
+        assert!(format_edits(None).is_empty());
+        assert!(format_edits(Some(&Value::Null)).is_empty());
+        assert!(format_edits(Some(&json!([]))).is_empty());
+        assert!(format_edits(Some(&json!({"changes": {}}))).is_empty(), "not a WorkspaceEdit");
+        let answer = json!([
+            {"newText": "no range here"},
+            {"range": {"start": {"line": 1, "character": 0},
+                       "end": {"line": 1, "character": 2}}, "newText": "kept"},
+        ]);
+        let edits = format_edits(Some(&answer));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "kept");
+    }
+
+    /// The second answer whose error is carried rather than read as "nothing to do", and the one
+    /// where the difference bites hardest: an empty formatting answer already means "already
+    /// laid out", so a refusal read as one would tell the user the opposite of the truth.
+    #[test]
+    fn a_refused_format_arrives_with_what_the_server_said() {
+        let wire = frame(
+            r#"{"jsonrpc":"2.0","id":11,
+                "error":{"code":-32601,"message":"formatting is not supported"}}"#,
+        );
+        let (tx, rx) = mpsc::channel();
+        read_loop(
+            BufReader::new(&wire[..]),
+            tx,
+            "stub".to_string(),
+            pending_asks(&[(11, Ask::Formatting)]),
+        );
+        let events: Vec<Event> = rx.into_iter().collect();
+        match &events[0] {
+            Event::Formatting { id, edits } => {
+                assert_eq!(*id, 11);
+                assert_eq!(
+                    edits.as_ref().err().map(String::as_str),
+                    Some("formatting is not supported")
+                );
+            }
+            _ => panic!("the error did not come back as the answer to the format"),
         }
     }
 }

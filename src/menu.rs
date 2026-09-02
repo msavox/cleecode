@@ -76,6 +76,7 @@ pub enum MenuAction {
     FindReferences,
     DocumentSymbols,
     RenameSymbol,
+    FormatDocument,
     ShowDiagnostics,
     NewFile,
     NewFolder,
@@ -190,6 +191,7 @@ impl MenuAction {
         MenuAction::FindReferences,
         MenuAction::DocumentSymbols,
         MenuAction::RenameSymbol,
+        MenuAction::FormatDocument,
         MenuAction::ShowDiagnostics,
         MenuAction::NewFile,
         MenuAction::NewFolder,
@@ -389,6 +391,18 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // way — and the one of the four that writes, which is why it answers with a
                 // preview rather than with a list.
                 item(Key::ItemRenameSymbol, MenuAction::RenameSymbol, Some("Ctrl+Shift+C")),
+                // The second one that writes, and beside the first because that is the pair: one
+                // asks the server about a name and one asks it about the file, and both come
+                // back as edits. It has no preview where the rename does — a format is the one
+                // buffer you are looking at, and one Ctrl+Z is the whole of taking it back.
+                //
+                // Not in the Format menu, whose name promises it. That menu is Markdown styling —
+                // bold, a heading, a fence — which is text this editor writes on its own account
+                // for the file you are in. This is the language server's opinion about a source
+                // file, and it belongs where the other four things the server answers are: the
+                // menu tells you which of them work by which file you have open, and splitting
+                // them across two menus would make that one honest rule two.
+                item(Key::ItemFormatDocument, MenuAction::FormatDocument, Some("Ctrl+Shift+Q")),
                 // No chord: the comfortable ones are spent, and this is the one of the three
                 // nobody reaches for mid-keystroke — it is looked at after a build, not while
                 // typing a name.
