@@ -1,3 +1,46 @@
+## What's new in 0.15.0
+
+**Your coding agent, inside the editor.** `clee -w claude`, `clee -w opencode` and
+`clee -w codex` open the editor with the agent running in one terminal tab and a plain shell
+in the other. The agent is the TUI you already have, with the subscription you already pay
+for — CleeCode holds no API key and rebuilds no chat; it is the place where the agent runs
+best, with the editor, the clickable compiler output and the Git panel around it.
+
+**Ctrl+Shift+A tells the agent where you are.** The selection, the diagnostic under the
+cursor, or just the cursor's line, written to the agent's prompt as `path:line` — and never
+submitted: Enter stays yours. The way back has always been there: agents print `path:line`
+constantly, and a double-click opens it.
+
+**The agent's edits are live.** A file it rewrites reloads on its own and the new lines light
+up in the gutter until you type again or press Esc. Follow mode — off by default — opens the
+files it touches beside your work, without ever taking the keyboard; it needs a git
+repository and says so when there is none. A buffer with your unsaved edits never reloads
+itself: your work wins over the agent's, always.
+
+**`clee --mcp` makes the editor an MCP server.** Four tools tell the agent what only the
+editor knows — the open files, the active one, the selection, the diagnostics — and
+`open_file` shows a file beside your work without touching your keyboard. One implementation,
+three agents: the wiring is one line in each agent's config, spelled out in the manual.
+
+Along for the ride, the 0.14 tail: `theme = "auto"` asks the terminal for its background
+colour (OSC 11, with a timeout) and picks the dark or light house theme; keybindings can be
+remapped one at a time from a `[keys]` table in settings.toml, seeded as a commented catalogue
+by the new menu entry; and the macOS app's window now closes when the editor quits, whatever
+the Ghostty config says (rebuild the launcher with `clee --install-app` to pick it up).
+
+## What's new in 0.14.0
+
+**Nine themes, and one place the colours come from.** Five dark, four light. Six are built on
+the values syntect already carried in the binary — it shipped seven themes and CleeCode used
+one — and Turbo is the blue screen, in the set because it stresses the palette like no other
+dark theme would. The theme picker sits beside the background button, and in View → Theme for
+whoever has their hands on the keyboard.
+
+A settings.toml with a single key now loads as that key over the defaults instead of being
+set aside as broken: the first release's fields lacked `#[serde(default)]`, so a hand-written
+partial file lost everything else — and the file is rewritten on exit, so the defaults papered
+over the evidence before you could see it.
+
 ## What's new in 0.13.3
 
 **A URL in terminal output opens on a double-click.** The same double-click that already takes
