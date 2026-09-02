@@ -994,6 +994,12 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
+    if app.symbol_rename.is_some() {
+        draw_symbol_rename_modal(f, app, f.area());
+    }
+    if app.rename_preview.is_some() {
+        draw_rename_preview(f, app, f.area());
+    }
     if app.show_terminal_rename {
         draw_terminal_rename_modal(f, app, f.area());
     }
@@ -1552,6 +1558,96 @@ fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let cursor_x = (inner.x + app.rename_input.chars().count() as u16)
         .min(inner.right().saturating_sub(1));
     f.set_cursor_position((cursor_x, inner.y + 1));
+}
+
+/// The box that asks what to call the name under the cursor instead.
+///
+/// The same shape as the file rename above, deliberately: one line of question, one of answer,
+/// and the caret where the typing goes. What is being renamed is a different kind of thing, but
+/// the gesture is the same one and there is nothing to be gained by its looking different.
+fn draw_symbol_rename_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let Some(box_) = app.symbol_rename.as_ref() else { return };
+    let rect = rename_modal_rect(full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(lang, Key::ItemRenameSymbol)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(i18n::msg_rename_symbol_prompt(lang, &box_.old_name)),
+        Line::from(Span::styled(box_.typed.clone(), Style::default().fg(pal.warning))),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Clamped to the box, for the reason every other input here is: a name longer than the modal
+    // is wide would park the caret on whatever is drawn beside it.
+    let cursor_x =
+        (inner.x + box_.typed.chars().count() as u16).min(inner.right().saturating_sub(1));
+    f.set_cursor_position((cursor_x, inner.y + 1));
+}
+
+/// What a rename would change, before any of it is a buffer.
+///
+/// On the git panel's frame, and that is the argument for the whole design: this is a diff being
+/// read before it is agreed to, which is what that panel is for, and a reader who has read one
+/// has read this. The rows are diff-shaped so [`diff_span`] colours them without being told
+/// anything new, and the footer spells its keys for the reason the git footer spells its own —
+/// they are bare letters, safe only while the box owns the keyboard, and discoverable only if the
+/// box says so.
+fn draw_rename_preview(f: &mut Frame, app: &mut App, full: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let rect = git_panel_rect(full);
+    let Some(preview) = app.rename_preview.as_ref() else { return };
+    let block = Block::default()
+        .title(format!(
+            " {} ",
+            i18n::msg_rename_preview_title(
+                lang,
+                &preview.old_name,
+                &preview.new_name,
+                preview.edits,
+                preview.files.len(),
+            )
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    if inner.height < 2 {
+        return;
+    }
+    // One row kept back for the keys, the way the git panel keeps one back for its own.
+    let body = Rect { height: inner.height.saturating_sub(1), ..inner };
+    let rows = body.height as usize;
+    // Told back to the preview before anything is drawn, because paging needs the height and the
+    // renderer is the only thing that knows it — the same arrangement as the git panel's.
+    if let Some(preview) = app.rename_preview.as_mut() {
+        preview.body_rows = rows;
+    }
+    let app: &App = app;
+    let Some(preview) = app.rename_preview.as_ref() else { return };
+
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    let lines: Vec<Line> = preview
+        .rows
+        .iter()
+        .skip(preview.scroll)
+        .take(rows)
+        .map(|row| Line::from(diff_span(pal, row)))
+        .collect();
+    f.render_widget(Paragraph::new(lines), body);
+    let keys = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            i18n::msg_rename_keys(lang),
+            Style::default().fg(pal.text_dim),
+        ))),
+        keys,
+    );
 }
 
 /// Simple single-line input modal shared by Go-to-line and New file/folder.

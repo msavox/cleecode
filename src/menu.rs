@@ -75,6 +75,7 @@ pub enum MenuAction {
     JumpBack,
     FindReferences,
     DocumentSymbols,
+    RenameSymbol,
     ShowDiagnostics,
     NewFile,
     NewFolder,
@@ -188,6 +189,7 @@ impl MenuAction {
         MenuAction::JumpBack,
         MenuAction::FindReferences,
         MenuAction::DocumentSymbols,
+        MenuAction::RenameSymbol,
         MenuAction::ShowDiagnostics,
         MenuAction::NewFile,
         MenuAction::NewFolder,
@@ -383,6 +385,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // look at the file from.
                 item(Key::ItemFindReferences, MenuAction::FindReferences, Some("Ctrl+Shift+Y")),
                 item(Key::ItemDocumentSymbols, MenuAction::DocumentSymbols, Some("Ctrl+Shift+V")),
+                // Beside the three that read, because it is asked of the same name in the same
+                // way — and the one of the four that writes, which is why it answers with a
+                // preview rather than with a list.
+                item(Key::ItemRenameSymbol, MenuAction::RenameSymbol, Some("Ctrl+Shift+C")),
                 // No chord: the comfortable ones are spent, and this is the one of the three
                 // nobody reaches for mid-keystroke — it is looked at after a build, not while
                 // typing a name.
