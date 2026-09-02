@@ -2217,12 +2217,19 @@ riscritti con la strada temp+rename.
   numerico e l'agente nello stesso posto di lavoro: il primo nome un preset di sessione, il
   secondo un agente, e il builder monta la composizione — niente nove preset in `BUILT_INS`,
   perché 3 linguaggi × 3 agenti non direbbero niente che `+` non dica da sé. Il layout è
-  quello classico con tre finestre sotto — interprete, agente, shell — perché il pannello le
-  tila già e perché l'agente in finestra propria resta a schermo, che non è estetica:
-  `Ctrl+Shift+A` guarda solo la scheda visibile di ogni finestra, e un agente dietro la
-  scheda dell'interprete sarebbe invisibile al tasto. Sotto una soglia di larghezza tre
-  finestre fanno trenta colonne l'una e una TUI si impasta: lì l'agente degrada a scheda,
-  col limite detto. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
+  il pannello a destra impilato, che è il frame di fianco all'editor già costruito: col
+  pannello a destra le finestre si impilano in verticale (`ui.rs`, la stessa geometria del
+  preset agente), quindi editor a sinistra e colonna destra con l'agente in alto a peso
+  doppio — una conversazione legge in giù e vuole righe — l'interprete sotto con la shell
+  come scheda, e il pannello variabili in fondo. Seam trascinabili e pesi già nel formato.
+  L'agente in finestra propria resta a schermo, che non è estetica: `Ctrl+Shift+A` guarda
+  solo la scheda visibile di ogni finestra, e un agente dietro la scheda dell'interprete
+  sarebbe invisibile al tasto. Sui terminali larghi e bassi, dove una colonna non ha righe
+  per tre finestre, si degrada alle tre finestre sotto — interprete, agente, shell — e
+  sotto ancora l'agente diventa scheda, col limite detto. Un frame *dedicato* agli LLM
+  nella split dell'editor è stato valutato e rimandato: la split ospita buffer, metterci un
+  pty tocca focus e routing di tasti e mouse, e comprerebbe solo estetica sopra quello che
+  l'impilamento a destra già dà — se ne riparla il giorno che serve chrome specifico. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
   `Ctrl+Shift+W` — quindi la voce non è renderlo possibile: è renderlo di serie, col
   layout giusto e un nome che si legge da solo nella lista di `clee -w`. Il flusso che ne
   esce non ce l'ha nessun editor intero: l'agente vede diagnostici e selezione via MCP,
