@@ -1,3 +1,25 @@
+## What's new in 0.15.1
+
+**Ctrl+Shift+A now finds the `claude` most people actually have.** Installed from npm,
+`claude` is a script run by `node`, so the process table says `node` and a search by name came
+up empty — an agent sitting at its prompt two panes away, and the key said there was none. A
+pane opened by the preset was covered by its startup command; a `claude` typed by hand into an
+ordinary shell was covered by nothing. Now each process is read by name *and* by the arguments
+it was started with: where the name is an interpreter's, the script it was handed answers, and
+the npm-installed agent is found like any other.
+
+**"Send where you are to the agent" is in the Run menu.** The chord was the only way to it,
+and a feature reachable only by a shortcut you were told about once is a feature most people
+never learn they have. The menu row is also what `Ctrl+P` finds.
+
+**Running a script again lands in the same figure tabs again.** Run closes the figures the
+file's previous run opened, so an unnumbered `figure()` redraws into the tab that is already
+there instead of opening a new one — but the watch that remembers what a run drew was closing
+half a second after the prompt returned, and the session publishes its figures up to two
+seconds later. Every rerun recorded nothing, closed nothing, and stacked fresh tabs. The watch
+now waits for the session to actually say what the run drew, with a cap for sessions that
+never say anything.
+
 ## What's new in 0.15.0
 
 **Your coding agent, inside the editor.** `clee -w claude`, `clee -w opencode` and
