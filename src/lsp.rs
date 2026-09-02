@@ -874,11 +874,18 @@ impl Client {
                     // one we depend on: a server told nothing about snippets may send them
                     // anyway, and `${1:self}` inserted into a buffer is a mess the user has to
                     // undo. This popup types a word, and this is where it says so.
+                    //
+                    // `context_support` is the other half of the same sentence: every request
+                    // this client sends carries a `context`, and a server told nothing about it
+                    // is entitled to ignore the member — which would cost exactly the feature it
+                    // is there for, since a member list after a `.` is what a server answers
+                    // differently when it knows the dot is why it was asked.
                     completion: Some(CompletionClientCapabilities {
                         completion_item: Some(CompletionItemCapability {
                             snippet_support: Some(false),
                             ..Default::default()
                         }),
+                        context_support: Some(true),
                         ..Default::default()
                     }),
                     // Said out loud for the same reason as the snippet flag above: the default is
@@ -1039,15 +1046,38 @@ impl Client {
     /// which it negotiated. Nothing waits for the answer — it arrives as [`Event::Completion`]
     /// some frames later, and the popup is already on screen with the words from the buffer by
     /// then. That is the whole shape of this feature: the list is never empty while it waits.
-    pub fn completion(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+    ///
+    /// `trigger` is the character that asked the question, when a character did — a `.` or a `:`,
+    /// chosen by [`crate::complete::trigger_at`]. It is the difference between "somebody pressed
+    /// the completion key here" and "somebody typed a dot", and servers answer the two
+    /// differently: the second is what makes rust-analyzer list the methods of a type rather than
+    /// every name in scope. Both shapes are sent rather than one omitted, because a request that
+    /// says `triggerKind: 1` has said something, and a request with no `context` at all has left
+    /// the server to guess after this client promised it would not.
+    pub fn completion(
+        &mut self,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+        trigger: Option<char>,
+    ) -> Option<i64> {
         let uri = uri_for(path)?;
         let character = self.column_for(line_text, col);
+        // 1 is Invoked and 2 is TriggerCharacter, which are the only two this client can be in;
+        // the third, "the list was incomplete and is being asked again", needs a list kept across
+        // requests and there is none.
+        let context = match trigger {
+            Some(c) => json!({"triggerKind": 2, "triggerCharacter": c.to_string()}),
+            None => json!({"triggerKind": 1}),
+        };
         let id = self
             .request(
                 "textDocument/completion",
                 json!({
                     "textDocument": {"uri": uri.as_str()},
-                    "position": {"line": line, "character": character}
+                    "position": {"line": line, "character": character},
+                    "context": context
                 }),
             )
             .ok()?;

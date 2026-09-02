@@ -15,6 +15,11 @@ the text it was last sent. A canned list would pass with the position arithmetic
 the file never sent, or with the request going out against yesterday's text — which are three of
 the four things that can actually go wrong on the client's side.
 
+A request that carries a trigger character is the one answer built out of a fixed list instead:
+what follows a `.` is decided by a type, and a stub has no types. It is fixed in an order the
+client is not allowed to rearrange, out of words that appear in no fixture — so a popup showing
+them can only have got them from here.
+
 Used two ways: by the process-level test in src/lsp.rs, and by scripts/drive_lsp.py, which
 installs it under the name CleeCode looks for and drives the real editor against it.
 
@@ -97,6 +102,26 @@ def word_at(text, line, character):
     return word
 
 
+# What a trigger character answers with: a member list, in an order this file decides and the
+# client is not allowed to invent. Nothing here appears in any fixture, so a buffer word that
+# leaked into the popup would be visible beside them rather than hidden among them.
+MEMBERS = ["push_back", "pop_front", "len_of"]
+
+
+def members(message, trigger):
+    """The answer to a `.` or a `::`: what could follow it, and nothing that came before.
+
+    A real server answers a trigger differently from a bare position — after a dot it lists the
+    members of a type rather than every name in scope — and this is the smallest honest version
+    of that: a fixed list, in an explicit `sortText` order, none of whose words is in any file the
+    driver opens. So the popup that shows them can only have got them from here, and the order on
+    screen can only be this one."""
+    log(f"   offering the members after {trigger!r}")
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"isIncomplete": False, "items": [
+        {"label": label, "sortText": "%04d" % at} for at, label in enumerate(MEMBERS)
+    ]}})
+
+
 def complete(message):
     """An answer assembled out of the question, so it cannot pass while the question is wrong."""
     params = message.get("params", {})
@@ -104,7 +129,15 @@ def complete(message):
     position = params.get("position", {})
     line = position.get("line", 0)
     character = position.get("character", 0)
+    context = params.get("context") or {}
     word = word_at(TEXTS.get(uri, ""), line, character)
+    # 2 is TriggerKind.TriggerCharacter. The empty word is the same case reached from the other
+    # side — there is nothing to complete *back* from a dot — and reading both means a client
+    # that dropped the `context` member still gets an answer it can be measured against, rather
+    # than a list built out of an empty word that would look like a passing screen.
+    if context.get("triggerKind") == 2 or not word:
+        members(message, context.get("triggerCharacter"))
+        return
     log(f"   completing {word!r} at line {line} column {character}")
     send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"isIncomplete": False, "items": [
         # No word at its head. Sorted first on purpose: if the client offered it, it would be the
@@ -306,6 +339,12 @@ def main():
                 # plumbing rather than about its UTF-16 arithmetic, which has its own tests.
                 "positionEncoding": "utf-8",
                 "textDocumentSync": 1,
+                # Said for realism rather than because anything reads it: the client hardcodes
+                # `.` and `::` and stores nothing a server says at the handshake. A stub that
+                # announced no triggers at all would be describing a server the client could not
+                # have been written against, which is the kind of quiet lie a fixture should not
+                # tell — and the day the client negotiates this list, this is where it will look.
+                "completionProvider": {"triggerCharacters": [".", ":"]},
             }}})
         elif method in ("textDocument/didOpen", "textDocument/didChange"):
             document = message["params"]["textDocument"]

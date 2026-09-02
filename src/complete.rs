@@ -10,6 +10,15 @@
 //! its nature: the question goes out when the popup opens and the answer comes back frames later.
 //! So the popup is never waiting on it — it opens on the words in the file, and the server's
 //! names are folded into a list that is already on screen. See [`Popup::absorb`].
+//!
+//! There is one place where that order is deliberately reversed. After a trigger character — a
+//! `.` or a `::`, see [`trigger_at`] — the words in the file are not merely incomplete, they are
+//! *wrong*: what can follow a dot is decided by a type, and no amount of reading the buffer will
+//! find the methods of one. So there the question goes out first and the popup opens on the
+//! answer, or does not open at all. A list that flashes up full of the wrong words and corrects
+//! itself two frames later is worse than one that appears once, already right. Such a popup is
+//! marked [`Popup::triggered`], and it is the one that is allowed to stand with nothing typed
+//! into it yet — see [`prefix_from`] for the anchor that keeps it honest.
 
 use crate::picker::fuzzy_score;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -19,6 +28,10 @@ use std::path::Path;
 
 /// How many word characters must be typed before the popup appears on its own, and below which
 /// it closes again. Two is enough to mean something and short enough not to arrive late.
+///
+/// It is a floor on *guessing*: below two letters the buffer's words are a list of everything,
+/// which is no answer. A popup a trigger character opened is not guessing — the server was asked
+/// about that exact position — so it is exempt, and stands with nothing typed into it at all.
 pub const MIN_PREFIX: usize = 2;
 
 /// Rows the popup shows at once; the list scrolls inside this if there are more.
@@ -217,6 +230,40 @@ pub fn prefix_at(rope: &Rope, line: usize, col: usize) -> Option<(usize, String)
     Some((rope.line_to_char(line) + start, prefix))
 }
 
+/// What has been typed since an anchor, when the cursor is still writing at it.
+///
+/// The question [`prefix_at`] cannot answer. That one reads backwards from the cursor and refuses
+/// an empty word, which is load-bearing where it is used: a popup that opened on its own must be
+/// about a word somebody is actually typing. A popup a trigger character opened is anchored
+/// instead — it belongs to the position right after the `.`, and at the instant it opens there is
+/// nothing typed into it yet. Reading backwards from the cursor there would find the word *before*
+/// the dot, which is the one thing the list is not about.
+///
+/// So this reads forwards from the anchor, and `None` is the popup's death: the cursor has gone
+/// to another line, or behind the anchor (backspaced past the `.`), or something that is not a
+/// word character sits in between (a space, a bracket, another dot). Everything else is the
+/// prefix, the empty string included.
+pub fn prefix_from(rope: &Rope, start: usize, line: usize, col: usize) -> Option<String> {
+    if line >= rope.len_lines() {
+        return None;
+    }
+    let line_start = rope.line_to_char(line);
+    // An anchor on another line is an anchor the cursor has left. Checked before the subtraction
+    // below, which would underflow on exactly that case.
+    if start < line_start {
+        return None;
+    }
+    let chars: Vec<char> = rope.line(line).chars().collect();
+    let col = col.min(chars.len());
+    let from = start - line_start;
+    // Behind the anchor, or off the end of a line that has since been cut short.
+    if from > col || from > chars.len() {
+        return None;
+    }
+    let run: String = chars[from..col].iter().collect();
+    run.chars().all(is_word_char).then_some(run)
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -290,6 +337,13 @@ pub struct Popup {
     /// row, and must, or its best suggestion arrives underneath the highlight and Enter types
     /// the wrong word. Once the arrows have been touched, the pick is the user's and is kept.
     touched: bool,
+    /// Whether a trigger character opened this, rather than a word being typed.
+    ///
+    /// Two things follow from it, and they are the same thing said twice: this popup is about a
+    /// *position* rather than about a word, so it may stand with nothing typed into it, and it is
+    /// kept alive by its anchor ([`prefix_from`]) rather than by the word under the cursor. A
+    /// popup that opened on its own is the other case in both, and neither rule crosses over.
+    pub triggered: bool,
 }
 
 impl Popup {
@@ -299,13 +353,45 @@ impl Popup {
         if matches.is_empty() {
             return None;
         }
-        Some(Popup { editor, start, prefix, candidates, matches, selected: 0, scroll: 0, touched: false })
+        Some(Popup {
+            editor,
+            start,
+            prefix,
+            candidates,
+            matches,
+            selected: 0,
+            scroll: 0,
+            touched: false,
+            triggered: false,
+        })
+    }
+
+    /// The popup a trigger character opens, on the server's answer and on nothing else.
+    ///
+    /// No buffer index is folded in, and that is the whole point rather than an economy: after a
+    /// dot the words in the file are the wrong list, and this feature exists to beat them. An
+    /// answer with nothing in it opens nothing — `None` here is a server that had no members to
+    /// offer, and a popup showing the file's words instead would be answering a question nobody
+    /// asked.
+    pub fn from_trigger(
+        editor: usize,
+        start: usize,
+        prefix: String,
+        candidates: Vec<Candidate>,
+    ) -> Option<Self> {
+        let mut popup = Popup::open(editor, start, prefix, candidates)?;
+        popup.triggered = true;
+        Some(popup)
     }
 
     /// Re-filters against a new prefix. `false` means the popup should close: either the word
     /// shrank below the threshold, or nothing matches it any more.
+    ///
+    /// The threshold is [`MIN_PREFIX`] for a popup that opened on a word and none at all for one
+    /// a trigger opened: there, an empty prefix is where it started, and closing on it would shut
+    /// the list in the same breath as opening it.
     pub fn refilter(&mut self, prefix: &str) -> bool {
-        if prefix.chars().count() < MIN_PREFIX {
+        if !self.triggered && prefix.chars().count() < MIN_PREFIX {
             return false;
         }
         self.prefix = prefix.to_string();
@@ -446,6 +532,33 @@ pub fn opens_on(code: KeyCode, ctrl: bool, prefix: Option<&str>) -> bool {
         return false;
     }
     prefix.is_some_and(|p| p.chars().count() >= MIN_PREFIX)
+}
+
+/// Whether the character just typed is one a language server should be asked about, and which
+/// one to tell it about.
+///
+/// `before` is the line to the left of the cursor, so it ends in the character that was just
+/// written. Two triggers, hardcoded, and the deliberate v1: nothing in this program stores what a
+/// server said it could do — the handshake reply is read for its position encoding and for
+/// nothing else — so there is no table to look `completionProvider.triggerCharacters` up in.
+/// Hardcoding two is the honest shape of that: `.` and `::` are the two every language this
+/// editor knows about spells the same way, and the day one needs another — C++ and Rust both
+/// offer members through `->`, which rust-analyzer and clangd both list — the fix is to keep the
+/// server's own list at initialize and ask it here, not to lengthen this `match`.
+///
+/// A single `:` is not a trigger. It is a type annotation, a dictionary, a label and a ternary
+/// far more often than it is half a path, and a popup on every one of those would be a popup on
+/// nearly every line.
+pub fn trigger_at(code: KeyCode, ctrl: bool, before: &str) -> Option<char> {
+    if ctrl {
+        return None;
+    }
+    let KeyCode::Char(c) = code else { return None };
+    match c {
+        '.' => Some('.'),
+        ':' if before.ends_with("::") => Some(':'),
+        _ => None,
+    }
 }
 
 /// The keywords of the language a file is written in, by extension.
@@ -864,6 +977,93 @@ mod tests {
         // Below the threshold, and on no word at all.
         assert!(!opens_on(KeyCode::Char('c'), false, Some("c")));
         assert!(!opens_on(KeyCode::Char(' '), false, None));
+    }
+
+    /// The anchor a triggered popup lives on: what has been typed since the `.`, and nothing read
+    /// backwards from the cursor. The empty answer is the interesting one — it is the state the
+    /// popup opens in.
+    #[test]
+    fn an_anchor_reads_forwards_and_an_empty_run_is_an_answer() {
+        let rope = Rope::from_str("value.push\nsecond line\n");
+        // Right after the dot, nothing typed yet.
+        assert_eq!(prefix_from(&rope, 6, 0, 6), Some(String::new()));
+        // And as the word grows under it.
+        assert_eq!(prefix_from(&rope, 6, 0, 8), Some("pu".to_string()));
+        assert_eq!(prefix_from(&rope, 6, 0, 10), Some("push".to_string()));
+    }
+
+    #[test]
+    fn an_anchor_dies_when_the_cursor_leaves_it() {
+        let rope = Rope::from_str("value.push here\nsecond line\n");
+        // Backspaced past the `.`: the cursor is behind the anchor.
+        assert_eq!(prefix_from(&rope, 6, 0, 5), None);
+        // Something that is not a word character in between — the popup is about the run right
+        // after the dot, and a space ended it.
+        assert_eq!(prefix_from(&rope, 6, 0, 12), None);
+        // Another line entirely, and a line that does not exist.
+        assert_eq!(prefix_from(&rope, 6, 1, 3), None);
+        assert_eq!(prefix_from(&rope, 6, 9, 0), None);
+    }
+
+    /// With nothing typed yet every name is in the exact-prefix tier, so the order that reaches
+    /// the screen is the server's own — which is the only ranking there is after a dot.
+    #[test]
+    fn an_empty_prefix_leaves_the_servers_order_alone() {
+        let cands = lsp_candidates(&[
+            "push_back".to_string(),
+            "pop_front".to_string(),
+            "len_of".to_string(),
+        ]);
+        assert_eq!(ranked("", &cands), vec!["push_back", "pop_front", "len_of"]);
+    }
+
+    /// The exemption, and the anchor that bounds it: a triggered popup stands on an empty prefix,
+    /// narrows as the word grows, and closes when nothing matches — never merely for being short.
+    #[test]
+    fn a_triggered_popup_stands_with_nothing_typed_into_it() {
+        let cands = lsp_candidates(&["push_back".to_string(), "pop_front".to_string()]);
+        let mut popup = Popup::from_trigger(0, 6, String::new(), cands).unwrap();
+        assert!(popup.triggered);
+        assert_eq!(popup.len(), 2);
+        // One letter would have closed a popup that opened on a word.
+        assert!(popup.refilter("p"));
+        assert_eq!(popup.len(), 2);
+        assert!(popup.refilter("pu"));
+        assert_eq!(popup.len(), 1);
+        // Back to nothing typed, which is where it started.
+        assert!(popup.refilter(""));
+        assert_eq!(popup.len(), 2);
+        // And a word the server never offered closes it, as it closes any other list.
+        assert!(!popup.refilter("zz"));
+    }
+
+    #[test]
+    fn a_popup_that_opened_on_a_word_keeps_its_floor() {
+        let cands = vec![cand("config_path", Source::Buffer, 0, 1)];
+        let mut popup = Popup::open(0, 0, "conf".to_string(), cands).unwrap();
+        assert!(!popup.triggered);
+        assert!(!popup.refilter("c"), "the exemption belongs to the trigger, not to every popup");
+    }
+
+    /// An answer with nothing in it opens nothing: the buffer's words are not the fallback here,
+    /// they are the thing being replaced.
+    #[test]
+    fn a_trigger_with_no_answer_opens_no_popup() {
+        assert!(Popup::from_trigger(0, 6, String::new(), Vec::new()).is_none());
+    }
+
+    #[test]
+    fn a_dot_triggers_and_a_lone_colon_does_not() {
+        let dot = KeyCode::Char('.');
+        let colon = KeyCode::Char(':');
+        assert_eq!(trigger_at(dot, false, "value."), Some('.'));
+        assert_eq!(trigger_at(colon, false, "std::"), Some(':'));
+        // A type annotation, a dictionary, a label: one colon is none of the editor's business.
+        assert_eq!(trigger_at(colon, false, "let x:"), None);
+        // A chord that happens to leave a dot behind is still a chord, and no other key triggers.
+        assert_eq!(trigger_at(dot, true, "value."), None);
+        assert_eq!(trigger_at(KeyCode::Char('a'), false, "valuea"), None);
+        assert_eq!(trigger_at(KeyCode::Enter, false, ""), None);
     }
 
     #[test]

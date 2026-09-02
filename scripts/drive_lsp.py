@@ -58,6 +58,18 @@ JUMP = "aaa\nbbb\nccc\nddd\n"
 NAME = "alfa = alfa + 1\nsecond\nalfa\n"
 
 
+# For the trigger characters. Two words worth offering, so typing `value` brings the ordinary
+# popup up on the buffer's own `value_holder` — the dot has to land with a list already on
+# screen, because that is what it does when anybody types — and an empty line to type on that is
+# not one of the two the stub marks.
+DOT = "fn probe() {\n    let value_holder = 1;\n    let marker_word = 2;\n\n}\n"
+
+
+# A file no server is configured for. The `.` typed into it is the honest negative: it happens a
+# hundred times an hour, and here it has to stay a full stop.
+PLAIN = "plain words, nothing to complete\n"
+
+
 def install_stub(root):
     """A directory holding an executable called what CleeCode will look for."""
     bindir = os.path.join(root, "fakebin")
@@ -121,6 +133,13 @@ def main():
     # earlier edits had happened first would be a check nobody can read.
     with open(os.path.join(root, "src", "name.rs"), "w") as handle:
         handle.write(NAME)
+    # And a fourth for the trigger characters, for the same reason again: it is typed into, and
+    # its words have to be words no other check is looking at.
+    with open(os.path.join(root, "src", "dot.rs"), "w") as handle:
+        handle.write(DOT)
+    # Deliberately not in src/ and deliberately not Rust: nothing here has a server behind it.
+    with open(os.path.join(root, "notes.txt"), "w") as handle:
+        handle.write(PLAIN)
     bindir = install_stub(root)
 
     report = Report()
@@ -227,6 +246,101 @@ def main():
             typed = [line for line in session.lines() if in_buffer(line)]
             report.check("accepting types the server's word into the buffer", bool(typed), session,
                          note=repr(typed[:1]))
+
+        # ---- trigger characters ---------------------------------------------------------
+        #
+        # The point where the server's answer stops being an improvement on the buffer's words and
+        # starts being the only right answer: what can follow a `.` is decided by a type, and no
+        # amount of reading the file will find the methods of one. So the stub answers a trigger
+        # with three names that appear in no fixture anywhere — a word from the buffer leaking
+        # into this popup would be sitting beside them, not hidden among them.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "dot.rs" in s.text(), 8)
+        session.send("dot.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the trigger fixture opens",
+                     session.wait(lambda s: "value_holder" in s.text(), 8), session)
+
+        # Down to the empty fourth line, then `value` — which brings up the ordinary popup on the
+        # buffer's own word. The dot has to arrive with a list already on screen: that is the
+        # common case, and a trigger that only worked when nothing was up would be a feature
+        # missing exactly half the time.
+        session.press("\x1b[B" * 3, lambda s: True, 1)
+        session.press("value", lambda s: s.popup_open(), 8)
+        report.check("a word still opens the popup on the words in the file",
+                     "value_holder" in session.popup_words(), session,
+                     note=str(session.popup_words()))
+
+        session.send(".")
+        offered = session.wait(lambda s: "push_back" in s.text(), 15)
+        report.check("a dot opens the popup on what the server says can follow it", offered,
+                     session, note="names the stub answers a trigger with and nothing else with")
+
+        if offered:
+            words = session.popup_words()
+            members = [w for w in words if w in ("push_back", "pop_front", "len_of")]
+            report.check("in the order the server gave them, which is the only ranking after a dot",
+                         members == ["push_back", "pop_front", "len_of"], session, note=str(words))
+            report.check("and with none of the file's own words in it",
+                         "value_holder" not in words and "marker_word" not in words
+                         and not any(w.startswith("value_line") for w in words), session,
+                         note=str(words))
+
+            # It is a live list, not a picture: it opened on an empty prefix and goes on filtering
+            # from there, which is the one thing a popup with nothing typed into it has to prove.
+            session.press("pu", lambda s: "pop_front" not in s.text(), 6)
+            report.check("typing after the dot narrows it",
+                         session.popup_open() and "push_back" in session.text()
+                         and "pop_front" not in session.text(), session,
+                         note=str(session.popup_words()))
+
+            # And the point of all of it: the member goes in after the dot, not over the word
+            # before it.
+            session.press("\r", lambda s: s.buffer_line(4) == "value.push_back", 8)
+            report.check("Enter types the member after the dot",
+                         session.buffer_line(4) == "value.push_back", session,
+                         note=repr(session.buffer_line(4)))
+
+        # Esc closes it and the typing carries straight on. A list the server put up is no more a
+        # modal than one the buffer put up.
+        session.send(".")
+        session.wait(lambda s: s.popup_open() and "pop_front" in s.text(), 15)
+        session.press("\x1b", lambda s: not s.popup_open(), 6)
+        session.press("x", lambda s: s.buffer_line(4) == "value.push_back.x", 6)
+        report.check("Esc closes a triggered popup and the next character is typed, not swallowed",
+                     not session.popup_open() and session.buffer_line(4) == "value.push_back.x",
+                     session, note=repr(session.buffer_line(4)))
+
+        # `::` is the other trigger, and one colon is not: a type annotation must not put a list
+        # on screen. The pause is the check — there is nothing to wait *for* when the answer is
+        # that nothing happens.
+        session.press(":", lambda s: s.buffer_line(4) == "value.push_back.x:", 6)
+        session.wait(lambda s: False, 1.5)
+        report.check("one colon on its own asks nothing", not session.popup_open(), session,
+                     note=repr(session.buffer_line(4)))
+        session.send(":")
+        report.check("a second one asks the server, the way a dot does",
+                     session.wait(lambda s: s.popup_open() and "push_back" in s.text(), 15),
+                     session)
+        session.press("\x1b", lambda s: not s.popup_open(), 6)
+
+        # The negative, and it is the one that keeps this liveable: a `.` in a file nothing serves
+        # is a full stop. No popup, no message, nothing to dismiss.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "notes.txt" in s.text(), 8)
+        session.send("notes.txt")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the file no server is configured for opens",
+                     session.wait(lambda s: "plain words" in s.text(), 8), session)
+        session.press("\x1b[F", lambda s: True, 2)            # End of its one line
+        session.send(" value.")
+        session.wait(lambda s: False, 2)
+        report.check("a dot in a file no server knows about opens nothing at all",
+                     not session.popup_open() and "push_back" not in session.text()
+                     and session.buffer_line(1).endswith("value."), session,
+                     note=repr(session.buffer_line(1)))
 
         # ---- what it is, and where it is defined -------------------------------------------
         #
