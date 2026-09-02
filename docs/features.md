@@ -302,3 +302,28 @@ and it is safe inside a terminal for a structural reason: no terminal can encode
 the program running in a pane, so nothing there is listening for it.
 
 The same list, with more detail, is in the built-in manual (`Ctrl+Shift+M`) and in `man clee`.
+
+### Moving a chord
+
+Those reasons hold for an Italian layout on a Mac and are somebody else's arbitrary rules. Every
+chord in the `Ctrl+Shift` layer can be moved, one at a time, by a `[keys]` table in
+`settings.toml`:
+
+```toml
+[keys]
+find-in-project = "Ctrl+Alt+F"
+manual          = "F1"
+```
+
+Anything not named there keeps the key it shipped with — this is not a keymap language, it is the
+ability to move a chord that your keyboard does not have. A chord is modifiers and a key joined
+with `+`: `ctrl`, `shift` and `alt` in any case or order, and then a letter, a digit, `F1` to
+`F12`, an arrow (`left`/`right`/`up`/`down`, or `←→↑↓`), `enter`, `tab`, `esc` or `space`.
+
+**CleeCode ▸ Keybindings...** writes the whole table into `settings.toml` as comments — every
+action, on the key it is on now — and opens the file: uncomment the line you want, change its
+chord, save. The new chords take effect on that save. A name or a chord CleeCode cannot read is a
+sentence on the status line and a default left where it was, never a file that fails to load; two
+actions on one chord is also reported, and the one listed first in the file wins.
+
+The manual and the menus then advertise the chord you chose rather than the one we shipped.

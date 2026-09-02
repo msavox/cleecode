@@ -11,6 +11,7 @@ pub enum MenuAction {
     OpenMenuBar,
     ColumnSelection,
     OpenSettings,
+    EditKeybindings,
     SaveAll,
     NewTerminal,
     CloseTerminal,
@@ -118,6 +119,7 @@ impl MenuAction {
         MenuAction::OpenMenuBar,
         MenuAction::ColumnSelection,
         MenuAction::OpenSettings,
+        MenuAction::EditKeybindings,
         MenuAction::SaveAll,
         MenuAction::NewTerminal,
         MenuAction::CloseTerminal,
@@ -310,6 +312,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemCommandPalette, MenuAction::CommandPalette, Some("Ctrl+P")),
                 item(Key::ItemOpenSettings, MenuAction::OpenSettings, Some("Ctrl+Shift+O")),
+                // Beside the settings panel because it is the other half of the same file, and
+                // without a chord of its own on purpose: this is the entry you use once, to
+                // find out that the chords are editable and what they are called.
+                item(Key::ItemKeybindings, MenuAction::EditKeybindings, None),
                 group(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
             ],
         },

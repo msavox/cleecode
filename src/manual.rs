@@ -6,10 +6,17 @@
 //! section list, and wrapping mid-diagram would ruin the pictures.
 
 use crate::i18n::Lang;
+use crate::keymap::Keymap;
+use std::borrow::Cow;
 
 pub struct Section {
     pub title: &'static str,
-    pub body: &'static [&'static str],
+    /// The section's lines, with every chord the reader has moved written the way they moved it.
+    ///
+    /// `Cow`, because that rewriting is the exception: with nothing remapped — which is nearly
+    /// every reader — these are the same static strings the source holds and not one byte is
+    /// copied. See [`Keymap::relabel`].
+    pub body: Vec<Cow<'static, str>>,
 }
 
 /// Where the reader is: which section, and how far down it. Held by `App` while the manual
@@ -51,11 +58,25 @@ impl ManualState {
     }
 }
 
-pub fn sections(lang: Lang) -> Vec<Section> {
-    match lang {
-        Lang::En => EN.iter().map(|(title, body)| Section { title, body }).collect(),
-        Lang::It => IT.iter().map(|(title, body)| Section { title, body }).collect(),
-    }
+/// The manual as this reader's keyboard actually works.
+///
+/// The prose is written by hand and stays that way — it says *why* a key is the key it is, and a
+/// generated table cannot say that — but the chords inside it are passed through the keymap on
+/// the way out. A manual that advertised `Ctrl+Shift+H` to somebody who had moved project search
+/// onto `Ctrl+Alt+F` would be worse than no manual: it would be a confident wrong answer, in the
+/// one place a reader goes precisely because they do not know.
+pub fn sections(lang: Lang, keymap: &Keymap) -> Vec<Section> {
+    let pages = match lang {
+        Lang::En => EN,
+        Lang::It => IT,
+    };
+    pages
+        .iter()
+        .map(|(title, body)| Section {
+            title,
+            body: body.iter().map(|line| keymap.relabel(line)).collect(),
+        })
+        .collect()
 }
 
 type Page = (&'static str, &'static [&'static str]);
@@ -1758,6 +1779,44 @@ const IT: &[Page] = &[
 mod tests {
     use super::*;
 
+    /// Every line of the manual, in one string, for the tests that ask whether something is
+    /// written down anywhere at all.
+    fn whole_manual(lang: Lang, keymap: &Keymap) -> String {
+        sections(lang, keymap)
+            .iter()
+            .flat_map(|s| s.body.iter().map(|l| l.to_string()).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The manual has to say the key that works, not the key that shipped.
+    ///
+    /// This is the half of remappable chords that is easy to leave out and impossible to live
+    /// without: the manual is where somebody goes when a key did nothing, and a manual that
+    /// repeats the default is the one thing guaranteed not to help them. Both languages, because
+    /// the prose is written twice and the rewriting has to reach both copies.
+    #[test]
+    fn a_remapped_chord_is_the_one_the_manual_shows() {
+        let overrides = [("find-in-project", "Ctrl+Alt+F"), ("manual", "F1")]
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
+        let (keymap, warnings) = Keymap::build(&overrides, Lang::En);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for lang in [Lang::En, Lang::It] {
+            let manual = whole_manual(lang, &keymap);
+            assert!(manual.contains("Ctrl+Alt+F"), "the new chord is missing from the {lang:?} manual");
+            assert!(
+                !manual.contains("Ctrl+Shift+H"),
+                "the {lang:?} manual still advertises the chord that was moved away"
+            );
+            assert!(manual.contains("F1"), "the manual's own chord was not rewritten in {lang:?}");
+            assert!(!manual.contains("Ctrl+Shift+M"), "{lang:?}");
+            // Everything nobody touched is still written exactly as it was.
+            assert!(manual.contains("Ctrl+Shift+R"), "{lang:?}");
+        }
+    }
+
     /// Every key a menu advertises has to be findable in the manual, in both languages.
     ///
     /// This is the drift that happens on its own. A shortcut is added to a menu, where it is
@@ -1784,14 +1843,13 @@ mod tests {
             })
         }
 
+        let keymap = Keymap::default();
         for lang in [Lang::En, Lang::It] {
-            let manual: String =
-                sections(lang).iter().flat_map(|s| s.body.iter().copied()).collect::<Vec<_>>().join("\n");
+            let manual = whole_manual(lang, &keymap);
             for (_, item) in crate::menu::command_entries() {
-                let Some(key) = item.shortcut.map(|sc| crate::i18n::shortcut_label(lang, sc))
-                else {
-                    continue;
-                };
+                let Some(shortcut) = item.shortcut else { continue };
+                let key = crate::keymap::shortcut_hint(lang, &keymap, shortcut);
+                let key = key.as_str();
                 let found = manual.contains(key)
                     || key.chars().next_back().is_some_and(|arrow| {
                         matches!(arrow, '←' | '↑' | '↓' | '→')
@@ -1807,10 +1865,11 @@ mod tests {
     #[test]
     fn every_line_fits_the_reading_pane() {
         const MAX: usize = 76;
+        let keymap = Keymap::default();
         for lang in [Lang::En, Lang::It] {
-            for section in sections(lang) {
+            for section in sections(lang, &keymap) {
                 assert!(section.title.chars().count() <= 14, "section title is too long for the list");
-                for line in section.body {
+                for line in &section.body {
                     assert!(
                         line.chars().count() <= MAX,
                         "manual line is {} columns, over the {MAX} the pane can show: {line}",
@@ -1829,11 +1888,12 @@ mod tests {
     fn diagram_boxes_line_up() {
         const EDGES: [char; 8] = ['┌', '┐', '└', '┘', '├', '┤', '│', '╔'];
         let starts_box = |l: &&str| l.trim_start().starts_with(EDGES);
+        let keymap = Keymap::default();
         for lang in [Lang::En, Lang::It] {
-            for section in sections(lang) {
+            for section in sections(lang, &keymap) {
                 let mut block: Vec<&str> = Vec::new();
                 // A trailing blank flushes the last block without duplicating the check.
-                for line in section.body.iter().copied().chain(std::iter::once("")) {
+                for line in section.body.iter().map(|l| l.as_ref()).chain(std::iter::once("")) {
                     if starts_box(&line) {
                         block.push(line);
                         continue;
@@ -1861,8 +1921,9 @@ mod tests {
     /// the reader somewhere else entirely.
     #[test]
     fn both_languages_have_the_same_sections() {
-        assert_eq!(sections(Lang::En).len(), sections(Lang::It).len());
-        assert!(!sections(Lang::En).is_empty());
+        let keymap = Keymap::default();
+        assert_eq!(sections(Lang::En, &keymap).len(), sections(Lang::It, &keymap).len());
+        assert!(!sections(Lang::En, &keymap).is_empty());
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub enum Key {
     MdLinkPlaceholder,
     WorkspaceBadge,
     ItemOpenSettings,
+    ItemKeybindings,
     ItemNewTerminal,
     ItemNewTerminalTab,
     ItemCloseTerminalTab,
@@ -316,6 +317,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemOpenSettings) => "Settings...",
         (Lang::It, ItemOpenSettings) => "Impostazioni...",
+
+        // Opens settings.toml itself rather than a panel: the chords are a table in a file, and
+        // the entry says so by taking you to the file with that table already written out.
+        (Lang::En, ItemKeybindings) => "Keybindings...",
+        (Lang::It, ItemKeybindings) => "Scorciatoie...",
 
         (Lang::En, ItemNewTerminal) => "New terminal window",
         (Lang::It, ItemNewTerminal) => "Nuova finestra terminale",
@@ -1452,6 +1458,80 @@ pub fn shortcut_label(lang: Lang, shortcut: &str) -> &str {
     match (lang, shortcut) {
         (Lang::It, "Del") => "Canc",
         _ => shortcut,
+    }
+}
+
+/// What went wrong in `[keys]`, said on the status line at startup rather than raised as an
+/// error. Each of these leaves the default chord where it was, so the sentence is about a
+/// setting that did not take effect, not about an editor that failed to start.
+///
+/// The offending text is quoted back verbatim in every one of them. A message that only said
+/// "unknown action" would leave the reader looking for it in a file they have written by hand.
+pub fn msg_keys_unknown_action(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("[keys]: no action is called \"{name}\" — see Keybindings... for the list"),
+        Lang::It => {
+            format!("[keys]: nessuna azione si chiama \"{name}\" — la lista è in Scorciatoie...")
+        }
+    }
+}
+
+pub fn msg_keys_bad_chord(lang: Lang, name: &str, chord: &str) -> String {
+    match lang {
+        Lang::En => format!("[keys]: \"{chord}\" is not a chord — {name} keeps its usual key"),
+        Lang::It => format!("[keys]: \"{chord}\" non è una corda — {name} tiene il tasto di sempre"),
+    }
+}
+
+/// Two actions on one chord. Which one wins is not a coin toss and the message says so, because
+/// the other one has silently stopped working and that is the thing worth knowing.
+pub fn msg_keys_conflict(lang: Lang, chord: &str, winner: &str, loser: &str) -> String {
+    match lang {
+        Lang::En => format!("[keys]: {chord} is on both {winner} and {loser} — {winner} wins"),
+        Lang::It => format!("[keys]: {chord} sta su {winner} e su {loser} — vince {winner}"),
+    }
+}
+
+pub fn msg_keys_reloaded(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Keybindings reloaded from settings.toml".to_string(),
+        Lang::It => "Scorciatoie ricaricate da settings.toml".to_string(),
+    }
+}
+
+pub fn msg_keys_no_config_dir(lang: Lang) -> String {
+    match lang {
+        Lang::En => "No config directory to keep settings.toml in".to_string(),
+        Lang::It => "Nessuna cartella di configurazione dove tenere settings.toml".to_string(),
+    }
+}
+
+/// The comment written above the `[keys]` table CleeCode seeds into settings.toml. Lines, not
+/// one string, because each has to come back out with a `#` in front of it and a hard-wrapped
+/// paragraph is the only way a comment block stays inside eighty columns in both languages.
+pub fn keys_section_header(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::En => &[
+            "",
+            "# Keyboard chords. Uncomment a line and change its chord to move that action; every",
+            "# action left commented out keeps the key CleeCode ships with. Modifiers are ctrl,",
+            "# shift and alt, joined to the key with +, and the key may be a letter, a digit,",
+            "# F1 to F12, an arrow (left/right/up/down), enter, tab, esc or space.",
+            "#",
+            "# Two actions on one chord is allowed and reported: the one listed first here wins,",
+            "# and the other stops firing. Changes take effect when this file is saved.",
+        ],
+        Lang::It => &[
+            "",
+            "# Corde da tastiera. Togli il commento a una riga e cambiale la corda per spostare",
+            "# quell'azione; ogni azione lasciata commentata tiene il tasto con cui CleeCode",
+            "# arriva. I modificatori sono ctrl, shift e alt, uniti al tasto con +, e il tasto",
+            "# può essere una lettera, una cifra, da F1 a F12, una freccia (left/right/up/down),",
+            "# enter, tab, esc o space.",
+            "#",
+            "# Due azioni sulla stessa corda si può, e viene segnalato: vince quella elencata",
+            "# per prima qui sotto, l'altra smette di scattare. Le modifiche valgono al salvataggio.",
+        ],
     }
 }
 

@@ -2058,13 +2058,19 @@ quelle dei menu. Vale la stessa regola del pulsante — è fra i primi a cedere 
 è stretta. Una domanda da decidere lì: se scegliere un tema a fondo opaco debba accendere da sé
 il flag dello sfondo, o se i due interruttori restino indipendenti e liberi di contraddirsi.
 
-**I keybinding rimappabili.** I vincoli di questo progetto — niente F-key, niente Alt+lettera,
+✅ **I keybinding rimappabili.** I vincoli di questo progetto — niente F-key, niente Alt+lettera,
 niente Ctrl+freccia — sono sacrosanti *per un layout italiano su macOS* e arbitrari per
 chiunque altro. La forma: una tabella `[keys]` in `settings.toml`, azione = corda, che
 sovrascrive i default uno alla volta; i default non si toccano. Il test del manuale
 (`every_advertised_key_is_written_down`) deve imparare che una scorciatoia pubblicizzata può
 essere stata rimappata — il manuale mostra quella effettiva. Non è un sistema di keymap alla
 vim: è la possibilità di spostare una corda che sul tuo layout non esiste.
+
+> Fatto in `src/keymap.rs`: ventiquattro azioni con nome kebab-case, i default intatti, avviso
+> sulla status line per nome o corda illeggibile e per due azioni sulla stessa corda (vince la
+> prima dichiarata). **CleeCode ▸ Scorciatoie...** semina in `settings.toml` la sezione `[keys]`
+> con ogni azione commentata sul tasto di oggi — generata dalla tabella, quindi un'azione nuova ci
+> compare da sé — e apre il file; salvarlo ricarica le corde.
 
 ## 0.16 — Il refactoring quotidiano
 
