@@ -196,19 +196,38 @@ pub fn shell_is_busy(shell_pid: u32) -> bool {
 /// and a refresh is not cheap. Returns `None` if the table can't be read.
 pub fn shell_running(language: crate::session::Language, shell_pids: &[Option<u32>]) -> Option<usize> {
     let sys = process_snapshot();
-    shell_pids
-        .iter()
-        .position(|pid| pid.is_some_and(|pid| has_interpreter_descendant(&sys, language, pid)))
+    shell_pids.iter().position(|pid| {
+        pid.is_some_and(|pid| {
+            descendant_matching(&sys, pid, |name| language.is_interpreter(name).then_some(()))
+                .is_some()
+        })
+    })
 }
 
-/// Whether an interpreter of `language` is running under `shell_pid`. Searches descendants
-/// rather than direct children only, because a launcher — `octave` is one — can sit between the
-/// shell and the real interpreter.
-fn has_interpreter_descendant(
+/// The same question asked about agents: the first shell in `shell_pids` with Claude Code,
+/// opencode or codex running inside it, and which of the three it is.
+///
+/// One snapshot for all the shells, like `shell_running` and for the same reason. `None` where
+/// the table cannot be read, or where an agent is there under a name the table does not show —
+/// `claude` from npm is a script that execs `node`, and no list of process names fixes that. The
+/// caller has a second answer for that case: the command the pane was started with.
+pub fn agent_running(shell_pids: &[Option<u32>]) -> Option<(usize, crate::session::Agent)> {
+    let sys = process_snapshot();
+    shell_pids.iter().enumerate().find_map(|(index, pid)| {
+        let found = descendant_matching(&sys, (*pid)?, crate::session::Agent::of_program)?;
+        Some((index, found))
+    })
+}
+
+/// The first process under `shell_pid` that `recognise` says something about, by name.
+///
+/// Descendants rather than direct children only, because a launcher — `octave` is one, and so is
+/// a shell script wrapping an agent — can sit between the shell and the program being looked for.
+fn descendant_matching<T>(
     sys: &sysinfo::System,
-    language: crate::session::Language,
     shell_pid: u32,
-) -> bool {
+    recognise: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
     let mut frontier = vec![sysinfo::Pid::from_u32(shell_pid)];
     let mut visited = 0;
     // The tree under one shell is tiny; the bound only stops a pathological parent/child
@@ -222,13 +241,13 @@ fn has_interpreter_descendant(
             if process.parent() != Some(parent) {
                 continue;
             }
-            if language.is_interpreter(&process.name().to_string_lossy()) {
-                return true;
+            if let Some(found) = recognise(&process.name().to_string_lossy()) {
+                return Some(found);
             }
             frontier.push(process.pid());
         }
     }
-    false
+    None
 }
 
 fn parse_ssh_command(cmd: &str) -> Option<String> {

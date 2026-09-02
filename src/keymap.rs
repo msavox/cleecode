@@ -50,6 +50,7 @@ pub enum Action {
     Settings,
     RunFile,
     RunSelection,
+    SendToAgent,
     ToggleBreakpoint,
     InspectVariable,
     NewTerminalWindow,
@@ -96,6 +97,7 @@ fn build_table() -> Vec<(Action, &'static str, Chord)> {
         (Action::Settings, "settings", letter('o')),
         (Action::RunFile, "run-file", letter('r')),
         (Action::RunSelection, "run-selection", letter('x')),
+        (Action::SendToAgent, "send-to-agent", letter('a')),
         (Action::ToggleBreakpoint, "toggle-breakpoint", letter('p')),
         (Action::InspectVariable, "inspect-variable", letter('i')),
         (Action::NewTerminalWindow, "new-terminal-window", letter('n')),
@@ -425,8 +427,8 @@ pub fn commented_section(lang: Lang) -> String {
         out.push('\n');
     }
     out.push_str("[keys]\n");
-    // Names padded to a common width so the chords line up in a column, which is how a list of
-    // twenty-four of them becomes something you can scan for the one you want.
+    // Names padded to a common width so the chords line up in a column, which is how a list two
+    // dozen long becomes something you can scan for the one you want.
     let width = table().iter().map(|(_, name, _)| name.len()).max().unwrap_or(0);
     for (_, name, chord) in table() {
         let chord = chord.display();
