@@ -207,7 +207,7 @@ pub fn shell_running(language: crate::session::Language, shell_pids: &[Option<u3
 }
 
 /// The same question asked about agents: the first shell in `shell_pids` with Claude Code,
-/// opencode or codex running inside it, and which of the three it is.
+/// opencode, codex or gemini running inside it, and which of the four it is.
 ///
 /// One snapshot for all the shells, like `shell_running` and for the same reason. `None` where
 /// the table cannot be read.

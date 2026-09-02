@@ -1664,8 +1664,8 @@ pub fn msg_agent_sent(lang: Lang, reference: &str, agent: &str, terminal: usize)
 /// No agent anywhere, said plainly rather than by doing nothing. Names the way to get one.
 pub fn msg_agent_none(lang: Lang) -> String {
     match lang {
-        Lang::En => "No agent in any terminal — clee -w claude, opencode or codex opens one",
-        Lang::It => "Nessun agente nei terminali — clee -w claude, opencode o codex ne apre uno",
+        Lang::En => "No agent in any terminal — clee -w claude, opencode, codex or gemini opens one",
+        Lang::It => "Nessun agente nei terminali — clee -w claude, opencode, codex o gemini ne apre uno",
     }
     .to_string()
 }

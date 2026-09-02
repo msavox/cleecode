@@ -36,7 +36,7 @@ PRESETS = [
     {"name": "pylab", "needs": "python3", "prompt": ">>>", "tab": "python"},
 ]
 
-AGENTS = ["claude", "opencode", "codex"]
+AGENTS = ["claude", "opencode", "codex", "gemini"]
 
 # A stand-in for an agent: says who it is, then reads its prompt a line at a time and says what
 # it was given. Line at a time is the point — a `read` returns when Enter is pressed and not

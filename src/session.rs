@@ -316,14 +316,14 @@ impl Language {
 
 /// A coding agent sitting at its own prompt in one of the terminals.
 ///
-/// The same shape as [`Language`], and for the same reason. Claude Code, opencode and codex are
-/// terminal programs, so CleeCode does not have to embed one — it already hosts real ptys. What
-/// the rest of the program wants to know about them differs by a line each: which process names
-/// mean "that agent is running in here", how a file is named at its prompt, what to call it on
-/// screen. Written as three integrations that might converge later, it becomes three
+/// The same shape as [`Language`], and for the same reason. Claude Code, opencode, codex and
+/// gemini are terminal programs, so CleeCode does not have to embed one — it already hosts real
+/// ptys. What the rest of the program wants to know about them differs by a line each: which
+/// process names mean "that agent is running in here", how a file is named at its prompt, what
+/// to call it on screen. Written as four integrations that might converge later, it becomes four
 /// half-features that never do, so the seam goes in with the first one.
 ///
-/// The seam is honest about being a seam. In v1 all three answer [`Agent::reference`] the same
+/// The seam is honest about being a seam. In v1 all four answer [`Agent::reference`] the same
 /// way — `path:line`, plain text, which every one of them reads and which `locate.rs` already
 /// turns back into a jump when the agent prints it. The point of the enum is that the day one of
 /// them wants `@path` or a slash command, exactly one function changes.
@@ -332,6 +332,7 @@ pub enum Agent {
     Claude,
     OpenCode,
     Codex,
+    Gemini,
 }
 
 /// A selection longer than this goes as a reference and nothing else.
@@ -355,23 +356,24 @@ pub enum Context {
 
 impl Agent {
     /// Every agent, in the order the presets are declared.
-    pub fn all() -> [Agent; 3] {
-        [Agent::Claude, Agent::OpenCode, Agent::Codex]
+    pub fn all() -> [Agent; 4] {
+        [Agent::Claude, Agent::OpenCode, Agent::Codex, Agent::Gemini]
     }
 
     /// Program names that mean "this agent is at its own prompt in here".
     ///
-    /// One name each, because each of the three ships one executable and that is what it is
+    /// One name each, because each of the four ships one executable and that is what it is
     /// called. `claude` is the interesting case and it is interesting the other way: installed
     /// from npm it is a script run by `node`, so the process table often says `node` and no list
-    /// of names can fix that. Two answers where the name cannot answer — the arguments the
-    /// process was started with ([`Agent::of_process`]) and the pane's own startup command
-    /// ([`Agent::of_command`]).
+    /// of names can fix that. `gemini` is installed the same way and shares the same answer.
+    /// Two answers where the name cannot answer — the arguments the process was started with
+    /// ([`Agent::of_process`]) and the pane's own startup command ([`Agent::of_command`]).
     pub fn programs(self) -> &'static [&'static str] {
         match self {
             Agent::Claude => &["claude"],
             Agent::OpenCode => &["opencode"],
             Agent::Codex => &["codex"],
+            Agent::Gemini => &["gemini"],
         }
     }
 
@@ -436,6 +438,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::OpenCode => "opencode",
             Agent::Codex => "codex",
+            Agent::Gemini => "gemini",
         }
     }
 
@@ -445,14 +448,15 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::OpenCode => "opencode",
             Agent::Codex => "codex",
+            Agent::Gemini => "gemini",
         }
     }
 
     /// How a place in a file is named at this agent's prompt.
     ///
-    /// `path:line`, in plain text, for all three. Not `@path`: that is Claude Code's file
+    /// `path:line`, in plain text, for all four. Not `@path`: that is Claude Code's file
     /// reference and it means *read this whole file*, which is a different request from *look
-    /// here*. Every one of the three reads `path:line`, and it is the same spelling they print
+    /// here*. Every one of the four reads `path:line`, and it is the same spelling they print
     /// back — which `locate.rs` has turned into a double-click jump since long before this
     /// existed, so the round trip is already built.
     pub fn reference(&self, path: &str, line: usize) -> String {
@@ -693,9 +697,11 @@ mod tests {
         assert_eq!(Agent::of_program("claude"), Some(Agent::Claude));
         assert_eq!(Agent::of_program("opencode"), Some(Agent::OpenCode));
         assert_eq!(Agent::of_program("codex"), Some(Agent::Codex));
+        assert_eq!(Agent::of_program("gemini"), Some(Agent::Gemini));
         // A full path and a Windows executable are the same program as the bare word.
         assert_eq!(Agent::of_program("/opt/homebrew/bin/claude"), Some(Agent::Claude));
         assert_eq!(Agent::of_program(r"C:\Users\x\AppData\npm\codex.exe"), Some(Agent::Codex));
+        assert_eq!(Agent::of_program(r"C:\Users\x\AppData\npm\gemini.exe"), Some(Agent::Gemini));
         assert_eq!(Agent::of_program("Claude"), Some(Agent::Claude));
         // And nothing that merely starts the same way.
         assert_eq!(Agent::of_program("claudette"), None);
@@ -734,6 +740,11 @@ mod tests {
         assert_eq!(
             Agent::of_process("node", &argv(&["node", "--no-warnings", "/opt/npm/bin/claude", "--resume"])),
             Some(Agent::Claude)
+        );
+        // gemini-cli is installed from npm the same way, so it is found the same way.
+        assert_eq!(
+            Agent::of_process("node", &argv(&["node", "/usr/local/bin/gemini"])),
+            Some(Agent::Gemini)
         );
 
         // An ordinary Node program is not an agent, and neither is a bare REPL.
@@ -818,10 +829,10 @@ mod tests {
         assert_eq!(agent.context("f.rs", &diag, false), "f.rs:2");
     }
 
-    /// v1 says the same thing to all three, on purpose, and that is worth pinning: the day one
+    /// v1 says the same thing to all four, on purpose, and that is worth pinning: the day one
     /// of them differs, this test is where the decision gets written down.
     #[test]
-    fn all_three_agents_are_told_the_same_thing_in_v1() {
+    fn all_four_agents_are_told_the_same_thing_in_v1() {
         let what = Context::Cursor { line: 9 };
         for agent in Agent::all() {
             assert_eq!(agent.reference("a/b.rs", 9), "a/b.rs:9");
