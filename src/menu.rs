@@ -39,6 +39,7 @@ pub enum MenuAction {
     ToggleResizeMode,
     RunFile,
     RunSelection,
+    SendToAgent,
     ToggleBreakpoint,
     ShowWorkspacePanel,
     InspectVariable,
@@ -148,6 +149,7 @@ impl MenuAction {
         MenuAction::ToggleResizeMode,
         MenuAction::RunFile,
         MenuAction::RunSelection,
+        MenuAction::SendToAgent,
         MenuAction::ToggleBreakpoint,
         MenuAction::ShowWorkspacePanel,
         MenuAction::InspectVariable,
@@ -456,6 +458,13 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemRunFile, MenuAction::RunFile, Some("Ctrl+Shift+R")),
                 item(Key::ItemRunSelection, MenuAction::RunSelection, Some("Ctrl+Shift+X")),
+                // Beside the two that run the file themselves, because from where you are sitting
+                // it is the same kind of errand: you have a selection, or a cursor on a line, and
+                // you are handing it to something that will act on it. The chord was the only way
+                // to it, and a feature reachable only by a chord you were told about once is a
+                // feature most people never learn they have — the palette is built from these
+                // entries, so this row is also the row Ctrl+P finds.
+                item(Key::ItemSendToAgent, MenuAction::SendToAgent, Some("Ctrl+Shift+A")),
                 // Both belong to a running session rather than to a file, which is why they sit
                 // below the separator: they were reachable only from the keyboard before, and a
                 // feature nobody can find is a feature nobody has.

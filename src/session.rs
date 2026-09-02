@@ -22,6 +22,16 @@ fn program_stem(program: &str) -> &str {
     base.strip_suffix(".exe").unwrap_or(base)
 }
 
+/// Whether a program is one that runs a script somebody else wrote, so that the name in the
+/// process table is the interpreter's and the interesting name is in the arguments.
+///
+/// Only `node`, because only one of the agents is shipped that way: `claude` from npm is a
+/// wrapper script, and running it puts `node` in the table with the script as its argument. The
+/// list is a list so that a second agent packaged for a different runtime has somewhere to go.
+fn is_script_interpreter(name: &str) -> bool {
+    ["node"].contains(&program_stem(name).to_ascii_lowercase().as_str())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     Octave,
@@ -353,9 +363,10 @@ impl Agent {
     ///
     /// One name each, because each of the three ships one executable and that is what it is
     /// called. `claude` is the interesting case and it is interesting the other way: installed
-    /// from npm it is a shell script that execs `node`, so the process table often says `node`
-    /// and no list of names can fix that. The pane's startup command answers where the process
-    /// table cannot — see [`Agent::of_command`].
+    /// from npm it is a script run by `node`, so the process table often says `node` and no list
+    /// of names can fix that. Two answers where the name cannot answer — the arguments the
+    /// process was started with ([`Agent::of_process`]) and the pane's own startup command
+    /// ([`Agent::of_command`]).
     pub fn programs(self) -> &'static [&'static str] {
         match self {
             Agent::Claude => &["claude"],
@@ -380,6 +391,42 @@ impl Agent {
     /// everything after it is that program's business (`claude --resume`, `codex --model o3`).
     pub fn of_command(command: &str) -> Option<Agent> {
         Agent::of_program(command.split_whitespace().next()?)
+    }
+
+    /// Which agent a *running process* is, read from the name the process table shows together
+    /// with the arguments it was started with.
+    ///
+    /// The name alone answers for a binary, and it is the whole of [`Agent::of_program`]. It does
+    /// not answer for `claude` installed from npm: npm's wrapper is a script, and running a
+    /// script means running the interpreter, so the process table says `node` and the agent is
+    /// invisible to any search by name — which left Ctrl+Shift+A saying there was no agent while
+    /// one sat at its prompt two panes away. A pane opened from the preset is covered by its
+    /// startup command; a `claude` typed by hand into an ordinary shell was covered by nothing.
+    ///
+    /// What the wrapper cannot hide is the argument. `node` has to be told which script to run,
+    /// and the script npm installed is called `claude` — so where the program is an interpreter,
+    /// the file stem of the script it was handed is the agent's own name. Only the first argument
+    /// that is not a flag is read: that is the script, and everything after it belongs to the
+    /// script rather than to node.
+    pub fn of_process(name: &str, argv: &[String]) -> Option<Agent> {
+        if let Some(agent) = Agent::of_program(name) {
+            return Some(agent);
+        }
+        if !is_script_interpreter(name) {
+            return None;
+        }
+        // The interpreter's own name comes off the front — by what it is rather than by counting,
+        // since whether a process table repeats argv[0] is the table's business and not ours.
+        // A bare `node` with nothing left after it is a REPL and names no agent.
+        argv.iter()
+            .skip_while(|arg| is_script_interpreter(arg))
+            .find(|arg| !arg.starts_with('-'))
+            .and_then(|script| {
+                // `server.js` keeps its extension through `program_stem`, so a plain Node program
+                // is not mistaken for an agent even when it is called `claude.js`: what npm
+                // installs, and what has to be recognised here, is the extensionless `claude`.
+                Agent::of_program(script)
+            })
     }
 
     /// The name of the built-in workspace that opens this agent, which is also what its terminal
@@ -662,6 +709,51 @@ mod tests {
         assert_eq!(Agent::of_command("  opencode  "), Some(Agent::OpenCode));
         assert_eq!(Agent::of_command("npm run dev"), None);
         assert_eq!(Agent::of_command(""), None);
+    }
+
+    /// The npm wrapper, which is how most people have Claude Code: `claude` is a script, so the
+    /// process table says `node` and the agent was invisible to Ctrl+Shift+A unless the pane had
+    /// been opened by the preset. The script's own name is in the arguments, and that is what is
+    /// read here.
+    #[test]
+    fn an_agent_run_by_node_is_still_that_agent() {
+        let argv = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+
+        // What `npm i -g @anthropic-ai/claude-code` leaves in the process table.
+        assert_eq!(
+            Agent::of_process("node", &argv(&["node", "/usr/local/bin/claude"])),
+            Some(Agent::Claude)
+        );
+        // The same on Windows, where the interpreter has an extension and the path is written
+        // the other way round.
+        assert_eq!(
+            Agent::of_process("node.exe", &argv(&["node.exe", r"C:\Users\x\AppData\npm\claude"])),
+            Some(Agent::Claude)
+        );
+        // Flags to node itself sit before the script and are stepped over.
+        assert_eq!(
+            Agent::of_process("node", &argv(&["node", "--no-warnings", "/opt/npm/bin/claude", "--resume"])),
+            Some(Agent::Claude)
+        );
+
+        // An ordinary Node program is not an agent, and neither is a bare REPL.
+        assert_eq!(Agent::of_process("node", &argv(&["node", "server.js"])), None);
+        assert_eq!(Agent::of_process("node", &argv(&["node"])), None);
+        assert_eq!(Agent::of_process("node", &[]), None);
+        // A table that does not repeat argv[0] is read the same way, since the interpreter is
+        // taken off the front by what it is rather than by counting.
+        assert_eq!(Agent::of_process("node", &argv(&["/usr/local/bin/claude"])), Some(Agent::Claude));
+        // Nor is a script that merely has an agent's name inside its own: the file npm installs
+        // has no extension, and `claude.js` is somebody's own program.
+        assert_eq!(Agent::of_process("node", &argv(&["node", "/srv/claude.js"])), None);
+
+        // A real binary still answers by name, arguments or no arguments — the argument list is
+        // read only where the name is an interpreter's.
+        assert_eq!(Agent::of_process("codex", &argv(&["codex", "--model", "o3"])), Some(Agent::Codex));
+        assert_eq!(Agent::of_process("opencode", &[]), Some(Agent::OpenCode));
+        // And a shell that happens to have been handed a path is not an agent: only the runtime
+        // the wrapper actually uses gets its arguments read.
+        assert_eq!(Agent::of_process("bash", &argv(&["bash", "/usr/local/bin/claude"])), None);
     }
 
     /// The seam is real only if every agent is also a preset somebody can open by name.

@@ -7450,11 +7450,13 @@ impl App {
     /// hidden tab would put it at a prompt nobody is looking at, which is the one outcome this
     /// feature must not have — the text is a question the user is about to press Enter on.
     ///
-    /// Two ways of recognising one, in this order. The process table is the truthful answer:
-    /// an agent that has since exited leaves a shell behind, and the shell is not an agent. But
-    /// `claude` installed from npm is a script that execs `node`, so the table often says `node`
-    /// — and there the pane's own startup command answers, because a pane opened by the preset
-    /// was opened to run that agent and says so.
+    /// Two ways of recognising one, in this order. The process table is the truthful answer: an
+    /// agent that has since exited leaves a shell behind, and the shell is not an agent. It reads
+    /// each process by name and by the arguments it was started with, so an npm-installed
+    /// `claude` — which runs as `node` with the script as its argument — is found there too.
+    ///
+    /// The pane's own startup command is the fallback, for the pane that was opened by a preset
+    /// to run an agent and says so even where the table has gone quiet.
     fn agent_terminal(&self) -> Option<(usize, crate::session::Agent)> {
         let pids: Vec<Option<u32>> =
             self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
@@ -8641,6 +8643,7 @@ impl App {
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::RunSelection => self.run_selection(),
+            MenuAction::SendToAgent => self.send_context_to_agent(),
             MenuAction::ToggleBreakpoint => self.toggle_breakpoint(),
             MenuAction::ShowWorkspacePanel => self.show_workspace_panel(),
             MenuAction::InspectVariable => self.open_inspector_picker(),
