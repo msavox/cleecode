@@ -508,6 +508,15 @@ pub struct App {
     pub show_rename: bool,
     pub rename_target: Option<PathBuf>,
     pub rename_input: String,
+    /// The box that asks what to call the name under the cursor instead, when it is open.
+    ///
+    /// Named apart from the three fields above, which are the file tree's rename, and the
+    /// distance between the two is the point: one moves a file on disk, this one asks a language
+    /// server a question about a name inside one. They can never be up at the same time, and a
+    /// shared field would still have been a field two features had to agree about.
+    pub symbol_rename: Option<SymbolRename>,
+    /// What a rename would change, once the server has said and before any of it is a buffer.
+    pub rename_preview: Option<RenamePreview>,
     /// The run-target drop-down, while it is open under its toolbar button.
     pub run_menu: Option<RunMenu>,
     /// The theme drop-down, while it is open under its button on the menu bar. Just the row the
@@ -600,6 +609,14 @@ pub struct App {
     /// list asked for on purpose would either be cancelled by the next one or be blocked by it
     /// forever. Neither of those is something a key press should have to know about.
     lsp_listing: Option<PendingAsk>,
+    /// The one rename still out.
+    ///
+    /// A third slot, and the separation from the other two is the whole reason it exists: those
+    /// hold questions whose answers are things to *read*, and a hover fills one of them several
+    /// times a second on its own account. An answer that is going to write into buffers cannot
+    /// share a slot with that — a rename quietly displaced by a hover is a key that appeared to
+    /// do nothing to a file the user believed they had changed.
+    lsp_editing: Option<PendingRename>,
     /// Where the cursor was when the last hover was asked, so the same question is not asked
     /// again every frame while nothing moves.
     lsp_hovered: Option<(PathBuf, usize, usize)>,
@@ -937,6 +954,88 @@ pub struct PendingAsk {
     pub from: (PathBuf, usize, usize),
 }
 
+/// A rename that has gone out to a server and not come back.
+///
+/// The names travel with it rather than being read off the buffer when the answer lands. By then
+/// the text may have moved, and a title reading `foo → bar` assembled from whatever happens to be
+/// under the cursor a second later would be a preview describing the wrong rename.
+pub struct PendingRename {
+    pub id: i64,
+    /// The buffer and the place in it the question was asked from: the position the answer is
+    /// about, and the cursor to put back once the edits have landed.
+    pub from: (PathBuf, usize, usize),
+    pub old_name: String,
+    pub new_name: String,
+}
+
+/// The box that asks what to call it instead.
+pub struct SymbolRename {
+    /// The identifier under the cursor when the box opened. Shown in the prompt and compared
+    /// against what was typed, so a name left untouched closes the box without asking anything.
+    pub old_name: String,
+    pub from: (PathBuf, usize, usize),
+    /// What has been typed so far, prefilled with `old_name`.
+    pub typed: String,
+}
+
+/// One replacement, converted against the buffer it belongs to.
+///
+/// Absolute char indices, half-open, which is what [`Editor::replace_char_range`] takes — and
+/// they are only true while the buffer has not moved, which is what [`RenameFile::revision`]
+/// exists to check. `line` rides along because two things want it: the preview groups the rows
+/// by line, and the cursor is put back by counting the edits before it on its own line.
+pub struct RenameEdit {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub new_text: String,
+}
+
+/// The edits one open buffer would receive, in ascending order and not overlapping.
+pub struct RenameFile {
+    pub path: PathBuf,
+    /// The buffer's revision when the preview was built.
+    ///
+    /// The whole guard on the offsets above. A clean buffer is reloaded from disk by the sweep in
+    /// the frame loop without anybody pressing anything, and a preview built before that reload
+    /// describes text that is no longer in the rope. Checked again at the moment Enter is
+    /// pressed, because that is the only moment at which it matters.
+    pub revision: u64,
+    pub edits: Vec<RenameEdit>,
+}
+
+/// What a rename would change, ready to be read and then applied.
+///
+/// Built once, from the server's answer and the buffers as they are at that moment, and never
+/// recomputed: the rows on screen and the offsets that get written are two views of the same
+/// list, so what is applied is what was shown or nothing is.
+pub struct RenamePreview {
+    pub old_name: String,
+    pub new_name: String,
+    /// Where the key was pressed — the buffer whose cursor is put back afterwards, and its
+    /// position as an absolute char index in that buffer before any of this is applied.
+    pub from: (PathBuf, usize, usize),
+    pub from_char: usize,
+    pub files: Vec<RenameFile>,
+    /// The lines to draw, diff-shaped: a header per file, then a `-`/`+` pair per changed line.
+    pub rows: Vec<String>,
+    /// How many changes in all, so the title does not have to add them up while it draws.
+    pub edits: usize,
+    pub scroll: usize,
+    /// How many rows the body has room for, written by the renderer for the same reason the git
+    /// panel's is: keeping a reading position sane needs the height, and only the renderer knows.
+    pub body_rows: usize,
+}
+
+impl RenamePreview {
+    /// Moves the reading position, stopping at the top and at the last screenful.
+    pub fn scroll_by(&mut self, by: isize) {
+        let page = self.body_rows.max(1);
+        let last = self.rows.len().saturating_sub(page) as isize;
+        self.scroll = (self.scroll as isize + by).clamp(0, last.max(0)) as usize;
+    }
+}
+
 /// A question the panel is holding everything else for.
 ///
 /// Two kinds, and the difference is the whole of the safety here. Something you *type* can be
@@ -1222,6 +1321,75 @@ fn empty_state_focus(show_sidebar: bool, show_terminal: bool) -> Focus {
 ///
 /// A file that could not be read still gets a row, with the place and nothing after it: where
 /// it is is most of what was asked for, and a row missing from the list is a use gone missing.
+/// One file's whole share of a rename, as the single replacement that carries it out: where it
+/// starts, where it ends, and what goes there.
+///
+/// The [`App::replace_all`] pattern, and for the same reason. A rename is one action, so it has to
+/// be one step to undo — replacing each occurrence on its own would put a whole copy of the file
+/// on the undo stack per occurrence, and taking back a forty-site rename would mean forty Ctrl+Z.
+/// So the run from the first edit to the last is rebuilt here, replacements where the edits were
+/// and the text between them carried over verbatim, and written back in a single edit.
+///
+/// Every slice is taken before anything is written, which is not a nicety: replacing the first
+/// character would move every offset measured after it.
+///
+/// `edits` must be ascending and non-overlapping. `None` for an empty list, which is a file the
+/// server named and then asked nothing of.
+fn rename_span(editor: &Editor, edits: &[RenameEdit]) -> Option<(usize, usize, String)> {
+    let span_start = edits.first()?.start;
+    let span_end = edits.last()?.end;
+    let mut rebuilt = String::new();
+    let mut carried = span_start;
+    for edit in edits {
+        if edit.start > carried {
+            rebuilt.push_str(&editor.rope.slice(carried..edit.start).to_string());
+        }
+        rebuilt.push_str(&edit.new_text);
+        carried = edit.end;
+    }
+    Some((span_start, span_end, rebuilt))
+}
+
+/// The rows one file contributes to a rename preview: for every line an edit touches, the line as
+/// it is and the line as it would be.
+///
+/// Diff-shaped on purpose, and not only for the look of it: the git panel already colours a line
+/// starting with `-` or `+` and a header starting with `---`, so the preview is read by the one
+/// pair of eyes that has read every other diff, and drawn by the code that already draws them.
+/// The marker carries a space after it so a line of code that itself begins with `--` cannot be
+/// mistaken for a file header.
+///
+/// Several edits on one line collapse into a single pair. Two occurrences of a name on one line
+/// are one line changing, and showing it twice — once per edit, each time with the *other*
+/// occurrence still in its old spelling — would be showing two intermediate states that never
+/// exist.
+///
+/// `edits` must be ascending and non-overlapping, which is what the caller has just checked.
+fn preview_rows(editor: &Editor, lines: &[String], edits: &[RenameEdit]) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut at = 0usize;
+    while at < edits.len() {
+        let line = edits[at].line;
+        let end = at + edits[at..].iter().take_while(|e| e.line == line).count();
+        let old: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        let line_start = editor.rope.line_to_char(line);
+        let mut new = String::new();
+        let mut carried = 0usize;
+        for edit in &edits[at..end] {
+            let from = edit.start.saturating_sub(line_start).min(old.len()).max(carried);
+            let to = edit.end.saturating_sub(line_start).min(old.len()).max(from);
+            new.extend(&old[carried..from]);
+            new.push_str(&edit.new_text);
+            carried = to;
+        }
+        new.extend(&old[carried..]);
+        rows.push(format!("- {}", old.iter().collect::<String>()));
+        rows.push(format!("+ {new}"));
+        at = end;
+    }
+    rows
+}
+
 fn located_label(root: &Path, path: &Path, line: usize, text: Option<&str>) -> String {
     let shown = path.strip_prefix(root).unwrap_or(path);
     match text {
@@ -1906,6 +2074,7 @@ enum ModalTextField {
     ProjectSearch,
     NewEntry,
     Rename,
+    SymbolRename,
     TerminalRename,
     WorkspaceSave,
     GitPrompt,
@@ -2038,6 +2207,8 @@ impl App {
             show_rename: false,
             rename_target: None,
             rename_input: String::new(),
+            symbol_rename: None,
+            rename_preview: None,
             run_menu: None,
             theme_menu: None,
             venv_register: None,
@@ -2066,6 +2237,7 @@ impl App {
             lsp_completion: None,
             lsp_asked: None,
             lsp_listing: None,
+            lsp_editing: None,
             lsp_hovered: None,
             lsp_what_it_is: None,
             jumps: Vec::new(),
@@ -2412,6 +2584,11 @@ impl App {
             ModalTextField::ProjectSearch => self.search_input.push_str(&text),
             ModalTextField::NewEntry => self.new_entry_input.push_str(&text),
             ModalTextField::Rename => self.rename_input.push_str(&text),
+            ModalTextField::SymbolRename => {
+                if let Some(box_) = self.symbol_rename.as_mut() {
+                    box_.typed.push_str(&text);
+                }
+            }
             ModalTextField::TerminalRename => self.terminal_field_mut().push_str(&text),
             ModalTextField::WorkspaceSave => self.workspace_save_input.push_str(&text),
             ModalTextField::GitPrompt => {
@@ -2472,6 +2649,14 @@ impl App {
         }
         if self.show_rename {
             return Some(ModalTextField::Rename);
+        }
+        if self.symbol_rename.is_some() {
+            return Some(ModalTextField::SymbolRename);
+        }
+        // The preview that follows it takes no text: it is a list and a yes/no, and a sentence
+        // pasted into it would have nowhere to go.
+        if self.rename_preview.is_some() {
+            return None;
         }
         if self.show_terminal_rename {
             return Some(ModalTextField::TerminalRename);
@@ -3799,6 +3984,7 @@ impl App {
                     self.lsp_list_references(id, targets)
                 }
                 crate::lsp::Event::Symbols { id, symbols } => self.lsp_list_symbols(id, symbols),
+                crate::lsp::Event::Rename { id, plan } => self.lsp_rename_answer(id, plan),
                 crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
                 crate::lsp::Event::Answer { message } => {
                     // Straight back to the server that asked, on the thread that owns the pipe.
@@ -3830,6 +4016,9 @@ impl App {
                     self.lsp_completion = None;
                     self.lsp_asked = None;
                     self.lsp_listing = None;
+                    // The preview, if one is up, is not cleared with it: it holds offsets into
+                    // buffers this editor owns and needs nothing from the server to apply them.
+                    self.lsp_editing = None;
                     // The files it was serving are forgotten too, so the ones still open are
                     // announced again from scratch to whatever takes its place.
                     self.lsp_forget(&program);
@@ -4267,6 +4456,377 @@ impl App {
             })
             .collect();
         self.open_server_list(Key::PickerSymbols, crate::picker::PickerKind::Symbols, items, asked.from);
+    }
+
+    // ---- Renaming a name ---------------------------------------------------------------------
+    //
+    // The first thing a language server is asked that *writes*, and everything below is the
+    // discipline that buys: nothing happens without a preview of exactly what would change and
+    // where, each buffer takes one step of undo, and an answer this cannot carry out honestly is
+    // refused whole rather than applied in part.
+    //
+    // Open buffers only, edited through the rope. Not a scruple — a limit with a reason. Writing
+    // a file that has a tab open would be undone by the frame loop within the second: the sweep
+    // in `Editor::check_external_changes` reloads a clean buffer that changed on disk and clears
+    // its undo stack outright, so the rename would land and the one keystroke that could take it
+    // back would be gone. A *dirty* tab is worse still: it keeps its text, the disk keeps the
+    // rename, and the two diverge in silence. Editing the rope has neither problem, and files
+    // with no tab are the honest refusal below rather than a special case here.
+
+    /// Opens the box that asks what to call the name under the cursor instead.
+    pub fn lsp_rename_symbol(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        // Asked before the box rather than after it, so a file no server serves costs a keypress
+        // and not a name typed for nothing. Whether the server is *ready* is asked later, at the
+        // moment the question actually goes out.
+        if self.lsp_argv_for(&path).is_none() {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        }
+        // The whole identifier, not the part before the caret: what is being renamed is a name,
+        // and a box prefilled with half of one invites a rename of the other half.
+        let Some((start, end)) = editor.word_at_cursor() else {
+            self.status_message = i18n::msg_rename_nothing_here(lang).to_string();
+            return;
+        };
+        let old_name = editor.rope.slice(start..end).to_string();
+        let from = (path, editor.cursor_line, editor.cursor_col);
+        self.symbol_rename = Some(SymbolRename { typed: old_name.clone(), old_name, from });
+        self.status_message = String::new();
+    }
+
+    fn handle_symbol_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.confirm_symbol_rename(),
+            KeyCode::Esc => self.symbol_rename = None,
+            KeyCode::Backspace => {
+                if let Some(box_) = self.symbol_rename.as_mut() {
+                    pop_grapheme(&mut box_.typed);
+                }
+            }
+            KeyCode::Char(c) if is_a_typed_character(key) => {
+                if let Some(box_) = self.symbol_rename.as_mut() {
+                    box_.typed.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Sends the question, with the same opening as [`Self::lsp_find_references`] down to sending
+    /// the file first: the answer is a set of *positions*, and positions in the text of four
+    /// hundred milliseconds ago are positions in a file that has since moved under them.
+    fn confirm_symbol_rename(&mut self) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.symbol_rename.take() else { return };
+        let new_name = asked.typed.trim().to_string();
+        // Nothing typed, or the name it already has. Neither is worth a sentence: the box was
+        // opened and closed, and the best possible answer to "rename foo to foo" is a preview of
+        // nothing at all.
+        if new_name.is_empty() || new_name == asked.old_name {
+            self.status_message = String::new();
+            return;
+        }
+        let (path, line, col) = asked.from.clone();
+        let Some(editor) = self.editors.iter().find(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        let line_text = editor.rope.get_line(line).map(|l| l.to_string()).unwrap_or_default();
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        client.did_change(&absolute, &text);
+        match client.rename(&absolute, line, &line_text, col, &new_name) {
+            Some(id) => {
+                self.status_message = i18n::msg_rename_asking(lang, &asked.old_name, &new_name);
+                self.lsp_editing = Some(PendingRename {
+                    id,
+                    from: asked.from,
+                    old_name: asked.old_name,
+                    new_name,
+                });
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Reads the server's answer, and either puts a preview on screen or says why it will not.
+    fn lsp_rename_answer(&mut self, id: i64, plan: Result<crate::lsp::RenamePlan, String>) {
+        let Some(asked) = self.lsp_editing.take().filter(|a| a.id == id) else { return };
+        let plan = match plan {
+            Ok(plan) => plan,
+            // The server's own sentence, unwrapped and unexplained. It is the only party here
+            // that knows why — "cannot rename this element" is rust-analyzer's answer about a
+            // keyword, and dressing it up in an editor's words would lose the one useful word.
+            Err(complaint) => {
+                self.status_message = complaint;
+                return;
+            }
+        };
+        match self.rename_preview_from(&asked, plan) {
+            Ok(preview) => {
+                self.rename_preview = Some(preview);
+                // The preview is the answer, so the line that said the question had gone out has
+                // done its job — as with the lists, an "asking…" under an answer reads as one
+                // still to come.
+                self.status_message = String::new();
+            }
+            Err(refusal) => self.status_message = refusal,
+        }
+    }
+
+    /// Turns a plan into a preview, or into the one sentence saying why there is not going to be
+    /// one.
+    ///
+    /// Every `Err` here is a refusal of the *whole* rename, and the order they are asked in is
+    /// the order of what the reader can do about them: a file operation is not something any
+    /// amount of opening tabs would fix, a file with no tab is fixed by opening it, and the last
+    /// two are about the edits themselves.
+    fn rename_preview_from(
+        &self,
+        asked: &PendingRename,
+        plan: crate::lsp::RenamePlan,
+    ) -> Result<RenamePreview, String> {
+        let lang = self.settings.lang;
+        if plan.file_ops {
+            return Err(i18n::msg_rename_refused_file_ops(lang).to_string());
+        }
+        // Back to the spelling the tabs use, for the same reason every other answer is mapped
+        // back: the server answers in resolved paths — symlinks followed, `.` gone — and a file
+        // matched under the wrong name is a file this would report as not open.
+        let mut files: Vec<crate::lsp::FileEdits> = plan
+            .files
+            .into_iter()
+            .map(|mut file| {
+                file.path = self.lsp_paths.get(&file.path).cloned().unwrap_or(file.path);
+                file
+            })
+            .filter(|file| !file.edits.is_empty())
+            .collect();
+        if files.is_empty() {
+            return Err(i18n::msg_rename_no_changes(lang).to_string());
+        }
+        // By path, so the preview reads the same way twice running. The server answers in
+        // whatever order it indexed in, which is not an order anybody can read.
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        // And one entry per file, whatever the answer did. A server may name a file twice — both
+        // wire shapes in one reply, or two `documentChanges` entries for the same document — and
+        // two entries for one buffer would be two rebuilds of the same span, the second measured
+        // against text the first had already moved. Merged rather than refused: the edits are the
+        // same edits, and it is only the bookkeeping below that cares how they arrived.
+        files.dedup_by(|later, first| {
+            let same = later.path == first.path;
+            if same {
+                let taken = std::mem::take(&mut later.edits);
+                first.edits.extend(taken);
+            }
+            same
+        });
+
+        if files.iter().any(|f| f.edits.iter().any(crate::lsp::SpanEdit::spans_lines)) {
+            return Err(i18n::msg_rename_refused_multiline(lang).to_string());
+        }
+        let held = |path: &Path| self.editors.iter().find(|e| e.path.as_deref() == Some(path));
+        let outside = files.iter().filter(|f| held(&f.path).is_none()).count();
+        if outside > 0 {
+            return Err(i18n::msg_rename_refused_outside(lang, outside));
+        }
+        if files.iter().any(|f| held(&f.path).is_some_and(|e| e.read_only)) {
+            return Err(i18n::msg_rename_refused_read_only(lang).to_string());
+        }
+
+        let mut targets = Vec::with_capacity(files.len());
+        let mut rows = Vec::new();
+        let mut total = 0usize;
+        for file in &files {
+            let Some(editor) = held(&file.path) else {
+                return Err(i18n::msg_rename_refused_moved(lang).to_string());
+            };
+            let lines = self.file_lines(&file.path);
+            let mut edits = Vec::with_capacity(file.edits.len());
+            for edit in &file.edits {
+                // A line the buffer does not have is the server describing text that is no longer
+                // here. Refused rather than clamped, which is the difference between this and a
+                // diagnostic: an underline in the wrong place is noise, a replacement in the
+                // wrong place is damage.
+                let Some(text) = lines.get(edit.start_line) else {
+                    return Err(i18n::msg_rename_refused_moved(lang).to_string());
+                };
+                let start_col = self.lsp_chars_for(&file.path, text, edit.start_col);
+                // Clamped forward rather than refused: a backwards span is a server being wrong
+                // about a range, and read as a zero-width one it becomes an insertion — which the
+                // preview then shows for what it is, character for character.
+                let end_col = self.lsp_chars_for(&file.path, text, edit.end_col).max(start_col);
+                let line_start = editor.rope.line_to_char(edit.start_line);
+                edits.push(RenameEdit {
+                    start: line_start + start_col,
+                    end: line_start + end_col,
+                    line: edit.start_line,
+                    new_text: edit.new_text.clone(),
+                });
+            }
+            edits.sort_by_key(|e| (e.start, e.end));
+            // Two edits over the same characters would make the result depend on which was
+            // applied first, and the span rebuild below has no order that is more right than the
+            // other. Adjacent is fine — one ending exactly where the next begins is two names.
+            if edits.windows(2).any(|pair| pair[1].start < pair[0].end) {
+                return Err(i18n::msg_rename_refused_overlap(lang).to_string());
+            }
+            total += edits.len();
+            rows.push(i18n::msg_rename_file_header(
+                lang,
+                &file.path.strip_prefix(&self.root).unwrap_or(&file.path).display().to_string(),
+                edits.len(),
+            ));
+            rows.extend(preview_rows(editor, &lines, &edits));
+            targets.push(RenameFile {
+                path: file.path.clone(),
+                revision: editor.revision(),
+                edits,
+            });
+        }
+
+        // Where the cursor is, as an offset, worked out here because here is where the text it is
+        // an offset into still exists.
+        let (path, line, col) = asked.from.clone();
+        let from_char = held(&path)
+            .map(|e| e.rope.line_to_char(line.min(e.rope.len_lines().saturating_sub(1))) + col)
+            .unwrap_or(0);
+        Ok(RenamePreview {
+            old_name: asked.old_name.clone(),
+            new_name: asked.new_name.clone(),
+            from: (path, line, col),
+            from_char,
+            files: targets,
+            rows,
+            edits: total,
+            scroll: 0,
+            body_rows: 1,
+        })
+    }
+
+    fn handle_rename_preview_key(&mut self, key: KeyEvent) {
+        let lang = self.settings.lang;
+        let page = self.rename_preview.as_ref().map(|p| p.body_rows.max(1) as isize).unwrap_or(1);
+        if let Some(preview) = self.rename_preview.as_mut() {
+            match key.code {
+                KeyCode::Up => return preview.scroll_by(-1),
+                KeyCode::Down => return preview.scroll_by(1),
+                KeyCode::PageUp => return preview.scroll_by(-page),
+                KeyCode::PageDown => return preview.scroll_by(page),
+                KeyCode::Home => {
+                    preview.scroll = 0;
+                    return;
+                }
+                KeyCode::End => return preview.scroll_by(preview.rows.len() as isize),
+                _ => {}
+            }
+        }
+        // Enter counts as yes here, unlike the delete confirmation, and the difference is that
+        // this one can be taken back: one Ctrl+Z per buffer puts every one of these edits away
+        // again. The letter is the localized one, so the key that means yes is the key the footer
+        // prints. Everything else is no — including Esc, which is how it is spelled.
+        match key.code {
+            KeyCode::Enter => self.apply_rename_preview(),
+            KeyCode::Char(c) if c.eq_ignore_ascii_case(&i18n::yes_key(lang)) => {
+                self.apply_rename_preview()
+            }
+            _ => {
+                self.rename_preview = None;
+                self.status_message = i18n::msg_rename_cancelled(lang).to_string();
+            }
+        }
+    }
+
+    /// Writes the preview into the buffers it was built against.
+    ///
+    /// One [`Editor::replace_char_range`] per file, which is one checkpoint and therefore one step
+    /// of undo — the same shape as Replace All, and for the same reason: a rename is one action,
+    /// so taking it back has to be one Ctrl+Z and not one per occurrence. The run from the first
+    /// edit to the last is rebuilt in memory — replacements where the edits were, the text
+    /// between them carried over verbatim — and written back in a single edit.
+    fn apply_rename_preview(&mut self) {
+        let lang = self.settings.lang;
+        let Some(preview) = self.rename_preview.take() else { return };
+        // Every offset below was measured against these buffers at the moment the preview was
+        // built, and the sweep in the frame loop can reload a clean one out from under it without
+        // anybody pressing anything. Checked for all of them before any of them is written, so a
+        // rename that cannot be finished is not half done either.
+        let moved = preview.files.iter().any(|target| {
+            self.editors
+                .iter()
+                .find(|e| e.path.as_deref() == Some(target.path.as_path()))
+                .is_none_or(|e| e.revision() != target.revision)
+        });
+        if moved {
+            self.status_message = i18n::msg_rename_refused_moved(lang).to_string();
+            return;
+        }
+        for target in &preview.files {
+            let Some(index) =
+                self.editors.iter().position(|e| e.path.as_deref() == Some(target.path.as_path()))
+            else {
+                continue;
+            };
+            let editor = &mut self.editors[index];
+            let Some((span_start, span_end, rebuilt)) = rename_span(editor, &target.edits) else {
+                continue;
+            };
+            editor.replace_char_range(span_start, span_end, &rebuilt);
+        }
+        self.restore_cursor_after_rename(&preview);
+        // Nothing is told to the servers here. The revision each buffer just bumped is what the
+        // debounced `didChange` in the frame loop watches, so they are resynchronized four
+        // hundred milliseconds after the last of these lands — one message per file, not one per
+        // edit, and by the same path as any other typing.
+        self.status_message = i18n::msg_rename_applied(
+            lang,
+            &preview.old_name,
+            &preview.new_name,
+            preview.edits,
+            preview.files.len(),
+        );
+    }
+
+    /// Puts the cursor back where the key was pressed, allowing for the text that moved under it.
+    ///
+    /// Only the buffer the question was asked from: `replace_char_range` leaves the cursor at the
+    /// end of what it wrote, which is fine everywhere else — nobody is looking at those tabs, and
+    /// the first thing that happens when they are looked at is that the cursor is put somewhere
+    /// by hand anyway.
+    ///
+    /// The adjustment counts only the edits that end at or before where the cursor was, on its
+    /// own line. An edit *containing* the cursor is not one of them: renaming `value` to `count`
+    /// with the caret three characters in leaves it three characters in, which is where the eye
+    /// is and where the next keystroke belongs.
+    fn restore_cursor_after_rename(&mut self, preview: &RenamePreview) {
+        let (path, line, col) = &preview.from;
+        let Some(target) = preview.files.iter().find(|t| &t.path == path) else { return };
+        let delta: isize = target
+            .edits
+            .iter()
+            .filter(|e| e.line == *line && e.end <= preview.from_char)
+            .map(|e| e.new_text.chars().count() as isize - (e.end - e.start) as isize)
+            .sum();
+        let Some(index) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        let editor = &mut self.editors[index];
+        editor.cursor_line = (*line).min(editor.rope.len_lines().saturating_sub(1));
+        let wanted = (*col as isize + delta).max(0) as usize;
+        editor.cursor_col = wanted.min(editor.line_char_len(editor.cursor_line));
     }
 
     /// Offers everything the servers have said is wrong, as a list to jump into.
@@ -8501,6 +9061,8 @@ impl App {
             || self.show_new_entry
             || self.show_delete_confirm
             || self.show_rename
+            || self.symbol_rename.is_some()
+            || self.rename_preview.is_some()
             || self.show_terminal_rename
             || self.show_workspace_save
             || self.git_panel.is_some()
@@ -8577,6 +9139,14 @@ impl App {
         }
         if self.show_rename {
             self.handle_rename_key(key);
+            return;
+        }
+        if self.symbol_rename.is_some() {
+            self.handle_symbol_rename_key(key);
+            return;
+        }
+        if self.rename_preview.is_some() {
+            self.handle_rename_preview_key(key);
             return;
         }
         if self.show_terminal_rename {
@@ -8662,6 +9232,11 @@ impl App {
             // definition prints them, which is the same way J and L are found.
             Action::FindReferences => self.lsp_find_references(),
             Action::DocumentSymbols => self.lsp_document_symbols(),
+            // C for change, and the last letter of the free three: Z is redo by every habit
+            // anybody brings here, and Q sits against Ctrl+Q. Some Linux terminal emulators bind
+            // Ctrl+Shift+C to copy — a trade this project already made with T, N and W, and the
+            // one chord in the list a `[keys]` entry is most likely to be moved off.
+            Action::RenameSymbol => self.lsp_rename_symbol(),
             Action::GitPanel => self.toggle_git_panel(),
             // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
             // key that does two things is a key that does the wrong one.
@@ -9039,6 +9614,7 @@ impl App {
             MenuAction::JumpBack => self.lsp_jump_back(),
             MenuAction::FindReferences => self.lsp_find_references(),
             MenuAction::DocumentSymbols => self.lsp_document_symbols(),
+            MenuAction::RenameSymbol => self.lsp_rename_symbol(),
             MenuAction::ShowDiagnostics => self.open_diagnostics_picker(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
@@ -10364,6 +10940,31 @@ impl App {
             return;
         }
 
+        // The rename preview is a reader as well, drawn on the git panel's own frame. The wheel
+        // moves through it and a click puts it away — and a click *inside* it puts it away too,
+        // which is the difference from the panel above. A click is not an agreement to write into
+        // half a dozen files, so there is nothing in here for one to land on.
+        if self.rename_preview.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(preview) = self.rename_preview.as_mut() {
+                        preview.scroll_by(-3);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(preview) = self.rename_preview.as_mut() {
+                        preview.scroll_by(3);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.rename_preview = None;
+                    self.status_message = i18n::msg_rename_cancelled(self.settings.lang).to_string();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The manual is a reader, not a frame: while it is up the mouse only picks sections,
         // scrolls, or dismisses it.
         if self.manual.is_some() {
@@ -10423,6 +11024,10 @@ impl App {
                     self.show_rename = false;
                     self.rename_target = None;
                     self.rename_input.clear();
+                    return;
+                }
+                if self.symbol_rename.is_some() {
+                    self.symbol_rename = None;
                     return;
                 }
                 if self.show_terminal_rename {
@@ -12143,5 +12748,117 @@ mod tests {
                 "{chord:?}+V is a shortcut, not a `v`"
             );
         }
+    }
+
+    /// A buffer holding `text`, for the two functions a rename is made of.
+    fn buffer(text: &str) -> Editor {
+        let mut editor = Editor::empty();
+        editor.rope = ropey::Rope::from_str(text);
+        editor
+    }
+
+    /// Every occurrence of `word` in `text`, as the converted edits a preview would hold.
+    fn edits_over(editor: &Editor, word: &str, new_text: &str) -> Vec<RenameEdit> {
+        let text = editor.rope.to_string();
+        let chars: Vec<char> = text.chars().collect();
+        let target: Vec<char> = word.chars().collect();
+        (0..chars.len().saturating_sub(target.len() - 1))
+            .filter(|&at| chars[at..at + target.len()] == target[..])
+            .map(|at| RenameEdit {
+                start: at,
+                end: at + target.len(),
+                line: editor.rope.char_to_line(at),
+                new_text: new_text.to_string(),
+            })
+            .collect()
+    }
+
+    /// One replacement for the whole file, whatever the edits are spread over — which is what
+    /// makes a rename one step of undo instead of one per occurrence.
+    #[test]
+    fn a_files_share_of_a_rename_is_a_single_replacement() {
+        let editor = buffer("let count = count + 1;\nprintln!(\"{count}\");\n");
+        let edits = edits_over(&editor, "count", "total");
+        assert_eq!(edits.len(), 3, "two on the first line and one on the second");
+        let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+        // From the first occurrence to the last, and everything in between carried over as it is.
+        assert_eq!((start, end), (4, 39));
+        assert_eq!(rebuilt, "total = total + 1;\nprintln!(\"{total");
+        // Applied, the file reads as the rename asked — and the text outside the span is
+        // untouched, which is the half a single replacement could get wrong.
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(applied.rope.to_string(), "let total = total + 1;\nprintln!(\"{total}\");\n");
+    }
+
+    /// A replacement of a different length moves everything after it, and the rebuild is where
+    /// that either works or quietly eats a character. Both directions, because a shorter name is
+    /// the case where an off-by-one deletes real text rather than duplicating it.
+    #[test]
+    fn the_rebuild_survives_a_name_of_a_different_length() {
+        for new_name in ["n", "a_much_longer_name"] {
+            let editor = buffer("xx\nvalue.value(value)\nyy\n");
+            let edits = edits_over(&editor, "value", new_name);
+            assert_eq!(edits.len(), 3);
+            let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+            let mut applied = buffer(&editor.rope.to_string());
+            applied.replace_char_range(start, end, &rebuilt);
+            assert_eq!(
+                applied.rope.to_string(),
+                format!("xx\n{new_name}.{new_name}({new_name})\nyy\n")
+            );
+        }
+    }
+
+    /// Two edits that meet exactly are two names, not an overlap, and the text between them is
+    /// nothing rather than a character to carry over.
+    #[test]
+    fn adjacent_edits_leave_nothing_between_them() {
+        let editor = buffer("abab\n");
+        let edits = vec![
+            RenameEdit { start: 0, end: 2, line: 0, new_text: "X".to_string() },
+            RenameEdit { start: 2, end: 4, line: 0, new_text: "Y".to_string() },
+        ];
+        let (start, end, rebuilt) = rename_span(&editor, &edits).unwrap();
+        assert_eq!((start, end, rebuilt.as_str()), (0, 4, "XY"));
+    }
+
+    /// The preview shows each changed line once, with every edit on it already applied. Two
+    /// occurrences on one line drawn as two pairs would show an intermediate state that never
+    /// exists — the line with one of them renamed and the other not.
+    #[test]
+    fn several_edits_on_one_line_are_one_pair_of_rows() {
+        let editor = buffer("let count = count + 1;\nprintln!(\"{count}\");\n");
+        let edits = edits_over(&editor, "count", "total");
+        let lines: Vec<String> =
+            editor.rope.lines().map(|l| l.to_string().trim_end_matches('\n').to_string()).collect();
+        let rows = preview_rows(&editor, &lines, &edits);
+        assert_eq!(
+            rows,
+            vec![
+                "- let count = count + 1;",
+                "+ let total = total + 1;",
+                "- println!(\"{count}\");",
+                "+ println!(\"{total}\");",
+            ]
+        );
+        // The marker carries a space, so a line of code that starts with `--` cannot be read as
+        // the file header the panel colours differently.
+        assert!(rows.iter().all(|row| !row.starts_with("---")));
+    }
+
+    /// The preview measures in characters, not bytes: a line with an accent in it before the name
+    /// is the case where counting the wrong unit shows a `+` row with the name in the wrong place
+    /// — and the offsets that draw it are the offsets that get written.
+    #[test]
+    fn the_preview_counts_characters_and_not_bytes() {
+        let editor = buffer("// città: value\n");
+        let edits = edits_over(&editor, "value", "conto");
+        assert_eq!(edits[0].start, 10, "ten characters, thirteen bytes");
+        let lines = vec!["// città: value".to_string()];
+        assert_eq!(
+            preview_rows(&editor, &lines, &edits),
+            vec!["- // città: value", "+ // città: conto"]
+        );
     }
 }

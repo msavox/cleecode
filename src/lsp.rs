@@ -14,12 +14,17 @@
 //! the popup falls back to the words already in the file. Nothing here rewrites text on its own
 //! account — a completion is accepted by the same keystroke and the same one-step edit as a word
 //! scraped out of the buffer, and the server only ever adds names to a list that already exists.
+//!
+//! Rename is the one request whose answer is a set of edits, and it is still not something this
+//! module applies: it is parsed into a [`RenamePlan`] — a neutral description of what the server
+//! wants changed — and handed over. What the application does with it is shown to the user
+//! before any of it reaches a buffer, and refused whole where it cannot be shown honestly.
 
 use lsp_types::{
     ClientCapabilities, CompletionClientCapabilities, CompletionItem, CompletionItemCapability,
     Diagnostic, DiagnosticSeverity, GeneralClientCapabilities, InitializeParams, InsertTextFormat,
-    PositionEncodingKind, PublishDiagnosticsParams, TextDocumentClientCapabilities, Uri,
-    WindowClientCapabilities,
+    PositionEncodingKind, PublishDiagnosticsParams, RenameClientCapabilities,
+    TextDocumentClientCapabilities, Uri, WindowClientCapabilities,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -70,6 +75,14 @@ pub enum Event {
     Symbols { id: i64, symbols: Vec<SymbolRow> },
     /// What the thing under the cursor is, in one line. `None` when the server had nothing.
     Hover { id: i64, text: Option<String> },
+    /// What the server wants changed to carry out one rename, or what it said instead.
+    ///
+    /// The only answer in this list that carries an error rather than dropping it. Everywhere
+    /// else a refusal reads as an empty result and says so — "the server knows of no definition
+    /// for that" is true either way. A rename is a question the user asked in words and waited
+    /// for, and "you cannot rename that" is the answer: reporting it as "no changes" would be
+    /// the editor putting its own words in the server's mouth.
+    Rename { id: i64, plan: Result<RenamePlan, String> },
     /// A reply the server is owed, already written and waiting to be put on the wire.
     ///
     /// It travels this way round because the reader thread has no writer: the pipe into the
@@ -462,6 +475,7 @@ pub enum Ask {
     References,
     Symbols,
     Hover,
+    Rename,
 }
 
 /// Where a definition is, before the file it names has been opened.
@@ -654,6 +668,146 @@ pub fn hover_text(result: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+// ---- What a rename would change --------------------------------------------------------------
+
+/// Everything one `WorkspaceEdit` asks for, in a shape that owes nothing to the wire.
+///
+/// Deliberately not `lsp_types::WorkspaceEdit`. That type is an accurate model of the protocol,
+/// which is the problem: it makes the caller walk two optional collections, three enum variants
+/// of resource operation and an annotated spelling of a text edit before it can answer the only
+/// two questions that matter here — *which files, which spans* and *is there anything in this we
+/// cannot do*.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenamePlan {
+    /// One entry per file the server named, in the order they were read off the answer.
+    pub files: Vec<FileEdits>,
+    /// Whether the answer also asked for a file to be created, renamed or deleted.
+    ///
+    /// A flag rather than a list of them, because the only thing the application does with it is
+    /// refuse: creating and deleting files is not what "rename this name" means, and a client
+    /// that quietly ignored those operations would apply half of what the server asked for and
+    /// report it as the whole thing.
+    pub file_ops: bool,
+}
+
+/// The edits one file is to receive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileEdits {
+    pub path: PathBuf,
+    pub edits: Vec<SpanEdit>,
+}
+
+/// One replacement, in the server's own units — lines as it counts them, columns as it counts
+/// those, for the same reason [`Jump`]'s column stays that way: turning a column into a character
+/// offset needs the file's text, and this is parsed on a thread that has never read it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpanEdit {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub new_text: String,
+}
+
+impl SpanEdit {
+    /// Whether the span runs off the end of the line it starts on.
+    ///
+    /// Asked because the answer is a refusal. The range machinery here clamps a multi-line span
+    /// to its first line — see [`marks_from`], where that is exactly right for an underline — and
+    /// a replacement clamped the same way would delete a different amount of text from the one
+    /// the preview showed. A rename that spans lines is not something a rename should produce; if
+    /// a server sends one it is describing something else, and refusing is the honest reading.
+    pub fn spans_lines(&self) -> bool {
+        self.start_line != self.end_line
+    }
+}
+
+/// One `TextEdit` off the wire, in whichever of its two spellings arrived.
+///
+/// `AnnotatedTextEdit` is a `TextEdit` with an `annotationId` beside it, so reading the three
+/// fields by name accepts both without having to know which is which.
+fn one_edit(value: &Value) -> Option<SpanEdit> {
+    let range = value.get("range")?;
+    let at = |which: &str, field: &str| {
+        range.pointer(&format!("/{which}/{field}")).and_then(Value::as_u64).map(|n| n as usize)
+    };
+    Some(SpanEdit {
+        start_line: at("start", "line")?,
+        start_col: at("start", "character")?,
+        end_line: at("end", "line")?,
+        end_col: at("end", "character")?,
+        // An edit with no text is a deletion, which is a legal thing to be sent and reads as an
+        // empty string everywhere below.
+        new_text: value.get("newText").and_then(Value::as_str).unwrap_or_default().to_string(),
+    })
+}
+
+/// The edits under one URI, or `None` when the URI is not one we can name a file with.
+fn edits_for(uri: &str, edits: Option<&Value>) -> Option<FileEdits> {
+    let uri: Uri = uri.parse().ok()?;
+    let path = path_for(&uri)?;
+    let edits: Vec<SpanEdit> =
+        edits?.as_array()?.iter().filter_map(one_edit).collect();
+    Some(FileEdits { path, edits })
+}
+
+/// The one place a `WorkspaceEdit` is read, in both of the shapes it comes in.
+///
+/// The protocol has two and a client may be sent either: `changes` is a flat map of URI to edits,
+/// and `documentChanges` is an ordered list whose entries are either a `TextDocumentEdit` or a
+/// resource operation. Both are read here whatever the handshake said — the same lesson the three
+/// spellings of a definition answer taught: what a server sends is decided by the server, and a
+/// client that only reads what it asked for shows nothing on the day one of them sends the other
+/// thing. CleeCode advertises no `workspace.workspaceEdit` capability at all, which the
+/// specification says means the flat `changes` shape; several servers send the other one anyway.
+///
+/// An entry that cannot be read is dropped rather than costing the whole answer, with one
+/// exception: a resource operation sets [`RenamePlan::file_ops`], because *that* is a thing the
+/// caller has to know was asked for in order to refuse it.
+pub fn rename_plan(result: Option<&Value>) -> RenamePlan {
+    let mut plan = RenamePlan::default();
+    let Some(result) = result else { return plan };
+    if let Some(changes) = result.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            if let Some(file) = edits_for(uri, Some(edits)) {
+                plan.files.push(file);
+            }
+        }
+    }
+    if let Some(items) = result.get("documentChanges").and_then(Value::as_array) {
+        for item in items {
+            // A resource operation is told apart by its `kind`, which a `TextDocumentEdit` does
+            // not have. Read first, so a create/rename/delete cannot be mistaken for an edit with
+            // an unreadable document.
+            if item.get("kind").and_then(Value::as_str).is_some() {
+                plan.file_ops = true;
+                continue;
+            }
+            let Some(uri) = item.pointer("/textDocument/uri").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(file) = edits_for(uri, item.get("edits")) {
+                plan.files.push(file);
+            }
+        }
+    }
+    plan
+}
+
+/// What a server said went wrong, as the one sentence a status line has room for.
+///
+/// Its own words, not ours. "The server refused" would be true of every possible failure here and
+/// useful for none of them — what the reader needs is rust-analyzer's own "cannot rename this",
+/// or pyright's own reason, said the way the server said it.
+fn complaint(error: &Value) -> String {
+    match error.get("message").and_then(Value::as_str) {
+        Some(message) => message.to_string(),
+        // A server that answered with an error object shaped like nothing in the specification.
+        // Printed as it arrived rather than replaced with a sentence of ours, for the same reason.
+        None => error.to_string(),
+    }
+}
+
 pub struct Client {
     pub name: String,
     child: Child,
@@ -725,6 +879,20 @@ impl Client {
                             snippet_support: Some(false),
                             ..Default::default()
                         }),
+                        ..Default::default()
+                    }),
+                    // Said out loud for the same reason as the snippet flag above: the default is
+                    // the one this depends on. `prepare_support: false` tells the server not to
+                    // expect a `textDocument/prepareRename` before the rename itself — this
+                    // client asks the question once, and a server holding back its answer until a
+                    // preparation request that never comes is a key that does nothing.
+                    //
+                    // `workspace.workspace_edit` is deliberately left unset. The specification
+                    // reads an absent one as a client that can only be sent the flat `changes`
+                    // shape, which is the smaller thing to be sent; [`rename_plan`] reads the
+                    // other shape too, because what a server sends is the server's decision.
+                    rename: Some(RenameClientCapabilities {
+                        prepare_support: Some(false),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -930,6 +1098,29 @@ impl Client {
         self.position_request("textDocument/hover", Ask::Hover, path, (line, line_text, col), Value::Null)
     }
 
+    /// Asks what would have to change for the thing under the cursor to be called `new_name`.
+    ///
+    /// The one request in this client whose answer is a set of edits rather than a fact. It is
+    /// still only a question: the answer arrives as [`Event::Rename`] and nothing on this side of
+    /// the wire touches a buffer — see [`rename_plan`] for what is made of it, and the
+    /// application for what is done with that.
+    pub fn rename(
+        &mut self,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+        new_name: &str,
+    ) -> Option<i64> {
+        self.position_request(
+            "textDocument/rename",
+            Ask::Rename,
+            path,
+            (line, line_text, col),
+            json!({ "newName": new_name }),
+        )
+    }
+
     /// The shape those three share: a method name, a file and a place in it.
     ///
     /// `at` is the place, as the editor holds it: the line, that line's text, and the column in
@@ -1110,6 +1301,12 @@ pub fn negotiated_utf16(encoding: Option<&str>) -> bool {
 ///
 /// The id is passed back exactly as it arrived, number or string, because it is the server's own
 /// bookkeeping and not ours to normalise.
+///
+/// `workspace/applyEdit` falls into the refusal below, and deliberately. It is the server asking
+/// to write into the project on its own initiative, at a moment nobody chose, with no preview and
+/// nothing to undo it as one step — the opposite of every rule the rename obeys. No capability
+/// for it is advertised, so a server sending one is asking anyway, and -32601 is the honest
+/// answer: this client does not do that.
 pub fn reply_to(message: &Value) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id")?.clone();
@@ -1197,6 +1394,18 @@ fn read_loop(
                         }
                         Ask::Symbols => Event::Symbols { id, symbols: symbol_rows(result) },
                         Ask::Hover => Event::Hover { id, text: hover_text(result) },
+                        // The one place an `error` member is read rather than passed over. For
+                        // every other question above, a response carrying an error instead of a
+                        // result has no `result` to read and becomes the same empty answer as a
+                        // server that simply knew nothing — which is the truth as far as the
+                        // screen is concerned. See [`Event::Rename`] for why this one is not.
+                        Ask::Rename => Event::Rename {
+                            id,
+                            plan: match value.get("error") {
+                                Some(error) => Err(complaint(error)),
+                                None => Ok(rename_plan(result)),
+                            },
+                        },
                     });
                     continue;
                 }
@@ -2019,5 +2228,142 @@ mod tests {
         let started = Client::start_with(&["cleecode-no-such-language-server"], Path::new("."));
         let Err(err) = started else { panic!("a server that does not exist must not start") };
         assert!(err.contains("cleecode-no-such-language-server"), "{err}");
+    }
+
+    /// A `file:` URI for a path this test can write without caring what the host calls its root.
+    fn uri(path: &str) -> String {
+        format!("file://{path}")
+    }
+
+    /// The flat shape: a map of URI to edits, which is what a client advertising no
+    /// `workspace.workspaceEdit` capability is supposed to be sent.
+    #[test]
+    fn the_flat_shape_of_a_workspace_edit_is_read() {
+        let answer = json!({"changes": {
+            uri("/p/src/main.rs"): [
+                {"range": {"start": {"line": 3, "character": 8},
+                           "end": {"line": 3, "character": 11}},
+                 "newText": "renamed"},
+                {"range": {"start": {"line": 9, "character": 4},
+                           "end": {"line": 9, "character": 7}},
+                 "newText": "renamed"},
+            ],
+        }});
+        let plan = rename_plan(Some(&answer));
+        assert!(!plan.file_ops);
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, PathBuf::from("/p/src/main.rs"));
+        assert_eq!(
+            plan.files[0].edits[0],
+            SpanEdit {
+                start_line: 3,
+                start_col: 8,
+                end_line: 3,
+                end_col: 11,
+                new_text: "renamed".to_string(),
+            }
+        );
+        assert_eq!(plan.files[0].edits[1].start_line, 9);
+        assert!(plan.files.iter().all(|f| f.edits.iter().all(|e| !e.spans_lines())));
+    }
+
+    /// The other shape, which is what several servers send whatever the handshake said. The
+    /// annotated spelling of a text edit rides in it too, and is the same three fields plus one
+    /// this does not read.
+    #[test]
+    fn the_document_changes_shape_is_read_as_well() {
+        let answer = json!({"documentChanges": [
+            {"textDocument": {"uri": uri("/p/a.rs"), "version": 4},
+             "edits": [{"range": {"start": {"line": 0, "character": 0},
+                                  "end": {"line": 0, "character": 3}},
+                        "newText": "new"}]},
+            {"textDocument": {"uri": uri("/p/b.rs"), "version": null},
+             "edits": [{"range": {"start": {"line": 7, "character": 1},
+                                  "end": {"line": 7, "character": 4}},
+                        "newText": "new", "annotationId": "rename"}]},
+        ]});
+        let plan = rename_plan(Some(&answer));
+        assert!(!plan.file_ops);
+        let named: Vec<PathBuf> = plan.files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(named, vec![PathBuf::from("/p/a.rs"), PathBuf::from("/p/b.rs")]);
+        assert_eq!(plan.files[1].edits[0].new_text, "new");
+        assert_eq!(plan.files[1].edits[0].start_col, 1);
+    }
+
+    /// A create, a rename or a delete of a *file* is not what "rename this name" means, and the
+    /// flag is how the caller finds out it was asked for. The edits beside it are still read —
+    /// what the caller does is refuse the whole answer, and it can only do that knowingly.
+    #[test]
+    fn a_file_operation_is_noticed_rather_than_quietly_skipped() {
+        for kind in ["create", "rename", "delete"] {
+            let answer = json!({"documentChanges": [
+                {"textDocument": {"uri": uri("/p/a.rs")},
+                 "edits": [{"range": {"start": {"line": 0, "character": 0},
+                                      "end": {"line": 0, "character": 3}},
+                            "newText": "new"}]},
+                {"kind": kind, "uri": uri("/p/b.rs"), "oldUri": uri("/p/a.rs"),
+                 "newUri": uri("/p/b.rs")},
+            ]});
+            let plan = rename_plan(Some(&answer));
+            assert!(plan.file_ops, "a {kind} operation went unnoticed");
+            assert_eq!(plan.files.len(), 1, "the edits beside it are still read");
+        }
+    }
+
+    /// A span that runs off the end of its line is detected rather than clamped. Clamping is
+    /// right for an underline and wrong for a replacement: it would delete a different amount of
+    /// text from the one a preview showed.
+    #[test]
+    fn a_span_that_crosses_a_line_is_recognisable() {
+        let answer = json!({"changes": {uri("/p/a.rs"): [
+            {"range": {"start": {"line": 2, "character": 4},
+                       "end": {"line": 5, "character": 1}},
+             "newText": "new"},
+        ]}});
+        let plan = rename_plan(Some(&answer));
+        assert!(plan.files[0].edits[0].spans_lines());
+    }
+
+    /// Nothing at all is an empty plan rather than a panic: a server may answer `null` to say it
+    /// would change nothing, and an entry that cannot be read costs its own row and no more.
+    #[test]
+    fn an_unreadable_answer_costs_only_itself() {
+        assert_eq!(rename_plan(None), RenamePlan::default());
+        assert_eq!(rename_plan(Some(&Value::Null)), RenamePlan::default());
+        let answer = json!({"changes": {
+            "not-a-uri-at-all": [{"range": {"start": {"line": 0, "character": 0},
+                                            "end": {"line": 0, "character": 1}},
+                                  "newText": "x"}],
+            uri("/p/a.rs"): [
+                {"newText": "no range here"},
+                {"range": {"start": {"line": 1, "character": 0},
+                           "end": {"line": 1, "character": 2}}, "newText": "kept"},
+            ],
+        }});
+        let plan = rename_plan(Some(&answer));
+        assert_eq!(plan.files.len(), 1, "the unparseable URI took only its own file with it");
+        assert_eq!(plan.files[0].edits.len(), 1, "the edit with no range took only itself");
+        assert_eq!(plan.files[0].edits[0].new_text, "kept");
+    }
+
+    /// A rename is the one answer whose error is carried rather than read as "nothing to do".
+    /// The server's own sentence, because "the server refused" would be true of every failure
+    /// here and useful for none of them.
+    #[test]
+    fn a_refused_rename_arrives_with_what_the_server_said() {
+        let wire = frame(
+            r#"{"jsonrpc":"2.0","id":7,
+                "error":{"code":-32602,"message":"cannot rename this element"}}"#,
+        );
+        let (tx, rx) = mpsc::channel();
+        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending_asks(&[(7, Ask::Rename)]));
+        let events: Vec<Event> = rx.into_iter().collect();
+        match &events[0] {
+            Event::Rename { id, plan } => {
+                assert_eq!(*id, 7);
+                assert_eq!(plan.as_ref().err().map(String::as_str), Some("cannot rename this element"));
+            }
+            _ => panic!("the error did not come back as the answer to the rename"),
+        }
     }
 }

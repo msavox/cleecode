@@ -1264,8 +1264,15 @@ impl Editor {
     /// The word the cursor is on or against, as absolute char indices.
     ///
     /// Adjacency counts on both sides: pressing bold with the caret just after `word` is asking
-    /// about that word, not about the empty space at the caret.
-    fn md_word_at_cursor(&self) -> Option<(usize, usize)> {
+    /// about that word, not about the empty space at the caret. The same reading is what "the
+    /// name under the cursor" means to a rename — a caret sitting at the end of an identifier is
+    /// pointing at it — which is why there is one of these rather than one per caller.
+    ///
+    /// A "word" here is a run of alphanumerics and underscores, which is an identifier in every
+    /// language CleeCode can start a server for. It is not the language's own idea of one — `-`
+    /// in Lisp, `$` in shell, `!` after a Rust macro — and it does not need to be: the server is
+    /// asked about a *position*, and this only decides what the box is prefilled with.
+    pub fn word_at_cursor(&self) -> Option<(usize, usize)> {
         let line_start = self.rope.line_to_char(self.cursor_line);
         let len = self.line_char_len(self.cursor_line);
         let col = self.cursor_col.min(len);
@@ -1308,7 +1315,7 @@ impl Editor {
                 }
                 (self.rope.line_to_char(sl) + sc, self.rope.line_to_char(el) + ec)
             }
-            None => match self.md_word_at_cursor() {
+            None => match self.word_at_cursor() {
                 Some(range) => range,
                 // Nothing to wrap: leave the pair behind with the caret between its halves, the
                 // way typing an opening bracket does.

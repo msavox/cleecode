@@ -4,7 +4,7 @@
 Speaks just enough of the protocol to exercise CleeCode's side of it: answers `initialize`,
 publishes one warning and one error against whatever file it is told was opened, and answers
 `textDocument/completion`, `textDocument/definition`, `textDocument/references`,
-`textDocument/documentSymbol` and `textDocument/hover`. It echoes back the
+`textDocument/documentSymbol`, `textDocument/hover` and `textDocument/rename`. It echoes back the
 URI it was given rather than inventing one, which
 is the whole point — a canned URI would pass even if the client's path-to-URI encoding were
 broken, and that encoding is the part most likely to be.
@@ -194,6 +194,86 @@ def symbols(message):
     }]})
 
 
+def word_around(text, line, character):
+    """The identifier a position sits in or against, in the text we were last sent.
+
+    Not `word_at` above, which reads backwards only: a completion is asked at the end of what has
+    been typed, and a rename is asked wherever the cursor happens to be sitting in the name."""
+    lines = text.split("\n")
+    if line >= len(lines):
+        return ""
+    row = lines[line]
+    def is_word(c):
+        return c.isalnum() or c == "_"
+    start = end = min(character, len(row))
+    while start > 0 and is_word(row[start - 1]):
+        start -= 1
+    while end < len(row) and is_word(row[end]):
+        end += 1
+    return row[start:end]
+
+
+def occurrences(row, word):
+    """Where `word` appears in `row` as a whole word, left to right."""
+    def is_word(c):
+        return c.isalnum() or c == "_"
+    at = 0
+    while True:
+        at = row.find(word, at)
+        if at < 0:
+            return
+        before = row[at - 1] if at > 0 else " "
+        after = row[at + len(word)] if at + len(word) < len(row) else " "
+        if not is_word(before) and not is_word(after):
+            yield at
+        at += 1
+
+
+def rename(message):
+    """Every occurrence of the word at the position, in the flat `changes` shape.
+
+    Built out of the question like every other answer here: the word comes from the text the
+    client says it has, and the spans are where that word actually is in it. A canned list would
+    pass with the position arithmetic broken or with the file never sent.
+
+    The fixture puts two occurrences on one line and one further down, which is the case a client
+    gets wrong quietly: applying the first edit on a line moves the second, so a client that
+    replaced them one at a time against stale offsets eats a character and only on that line.
+
+    A new name with `outside` in it is the refusal fixture. The answer then also names a file that
+    has no tab, which CleeCode has to refuse *whole* — the point being that the edits it could
+    have applied are not applied either."""
+    params = message.get("params", {})
+    uri = params.get("textDocument", {}).get("uri", "")
+    position = params.get("position", {})
+    new_name = params.get("newName", "")
+    text = TEXTS.get(uri, "")
+    word = word_around(text, position.get("line", 0), position.get("character", 0))
+    log(f"   renaming {word!r} to {new_name!r}")
+    if not word:
+        send({"jsonrpc": "2.0", "id": message.get("id"),
+              "error": {"code": -32602, "message": "there is nothing to rename there"}})
+        return
+    edits = []
+    for row, content in enumerate(text.split("\n")):
+        for at in occurrences(content, word):
+            edits.append({
+                "range": {"start": {"line": row, "character": at},
+                          "end": {"line": row, "character": at + len(word)}},
+                "newText": new_name,
+            })
+    changes = {uri: edits}
+    if "outside" in new_name:
+        elsewhere = uri.rsplit("/", 1)[0] + "/never-opened.rs"
+        log(f"   and one edit to {elsewhere}, which no tab holds")
+        changes[elsewhere] = [{
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": len(word)}},
+            "newText": new_name,
+        }]
+    send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"changes": changes}})
+
+
 def hover(message):
     """A hover whose first line names the word and the place it was asked about.
 
@@ -246,6 +326,8 @@ def main():
             symbols(message)
         elif method == "textDocument/hover":
             hover(message)
+        elif method == "textDocument/rename":
+            rename(message)
         elif method == "exit":
             return 0
 

@@ -18,6 +18,11 @@ The same goes for the three lists — the uses of a name, the names in a file, a
 wrong at once. Each is a picker, so what is checked is what a picker is for: that the rows say
 where they point, and that Enter arrives there.
 
+The rename is the one that writes, so it is checked for what a write has to promise: that the
+preview says what would change before anything does, that Esc leaves the file exactly as it was,
+that one Ctrl+Z takes back every occurrence at once, and that an answer touching a file no tab
+holds is refused whole rather than applied in part.
+
 pyte tracks colour and attributes per cell, not just characters, so "underlined" and "red" are
 things this can actually check rather than infer.
 """
@@ -45,6 +50,12 @@ SAMPLE = """fn main() {
 # Four lines, each different, so which one the cursor is on can be read off a single character
 # typed into it.
 JUMP = "aaa\nbbb\nccc\nddd\n"
+
+
+# Two occurrences on one line and one further down, which is the shape a rename gets wrong
+# quietly: the first edit on a line moves the second, so a client applying them one at a time
+# against offsets measured before any of them eats a character — and only on that line.
+NAME = "alfa = alfa + 1\nsecond\nalfa\n"
 
 
 def install_stub(root):
@@ -105,6 +116,11 @@ def main():
     # reason about which edits happened before it is a check nobody can read.
     with open(os.path.join(root, "src", "jump.rs"), "w") as handle:
         handle.write(JUMP)
+    # And a third for the rename, for the same reason: it is the one file in here that gets
+    # written to, undone and written to again, and a check that had to reason about which of the
+    # earlier edits had happened first would be a check nobody can read.
+    with open(os.path.join(root, "src", "name.rs"), "w") as handle:
+        handle.write(NAME)
     bindir = install_stub(root)
 
     report = Report()
@@ -330,6 +346,90 @@ def main():
         report.check("Enter on a diagnostic goes to the line it is about",
                      any("ZcccQ" in l for l in session.lines()), session,
                      note=repr([l.strip() for l in session.lines() if "ccc" in l][:1]))
+
+
+        # ---- renaming a name -----------------------------------------------------------------
+        #
+        # The one request that writes, and the checks are the promises it makes: a preview before
+        # anything changes, Esc changing nothing, one Ctrl+Z taking back every occurrence, and an
+        # honest refusal when the server names a file no tab holds.
+        #
+        # The box opens prefilled with the whole name, so the new one is typed *onto* it — which
+        # is also how the prefill gets checked: if it were empty, or half the word, every screen
+        # below would say so.
+        session.send("\x0f")                                  # Ctrl+O, quick-open
+        session.wait(lambda s: "name.rs" in s.text(), 8)
+        session.send("name.rs")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the rename fixture opens",
+                     session.wait(lambda s: "alfa = alfa + 1" in s.text(), 8), session)
+
+        session.press(session.chord("c"), lambda s: "'alfa'" in s.text(), 8)
+        report.check("Ctrl+Shift+C asks for the new name, prefilled with the whole one",
+                     "'alfa'" in session.text(), session,
+                     note="the identifier under the cursor, not the half before it")
+
+        # Typed onto the prefill: alfa2. Two occurrences on line 1 with a length change between
+        # them, which is the arithmetic the preview and the apply have to agree about.
+        session.send("2")
+        session.press("\r", lambda s: "+ alfa2 = alfa2 + 1" in s.text(), 12)
+        previewed = session.text()
+        report.check("Enter shows a diff of what would change",
+                     "- alfa = alfa + 1" in previewed and "+ alfa2 = alfa2 + 1" in previewed,
+                     session, note="the old line and the new one, both occurrences on it")
+        report.check("and the line further down is in it too",
+                     "+ alfa2" in previewed and previewed.count("+ alfa2") >= 2, session)
+        report.check("and it says which file, the way a diff says it",
+                     "--- src/name.rs" in previewed, session,
+                     note="root-relative, with the count beside it")
+
+        # Esc changes nothing. Checked against the buffer's own rows, gutter and all, so a
+        # preview still on screen could not pass for a file that had been written.
+        session.press("\x1b", lambda s: "+ alfa2 = alfa2 + 1" not in s.text(), 6)
+        report.check("Esc leaves the file exactly as it was",
+                     any(re.search(r"\s1 alfa = alfa \+ 1\b", l) for l in session.lines())
+                     and "alfa2" not in session.text(), session,
+                     note=repr([l.strip() for l in session.lines() if "alfa" in l][:2]))
+
+        # Again, and through this time.
+        session.press(session.chord("c"), lambda s: "'alfa'" in s.text(), 8)
+        session.send("2")
+        session.press("\r", lambda s: "+ alfa2 = alfa2 + 1" in s.text(), 12)
+        session.press("\r", lambda s: any(re.search(r"\s3 alfa2\b", l) for l in s.lines()), 8)
+        rows = session.lines()
+        report.check("Enter applies it everywhere in the buffer",
+                     any(re.search(r"\s1 alfa2 = alfa2 \+ 1\b", l) for l in rows)
+                     and any(re.search(r"\s3 alfa2\b", l) for l in rows), session,
+                     note=repr([l.strip() for l in rows if "alfa" in l][:3]))
+
+        # One step, not one per occurrence: the whole reason the edits are rebuilt into a single
+        # replacement per file.
+        session.press("\x1a", lambda s: any(re.search(r"\s1 alfa = alfa \+ 1\b", l)
+                                            for l in s.lines()), 8)
+        rows = session.lines()
+        # Asked of the buffer's own rows rather than of the whole screen: the status line still
+        # says what was just renamed, and rightly so — undoing does not unsay it.
+        report.check("one Ctrl+Z takes back every occurrence at once",
+                     any(re.search(r"\s1 alfa = alfa \+ 1\b", l) for l in rows)
+                     and any(re.search(r"\s3 alfa\b", l) for l in rows)
+                     and not any(re.search(r"\s\d+ .*alfa2", l) for l in rows), session,
+                     note=repr([l.strip() for l in rows if "alfa" in l][:3]))
+
+        # And the refusal. The stub answers a name containing `outside` with one extra edit to a
+        # file that has no tab; the edits it *could* have applied must not be applied either.
+        session.press(session.chord("c"), lambda s: "'alfa'" in s.text(), 8)
+        session.send("_outside")
+        session.press("\r", lambda s: "alfa_outside" not in s.text()[:0] or True, 8)
+        refused = session.wait(lambda s: "1" in s.lines()[-1] and "alfa_outside" not in s.text(), 12)
+        rows = session.lines()
+        report.check("a rename reaching a file no tab holds is refused whole",
+                     refused and not any("alfa_outside" in l for l in rows)
+                     and any(re.search(r"\s1 alfa = alfa \+ 1\b", l) for l in rows), session,
+                     note=repr(session.lines()[-1].strip()))
+        report.check("and the refusal says so on the status line rather than in silence",
+                     bool(session.lines()[-1].strip()), session,
+                     note=repr(session.lines()[-1].strip()))
 
         Report.show("final screen", session)
     finally:

@@ -156,6 +156,7 @@ pub enum Key {
     ItemJumpBack,
     ItemFindReferences,
     ItemDocumentSymbols,
+    ItemRenameSymbol,
     ItemShowDiagnostics,
     ItemGitStatus,
     ItemGitChanges,
@@ -620,6 +621,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemFindReferences) => "Trova i riferimenti",
         (Lang::En, ItemDocumentSymbols) => "Symbols in this file",
         (Lang::It, ItemDocumentSymbols) => "Simboli del file",
+        // The one thing in this group that writes. It is a question first — the box, then the
+        // preview — so the label says the action and not the consequence.
+        (Lang::En, ItemRenameSymbol) => "Rename symbol",
+        (Lang::It, ItemRenameSymbol) => "Rinomina simbolo",
         (Lang::En, ItemShowDiagnostics) => "Everything that is wrong",
         (Lang::It, ItemShowDiagnostics) => "Tutto quello che non va",
 
@@ -1785,6 +1790,157 @@ pub fn msg_lsp_nowhere_back(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "You have not jumped anywhere to come back from",
         Lang::It => "Non sei saltato da nessuna parte da cui tornare",
+    }
+}
+
+// ---- Renaming a name ------------------------------------------------------------------------
+//
+// The wordiest family of messages in this file, and on purpose. Every one of them below the
+// prompt is a *refusal*: the rename was asked for, the server answered, and the editor is not
+// going to do what it said. A refusal that does not say which of half a dozen reasons it was
+// leaves the reader with nothing to change, and the one thing worse than a rename that will not
+// happen is a rename that will not happen for no stated reason.
+
+/// The box: what is being renamed, and the two keys that end it.
+pub fn msg_rename_symbol_prompt(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Rename '{name}' to (Enter = ask, Esc = cancel):"),
+        Lang::It => format!("Rinomina '{name}' in (Invio = chiedi, Esc = annulla):"),
+    }
+}
+
+/// Said when the key is pressed somewhere there is no name: in the indentation, on a bracket, on
+/// a blank line. Nothing opens, because there would be nothing to put in the box.
+pub fn msg_rename_nothing_here(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No name under the cursor to rename",
+        Lang::It => "Nessun nome sotto il cursore da rinominare",
+    }
+}
+
+pub fn msg_rename_asking(lang: Lang, old_name: &str, new_name: &str) -> String {
+    match lang {
+        Lang::En => format!("Asking what it takes to rename {old_name} to {new_name}…"),
+        Lang::It => format!("Chiedo cosa serve per rinominare {old_name} in {new_name}…"),
+    }
+}
+
+/// The server answered, and its answer was that nothing would change. An answer, and said out
+/// loud for the same reason the absent definition is.
+pub fn msg_rename_no_changes(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server would change nothing for that rename",
+        Lang::It => "Il server non cambierebbe niente per quel rename",
+    }
+}
+
+/// The server wanted files created, moved or deleted as well as edited.
+///
+/// Refused whole rather than in part. Applying the edits and skipping the file operations would
+/// carry out half of what the server asked for and report it as all of it — and the half left
+/// out is the half that moves files around on disk.
+pub fn msg_rename_refused_file_ops(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That rename would also create, move or delete files — nothing was changed",
+        Lang::It => "Quel rename creerebbe, sposterebbe o cancellerebbe file — non ho cambiato niente",
+    }
+}
+
+/// One of the edits covers more than one line, which this cannot show and therefore will not do.
+pub fn msg_rename_refused_multiline(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "One of the server's edits spans several lines — nothing was changed",
+        Lang::It => "Una delle modifiche del server copre più righe — non ho cambiato niente",
+    }
+}
+
+/// Two of the edits cover the same text, so their order would decide the result.
+pub fn msg_rename_refused_overlap(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Two of the server's edits overlap — nothing was changed",
+        Lang::It => "Due modifiche del server si sovrappongono — non ho cambiato niente",
+    }
+}
+
+/// The rename reaches files no tab holds. The count is the whole message: it is what turns a
+/// refusal into an instruction, since opening those files and pressing the key again works.
+pub fn msg_rename_refused_outside(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::En => format!("{count} file(s) this rename touches are not open — open them and try again"),
+        Lang::It => format!("{count} file toccati da questo rename non sono aperti — aprili e riprova"),
+    }
+}
+
+/// One of the tabs it would write to cannot be typed in — a preview, or a file opened read-only.
+pub fn msg_rename_refused_read_only(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "One of the files this rename touches is open read-only — nothing was changed",
+        Lang::It => "Uno dei file toccati da questo rename è aperto in sola lettura — non ho cambiato niente",
+    }
+}
+
+/// The text moved between the preview being built and the key being pressed.
+///
+/// The one refusal that happens after something was already shown on screen, which is why it
+/// says so: a file reloaded from disk under an open preview would have the edits applied at
+/// character offsets measured against text that is no longer there.
+pub fn msg_rename_refused_moved(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The text changed under the preview — nothing was changed, ask again",
+        Lang::It => "Il testo è cambiato sotto l'anteprima — non ho cambiato niente, richiedi",
+    }
+}
+
+/// The preview's title: what is being renamed to what, and how much of it there is.
+pub fn msg_rename_preview_title(
+    lang: Lang,
+    old_name: &str,
+    new_name: &str,
+    edits: usize,
+    files: usize,
+) -> String {
+    match lang {
+        Lang::En => format!("{old_name} → {new_name}  ·  {edits} change(s) in {files} file(s)"),
+        Lang::It => format!("{old_name} → {new_name}  ·  {edits} modifiche in {files} file"),
+    }
+}
+
+/// One file's header row in the preview, written the way a diff writes one so it reads as one.
+pub fn msg_rename_file_header(lang: Lang, path: &str, count: usize) -> String {
+    match lang {
+        Lang::En => format!("--- {path}  ({count} change(s))"),
+        Lang::It => format!("--- {path}  ({count} modifiche)"),
+    }
+}
+
+/// The preview's footer. Spelled out for the same reason the git panel's is: these are bare keys,
+/// safe only while the box owns the keyboard, and discoverable only if the box says so.
+pub fn msg_rename_keys(lang: Lang) -> String {
+    let yes = yes_key(lang).to_ascii_uppercase();
+    match lang {
+        Lang::En => format!("Enter or {yes} = apply   Esc = cancel   ↑↓ PgUp/PgDn = scroll"),
+        Lang::It => format!("Invio o {yes} = applica   Esc = annulla   ↑↓ PgSu/PgGiù = scorri"),
+    }
+}
+
+/// What happened, in the same numbers the preview showed, so the two can be compared.
+pub fn msg_rename_applied(
+    lang: Lang,
+    old_name: &str,
+    new_name: &str,
+    edits: usize,
+    files: usize,
+) -> String {
+    match lang {
+        Lang::En => format!("Renamed {old_name} to {new_name}: {edits} change(s) in {files} file(s)"),
+        Lang::It => format!("Rinominato {old_name} in {new_name}: {edits} modifiche in {files} file"),
+    }
+}
+
+pub fn msg_rename_cancelled(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Rename cancelled — nothing was changed",
+        Lang::It => "Rename annullato — non ho cambiato niente",
     }
 }
 
