@@ -7129,6 +7129,113 @@ impl App {
         Some(idx)
     }
 
+    // ---- Handing the editor's context to an agent -------------------------------------------
+
+    /// Which on-screen terminal holds a coding agent, and which agent it is.
+    ///
+    /// The same shape as the question `send_to_session` asks about an interpreter, and the same
+    /// answer to "which tabs count": the on-screen one of each window. Sending text into a
+    /// hidden tab would put it at a prompt nobody is looking at, which is the one outcome this
+    /// feature must not have — the text is a question the user is about to press Enter on.
+    ///
+    /// Two ways of recognising one, in this order. The process table is the truthful answer:
+    /// an agent that has since exited leaves a shell behind, and the shell is not an agent. But
+    /// `claude` installed from npm is a script that execs `node`, so the table often says `node`
+    /// — and there the pane's own startup command answers, because a pane opened by the preset
+    /// was opened to run that agent and says so.
+    fn agent_terminal(&self) -> Option<(usize, crate::session::Agent)> {
+        let pids: Vec<Option<u32>> =
+            self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+        if let Some(found) = dnd::agent_running(&pids) {
+            return Some(found);
+        }
+        self.terminals.iter().enumerate().find_map(|(index, window)| {
+            let command = window.active_tab().startup_command.as_deref()?;
+            crate::session::Agent::of_command(command).map(|agent| (index, agent))
+        })
+    }
+
+    /// The path as it should be written at an agent's prompt: relative to the project root where
+    /// the file is inside it, absolute where it is not. An agent is running in that root, so the
+    /// short form is the one it can act on — and the one it prints back.
+    fn path_for_agent(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().to_string()
+    }
+
+    /// What the editor has to say about where you are, in order of precedence: the selection you
+    /// made, then a diagnostic the language server put under the cursor, then the cursor itself.
+    ///
+    /// Line numbers come out one-based, which is what the gutter shows and what `file:12` means
+    /// to everyone who reads it — the agent included.
+    fn agent_context(&self) -> Option<(PathBuf, crate::session::Context)> {
+        use crate::session::Context;
+        let editor = self.editor();
+        // No path, nothing to point at: a reference to a buffer that is not a file is a
+        // reference to nothing, and the agent would go looking for it.
+        let path = editor.path.clone()?;
+        if let Some(((from, _), (to, _))) = editor.selection_range() {
+            let text = editor.selected_text().unwrap_or_default();
+            return Some((path, Context::Selection { from: from + 1, to: to + 1, text }));
+        }
+        let (line, col) = (editor.cursor_line, editor.cursor_col);
+        // The diagnostics on this line: the one the cursor is actually inside if there is one,
+        // otherwise the worst of them. Sitting on a line with an error is the usual way of
+        // asking about the error, and severity is the tiebreak for the same reason the status
+        // bar uses it — an error is news, a hint is not.
+        let on_this_line: Vec<&crate::lsp::Mark> =
+            self.marks_for(Some(&path)).iter().filter(|mark| mark.line == line).collect();
+        let mark = on_this_line
+            .iter()
+            .find(|mark| mark.start <= col && col < mark.end)
+            .or_else(|| on_this_line.iter().max_by_key(|mark| mark.severity))
+            .copied();
+        Some(match mark {
+            Some(mark) => {
+                (path, Context::Diagnostic { line: line + 1, message: mark.message.clone() })
+            }
+            None => (path, Context::Cursor { line: line + 1 }),
+        })
+    }
+
+    /// Hands the agent in one of the terminals the piece of context you are looking at.
+    ///
+    /// **And stops there.** The text lands at the agent's prompt and nothing is submitted: no
+    /// newline is sent, ever. That is the discipline the whole feature is built on — what goes
+    /// to an agent is a question with a cost, and deciding to ask it is the user's, made by
+    /// pressing Enter themselves while looking at what they are about to send. It is also why
+    /// this is a paste and not a `type_line`: `type_line` ends with a carriage return, which is
+    /// right for an interpreter running a file and wrong for every word of this.
+    ///
+    /// The focus follows the text, which is the one thing this does on the user's behalf. Enter
+    /// is the next key in the sentence they just started, and it has to land in the pane where
+    /// the text is rather than in the buffer they were reading.
+    pub fn send_context_to_agent(&mut self) {
+        let lang = self.settings.lang;
+        let Some((idx, agent)) = self.agent_terminal() else {
+            self.status_message = i18n::msg_agent_none(lang);
+            return;
+        };
+        let Some((path, what)) = self.agent_context() else {
+            self.status_message = i18n::msg_agent_unsaved(lang);
+            return;
+        };
+        let name = self.path_for_agent(&path);
+        let Some(term) = self.window_tab(idx) else { return };
+        // Composed against what the pane can hold, then handed to the same paste path a
+        // clipboard goes through — brackets where the program asked for them, nothing where it
+        // did not.
+        let text = agent.context(&name, &what, term.holds_a_paste());
+        let bytes = term.paste_bytes(&text);
+        if let Some(term) = self.window_tab_mut(idx) {
+            term.write_input(&bytes);
+        }
+        self.settings.show_terminal = true;
+        self.active_terminal = idx;
+        self.focus = Focus::Terminal;
+        let reference = text.lines().next().unwrap_or_default().to_string();
+        self.status_message = i18n::msg_agent_sent(lang, &reference, agent.label(), idx);
+    }
+
     /// Writes a piece of a buffer where an interpreter can be pointed at it.
     ///
     /// One file per buffer rather than one per run, so a session's history stays readable —
@@ -7854,6 +7961,11 @@ impl App {
             // room for the Shift since VT100, so it would work in two emulators and silently do
             // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
             Action::RunSelection => self.run_selection(),
+            // A for agent, and one of the few letters still free — which is luck, because it is
+            // the one anybody would have guessed. Next to X in meaning as well as on the
+            // keyboard: X sends a piece of the file to an interpreter, A sends where you are to
+            // an agent, and neither presses Enter for you.
+            Action::SendToAgent => self.send_context_to_agent(),
             // Put a breakpoint on this line, or take it off.
             Action::ToggleBreakpoint => self.toggle_breakpoint(),
             // Inspect: what a variable actually contains, a screenful at a time.

@@ -202,6 +202,16 @@ and
 .B c
 at Python's (Pdb) \(em and the status line says which. Nothing is typed at your prompt to set a
 breakpoint or to read anything back.
+.SS Agents
+.TP
+.B Ctrl+Shift+A
+Hand the agent running in one of the terminals where you are: the selection, or the diagnostic
+under the cursor, or the line the cursor is on \(em written at its prompt as
+.IR path : line
+and left there. A selection of ten lines or fewer travels with its text; a longer one goes as the
+reference alone, since the agent reads the file better than a paste of it. Nothing is submitted:
+no newline is ever sent, so what to ask and when to ask it stays yours, and Enter is the key that
+sends. With no agent in any terminal it says so and does nothing.
 .SS File tree
 .RB \(bu " n" " / " N
 new file or folder \(bu
@@ -254,6 +264,21 @@ control. A built\-in
 .B "Default layout"
 is always offered and cannot be deleted or overwritten: it is the layout to go back to when the
 frames have wandered.
+.PP
+Five more are built in and are not files:
+.BR "clee \-w octave" " and " "clee \-w pylab" ,
+which open a numeric session, and
+.BR "clee \-w claude" ", " "clee \-w opencode" " and " "clee \-w codex" ,
+which open a coding agent \(em the agent in a terminal tab named after it, a plain shell in the
+next tab, and the editor beside them (underneath them on a window narrower than 150 columns,
+where two columns would leave the agent forty). They are the whole integration: these are real
+ptys, so a terminal agent runs in one as it runs anywhere. Nothing checks whether the program is
+installed; if it is not, the pane shows the shell saying so.
+.B Ctrl+Shift+A
+hands it the editor's context, and a
+.IR file : line
+it prints back opens on a double\-click. All six names are reserved and saving over one is
+refused.
 .SH PICTURES
 A picture \(em .png, .jpg, .jpeg, .gif, .webp, .bmp, .ico, .tiff \(em opens in a tab that draws
 it, rather than the blank read\-only buffer a binary file gives. There is nothing in one to edit,
