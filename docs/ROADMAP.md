@@ -2137,6 +2137,15 @@ il 40% che manca è quello che si usa ogni ora:
 > colonne vuole il testo. La v1 lista quelli e lo dice; la lista di progetto vera dovrà
 > conservare i diagnostici grezzi dei file chiusi e convertirli all'apertura.
 
+> **Fatti i tre lettori (2026-09-02).** References, document symbols e la lista dei
+> diagnostici sono dentro, tutti nel picker e tutti in sola lettura. Le richieste nuove
+> parcheggiano in uno slot loro, separato da quello che definition e hover si contendono;
+> l'origine del salto vive sul picker stesso e muore con lui, così Ctrl+Shift+L torna da un
+> riferimento come torna da una definizione. Lo stub del driver risponde alle due richieste
+> e undici controlli nuovi guardano le liste, il rientro e l'atterraggio. Restano del
+> blocco: rename, format on demand, trigger characters — e il rename è il prossimo, ora che
+> la forma delle liste è rodata.
+
 **Sostituisci nel progetto.** La ricerca c'è; manca la metà che scrive. Stessa disciplina del
 rename perché *è* lo stesso problema: anteprima raggruppata per file, `find::compile` resta
 l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale ancora),
