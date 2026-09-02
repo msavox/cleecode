@@ -148,6 +148,12 @@ def read_json(path):
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_mcp_")
+    # Sessions live under the temp dir (see `mcp::sessions_root`), and this driver gives the
+    # editors a temp dir of their own so the paths below are deterministic and two drivers
+    # cannot see each other's sessions. Both editors share it: the sweep check needs the second
+    # editor to find the first one's orphan.
+    tmp = tempfile.mkdtemp(prefix="clee_mcp_tmp_")
+    sessions = os.path.join(tmp, "cleecode-sessions")
     os.makedirs(os.path.join(root, "src"), exist_ok=True)
     with open(os.path.join(root, "src", "main.rs"), "w") as handle:
         handle.write(MAIN)
@@ -175,7 +181,7 @@ def main():
                  bool(still_there) and "result" in still_there, note=repr(still_there))
     report.check("closing stdin ends it cleanly", lonely.close() == 0)
 
-    session = Session(binary, root, cols=COLS, rows=ROWS)
+    session = Session(binary, root, env={"TMPDIR": tmp}, cols=COLS, rows=ROWS)
     mcp = None
     try:
         started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
@@ -195,7 +201,7 @@ def main():
 
         # Where an agent started in a pane would find us. Named from the editor's pid, which is
         # what the pty child became, so this driver names it exactly as `CLEE_SESSION` does.
-        session_dir = os.path.join(root, ".config", "cleecode", "sessions", str(session.pid))
+        session_dir = os.path.join(sessions, str(session.pid))
         state_path = os.path.join(session_dir, "state.json")
         report.check("the editor made a session directory and published into it",
                      wait_for(lambda: os.path.exists(state_path), 15, session), session,
@@ -286,18 +292,18 @@ def main():
         # below exists for. (The tidy exit is covered by the unit test that drops a Session.)
         session.close()
 
-    orphan = os.path.join(root, ".config", "cleecode", "sessions", str(session.pid))
+    orphan = os.path.join(sessions, str(session.pid))
     report.check("a killed editor does leave its session directory behind",
                  os.path.exists(orphan), note=orphan)
 
-    # The next CleeCode to start in the same config directory sweeps it, because the pid it is
+    # The next CleeCode to start with the same temp dir sweeps it, because the pid it is
     # named after is not running any more.
-    second = Session(binary, root, cols=COLS, rows=ROWS)
+    second = Session(binary, root, env={"TMPDIR": tmp}, cols=COLS, rows=ROWS)
     try:
         report.check("the next editor sweeps away the dead session's directory",
                      wait_for(lambda: not os.path.exists(orphan), 25, second), second,
                      note=orphan)
-        fresh = os.path.join(root, ".config", "cleecode", "sessions", str(second.pid))
+        fresh = os.path.join(sessions, str(second.pid))
         report.check("and has a session directory of its own", os.path.isdir(fresh), second,
                      note=fresh)
     finally:
