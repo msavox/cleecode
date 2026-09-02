@@ -2213,23 +2213,33 @@ riscritti con la strada temp+rename.
   fotogramma bianco fra due, e un file i cui frame non stanno in memoria dichiara il limite
   invece di scoprirlo congelandosi.
 
-- **I workspace componibili: `clee -w octave+claude`** (pensato il 2026-09-02). Il capitolo
-  numerico e l'agente nello stesso posto di lavoro: il primo nome un preset di sessione, il
-  secondo un agente, e il builder monta la composizione — niente nove preset in `BUILT_INS`,
-  perché 3 linguaggi × 3 agenti non direbbero niente che `+` non dica da sé. Il layout è
-  il pannello a destra impilato, che è il frame di fianco all'editor già costruito: col
-  pannello a destra le finestre si impilano in verticale (`ui.rs`, la stessa geometria del
-  preset agente), quindi editor a sinistra e colonna destra con l'agente in alto a peso
-  doppio — una conversazione legge in giù e vuole righe — l'interprete sotto con la shell
-  come scheda, e il pannello variabili in fondo. Seam trascinabili e pesi già nel formato.
+- **L'agente di fianco al lavoro: la composizione, e poi il cassetto** (pensato il
+  2026-09-02, in tre giri di conversazione). Il capitolo numerico e l'agente nello stesso
+  posto di lavoro, in due stadi.
+
+  *Il passo economico è la composizione:* `clee -w octave+claude` — il primo nome un preset
+  di sessione, il secondo un agente, niente nove preset in `BUILT_INS` perché 3 linguaggi ×
+  3 agenti non direbbero niente che `+` non dica da sé. Il layout esiste già: col pannello a
+  destra le finestre si impilano in verticale (la geometria del preset agente), quindi
+  editor a sinistra e colonna destra con l'agente in alto a peso doppio — una conversazione
+  legge in giù e vuole righe — l'interprete sotto con la shell come scheda, il pannello
+  variabili in fondo. Zero macchina nuova, e si prova a mano oggi coi workspace salvati.
   L'agente in finestra propria resta a schermo, che non è estetica: `Ctrl+Shift+A` guarda
-  solo la scheda visibile di ogni finestra, e un agente dietro la scheda dell'interprete
-  sarebbe invisibile al tasto. Sui terminali larghi e bassi, dove una colonna non ha righe
-  per tre finestre, si degrada alle tre finestre sotto — interprete, agente, shell — e
-  sotto ancora l'agente diventa scheda, col limite detto. Un frame *dedicato* agli LLM
-  nella split dell'editor è stato valutato e rimandato: la split ospita buffer, metterci un
-  pty tocca focus e routing di tasti e mouse, e comprerebbe solo estetica sopra quello che
-  l'impilamento a destra già dà — se ne riparla il giorno che serve chrome specifico. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
+  solo la scheda visibile di ogni finestra. Sui terminali larghi e bassi si degrada alle
+  tre finestre sotto, e più stretto ancora l'agente diventa scheda, col limite detto.
+
+  *La destinazione è il cassetto:* un pannello laterale che compare da destra per l'agente,
+  quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
+  ucciso: il pty sopravvive come già sopravvive il pannello sotto `Ctrl+J`, quindi la
+  conversazione resta. È un secondo pannello terminali accanto a quello di sempre, e il
+  prezzo è esattamente lì: l'assunzione un-pannello-un-orientamento tocca il layout, il
+  giro del focus, il resize coi seam, il mouse e il formato workspace (campo nuovo,
+  versionato). Il rendering invece si riusa intero, perché dentro è una finestra terminale
+  come le altre. Il cassetto assorbe la composizione — `octave+claude` diventa il preset
+  con il cassetto già aperto — e `Ctrl+Shift+A` dà precedenza al suo agente. Da decidere
+  allora: quale agente evoca il tasto la prima volta, un'impostazione o un picker al primo
+  uso. Un frame dedicato agli LLM nella *split dell'editor* resta valutato e rimandato: la
+  split ospita buffer, un pty lì dentro tocca focus e routing per comprare solo estetica. A mano si fa già oggi — preset, `Ctrl+Shift+T`, il nome dell'agente,
   `Ctrl+Shift+W` — quindi la voce non è renderlo possibile: è renderlo di serie, col
   layout giusto e un nome che si legge da solo nella lista di `clee -w`. Il flusso che ne
   esce non ce l'ha nessun editor intero: l'agente vede diagnostici e selezione via MCP,
