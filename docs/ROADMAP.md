@@ -1944,6 +1944,14 @@ click di `locate.rs` li apre da sempre.
 > premere decide l'utente. Niente agente in giro è una frase sulla status line, non un tasto che
 > non fa niente.
 
+> **La 0.15.1 chiude il buco di npm (2026-09-02).** Il `claude` che quasi tutti hanno è uno
+> script che node esegue: nel process table compare `node`, e la ricerca per nome non lo
+> trovava se il pane non era del preset — un agente al suo prompt, due pannelli più in là,
+> e il tasto diceva che non c'era. `Agent::of_process` legge ogni processo per nome *e* per
+> argomenti: dove il nome è di un interprete, risponde lo stem dello script che gli è stato
+> consegnato. Il driver dei preset riproduce la forma npm con un node vero, non finto —
+> uno stub che fingesse di essere node non proverebbe niente sul process table.
+
 **3. I file sotto le mani dell'agente, in diretta.** Il punto di partenza è capire cosa fa
 davvero un agente: non digita — **scrive il file intero a ogni edit**. Quindi "live" non è
 streaming, è reagire bene a una sequenza di scritture atomiche, che è ciò che un editor sa
@@ -2119,6 +2127,16 @@ il 40% che manca è quello che si usa ogni ora:
   sorgente LSP supera le parole del buffer, e oggi non scatta;
 - la *lista dei diagnostici* di progetto, un `PickerKind` in più sui dati che già arrivano.
 
+> **Le corde, decise (2026-09-02).** La tabella delle lettere libere diceva {C, Q, V, Y, Z}:
+> Z è già il redo di fatto, Q siede accanto a Ctrl+Q, C e V le mangiano alcuni terminali
+> Linux — un precedente già accettato con T, N e W, ma non da estendere a cuor leggero.
+> Quindi: *references* su **Ctrl+Shift+Y**, *document symbols* su **Ctrl+Shift+V**, e la
+> lista dei diagnostici senza corda: menu e palette bastano, un elenco non è un riflesso.
+> E una scoperta sul perimetro, dalla ricognizione: "i dati che già arrivano" sono i buffer
+> aperti — gli arrivi per file non aperti oggi si scartano alla porta, perché convertire le
+> colonne vuole il testo. La v1 lista quelli e lo dice; la lista di progetto vera dovrà
+> conservare i diagnostici grezzi dei file chiusi e convertirli all'apertura.
+
 **Sostituisci nel progetto.** La ricerca c'è; manca la metà che scrive. Stessa disciplina del
 rename perché *è* lo stesso problema: anteprima raggruppata per file, `find::compile` resta
 l'unico posto dove una query diventa un pattern (la decisione della 0.6 vale ancora),
@@ -2127,6 +2145,28 @@ riscritti con la strada temp+rename.
 
 ## 0.17 — La potenza sotto le dita
 
+- **Gli edit dell'agente si vedono anche nel testo, non solo nel gutter.** (2026-09-02, dal
+  primo uso vero del ponte MCP.) Oggi le righe arrivate da un reload esterno accendono solo
+  il numero di riga (`changed_line`): con edit sparsi in un file lungo il segnale si nota
+  soltanto scorrendo il gutter apposta. Il raffinamento è un **fondo tenue sul testo delle
+  stesse righe** — persistente, non un flash che decade: il caso d'uso è l'agente che scrive
+  mentre guardi altrove, e un'evidenziazione a tempo è informazione persa se in quel momento
+  non stavi guardando; il valore è trovarla *quando torni*. Si spegne esattamente come oggi —
+  primo edit dell'utente, o Esc: il momento in cui dichiari di aver ripreso il controllo.
+  La macchina c'è già tutta (`changed_lines` e `line_arrived()` in `editor.rs`; il render del
+  gutter passa già di lì in `ui.rs`); il lavoro nuovo è in quattro punti:
+  1. applicare il background agli span syntect della riga preservando i foreground — il
+     colore della sintassi resta leggibile sopra il fondo, sennò la cura è peggio del male;
+  2. un `changed_line_bg` in palette, definito per **ognuno dei nove temi** come già
+     `changed_line`, abbastanza tenue da non alterare il contrasto del testo;
+  3. la precedenza, detta una volta: la selezione e ogni background semantico esistente
+     (match di ricerca, riga corrente se ha un fondo) **vincono** sul fondo delle righe
+     arrivate — è un'informazione di contesto, non un evento;
+  4. il test gemello di `a_changed_line_cannot_be_mistaken_for_the_other_marks` per il nuovo
+     colore, più il vincolo di contrasto testo/fondo su tutti i temi.
+  Le righe *cancellate* restano senza segno, di proposito: un marcatore per "qui manca
+  qualcosa" è difficile da rendere bene in un TUI, e la review delle rimozioni è già il
+  pannello Git col suo diff. Se l'uso lo chiederà, se ne riparla — una promessa alla volta.
 - **La selezione a colonna scrive su ogni riga.** È il multi-cursor nella forma che il progetto
   ha già mezzo costruito: digitare con un blocco attivo inserisce su tutte le righe del blocco,
   Backspace idem. Il multi-cursor arbitrario (Ctrl+D "prossima occorrenza") viene dopo, se
@@ -2175,6 +2215,12 @@ Tre pezzi, in ordine di dipendenza:
   AppImage — dopo, se qualcuno li chiede: un formato di pacchetto è una promessa di
   manutenzione, e le promesse si fanno una alla volta.
 
+  > Primo utente concreto (2026-09-02): una macchina condivisa in datacenter, dove la rete
+  > manomette le POST git verso GitHub — `brew update` non può passare, e una chiave
+  > personale su una macchina condivisa non ce la si vuole lasciare. Lì clee oggi si
+  > aggiorna col tarball di release: una GET, verificata col checksum. Un pacchetto che si
+  > installa con una GET è esattamente quella strada, resa ufficiale.
+
 ## 1.0 — la definizione, non una data
 
 La 1.0 non è una release di funzionalità: è un elenco di frasi che devono essere vere.
@@ -2190,6 +2236,12 @@ La 1.0 non è una release di funzionalità: è un elenco di frasi che devono ess
 6. `clee -w claude` (o opencode, o codex) apre un posto di lavoro completo: l'agente in un
    pane usabile, il contesto dell'editor a un tasto, i suoi edit visibili nei buffer e nel
    pannello Git senza toccare niente.
+
+> Il punto 5 ha già avuto la sua prova del nove (2026-09-02): i driver girati a mano contro
+> un `target/debug` stantio di tre versioni hanno prodotto un'ora di falso allarme su un
+> master perfettamente sano — ogni check dei preset rosso, nessun bug. Da allora ogni driver
+> dichiara ad alta voce quale binario sta guidando; ma la dichiarazione è un cerotto, e la
+> frase del punto 5 resta la risposta: in CI il binario è sempre quello appena costruito.
 
 ## Cosa resta fuori, e perché è una decisione
 
