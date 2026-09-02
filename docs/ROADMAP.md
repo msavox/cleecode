@@ -1947,6 +1947,12 @@ aggiorna già da solo mentre l'agente ci lavora. Sopra quella base, tre pezzi:
   da un repo git il modo segui semplicemente non c'è, e lo dice;
 - *la regola di sicurezza che c'è già*: un buffer sporco non si auto-ricarica mai — il lavoro
   dell'utente vince su quello dell'agente, sempre.
+
+**Pezzo 3 fatto** il 2026-09-02: diff di righe puro al reload (prefissi e suffissi comuni tolti,
+LCS sul mezzo, tetto a 2000 righe di differenza: oltre, niente si accende), righe accese nel
+gutter col colore `changed_line` della palette e spente da qualsiasi modifica o da Esc, e il modo
+segui sulla differenza fra due snapshot di `git status` — un file per passata, cinque per
+sessione, nessuno chiuso da solo.
 Il pannello Git resta la review: lo stato mostra cosa ha toccato la sessione, il diff cosa ha
 scritto, scartare è già una domanda in rosso. Raffinamento opzionale, se l'uso lo chiede: un
 hook PostToolUse di Claude Code che scrive il percorso toccato in un file di contratto (il
