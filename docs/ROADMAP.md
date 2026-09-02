@@ -1931,6 +1931,19 @@ o il diagnostico sotto il cursore — scritto al prompt dell'agente come riferim
 Il ritorno esiste già ed è gratis: gli agenti stampano `file:riga` di continuo, e il doppio
 click di `locate.rs` li apre da sempre.
 
+> **Fatti tutti e due, il 2026-09-02.** I preset sono tre nomi in `BUILT_INS` e una forma sua in
+> `workspace.rs`: una scheda col nome dell'agente e il suo comando, una shell nella successiva,
+> nessuna finestra di workspace — un agente non ha variabili da guardare. Sta accanto all'editor
+> sopra i 150 colonne e sotto al di sotto, dove due colonne ne lascerebbero quaranta a una TUI.
+> Il seam è `enum Agent` in `session.rs`, accanto a `Language` e con le stesse domande; in v1
+> tutti e tre rispondono `percorso:riga`, che è quello che stampano loro e che `locate.rs` sa
+> già riaprire. **Ctrl+Shift+A** manda dove sei: la selezione (col testo se sta in dieci righe),
+> o il diagnostico sotto il cursore, o la riga del cursore. Va al pane come un incollaggio —
+> bracketed dove il programma l'ha chiesto, e dove non l'ha chiesto va solo il riferimento,
+> perché lì un a capo *è* Invio — e **senza Invio finale, mai**: il testo resta al prompt e a
+> premere decide l'utente. Niente agente in giro è una frase sulla status line, non un tasto che
+> non fa niente.
+
 **3. I file sotto le mani dell'agente, in diretta.** Il punto di partenza è capire cosa fa
 davvero un agente: non digita — **scrive il file intero a ogni edit**. Quindi "live" non è
 streaming, è reagire bene a una sequenza di scritture atomiche, che è ciò che un editor sa

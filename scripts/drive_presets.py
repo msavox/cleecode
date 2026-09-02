@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open `clee -w octave` and `clee -w pylab` and check what you actually get.
+"""Open each `clee -w <preset>` and check what you actually get.
 
     python3 scripts/drive_presets.py [path/to/clee]
 
@@ -7,6 +7,12 @@ A preset is a promise about what appears when you type its name, and the only wa
 promise like that is to type it. Every check here is about the screen: is the interpreter at its
 prompt, is there a shell beside it, did the frames land where the width says they should, and —
 running the same preset in a narrow window — did they move.
+
+The agent presets are checked the same way, against a stand-in rather than the real Claude Code:
+what is being promised is a tab named after the agent that runs the agent, and a shell beside it.
+A stub on `PATH` proves that better than the real program would, because it can also say what
+reached its prompt — which is how the last two checks read `Ctrl+Shift+A` for what it is: the
+context arrives, and *nothing is submitted* until Enter is pressed.
 
 Skips a language whose interpreter is not installed rather than passing quietly.
 """
@@ -23,6 +29,111 @@ PRESETS = [
     {"name": "octave", "needs": "octave", "prompt": ">>", "tab": "octave"},
     {"name": "pylab", "needs": "python3", "prompt": ">>>", "tab": "python"},
 ]
+
+AGENTS = ["claude", "opencode", "codex"]
+
+# A stand-in for an agent: says who it is, then reads its prompt a line at a time and says what
+# it was given. Line at a time is the point — a `read` returns when Enter is pressed and not
+# before, so "SUBMITTED" appearing is exactly the thing CleeCode promises never to do on your
+# behalf.
+STUB = """#!/bin/sh
+echo "AGENT-STUB %s ready"
+while IFS= read -r line; do
+    echo "SUBMITTED: $line"
+done
+"""
+
+
+def fake_agents(root):
+    """A directory holding a stub for each agent, to be put in front of `PATH`.
+
+    In front, so this is deterministic on a machine that has the real ones installed: the check
+    is about the preset, not about whichever agent happens to be on this laptop.
+    """
+    bin_dir = os.path.join(root, "fakebin")
+    os.makedirs(bin_dir, exist_ok=True)
+    for name in AGENTS:
+        path = os.path.join(bin_dir, name)
+        with open(path, "w") as handle:
+            handle.write(STUB % name)
+        os.chmod(path, 0o755)
+    return bin_dir
+
+
+def open_file(session, name):
+    """Quick-open `name`, from wherever the keyboard happens to be.
+
+    A focused terminal has first claim on every Ctrl chord, so Ctrl+O typed at a shell goes to
+    the shell; Ctrl+Tab is the one it hands back, and it is the way out of the pane. Same
+    manoeuvre as in drive_cells.py, for the same reason.
+    """
+    for _ in range(4):
+        session.send("\x0f")                                   # Ctrl+O
+        if session.wait(lambda s: "matches" in s.text(), 2):
+            session.send(name)
+            session.wait(lambda s: True, 0.5)
+            session.send("\r")
+            return True
+        session.press("\x1b[9;5u", lambda s: True, 0.4)        # Ctrl+Tab, cycle the frames
+    return False
+
+
+def check_agent_preset(binary, name, report):
+    """`clee -w <agent>`: a tab of that name running that command, and a shell beside it."""
+    root = tempfile.mkdtemp(prefix="clee_agent_")
+    # Something for the editor to be looking at, so the shortcut has a place to point at.
+    with open(os.path.join(root, "demo.py"), "w") as handle:
+        handle.write("value = 1\nprint(value)\n")
+    env = {"PATH": fake_agents(root) + os.pathsep + os.environ.get("PATH", "")}
+
+    session = Session(binary, root, env=env, args=["-w", name], cols=190)
+    try:
+        started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
+        report.check(f"{name}: the preset opens", started, session)
+        if not started:
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 8)
+
+        # The startup command ran, and it ran *that* program: the stub says its own name.
+        ready = session.wait(lambda s: f"AGENT-STUB {name} ready" in s.text(), 30)
+        report.check(f"{name}: the tab starts the agent by itself", ready, session,
+                     note="nothing was typed to start it")
+
+        # On the tab, not merely somewhere on screen: the name is also in the menu bar's
+        # workspace label and in the shell echo that started it.
+        strip = next((line for line in session.lines() if "shell ✕" in line), "")
+        report.check(f"{name}: its tab carries the agent's name", f"{name} ✕" in strip, session,
+                     note=repr(strip[-70:]))
+        report.check(f"{name}: a plain shell sits beside it in the same window",
+                     "shell" in session.text(), session)
+        if not ready:
+            return
+
+        # Ctrl+Shift+A. The reference has to arrive at the agent's own prompt — read out of that
+        # pane's frame, since "demo.py" is in the editor's tab strip the whole time.
+        if not open_file(session, "demo"):
+            report.check(f"{name}: the file opens", False, session)
+            return
+        session.wait(lambda s: "value = 1" in s.text(), 8)
+        session.send(session.chord("a"))
+        arrived = session.wait(
+            lambda s: "demo.py:1" in "\n".join(s.frame_of(f"AGENT-STUB {name} ready")), 8)
+        report.check(f"{name}: Ctrl+Shift+A writes the reference at the agent's prompt",
+                     arrived, session)
+
+        # And left it there. This is the whole discipline of the key: CleeCode never presses
+        # Enter for you, so the stub — which speaks only when a line is completed — has said
+        # nothing yet.
+        report.check(f"{name}: nothing was submitted", "SUBMITTED" not in session.text(), session,
+                     note="the agent is only asked when the user presses Enter")
+
+        # Pressing it is what sends, and the keyboard is already in the pane holding the text.
+        submitted = session.press("\r", lambda s: "SUBMITTED: demo.py:1" in s.text(), 8)
+        report.check(f"{name}: Enter is what sends it", submitted, session)
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def open_preset(binary, name, root, cols):
@@ -105,6 +216,9 @@ def main():
             print(f"  SKIP  {spec['name']}: {spec['needs']} not installed")
             continue
         check_preset(binary, spec, report)
+    # No skip here: an agent preset needs no agent installed, only a program of that name.
+    for name in AGENTS:
+        check_agent_preset(binary, name, report)
     return report.finish()
 
 

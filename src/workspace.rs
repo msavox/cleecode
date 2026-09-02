@@ -78,9 +78,11 @@ pub const DEFAULT_NAME: &str = "Default layout";
 /// The workspaces CleeCode ships rather than reads from a file.
 ///
 /// Two of them set up a session for a language: a prompt for it already running, a shell beside
-/// it, and the frames arranged the way that kind of work wants them. Being built in is why they
-/// cannot be deleted — there is nothing on disk to delete — and why they travel between projects.
-pub const BUILT_INS: [&str; 3] = [DEFAULT_NAME, "octave", "pylab"];
+/// it, and the frames arranged the way that kind of work wants them. Three more open a coding
+/// agent the same way — they are terminal programs and CleeCode hosts real terminals, so the
+/// whole preset is a tab with its name and a shell beside it. Being built in is why they cannot
+/// be deleted — there is nothing on disk to delete — and why they travel between projects.
+pub const BUILT_INS: [&str; 6] = [DEFAULT_NAME, "octave", "pylab", "claude", "opencode", "codex"];
 
 /// Whether `name` is one of the built-ins. Compared by slug, so case and spacing do not matter.
 pub fn is_built_in(name: &str) -> bool {
@@ -122,6 +124,12 @@ const SIDE_BY_SIDE_COLS: u16 = 150;
 /// A built-in workspace by name, shaped for the window it is opening in.
 pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
     let name = built_in_named(name)?;
+    // Each agent preset is named after the agent it opens, which is also the command that opens
+    // it, so the seam in `session.rs` answers "is this one of mine" and the three share an arm
+    // written once. An agent added there gets its preset by being added there.
+    if let Some(agent) = crate::session::Agent::of_program(name) {
+        return Some(agent_workspace(agent, shape));
+    }
     Some(match name {
         // `--persist` because `--eval` otherwise runs and exits; `--path` so the interpreter can
         // find the boot file, which installs the hook only if CleeCode asked for one. `octave`
@@ -226,6 +234,64 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
             split_pct: 50,
         },
         terminals,
+    }
+}
+
+/// The shape the three agent presets share: the agent in a tab, a plain shell in the next one,
+/// and the editor beside them.
+///
+/// Deliberately *not* [`session_workspace`], and the difference is the argument for two
+/// functions rather than one with a flag. A language preset has a workspace view — a second
+/// window watching the interpreter's variables through a snapshot file — because an interpreter
+/// holds state you want to see without asking. An agent holds a conversation, which is already
+/// on screen, and it writes files, which the editor and the git panel already show. There is
+/// nothing to watch, so there is no second window and no snapshot machinery: the whole preset is
+/// a startup command and a shell.
+///
+/// **Beside the editor on a wide window, underneath on a narrow one**, which is the opposite of
+/// what the language presets do and for a reason that belongs to agents alone. What is in the
+/// pane is a conversation: it reads down and it wants rows, and the file it is talking about is
+/// in the editor next to it — two columns is the arrangement. Under about 150 columns two
+/// columns leave the agent forty of them, and a TUI forty columns wide reflows into a mess, so
+/// there it goes underneath and takes the full width instead.
+fn agent_workspace(agent: crate::session::Agent, shape: &Shape) -> Workspace {
+    // The tab is called what the workspace is called, which is what you type to start it:
+    // `clee -w claude` is a tab called claude running `claude`.
+    let name = agent.workspace_name();
+    let beside = shape.cols >= SIDE_BY_SIDE_COLS;
+    Workspace {
+        name: name.to_string(),
+        root: shape.root.clone(),
+        open_files: Vec::new(),
+        active_file: None,
+        active_venv: None,
+        active_terminal: 0,
+        layout: WorkspaceLayout {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            // The tree is for finding the file you want to talk about, not for living in.
+            sidebar_width: if beside { 24 } else { 26 },
+            // A little under half either way: the agent is half the work here, and the editor
+            // keeps the larger share because that is where the answer is read.
+            terminal_pct: if beside { 42 } else { 45 },
+            terminal_on_right: beside,
+            split_view: false,
+            split_pct: 50,
+        },
+        terminals: vec![WorkspaceTerminal {
+            weight: default_weight(),
+            active: 0,
+            tabs: vec![
+                WorkspaceTab {
+                    name: Some(name.to_string()),
+                    startup_command: Some(name.to_string()),
+                },
+                // The shell the agent's work needs beside it: git, ls, a test run. Unnamed
+                // command and one keystroke away, so it costs a shell and no screen.
+                WorkspaceTab { name: Some("shell".to_string()), startup_command: None },
+            ],
+        }],
     }
 }
 
@@ -478,6 +544,7 @@ mod tests {
         let dir = temp_dir("builtin");
         assert!(is_built_in("Default layout") && is_built_in("default  LAYOUT"), "matched by slug");
         assert!(is_built_in("octave") && is_built_in("Octave") && is_built_in("pylab"));
+        assert!(is_built_in("claude") && is_built_in("opencode") && is_built_in("codex"));
         // A workspace of your own called "default" is not one of them and must survive.
         assert!(!is_built_in("default") && !is_built_in("Defaults") && !is_built_in("octavelab"));
 
@@ -520,6 +587,43 @@ mod tests {
             assert_eq!(ws.terminals[0].active, 0, "{name}: the prompt is what you are looking at");
             assert_eq!(tabs[1].startup_command, None, "{name}: the shell starts nothing");
         }
+    }
+
+    /// An agent preset is the agent in a tab, a shell in the next one, and nothing else: no
+    /// workspace view, because there is no interpreter state to watch — the conversation is on
+    /// screen and the files it writes are in the editor and the git panel.
+    #[test]
+    fn an_agent_preset_is_the_agent_a_shell_and_no_third_window() {
+        for name in ["claude", "opencode", "codex"] {
+            let ws = built_in(name, &shape(200)).unwrap();
+            assert_eq!(ws.terminals.len(), 1, "{name}: one window");
+            let tabs = &ws.terminals[0].tabs;
+            assert_eq!(tabs.len(), 2, "{name}: the agent and a shell share it");
+            assert_eq!(tabs[0].name.as_deref(), Some(name), "{name}: the tab carries its name");
+            // The name is the command: `clee -w claude` runs `claude`.
+            assert_eq!(tabs[0].startup_command.as_deref(), Some(name));
+            assert_eq!(tabs[1].name.as_deref(), Some("shell"));
+            assert_eq!(tabs[1].startup_command, None, "{name}: the shell starts nothing");
+            assert_eq!(ws.terminals[0].active, 0, "{name}: the agent is what you are looking at");
+            assert!(ws.open_files.is_empty());
+        }
+        // A viewer being available changes nothing: an agent has nothing for it to watch.
+        let mut bare = shape(200);
+        bare.workspace_view = None;
+        assert_eq!(built_in("claude", &bare).unwrap(), built_in("claude", &shape(200)).unwrap());
+    }
+
+    /// Two columns while there are columns to spare — the conversation beside the file it is
+    /// about — and underneath once there are not, because a TUI forty columns wide reflows into
+    /// a mess.
+    #[test]
+    fn the_agent_sits_beside_the_editor_only_where_there_is_room() {
+        let wide = built_in("codex", &shape(200)).unwrap().layout;
+        assert!(wide.terminal_on_right, "at 200 columns the agent is beside the editor");
+        assert!(wide.terminal_pct < 50, "the editor keeps the larger share");
+        let narrow = built_in("codex", &shape(90)).unwrap().layout;
+        assert!(!narrow.terminal_on_right, "at 90 columns it goes underneath, full width");
+        assert!(narrow.show_sidebar && !narrow.split_view);
     }
 
     /// A window, not a third tab, and that is the whole difference between watching your

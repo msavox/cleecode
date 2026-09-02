@@ -12,6 +12,16 @@
 
 use std::path::Path;
 
+/// The bare program name inside `program`: no directory in front of it, no `.exe` behind it.
+///
+/// The process table hands back a full path as often as a word, and a run command may hold
+/// either. Both questions asked of a program name — is this an interpreter, is this an agent —
+/// start here, so they start the same way.
+fn program_stem(program: &str) -> &str {
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    base.strip_suffix(".exe").unwrap_or(base)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     Octave,
@@ -44,8 +54,7 @@ impl Language {
     /// Whether a program name — a bare word from a run-command template, or a full path to the
     /// executable — is an interpreter for this language.
     pub fn is_interpreter(self, program: &str) -> bool {
-        let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
-        let stem = base.strip_suffix(".exe").unwrap_or(base);
+        let stem = program_stem(program);
         // Compared without case, and that is not tidiness. Homebrew's Python on macOS is a
         // framework build, so the process the table shows is
         // `Python.framework/…/Python.app/Contents/MacOS/Python` — the name is `Python`, with a
@@ -295,6 +304,159 @@ impl Language {
     }
 }
 
+/// A coding agent sitting at its own prompt in one of the terminals.
+///
+/// The same shape as [`Language`], and for the same reason. Claude Code, opencode and codex are
+/// terminal programs, so CleeCode does not have to embed one — it already hosts real ptys. What
+/// the rest of the program wants to know about them differs by a line each: which process names
+/// mean "that agent is running in here", how a file is named at its prompt, what to call it on
+/// screen. Written as three integrations that might converge later, it becomes three
+/// half-features that never do, so the seam goes in with the first one.
+///
+/// The seam is honest about being a seam. In v1 all three answer [`Agent::reference`] the same
+/// way — `path:line`, plain text, which every one of them reads and which `locate.rs` already
+/// turns back into a jump when the agent prints it. The point of the enum is that the day one of
+/// them wants `@path` or a slash command, exactly one function changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Agent {
+    Claude,
+    OpenCode,
+    Codex,
+}
+
+/// A selection longer than this goes as a reference and nothing else.
+///
+/// Ten lines is about what fits at a prompt while still being readable as *the thing you
+/// selected*; past that it is a wall of text in front of the question, and the agent can open
+/// the file at the line — which is what the reference is for. It reads the file better than a
+/// paste of it anyway.
+pub const AGENT_INLINE_LINES: usize = 10;
+
+/// What the editor has to say about where you are, in the order the keystroke prefers it: an
+/// explicit selection, then a diagnostic the language server put under the cursor, then the
+/// cursor itself. Line numbers are one-based — what the file's own gutter shows, and what an
+/// agent means by `file:12`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Context {
+    Selection { from: usize, to: usize, text: String },
+    Diagnostic { line: usize, message: String },
+    Cursor { line: usize },
+}
+
+impl Agent {
+    /// Every agent, in the order the presets are declared.
+    pub fn all() -> [Agent; 3] {
+        [Agent::Claude, Agent::OpenCode, Agent::Codex]
+    }
+
+    /// Program names that mean "this agent is at its own prompt in here".
+    ///
+    /// One name each, because each of the three ships one executable and that is what it is
+    /// called. `claude` is the interesting case and it is interesting the other way: installed
+    /// from npm it is a shell script that execs `node`, so the process table often says `node`
+    /// and no list of names can fix that. The pane's startup command answers where the process
+    /// table cannot — see [`Agent::of_command`].
+    pub fn programs(self) -> &'static [&'static str] {
+        match self {
+            Agent::Claude => &["claude"],
+            Agent::OpenCode => &["opencode"],
+            Agent::Codex => &["codex"],
+        }
+    }
+
+    /// Which agent a program name is, if any. A full path and a `.exe` are the same program as
+    /// the bare word, and case is not compared: Windows writes names its own way.
+    pub fn of_program(name: &str) -> Option<Agent> {
+        let stem = program_stem(name);
+        if stem.is_empty() {
+            return None;
+        }
+        Agent::all()
+            .into_iter()
+            .find(|agent| agent.programs().iter().any(|p| p.eq_ignore_ascii_case(stem)))
+    }
+
+    /// Which agent a startup command starts, if any: the first word of it is the program, and
+    /// everything after it is that program's business (`claude --resume`, `codex --model o3`).
+    pub fn of_command(command: &str) -> Option<Agent> {
+        Agent::of_program(command.split_whitespace().next()?)
+    }
+
+    /// The name of the built-in workspace that opens this agent, which is also what its terminal
+    /// tab is called. Lower case, because it is the command you type.
+    pub fn workspace_name(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::OpenCode => "opencode",
+            Agent::Codex => "codex",
+        }
+    }
+
+    /// What to call it on screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude Code",
+            Agent::OpenCode => "opencode",
+            Agent::Codex => "codex",
+        }
+    }
+
+    /// How a place in a file is named at this agent's prompt.
+    ///
+    /// `path:line`, in plain text, for all three. Not `@path`: that is Claude Code's file
+    /// reference and it means *read this whole file*, which is a different request from *look
+    /// here*. Every one of the three reads `path:line`, and it is the same spelling they print
+    /// back — which `locate.rs` has turned into a double-click jump since long before this
+    /// existed, so the round trip is already built.
+    pub fn reference(&self, path: &str, line: usize) -> String {
+        format!("{path}:{line}")
+    }
+
+    /// The same for a span of lines: `path:3-9`, and `path:3` where the span is one line.
+    pub fn range_reference(&self, path: &str, from: usize, to: usize) -> String {
+        if from == to { self.reference(path, from) } else { format!("{path}:{from}-{to}") }
+    }
+
+    /// The text one keystroke hands to this agent — the whole of what is sent, composed here so
+    /// it can be read in a test rather than inferred from a pty.
+    ///
+    /// `holds_a_paste` is whether the program in the pane turned bracketed paste on. It decides
+    /// whether anything multi-line may go at all: to a program that never asked, a newline is
+    /// Enter, so pasting ten lines into it would send nine messages and the discipline this
+    /// whole feature is built on — *CleeCode never presses Enter for you* — would be broken by
+    /// the paste itself. Where it cannot be held, the reference goes alone; it says the same
+    /// thing and the agent can read the file.
+    pub fn context(&self, path: &str, what: &Context, holds_a_paste: bool) -> String {
+        let fits = |text: &str| {
+            let lines = text.lines().count();
+            lines <= AGENT_INLINE_LINES && (holds_a_paste || lines <= 1)
+        };
+        match what {
+            Context::Selection { from, to, text } => {
+                let head = self.range_reference(path, *from, *to);
+                let body = text.trim_end();
+                if body.is_empty() || !fits(body) {
+                    head
+                } else {
+                    format!("{head}\n{body}")
+                }
+            }
+            // On one line with the reference: a diagnostic is a sentence, and a sentence about
+            // a place reads as one thing.
+            Context::Diagnostic { line, message } => {
+                let head = self.reference(path, *line);
+                let message = message.trim();
+                if message.is_empty() || !fits(message) {
+                    head
+                } else {
+                    format!("{head} {message}")
+                }
+            }
+            Context::Cursor { line } => self.reference(path, *line),
+        }
+    }
+}
+
 /// Which piece of the file was sent, so the status line can say which without the caller
 /// spelling out two nearly identical sentences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -477,6 +639,102 @@ mod tests {
         assert!(python.contains("figure(2).savefig(\"/proj/fig2.pdf\")"), "{python}");
         // A path with a quote in it still parses at the prompt it is going to.
         assert!(Language::Octave.export_command(1, "/it's/fig.pdf").contains("'/it''s/fig.pdf'"));
+    }
+
+    #[test]
+    fn an_agent_is_recognised_by_its_program_name() {
+        assert_eq!(Agent::of_program("claude"), Some(Agent::Claude));
+        assert_eq!(Agent::of_program("opencode"), Some(Agent::OpenCode));
+        assert_eq!(Agent::of_program("codex"), Some(Agent::Codex));
+        // A full path and a Windows executable are the same program as the bare word.
+        assert_eq!(Agent::of_program("/opt/homebrew/bin/claude"), Some(Agent::Claude));
+        assert_eq!(Agent::of_program(r"C:\Users\x\AppData\npm\codex.exe"), Some(Agent::Codex));
+        assert_eq!(Agent::of_program("Claude"), Some(Agent::Claude));
+        // And nothing that merely starts the same way.
+        assert_eq!(Agent::of_program("claudette"), None);
+        assert_eq!(Agent::of_program("node"), None);
+        assert_eq!(Agent::of_program(""), None);
+        // Neither answers for the other, and an interpreter is not an agent.
+        assert_eq!(Agent::of_program("octave"), None);
+
+        // A startup command is a program and its arguments; the program is the first word.
+        assert_eq!(Agent::of_command("claude --resume"), Some(Agent::Claude));
+        assert_eq!(Agent::of_command("  opencode  "), Some(Agent::OpenCode));
+        assert_eq!(Agent::of_command("npm run dev"), None);
+        assert_eq!(Agent::of_command(""), None);
+    }
+
+    /// The seam is real only if every agent is also a preset somebody can open by name.
+    #[test]
+    fn every_agent_has_a_preset_and_a_name_of_its_own() {
+        let mut seen: Vec<&str> = Vec::new();
+        for agent in Agent::all() {
+            let name = agent.workspace_name();
+            assert!(crate::workspace::is_built_in(name), "{name} is not a built-in workspace");
+            assert_eq!(Agent::of_program(name), Some(agent), "{name} does not find itself");
+            assert!(!seen.contains(&name));
+            assert!(!agent.label().is_empty());
+            seen.push(name);
+        }
+    }
+
+    /// What one keystroke actually hands over, in the three cases and in order of precedence.
+    #[test]
+    fn the_context_sent_is_a_reference_and_at_most_what_fits_beside_it() {
+        let agent = Agent::Claude;
+        let path = "src/app.rs";
+
+        // The cursor, and nothing else to say about it.
+        assert_eq!(agent.context(path, &Context::Cursor { line: 12 }, true), "src/app.rs:12");
+
+        // A short selection travels with its text, under a reference to where it came from.
+        let short = Context::Selection { from: 3, to: 5, text: "a\nb\nc".to_string() };
+        assert_eq!(agent.context(path, &short, true), "src/app.rs:3-5\na\nb\nc");
+        // A one-line selection is not written as a range.
+        let one = Context::Selection { from: 7, to: 7, text: "let x = 1;".to_string() };
+        assert_eq!(agent.context(path, &one, true), "src/app.rs:7\nlet x = 1;");
+
+        // A long one goes as the reference alone: the agent reads the file better than a wall
+        // of it in front of the question.
+        let text = (0..AGENT_INLINE_LINES + 1).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let long = Context::Selection { from: 1, to: AGENT_INLINE_LINES + 1, text };
+        assert_eq!(agent.context(path, &long, true), format!("src/app.rs:1-{}", AGENT_INLINE_LINES + 1));
+
+        // A diagnostic is a sentence about a place, so it goes on the line with it.
+        let diag = Context::Diagnostic {
+            line: 40,
+            message: "cannot borrow `self` as mutable".to_string(),
+        };
+        assert_eq!(agent.context(path, &diag, true), "src/app.rs:40 cannot borrow `self` as mutable");
+        // Nothing to say is not an empty line at somebody's prompt.
+        let empty = Context::Diagnostic { line: 40, message: "   ".to_string() };
+        assert_eq!(agent.context(path, &empty, true), "src/app.rs:40");
+    }
+
+    /// Where the pane never turned bracketed paste on, a newline in what we send *is* Enter —
+    /// so nothing multi-line is sent at all. CleeCode does not press Enter for you, and a paste
+    /// that presses it nine times would be the loudest possible way of breaking that.
+    #[test]
+    fn nothing_multi_line_goes_to_a_prompt_that_cannot_hold_a_paste() {
+        let agent = Agent::Codex;
+        let selection = Context::Selection { from: 3, to: 5, text: "a\nb\nc".to_string() };
+        assert_eq!(agent.context("f.rs", &selection, false), "f.rs:3-5");
+        // One line still travels: it is one line either way.
+        let one = Context::Selection { from: 3, to: 3, text: "a".to_string() };
+        assert_eq!(agent.context("f.rs", &one, false), "f.rs:3\na");
+        let diag = Context::Diagnostic { line: 2, message: "no\nsuch\nfield".to_string() };
+        assert_eq!(agent.context("f.rs", &diag, false), "f.rs:2");
+    }
+
+    /// v1 says the same thing to all three, on purpose, and that is worth pinning: the day one
+    /// of them differs, this test is where the decision gets written down.
+    #[test]
+    fn all_three_agents_are_told_the_same_thing_in_v1() {
+        let what = Context::Cursor { line: 9 };
+        for agent in Agent::all() {
+            assert_eq!(agent.reference("a/b.rs", 9), "a/b.rs:9");
+            assert_eq!(agent.context("a/b.rs", &what, true), "a/b.rs:9");
+        }
     }
 
     #[test]

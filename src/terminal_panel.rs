@@ -811,8 +811,14 @@ impl TerminalPanel {
     /// Pasted text, bracketed when the program in this pane asked for that. See
     /// [`bracketed_paste`].
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
-        let bracketed = lock_poisoned(&self.parser).screen().bracketed_paste();
-        bracketed_paste(text, bracketed)
+        bracketed_paste(text, self.holds_a_paste())
+    }
+
+    /// Whether the program in this pane turned bracketed paste on, which is the same as asking
+    /// whether it can hold a multi-line paste at its prompt instead of running it a line at a
+    /// time. Something composing text *for* a pane needs the answer before it composes.
+    pub fn holds_a_paste(&self) -> bool {
+        lock_poisoned(&self.parser).screen().bracketed_paste()
     }
 
     /// How many times output has been fed to this pane's screen. Only differences matter.

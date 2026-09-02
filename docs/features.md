@@ -249,6 +249,22 @@ between machines. A built-in **Default layout** is always there and cannot be de
 overwritten. A bare `clee` never reopens a named workspace — that stays a deliberate act — but it
 does restore the project, its open files and the layout you left.
 
+### An agent in the next pane
+
+`clee -w claude`, `clee -w opencode` and `clee -w codex` open a coding agent the way it wants to
+be opened: in a terminal tab named after it, with a plain shell in the next tab and the editor
+beside it — underneath it on a window narrower than 150 columns, where two columns would leave
+the agent forty. There is nothing to install and nothing to configure, because these are real
+ptys and all three are terminal programs. If the agent is not on your `PATH`, the pane shows the
+shell saying so; nothing here checks on your behalf.
+
+`Ctrl+Shift+A` hands the one that is running whatever you are looking at: the selection, or the
+diagnostic under the cursor, or the line the cursor is on — written at its prompt as `path:line`,
+with the text of a short selection under it. And then it stops. **Nothing is ever submitted**: no
+newline is sent, the text sits at the prompt, and Enter is yours to press once you have read what
+you are about to ask. The way back was already there — an agent prints `file:line` all day, and
+double-clicking one opens the file at that line.
+
 ### Finding your way
 
 Nothing needs to be memorised. `Ctrl+P` fuzzy-searches every action in the app and shows the key
@@ -323,6 +339,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+Shift+F` | Fold/unfold the block under the cursor |
 | `Ctrl+L` | Toggle split editor (`Ctrl+Alt+←`/`→` moves between the panes) |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / save all (an unnamed buffer asks for a name; Save As is in the File menu) |
+| `Ctrl+Shift+A` | Send where you are — selection, diagnostic, or cursor line — to the prompt of an agent running in one of the terminals. Nothing is submitted: Enter is yours |
 | `Ctrl+Shift+W` | Save the current workspace (open and delete are in the View menu) |
 | `Ctrl+Shift+E` | Name the focused terminal and give it a startup command |
 | `Ctrl+E` / `Ctrl+J` | Toggle sidebar / terminal panel |
