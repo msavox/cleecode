@@ -13,6 +13,7 @@ mod git_graph;
 mod git_status;
 mod highlight;
 mod i18n;
+mod keymap;
 mod locate;
 mod lsp;
 mod manual;
