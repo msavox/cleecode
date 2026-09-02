@@ -4,6 +4,9 @@ use crate::editor::Editor;
 use crate::file_tree::{Activation, FileTree};
 use crate::highlight::Highlighter;
 use crate::i18n::{self, Key, Lang};
+// Renamed on the way in: `MenuAction` is already here and the two are different alphabets — one
+// is everything the app can be asked to do, the other only the chords that can be moved.
+use crate::keymap::Action as KeyAction;
 use crate::menu::{ContextMenu, ContextTarget, MenuAction, MenuBar};
 use crate::settings::{self, Settings};
 use crate::terminal_panel::{self, key_to_bytes, MouseAction, TerminalPanel, TerminalWindow};
@@ -446,6 +449,9 @@ pub struct App {
     /// resolving reads a fact about the session that only exists once (see `preview::background`)
     /// and because the setting is what gets saved while this is what gets painted.
     pub theme: crate::theme::Theme,
+    /// Which chord runs which action. Built from the defaults plus whatever `[keys]` in
+    /// settings.toml moved, and rebuilt when that file is saved from inside the editor.
+    pub keymap: crate::keymap::Keymap,
     pub show_settings: bool,
     pub settings_selected: usize,
     pub highlighter: Highlighter,
@@ -1730,15 +1736,6 @@ fn resolve_save_as_path(input: &str, root: &std::path::Path, home: Option<&std::
 /// Screen cell `(row, col)` under a mouse position, relative to a pane's inner area. Positions
 /// outside the area are clamped to its edges, so a drag that wanders off the pane keeps
 /// selecting up to the border instead of being dropped.
-/// Whether `key` is a particular Ctrl+Shift+<letter>. Each overlay closes on the chord that
-/// opened it, so the two have to agree; naming the letter here keeps that pairing readable at
-/// both ends instead of spelling out the modifier test four times.
-fn is_ctrl_shift(key: KeyEvent, letter: char) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.modifiers.contains(KeyModifiers::SHIFT)
-        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&letter))
-}
-
 /// Whether `key` carries a character the user meant to *type*, as opposed to a chord.
 ///
 /// crossterm reports Ctrl+A as `Char('a')` with CONTROL set, so a box that matches on the code
@@ -1866,6 +1863,10 @@ impl App {
         // when it was asked, at startup, and that answer does not change for the life of the
         // session.
         let theme = settings.theme.resolve(crate::preview::background());
+        // Read here rather than lazily: a chord the user moved has to be moved before the first
+        // key press, and a `[keys]` entry that did not take is worth a sentence on the status
+        // line at the moment they can still see it.
+        let (keymap, key_warnings) = crate::keymap::Keymap::build(&settings.keys, settings.lang);
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
         // Two windows side by side to start, each with a single tab — the familiar two-pane view.
@@ -1908,10 +1909,19 @@ impl App {
             should_quit: false,
             redraw: true,
             terminal_generation: 0,
-            status_message: i18n::t(Lang::default(), Key::StatusHelp).to_string(),
+            status_message: if key_warnings.is_empty() {
+                i18n::t(Lang::default(), Key::StatusHelp).to_string()
+            } else {
+                // A `[keys]` entry that did not take effect is the one thing about this file
+                // worth interrupting the usual greeting for: the user pressed a key, nothing
+                // happened, and without this they would have no idea their own setting was the
+                // reason. The greeting is there every session; this is there once.
+                key_warnings.join("  ")
+            },
             editor_viewport: (0, 0),
             pointer: None,
             highlighter: Highlighter::for_theme(theme),
+            keymap,
             settings,
             theme,
             show_settings: false,
@@ -2887,7 +2897,7 @@ impl App {
                 self.inspector = None;
                 return;
             }
-            _ if is_ctrl_shift(key, 'i') => {
+            _ if self.keymap.matches(KeyAction::InspectVariable, key) => {
                 self.inspector = None;
                 return;
             }
@@ -5702,7 +5712,7 @@ impl App {
             .into_iter()
             .map(|(group_key, it)| crate::picker::PickItem {
                 label: format!("{}: {}", i18n::t(lang, group_key), i18n::t(lang, it.label_key)),
-                shortcut: it.shortcut.map(|s| i18n::shortcut_label(lang, s).to_string()),
+                shortcut: it.shortcut.map(|s| crate::keymap::shortcut_hint(lang, &self.keymap, s)),
                 action: crate::picker::PickAction::Command(it.action),
             })
             .collect();
@@ -5947,10 +5957,85 @@ impl App {
             return;
         }
         let lang = self.settings.lang;
+        let path = self.editor().path.clone();
         match self.editor_mut().save() {
             Ok(()) => self.status_message = i18n::msg_saved(lang, &self.editor().title(lang)),
             Err(e) => self.status_message = i18n::msg_save_error(lang, &e.to_string()),
         }
+        if let Some(path) = path {
+            self.reload_keymap_if_settings_were_saved(&path);
+        }
+    }
+
+    /// Editing settings.toml in the editor and saving it puts the new chords in force straight
+    /// away, warnings and all.
+    ///
+    /// Tied to the save rather than to a file watcher on purpose. A watcher is a thread, a
+    /// debounce and a class of surprise — the file changing under a machine that is mid-edit —
+    /// in exchange for reacting to a change nobody made from here. The save is the moment the
+    /// user finished the sentence, and it is the moment they are looking at the status line.
+    ///
+    /// Only the chords are reloaded. See `settings::read_keys_from_disk` for why the rest of the
+    /// file is left alone.
+    fn reload_keymap_if_settings_were_saved(&mut self, saved: &Path) {
+        let Some(config) = settings::config_path() else { return };
+        // Compared through the filesystem where it can be: settings.toml is very often a symlink
+        // into somebody's dotfiles, and the tab would then be holding the path it was opened by
+        // rather than the one the config lives at.
+        let same = saved == config
+            || std::fs::canonicalize(saved)
+                .ok()
+                .zip(std::fs::canonicalize(&config).ok())
+                .is_some_and(|(a, b)| a == b);
+        if !same {
+            return;
+        }
+        let lang = self.settings.lang;
+        let Some(keys) = settings::read_keys_from_disk() else { return };
+        let (keymap, warnings) = crate::keymap::Keymap::build(&keys, lang);
+        self.keymap = keymap;
+        self.settings.keys = keys;
+        self.status_message =
+            if warnings.is_empty() { i18n::msg_keys_reloaded(lang) } else { warnings.join("  ") };
+    }
+
+    /// Opens settings.toml on the `[keys]` table, writing that table out first when the file has
+    /// none.
+    ///
+    /// The block it seeds is every action commented out on the key it is on today, generated
+    /// from the table in `keymap.rs` — so the answer to "what can I remap, and what is it
+    /// called" is in the file the user is about to edit, rather than in a manual they would have
+    /// to have read. Uncomment one line, change its chord, save.
+    ///
+    /// It appends rather than rewrites: the file is documented as hand-editable, and a menu
+    /// entry that reformatted somebody's own settings on the way past would be a poor trade for
+    /// a list of names.
+    fn open_keybindings_file(&mut self) {
+        let lang = self.settings.lang;
+        let Some(path) = settings::config_path() else {
+            self.status_message = i18n::msg_keys_no_config_dir(lang);
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        // A `[keys]` header already there means the user has been here; adding a second one
+        // would make the file stop parsing altogether, which is the one outcome this must not
+        // have.
+        let has_section = existing.lines().any(|line| line.trim_start().starts_with("[keys]"));
+        if !has_section {
+            let mut text = existing;
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&crate::keymap::commented_section(lang));
+            if let Err(e) = settings::write_atomic(&path, text.as_bytes()) {
+                self.status_message = i18n::msg_save_error(lang, &e.to_string());
+                return;
+            }
+        }
+        self.open_file_in_tab(path);
     }
 
     /// Writes every named dirty buffer. Answers whether all of them landed, so an action that
@@ -5960,6 +6045,7 @@ impl App {
         let mut saved = 0usize;
         let mut unnamed = 0usize;
         let mut errors = Vec::new();
+        let mut written: Vec<PathBuf> = Vec::new();
         for editor in &mut self.editors {
             if !editor.dirty {
                 continue;
@@ -5971,7 +6057,10 @@ impl App {
                 continue;
             }
             match editor.save() {
-                Ok(()) => saved += 1,
+                Ok(()) => {
+                    saved += 1;
+                    written.extend(editor.path.clone());
+                }
                 Err(e) => errors.push(format!("{}: {}", editor.title(lang), e)),
             }
         }
@@ -5982,6 +6071,12 @@ impl App {
         } else {
             i18n::msg_saved_all(lang, saved)
         };
+        // Save All reaches settings.toml the same as Save does, so the chords follow it here too
+        // — otherwise which of two keys you pressed would decide whether your own setting took.
+        // Last, because it has a status message of its own to leave behind.
+        for path in written {
+            self.reload_keymap_if_settings_were_saved(&path);
+        }
         errors.is_empty()
     }
 
@@ -7740,6 +7835,69 @@ impl App {
         }
     }
 
+    /// Runs one of the application layer's actions. Which key it arrived on is the keymap's
+    /// business; what the key does is here.
+    ///
+    /// The comments are the ones that used to sit beside each arm of the dispatch — why a letter
+    /// is that letter, and why the ones nobody would guess are the ones that were left over.
+    /// They are still worth having now that the letters are only defaults, because a default is
+    /// the key almost everybody presses.
+    fn run_key_action(&mut self, action: crate::keymap::Action) {
+        use crate::keymap::Action;
+        match action {
+            Action::Manual => self.manual = Some(crate::manual::ManualState::new()),
+            Action::Settings => self.show_settings = true,
+            Action::RunFile => self.run_active_file(),
+            // eXecute this much of it. R runs the file, X runs the piece — next to each other in
+            // meaning, and X was one of the letters still free. Not Shift+Enter, which is what
+            // every notebook uses and what a terminal cannot deliver: the encoding has had no
+            // room for the Shift since VT100, so it would work in two emulators and silently do
+            // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
+            Action::RunSelection => self.run_selection(),
+            // Put a breakpoint on this line, or take it off.
+            Action::ToggleBreakpoint => self.toggle_breakpoint(),
+            // Inspect: what a variable actually contains, a screenful at a time.
+            Action::InspectVariable => self.open_inspector_picker(),
+            Action::NewTerminalWindow => self.new_terminal(),
+            Action::NewTerminalTab => self.new_terminal_tab(),
+            // One key closes the shell you are looking at. It takes the window with it when that
+            // was its last tab, so there is nothing to remember about which of the two you meant.
+            Action::CloseTerminalTab => self.close_active_terminal_tab(),
+            Action::ToggleFold => self.editor_mut().toggle_fold(),
+            Action::ResizeMode => self.resize_mode = !self.resize_mode,
+            Action::MenuBar => self.menu.open(),
+            Action::ContextMenu => self.open_context_menu_for_focus(),
+            // J and L, next to each other, for a pair that is used as one: go and come back.
+            // Neither is a letter anyone would guess, and neither had a better claim — the
+            // mnemonic keys are spent, and F12 is not available here for the reason no feature
+            // in CleeCode uses a function key.
+            Action::GoToDefinition => self.lsp_go_to_definition(),
+            Action::JumpBack => self.lsp_jump_back(),
+            Action::GitPanel => self.toggle_git_panel(),
+            // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
+            // key that does two things is a key that does the wrong one.
+            Action::FindInProject => self.begin_project_search(),
+            // Navigation lives on the arrows: the same physical keys on every layout, and no Fn
+            // needed. Ctrl+<direction> moves to the frame that lies that way — sidebar, either
+            // half of a split editor, or a tiled terminal window, without caring which kind it
+            // is. Ctrl+Shift+←/→ is the one exception, moving between the tabs *inside* the
+            // frame you are already in.
+            Action::NextTab => self.cycle_focused_tab(true),
+            Action::PrevTab => self.cycle_focused_tab(false),
+            // Walks the terminal windows without having to know how they happen to be tiled —
+            // the spatial arrows do it too, but which one depends on the layout.
+            Action::NextTerminal => self.cycle_terminal(true),
+            Action::PrevTerminal => self.cycle_terminal(false),
+            // Name the focused terminal and give it a startup command; save the workspace under
+            // a name; save every dirty buffer. All three used to be Alt chords.
+            Action::RenameTerminal => self.start_terminal_rename(),
+            Action::SaveWorkspace => self.begin_save_workspace(),
+            Action::SaveAll => {
+                self.save_all();
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if self.show_splash {
             self.show_splash = false;
@@ -7800,124 +7958,31 @@ impl App {
         // no shortcut. Alt with an *arrow* is a different matter and is still used: an Option
         // arrow produces no printable character, so the terminal forwards it as Meta whatever
         // the layout, which is also why editors have settled on Alt+↑/↓ for moving a line.
+
+        // ---- The application layer: Ctrl+Shift+<letter>, Ctrl+Shift+<arrow> ------------------
+        //
+        // Function keys used to live here, and they are gone. On a laptop they are a second-
+        // class row — on a Mac they need Fn — and PageUp/PageDown need Fn too, which ruled out
+        // the tab and window keys as well. Alt was not an option either: it only reaches an
+        // application when the terminal sends Option as Meta, which it does not on non-US
+        // keyboard layouts, so half the old Alt bindings never arrived at all.
+        //
+        // Letters and arrows only, never a symbol: on an Italian layout `/`, `<`, `[` and
+        // friends already need Shift or Option to type, so a chord built on one of them would
+        // ask for the same modifier twice.
+        //
+        // Every word of which is about one keyboard on one operating system, and none of it is
+        // a reason anybody else has to live with. So these are the *defaults* now and no longer
+        // the law: the table is in `keymap.rs`, and a `[keys]` entry in settings.toml moves any
+        // one of them without touching the rest. What used to be two dozen match arms — each
+        // naming its letter twice, because a terminal sends `Ctrl+Shift+M` as `m` here and `M`
+        // there — is this one question, asked of a table that answers it in one place.
+        if let Some(action) = self.keymap.action_for(key) {
+            self.run_key_action(action);
+            return;
+        }
+
         match key.code {
-            // ---- The application layer: Ctrl+Shift+<letter> -----------------------------------
-            //
-            // Function keys used to live here, and they are gone. On a laptop they are a second-
-            // class row — on a Mac they need Fn — and PageUp/PageDown need Fn too, which ruled out
-            // the tab and window keys as well. Alt was not an option either: it only reaches an
-            // application when the terminal sends Option as Meta, which it does not on non-US
-            // keyboard layouts, so half the old Alt bindings never arrived at all.
-            //
-            // Letters and arrows only, never a symbol: on an Italian layout `/`, `<`, `[` and
-            // friends already need Shift or Option to type, so a chord built on one of them would
-            // ask for the same modifier twice.
-            KeyCode::Char('m') | KeyCode::Char('M') if ctrl && shift => {
-                self.manual = Some(crate::manual::ManualState::new());
-                return;
-            }
-            KeyCode::Char('o') | KeyCode::Char('O') if ctrl && shift => {
-                self.show_settings = true;
-                return;
-            }
-            KeyCode::Char('r') | KeyCode::Char('R') if ctrl && shift => {
-                self.run_active_file();
-                return;
-            }
-            // eXecute this much of it. R runs the file, X runs the piece — next to each other in
-            // meaning, and X is one of the letters still free. Not Shift+Enter, which is what
-            // every notebook uses and what a terminal cannot deliver: the encoding has had no
-            // room for the Shift since VT100, so it would work in two emulators and silently do
-            // nothing in the rest. Ctrl+X is still cut; this is Ctrl+Shift+X.
-            KeyCode::Char('x') | KeyCode::Char('X') if ctrl && shift => {
-                self.run_selection();
-                return;
-            }
-            // Put a breakpoint on this line, or take it off.
-            KeyCode::Char('p') | KeyCode::Char('P') if ctrl && shift => {
-                self.toggle_breakpoint();
-                return;
-            }
-            // Inspect: what a variable actually contains, a screenful at a time.
-            KeyCode::Char('i') | KeyCode::Char('I') if ctrl && shift => {
-                self.open_inspector_picker();
-                return;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') if ctrl && shift => {
-                self.new_terminal();
-                return;
-            }
-            KeyCode::Char('t') | KeyCode::Char('T') if ctrl && shift => {
-                self.new_terminal_tab();
-                return;
-            }
-            // One key closes the shell you are looking at. It takes the window with it when that
-            // was its last tab, so there is nothing to remember about which of the two you meant.
-            KeyCode::Char('k') | KeyCode::Char('K') if ctrl && shift => {
-                self.close_active_terminal_tab();
-                return;
-            }
-            KeyCode::Char('f') | KeyCode::Char('F') if ctrl && shift => {
-                self.editor_mut().toggle_fold();
-                return;
-            }
-            KeyCode::Char('u') | KeyCode::Char('U') if ctrl && shift => {
-                self.resize_mode = !self.resize_mode;
-                return;
-            }
-            KeyCode::Char('b') | KeyCode::Char('B') if ctrl && shift => {
-                self.menu.open();
-                return;
-            }
-            KeyCode::Char('g') | KeyCode::Char('G') if ctrl && shift => {
-                self.open_context_menu_for_focus();
-                return;
-            }
-            // J and L, next to each other, for a pair that is used as one: go and come back.
-            // Neither is a letter anyone would guess, and neither had a better claim — the
-            // mnemonic keys are spent, and F12 is not available here for the reason no feature
-            // in CleeCode uses a function key.
-            KeyCode::Char('j') | KeyCode::Char('J') if ctrl && shift => {
-                self.lsp_go_to_definition();
-                return;
-            }
-            KeyCode::Char('l') | KeyCode::Char('L') if ctrl && shift => {
-                self.lsp_jump_back();
-                return;
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') if ctrl && shift => {
-                self.toggle_git_panel();
-                return;
-            }
-            // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
-            // key that does two things is a key that does the wrong one.
-            KeyCode::Char('h') | KeyCode::Char('H') if ctrl && shift => {
-                self.begin_project_search();
-                return;
-            }
-            // Navigation lives on the arrows: the same physical keys on every layout, and no Fn
-            // needed. Ctrl+<direction> moves to the frame that lies that way — sidebar, either
-            // half of a split editor, or a tiled terminal window, without caring which kind it
-            // is. Ctrl+Shift+←/→ is the one exception, moving between the tabs *inside* the
-            // frame you are already in.
-            KeyCode::Right if ctrl && shift => {
-                self.cycle_focused_tab(true);
-                return;
-            }
-            KeyCode::Left if ctrl && shift => {
-                self.cycle_focused_tab(false);
-                return;
-            }
-            // Walks the terminal windows without having to know how they happen to be tiled —
-            // the spatial arrows do it too, but which one depends on the layout.
-            KeyCode::Down if ctrl && shift => {
-                self.cycle_terminal(true);
-                return;
-            }
-            KeyCode::Up if ctrl && shift => {
-                self.cycle_terminal(false);
-                return;
-            }
             // Ctrl+Alt, not plain Ctrl: macOS binds Ctrl with each arrow to Mission Control and
             // to switching Spaces, and the system takes them before any terminal sees them, so
             // a plain Ctrl+arrow here would never arrive on the platform CleeCode is developed
@@ -7937,20 +8002,6 @@ impl App {
             }
             KeyCode::Down if ctrl && alt => {
                 self.focus_in_direction(ResizeSide::Down);
-                return;
-            }
-            // Name the focused terminal and give it a startup command; save the workspace under
-            // a name; save every dirty buffer. All three used to be Alt chords.
-            KeyCode::Char('e') | KeyCode::Char('E') if ctrl && shift => {
-                self.start_terminal_rename();
-                return;
-            }
-            KeyCode::Char('w') | KeyCode::Char('W') if ctrl && shift => {
-                self.begin_save_workspace();
-                return;
-            }
-            KeyCode::Char('s') | KeyCode::Char('S') if ctrl && shift => {
-                self.save_all();
                 return;
             }
             KeyCode::Char('q') if ctrl => {
@@ -8032,7 +8083,7 @@ impl App {
     fn handle_menu_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.menu.close(),
-            _ if is_ctrl_shift(key, 'b') => self.menu.close(),
+            _ if self.keymap.matches(KeyAction::MenuBar, key) => self.menu.close(),
             KeyCode::Left => self.menu.move_menu(-1),
             KeyCode::Right => self.menu.move_menu(1),
             KeyCode::Up => self.menu.move_item(-1),
@@ -8101,6 +8152,7 @@ impl App {
             MenuAction::ShowThemes => self.open_theme_menu(),
             MenuAction::TogglePlotsInTabs => self.toggle_plots_in_tabs(),
             MenuAction::OpenSettings => self.show_settings = true,
+            MenuAction::EditKeybindings => self.open_keybindings_file(),
             MenuAction::NewTerminal => self.new_terminal(),
             MenuAction::NewTerminalTab => self.new_terminal_tab(),
             MenuAction::CloseTerminalTab => self.close_active_terminal_tab(),
@@ -8226,11 +8278,11 @@ impl App {
     }
 
     fn handle_manual_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc || is_ctrl_shift(key, 'm') {
+        if key.code == KeyCode::Esc || self.keymap.matches(KeyAction::Manual, key) {
             self.manual = None;
             return;
         }
-        let sections = crate::manual::sections(self.settings.lang);
+        let sections = crate::manual::sections(self.settings.lang, &self.keymap);
         let page = self.manual_page();
         let Some(state) = self.manual.as_mut() else { return };
         let len = sections.get(state.section).map(|s| s.body.len()).unwrap_or(0);
@@ -8279,7 +8331,7 @@ impl App {
         let grow = !key.modifiers.contains(KeyModifiers::SHIFT);
         // Ctrl+Shift+U toggles back out, so the key that enters the mode also leaves it. Tested
         // before the arrows, which inside the mode belong to resizing.
-        if is_ctrl_shift(key, 'u') {
+        if self.keymap.matches(KeyAction::ResizeMode, key) {
             self.resize_mode = false;
             self.settings.save();
             return;
@@ -8888,7 +8940,7 @@ impl App {
     fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.show_settings = false,
-            _ if is_ctrl_shift(key, 'o') => self.show_settings = false,
+            _ if self.keymap.matches(KeyAction::Settings, key) => self.show_settings = false,
             KeyCode::Up => {
                 self.settings_selected = if self.settings_selected == 0 {
                     settings::SETTINGS_COUNT - 1
@@ -10208,7 +10260,7 @@ impl App {
     /// A click while the context menu is open: run the item under the pointer, or dismiss it.
     fn mouse_context_menu(&mut self, col: u16, row: u16) {
         let lang = self.settings.lang;
-        let rect = match self.context_menu.as_ref().map(|m| ui::context_menu_rect(m, lang, self.last_full)) {
+        let rect = match self.context_menu.as_ref().map(|m| ui::context_menu_rect(m, lang, &self.keymap, self.last_full)) {
             Some(rect) => rect,
             None => return,
         };
@@ -10241,7 +10293,7 @@ impl App {
     }
 
     fn scroll_manual(&mut self, delta: isize) {
-        let sections = crate::manual::sections(self.settings.lang);
+        let sections = crate::manual::sections(self.settings.lang, &self.keymap);
         let page = self.manual_page();
         if let Some(state) = self.manual.as_mut() {
             let len = sections.get(state.section).map(|s| s.body.len()).unwrap_or(0);
@@ -10262,7 +10314,7 @@ impl App {
         if !within(list, col, row) || row < list.y {
             return;
         }
-        let count = crate::manual::sections(self.settings.lang).len();
+        let count = crate::manual::sections(self.settings.lang, &self.keymap).len();
         let index = (row - list.y) as usize;
         if index < count {
             if let Some(state) = self.manual.as_mut() {
@@ -10299,7 +10351,7 @@ impl App {
     }
 
     fn mouse_menu(&mut self, col: u16, row: u16, full: Rect) {
-        let dropdown = ui::menu_dropdown_rect(&self.menu, self.settings.lang, full);
+        let dropdown = ui::menu_dropdown_rect(&self.menu, self.settings.lang, &self.keymap, full);
         if within(dropdown, col, row) {
             let inner = ui::inner_rect(dropdown);
             if row >= inner.y {
