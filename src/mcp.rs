@@ -124,8 +124,15 @@ struct Envelope<'a> {
 // ---- Where it lives ------------------------------------------------------------------------
 
 /// The directory every session's directory sits in.
+///
+/// The temp dir and not the config dir, for the same reason `wsnap::snapshot_dir` chose it:
+/// this is runtime state that means nothing after the process dies, and the config dir is for
+/// what the user decided, not for what the editor is doing right now. It is also what keeps a
+/// session out of the project's `git status` when a sandboxed config lives inside the project —
+/// the pty drivers run exactly that way, and the Git panel driver caught the session dir being
+/// staged along with the user's files.
 pub fn sessions_root() -> Option<PathBuf> {
-    crate::settings::config_dir().map(|dir| dir.join("sessions"))
+    Some(std::env::temp_dir().join("cleecode-sessions"))
 }
 
 /// This process's session directory.
