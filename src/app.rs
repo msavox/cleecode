@@ -374,15 +374,38 @@ struct RunWatch {
     /// nothing at all — which is what made the *second* run of a script open a second set of
     /// tabs and only the third behave. Held open a moment longer, and read every tick meanwhile.
     settled: Option<std::time::Instant>,
+    /// What the language's sessions had written by the time the prompt came back. The wait above
+    /// is a guess at how long the hook takes; this is the answer, because the snapshot naming the
+    /// run's figures is a snapshot that has not been written yet at that instant. Measured
+    /// against a real Octave: printing two plots to PNG puts it 1.5 to 2 seconds past the
+    /// prompt, which a fixed half-second wait misses every single time — so every rerun of the
+    /// script recorded nothing, closed nothing, and drew its plots into a fresh pair of tabs.
+    ///
+    /// Taken again whenever the prompt is lost and the settling starts over.
+    generation: Option<u64>,
+    /// Since when nothing new has arrived: set when the generation above is first seen to have
+    /// moved, and pushed forward again by every figure that turns up after it. A script that
+    /// draws four plots writes them one print at a time, and a run closed in the middle of that
+    /// burst would remember half of its own figures.
+    quiet: Option<std::time::Instant>,
 }
 
 /// How often a watched run's session is asked what it is holding.
 const RUN_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long the prompt has to have been back before a run counts as finished. Long enough for
-/// the hook to have written the snapshot that says what the run drew — measured at a few tens of
-/// milliseconds for both languages — and short enough that nothing typed afterwards is caught.
+/// How long after the last thing a run published it counts as finished. Counted from the moment
+/// the session was seen to write, not from the moment the prompt came back — the two are the same
+/// only for a script that draws nothing. Long enough that a script printing four figures one at a
+/// time is not cut in half, and short enough that nothing typed at the prompt afterwards is caught
+/// and blamed on the run.
 const RUN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long a finished run waits for its session to say anything at all before it is closed with
+/// whatever it has. What it protects against is an interpreter with no CleeCode hook in it, which
+/// writes no snapshot ever: without a limit that run would be watched until the editor is closed.
+/// Longer than the second or two a hook takes to print its figures, since expiring here is
+/// forgetting them.
+const RUN_SETTLE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long a run that was never caught mid-command is watched before it is called finished.
 /// A script that draws and returns inside one frame is over long before this; what the wait
@@ -3265,24 +3288,38 @@ impl App {
         };
         // Every tick once the prompt is back, throttled while the script is still running.
         let settling = self.run_watch.as_ref().is_some_and(|w| w.settled.is_some());
-        let open = (settling || looked.elapsed() >= RUN_WATCH_INTERVAL)
-            .then(|| crate::wsnap::open_figures(&crate::wsnap::snapshot_dir(), language.snapshot_lang()));
+        let read = (settling || looked.elapsed() >= RUN_WATCH_INTERVAL).then(|| {
+            let dir = crate::wsnap::snapshot_dir();
+            (
+                crate::wsnap::open_figures(&dir, language.snapshot_lang()),
+                crate::wsnap::snapshot_generation(&dir, language.snapshot_lang()),
+            )
+        });
         // A pane that is gone takes its run with it: there is nothing left to be at a prompt,
         // and nothing left to close figures in either.
         let at_prompt =
             self.terminals.get(terminal).map(|w| w.active_tab().is_at_prompt()).unwrap_or(true);
         let Some(watch) = self.run_watch.as_mut() else { return };
-        if let Some(open) = open {
+        if let Some((open, _)) = read.as_ref() {
             watch.looked = std::time::Instant::now();
             for number in open {
-                if !watch.before.contains(&number) && !watch.opened.contains(&number) {
-                    watch.opened.push(number);
+                if !watch.before.contains(number) && !watch.opened.contains(number) {
+                    watch.opened.push(*number);
+                    // A figure arriving while the run is being closed means it is still
+                    // publishing, so the wait starts again from here rather than expiring in the
+                    // middle of the burst. Only then: before the prompt is back there is nothing
+                    // being waited for, and a stamp left from mid-run would already be stale.
+                    if watch.settled.is_some() {
+                        watch.quiet = Some(std::time::Instant::now());
+                    }
                 }
             }
         }
         if !at_prompt {
             watch.busy_seen = true;
             watch.settled = None;
+            watch.generation = None;
+            watch.quiet = None;
             return;
         }
         // Still at the prompt because the command has not started yet, rather than because it
@@ -3291,7 +3328,18 @@ impl App {
         if !watch.busy_seen && watch.started.elapsed() < RUN_WATCH_MAX {
             return;
         }
-        if watch.settled.get_or_insert_with(std::time::Instant::now).elapsed() < RUN_SETTLE {
+        let back = *watch.settled.get_or_insert_with(std::time::Instant::now);
+        // The reading is throttled and the prompt is not, so the first tick after the prompt
+        // returns can have nothing to compare. Nothing is lost by waiting for the next one: the
+        // line above has already put the watch into its settling phase, which reads every tick.
+        let Some((_, generation)) = read else { return };
+        // Figures already attributed to this run are a session that has written, whatever the
+        // counter says — that is the ordinary fast case, and it must not wait for the timeout.
+        if *watch.generation.get_or_insert(generation) != generation || !watch.opened.is_empty() {
+            watch.quiet.get_or_insert_with(std::time::Instant::now);
+        }
+        let quiet = watch.quiet.is_some_and(|since| since.elapsed() >= RUN_SETTLE);
+        if !quiet && back.elapsed() < RUN_SETTLE_MAX {
             return;
         }
         let Some(watch) = self.run_watch.take() else { return };
@@ -7649,6 +7697,8 @@ impl App {
                     busy_seen: false,
                     looked: std::time::Instant::now(),
                     settled: None,
+                    generation: None,
+                    quiet: None,
                 });
                 self.active_terminal = idx;
                 self.status_message = i18n::msg_run_started(lang, idx, &command);

@@ -391,6 +391,28 @@ pub fn open_figures(dir: &Path, lang: &str) -> Vec<i64> {
     numbers
 }
 
+/// How much every session of `lang` has written, added up: the sum of their `seq` counters.
+///
+/// A number to compare against itself, never to read. What it answers is "has any session of this
+/// language published anything since I last looked", which is the only way to know that a run's
+/// figures have had their chance to arrive — the hook writes the snapshot at the command boundary,
+/// and printing the PNGs there takes it a second or two past the moment the prompt came back.
+/// Summed rather than maximised so that a second session's tick moves it too. It is compared for
+/// difference and not for growth: a session that dies and is started again begins counting from
+/// one, so the total can fall as easily as it rises, and either means something was written.
+pub fn snapshot_generation(dir: &Path, lang: &str) -> u64 {
+    let mut total: u64 = 0;
+    for path in snapshots_in(dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Some(snapshot) = Snapshot::parse(&text) else { continue };
+        if snapshot.lang != lang {
+            continue;
+        }
+        total = total.saturating_add(snapshot.seq);
+    }
+    total
+}
+
 pub fn newest_in(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -712,6 +734,34 @@ mod tests {
         write(3, "python", &[2, 5]);
         assert_eq!(open_figures(&dir, "python"), vec![1, 2, 5]);
         assert!(open_figures(&dir, "julia").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whether a language's sessions have published anything since the last look, which is what a
+    /// finished run waits for: the snapshot naming its figures is written a second or two after
+    /// the prompt is back, and a run closed at the prompt records no figures at all.
+    #[test]
+    fn a_generation_moves_when_a_session_of_that_language_writes() {
+        let dir = std::env::temp_dir().join(format!("cleecode_generation_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |pane: u64, lang: &str, seq: u64| {
+            let text = format!(r#"{{"v":1,"seq":{seq},"lang":"{lang}","vars":[]}}"#);
+            std::fs::write(snapshot_path(&dir, pane), text).unwrap();
+        };
+        assert_eq!(snapshot_generation(&dir, "octave"), 0, "nothing written is nothing to see");
+        write(1, "octave", 4);
+        write(2, "python", 9);
+        assert_eq!(snapshot_generation(&dir, "octave"), 4);
+        // Another language's tick is not this one's: a Python prompt writing every hundred
+        // milliseconds must not tell an Octave run that its figures have arrived.
+        write(2, "python", 11);
+        assert_eq!(snapshot_generation(&dir, "octave"), 4);
+        // Every session of the language counts, so a second prompt's tick moves it too.
+        write(3, "octave", 1);
+        assert_eq!(snapshot_generation(&dir, "octave"), 5);
+        write(1, "octave", 5);
+        assert_eq!(snapshot_generation(&dir, "octave"), 6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
