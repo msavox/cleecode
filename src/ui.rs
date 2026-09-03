@@ -57,10 +57,20 @@ pub fn drawer_rect(areas: &Areas) -> Option<Rect> {
 }
 
 /// The ribbon as something to see and to click, which is the column above *and* the drawer being
-/// away. One function for the drawing and for the hit testing, so a mark that is not on screen can
-/// never be the thing a click lands on.
+/// away. One function for the drawing and for the hit testing, so a handle that is not on screen
+/// can never be the thing a click lands on.
 pub fn drawer_ribbon_rect(areas: &Areas) -> Option<Rect> {
     drawer_rect(areas).is_none().then_some(areas.drawer_ribbon).flatten()
+}
+
+/// The other handle: the column an open drawer's left border rides, in whichever mode it is in.
+///
+/// The mirror of [`drawer_ribbon_rect`], and never on screen at the same time as it — the drawer
+/// is either there or it is not, and the edge of the window carries whichever of the two applies.
+/// It is not carved out of anything: the drawer's own border is already a column nobody else
+/// owns, and the handle is painted on it.
+pub fn drawer_close_ribbon_rect(areas: &Areas) -> Option<Rect> {
+    drawer_rect(areas).filter(|r| r.width > 0).map(|r| Rect { width: 1, ..r })
 }
 
 pub struct LayoutParams {
@@ -147,39 +157,58 @@ fn drawer_ribbon_split(main: Rect) -> (Rect, Option<Rect>) {
     (rest, Some(ribbon))
 }
 
-/// The mark the ribbon is drawn with, and the rows it appears on.
-///
-/// One row in three rather than a solid rule: a filled column is a border, and the screen has
-/// enough of those already — this is meant to be noticed rather than read. A single mark in the
-/// middle was the other candidate and is worse, because it is a button to find rather than an
-/// edge that is simply there the whole height of the window.
-const RIBBON_MARK: &str = "\u{2039}";
-const RIBBON_SPACING: u16 = 3;
+/// The chevrons the two handles carry: out towards the drawer, back towards the work.
+const RIBBON_OPEN_MARK: &str = "\u{2039}";
+const RIBBON_CLOSE_MARK: &str = "\u{203A}";
 
-/// The rows of `rect` that carry a mark, centred in it so the run reads as deliberate rather than
-/// as something that ran out at the bottom.
-pub fn drawer_ribbon_marks(rect: Rect) -> Vec<u16> {
+/// The tallest a handle gets, and the share of the edge it may take on a short window.
+///
+/// Seven rows is a grip: long enough to aim at without looking, short enough to leave the edge
+/// obviously an edge. A third of the height is the fallback that keeps it in proportion when
+/// there is not enough window for that — the handle shrinks with the column rather than
+/// swallowing it.
+const RIBBON_PILL_MAX: u16 = 7;
+const RIBBON_PILL_SHARE: u16 = 3;
+
+/// The block of cells a ribbon's handle fills: a run of rows in the middle of its column.
+///
+/// A filled pill and not a run of ticks. Sparse marks down the whole edge were the first
+/// attempt and they read as decoration — something the theme does to the border — rather than as
+/// a thing to press. One solid block, centred, is what every editor with a dockable side panel
+/// puts on that edge, and it is legible at a glance from the far side of the screen.
+///
+/// The *column* stays the click target either way; this is only what is drawn on it. A control
+/// you can hit anywhere along the edge and see in one place is more forgiving than one that is
+/// only where it is painted.
+pub fn drawer_ribbon_pill(rect: Rect) -> Rect {
     if rect.height == 0 {
-        return Vec::new();
+        return Rect { height: 0, ..rect };
     }
-    let count = (rect.height / RIBBON_SPACING).max(1);
-    let span = (count - 1) * RIBBON_SPACING + 1;
-    let top = rect.y + (rect.height - span) / 2;
-    (0..count).map(|i| top + i * RIBBON_SPACING).collect()
+    let tall = (rect.height / RIBBON_PILL_SHARE).clamp(1, RIBBON_PILL_MAX);
+    Rect { y: rect.y + (rect.height - tall) / 2, height: tall, ..rect }
 }
 
-/// The ribbon: the way back into a drawer that is away, for a hand that is on the mouse.
+/// A handle: the way into a drawer that is away, or the way out of one that is here.
 ///
-/// Dim until the pointer is on it, and then the accent — the same bargain the scrollbars strike,
-/// and for the same reason: a control that is quiet enough to live at the edge of every window
-/// has to say something when it is about to be clicked.
-pub fn draw_drawer_ribbon(f: &mut Frame, pal: Palette, rect: Rect, engaged: bool) {
-    let colour = if engaged { pal.accent } else { pal.text_dim };
-    let style = Style::default().fg(colour);
-    for y in drawer_ribbon_marks(rect) {
-        let cell = Rect { x: rect.x, y, width: rect.width, height: 1 };
-        f.render_widget(Paragraph::new(Span::styled(RIBBON_MARK, style)), cell);
+/// Filled in the accent with the chevron in the colour that colour is meant to be read against,
+/// and under the pointer the whole pill goes to `bright` — the strongest colour the theme has,
+/// which is a step *up* from the accent on a dark theme and a step down into it on a light one,
+/// and either way unmistakably a different thing than it was a moment ago. Both are palette
+/// roles rather than colours, so the nine themes each get their own answer: `on_accent` is by
+/// construction readable on `accent`, and it is equally readable on `bright`, because a theme's
+/// brightest colour and its text-on-a-swatch colour sit at opposite ends of the same range.
+pub fn draw_drawer_ribbon(f: &mut Frame, pal: Palette, rect: Rect, engaged: bool, mark: &str) {
+    let pill = drawer_ribbon_pill(rect);
+    if pill.height == 0 || pill.width == 0 {
+        return;
     }
+    let style =
+        Style::default().bg(if engaged { pal.bright } else { pal.accent }).fg(pal.on_accent);
+    let middle = pill.height / 2;
+    let rows: Vec<Line> = (0..pill.height)
+        .map(|i| Line::from(Span::styled(if i == middle { mark } else { " " }, style)))
+        .collect();
+    f.render_widget(Paragraph::new(rows).style(style), pill);
 }
 
 pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
@@ -1131,7 +1160,17 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     // before, so the one rule is visible in one place: what is on screen is the drawer or the way
     // back to it, never both.
     if let Some(ribbon) = drawer_ribbon_rect(&areas) {
-        draw_drawer_ribbon(f, pal, ribbon, app.drawer_ribbon_engaged(ribbon));
+        let engaged = app.drawer_ribbon_engaged(ribbon);
+        draw_drawer_ribbon(f, pal, ribbon, engaged, RIBBON_OPEN_MARK);
+    }
+
+    // And its mirror: the handle on an open drawer's own left border, which is the way out for
+    // the same hand. Drawn after the drawer in both modes, because it sits *on* that border —
+    // the column it shares with the width seam, where a press that moves is a resize and a press
+    // that does not is this. See `App::DragTarget::DrawerEdgePress`.
+    if let Some(ribbon) = drawer_close_ribbon_rect(&areas) {
+        let engaged = app.drawer_ribbon_engaged(ribbon);
+        draw_drawer_ribbon(f, pal, ribbon, engaged, RIBBON_CLOSE_MARK);
     }
 
     draw_status(f, app, areas.status);
@@ -6032,26 +6071,75 @@ mod tests {
         assert!(cramped.drawer_ribbon.is_none());
     }
 
-    /// The marks are inside the ribbon and spread down it, at every height a window can be.
+    /// The handle is one contiguous block, inside its column and centred in it, at every height a
+    /// window can be — including the ones where seven rows would be most of the edge.
     #[test]
-    fn the_ribbons_marks_are_spread_down_the_column_it_was_given() {
+    fn the_ribbons_handle_is_a_block_in_the_middle_of_the_column_it_was_given() {
         for height in [1u16, 2, 3, 5, 12, 40, 200] {
             let rect = Rect::new(9, 1, 1, height);
-            let marks = drawer_ribbon_marks(rect);
-            assert!(!marks.is_empty(), "a ribbon with a row in it has a mark on it");
-            for y in &marks {
-                assert!(*y >= rect.y && *y < rect.y + rect.height, "and every mark is in it");
-            }
-            for pair in marks.windows(2) {
-                assert_eq!(pair[1] - pair[0], RIBBON_SPACING, "evenly, one row in three");
-            }
-            // Centred: the gap above the first mark and the one below the last are the same, to
-            // within the odd row that cannot be halved.
-            let above = marks[0] - rect.y;
-            let below = rect.y + rect.height - 1 - marks[marks.len() - 1];
-            assert!(above.abs_diff(below) <= 1, "the run sits in the middle of the column");
+            let pill = drawer_ribbon_pill(rect);
+            assert!(pill.height >= 1, "a column with a row in it carries a handle");
+            assert!(pill.height <= RIBBON_PILL_MAX, "and never a longer one than a grip");
+            assert!(
+                pill.height <= rect.height,
+                "nor one that outgrows the edge it is a handle on"
+            );
+            assert_eq!(pill.x, rect.x, "on the column, and only on it");
+            assert_eq!(pill.width, rect.width);
+            assert!(pill.y >= rect.y && pill.y + pill.height <= rect.y + rect.height);
+            // Centred: the gap above and the gap below are the same, to within the odd row that
+            // cannot be halved.
+            let above = pill.y - rect.y;
+            let below = rect.y + rect.height - (pill.y + pill.height);
+            assert!(above.abs_diff(below) <= 1, "the handle sits in the middle of the column");
         }
-        assert!(drawer_ribbon_marks(Rect::new(0, 0, 1, 0)).is_empty());
+        assert_eq!(drawer_ribbon_pill(Rect::new(0, 0, 1, 0)).height, 0);
+    }
+
+    /// The other handle, on the open drawer's own left border — in both modes, since in both the
+    /// drawer has a left border and it is the same column either way. And never at the same time
+    /// as the one on the window's edge: the two are the drawer being away and the drawer being
+    /// here, which is one question with one answer.
+    #[test]
+    fn an_open_drawer_carries_the_closing_handle_on_its_own_edge() {
+        let full = Rect::new(0, 0, 200, 40);
+        let params = |drawer_open, terminal_on_right, drawer_pinned| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            menu_active: false,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right,
+            drawer_open,
+            drawer_pct: 40,
+            drawer_pinned,
+        };
+
+        for on_right in [false, true] {
+            for pinned in [false, true] {
+                let open = compute_layout(full, &params(true, on_right, pinned));
+                let drawer = drawer_rect(&open).expect("an open drawer is somewhere");
+                let handle = drawer_close_ribbon_rect(&open).expect("and carries its handle");
+
+                assert_eq!(handle.x, drawer.x, "on the border, which is the width seam's column");
+                assert_eq!(handle.width, 1, "one column, the same as the one on the far edge");
+                assert_eq!(handle.y, drawer.y);
+                assert_eq!(handle.height, drawer.height, "the whole edge is the click target");
+                assert!(
+                    drawer_ribbon_rect(&open).is_none(),
+                    "and the way in is not offered while you are already in"
+                );
+
+                let closed = compute_layout(full, &params(false, on_right, pinned));
+                assert!(
+                    drawer_close_ribbon_rect(&closed).is_none(),
+                    "nothing to close when there is no drawer on screen"
+                );
+                assert!(drawer_ribbon_rect(&closed).is_some(), "that edge carries the way in");
+            }
+        }
     }
 
     /// The launcher's rows are laid out once and read by both the drawing and the mouse. What

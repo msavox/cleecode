@@ -2053,6 +2053,25 @@ pub enum DragTarget {
     TerminalMouse(usize, u16),
     /// The seam between the editor side of the window and the agent drawer.
     DrawerWidth,
+    /// A button held on the drawer's left edge that has not moved yet.
+    ///
+    /// That column is two controls at once: the width seam, and the handle that closes the
+    /// drawer. Nothing about *where* the press landed can tell them apart — they are the same
+    /// cells — so what tells them apart is what the hand does next. A press that moves is a
+    /// resize; a press that comes back up without having moved is a click, and a click there
+    /// closes. So this variant arms neither: the real [`DragTarget::DrawerWidth`] is entered on
+    /// the first motion event, and a release that still finds this here is the click.
+    ///
+    /// Deferring the drag is only done for this edge. Everywhere else a press on a seam is a
+    /// grab and nothing else, and making them all wait for a movement would be a lag on every
+    /// resize in the window to pay for a control only this one has.
+    ///
+    /// `on_handle` remembers whether the press was on the border column itself, because only
+    /// that column closes: a seam accepts the cell either side of its border as aiming
+    /// tolerance, and here the cell to the right is the agent's own pane and the one to the left
+    /// belongs to whatever frame the drawer is standing next to. Closing the drawer from either
+    /// would be a click landing on something the user was not pointing at.
+    DrawerEdgePress { on_handle: bool },
     /// A text selection being dragged inside the drawer's pane. No index: there is only one.
     DrawerSelection,
     /// A button the drawer's agent was told went down, and has to be told came back up.
@@ -12103,7 +12122,10 @@ impl App {
         if let Some(drawer) = ui::drawer_rect(areas) {
             let border_x = drawer.x;
             if row >= drawer.y && row < drawer.y + drawer.height && col + 1 >= border_x && col <= border_x + 1 {
-                self.dragging = Some(DragTarget::DrawerWidth);
+                // Armed, not started: the closing handle is painted on this same column, and
+                // which of the two the press meant is decided by whether it moves. See
+                // [`DragTarget::DrawerEdgePress`].
+                self.dragging = Some(DragTarget::DrawerEdgePress { on_handle: col == border_x });
                 return true;
             }
         }
@@ -12223,8 +12245,11 @@ impl App {
                 self.settings.clamp_layout();
             }
             Some(DragTarget::TerminalSplit(i)) => self.drag_terminal_split(i, col, row, full),
+            // Never seen here: a press on the drawer's edge becomes `DrawerWidth` on the first
+            // movement, and movement is the only thing that reaches this function.
+            Some(DragTarget::DrawerEdgePress { .. })
             // All handled where the drag happens, against the frame it started in.
-            Some(DragTarget::TextSelection)
+            | Some(DragTarget::TextSelection)
             | Some(DragTarget::TerminalSelection(_))
             | Some(DragTarget::TerminalMouse(..))
             | Some(DragTarget::DrawerSelection)
@@ -13239,7 +13264,11 @@ impl App {
                     .filter(|r| row >= r.y && row < r.y + r.height && col + 1 >= r.x)
                 {
                     if col <= rect.x + 1 {
-                        self.dragging = Some(DragTarget::DrawerWidth);
+                        // Armed rather than started, exactly as on the pinned column: this edge
+                        // is the seam and the closing handle at once, and the movement is what
+                        // says which. See [`DragTarget::DrawerEdgePress`].
+                        self.dragging =
+                            Some(DragTarget::DrawerEdgePress { on_handle: col == rect.x });
                         return;
                     }
                     if let Some((ScrollbarId::Drawer, part)) = self.scrollbar_at(col, row, areas) {
@@ -13457,6 +13486,12 @@ impl App {
                 | Some(DragTarget::TerminalSplit(_)) => {
                     self.continue_drag(col, row, full);
                 }
+                Some(DragTarget::DrawerEdgePress { .. }) => {
+                    // The movement is what makes it a drag. From here on it is an ordinary width
+                    // drag and the release will find nothing to close.
+                    self.dragging = Some(DragTarget::DrawerWidth);
+                    self.continue_drag(col, row, full);
+                }
                 Some(DragTarget::Scrollbar(id)) => self.drag_scrollbar(id, col, row, areas),
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
@@ -13541,6 +13576,19 @@ impl App {
                     {
                         self.drawer_mouse_drag(held, MouseAction::Release, col, row, areas);
                         self.dragging = None;
+                    }
+                    // A press on the drawer's edge that never moved: not a resize, then, but a
+                    // click on the handle painted there — and a click on that handle closes the
+                    // drawer, the ✕'s own path. The pty goes on running.
+                    Some(DragTarget::DrawerEdgePress { on_handle })
+                        if button == MouseButton::Left =>
+                    {
+                        self.dragging = None;
+                        if on_handle {
+                            let lang = self.settings.lang;
+                            self.close_drawer();
+                            self.status_message = i18n::msg_drawer_toggled(lang, false);
+                        }
                     }
                     _ if button == MouseButton::Left => self.dragging = None,
                     _ => {}

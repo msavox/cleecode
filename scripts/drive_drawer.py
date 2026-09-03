@@ -100,13 +100,46 @@ def click(session, col, row):
     session.send(f"\x1b[<0;{col + 1};{row + 1}m")
 
 
-def ribbon_rows(session):
-    """The rows carrying the ribbon's mark, read out of the window's last column.
+def drag(session, col, row, to_col):
+    """Press on a cell, move to another column, release there. The SGR motion report carries the
+    button bits plus 32, so a left-button drag is 32."""
+    session.send(f"\x1b[<0;{col + 1};{row + 1}M")
+    session.wait(lambda s: True, 0.3)
+    session.send(f"\x1b[<32;{to_col + 1};{row + 1}M")
+    session.wait(lambda s: True, 0.3)
+    session.send(f"\x1b[<0;{to_col + 1};{row + 1}m")
 
-    The column itself, not a search of the whole screen: the ribbon's promise is that it is on the
-    edge, and a mark found anywhere else would be a different thing wearing the same character."""
-    edge = session.cols - 1
-    return [y for y in range(session.rows) if session.full_line(y)[edge] == "‹"]
+
+def hover(session, col, row):
+    """Rest the pointer on a cell without pressing anything. The SGR motion report with no button
+    held is 32 + 3; CleeCode asks for any-event tracking, so these arrive."""
+    session.send(f"\x1b[<35;{col + 1};{row + 1}M")
+    session.wait(lambda s: True, 0.4)
+
+
+def ribbon_handle(session, col, mark):
+    """The handle drawn in column `col`: (its rows, the background it is filled with), or None.
+
+    A pill, not a run of ticks — a contiguous block of filled cells with the chevron in the middle
+    of it, which is what makes it read as something to press rather than as something the theme
+    did to the border. Found by taking the chevron's own background and walking out along the
+    column while it holds, so the check is about the filled block itself and not about a colour
+    this file would have to know the name of."""
+    cells = {y: session.cells(y)[col] for y in range(1, session.rows - 1)}
+    middle = next((y for y, cell in cells.items() if cell.data == mark), None)
+    if middle is None:
+        return None
+    bg = cells[middle].bg
+    rows = [middle]
+    y = middle - 1
+    while y in cells and cells[y].bg == bg:
+        rows.insert(0, y)
+        y -= 1
+    y = middle + 1
+    while y in cells and cells[y].bg == bg:
+        rows.append(y)
+        y += 1
+    return rows, bg
 
 
 def close_cell(session):
@@ -264,45 +297,110 @@ def check_drawer(binary, report):
 
         # ---- the way in with a mouse ---------------------------------------------------------
         # The drawer has never been summoned in this session, so what is on the right edge is the
-        # ribbon: one carved column, a mark every third row, the height of the main area. It is
+        # opening handle: a filled pill in the middle of one carved column, with a ‹ in it. It is
         # the only thing on screen that says the drawer exists to a hand that is not on the
-        # keyboard.
-        marks = ribbon_rows(session)
-        report.check("a closed drawer leaves a ribbon on the right edge",
-                     len(marks) > 2, session,
-                     note="marks in column %d at rows %s" % (session.cols - 1, marks))
-        report.check("and the ribbon runs the height of the main area",
-                     bool(marks) and marks[0] >= 1 and marks[-1] <= session.rows - 2, session,
-                     note="never over the menu bar or the status line")
-        if marks:
+        # keyboard, so it has to look like a control and not like a decoration.
+        edge = session.cols - 1
+        handle = ribbon_handle(session, edge, "‹")
+        report.check("a closed drawer leaves a handle on the right edge",
+                     handle is not None, session,
+                     note="a ‹ in the last column, column %d" % edge)
+        if handle:
+            rows, bg = handle
+            report.check("the handle is a filled pill, not a scattering of marks",
+                         bg != "default" and len(rows) >= 3, session,
+                         note="%d contiguous filled cells at rows %s, background %r"
+                              % (len(rows), rows, bg))
+            report.check("and it sits inside the main area",
+                         rows[0] >= 1 and rows[-1] <= session.rows - 2, session,
+                         note="never over the menu bar or the status line")
+
+            # The pointer resting on it lights it. A control at the edge of the window has to
+            # answer when it is about to be pressed, or nobody finds out it was a control.
+            hover(session, edge, rows[len(rows) // 2])
+            lit = ribbon_handle(session, edge, "‹")
+            report.check("the handle lights up under the pointer",
+                         lit is not None and lit[1] != bg, session,
+                         note="%r at rest, %r under the pointer"
+                              % (bg, lit[1] if lit else None))
+            hover(session, 4, session.rows // 2)
+            rested = ribbon_handle(session, edge, "‹")
+            report.check("and goes back to itself when the pointer leaves",
+                         rested is not None and rested[1] == bg, session)
+
             # A click on it is the mouse's Ctrl+Shift+A: the summoning half of that key and no
             # more of it. It has to win over the editor's scrollbar, which rides the right of the
             # frame beside it — the carve is what keeps the two apart.
-            click(session, session.cols - 1, marks[len(marks) // 2])
+            click(session, edge, rows[len(rows) // 2])
             opened = session.wait(lambda s: drawer_column(s) is not None, 8)
-            report.check("clicking the ribbon opens the drawer", opened, session,
+            report.check("clicking the handle opens the drawer", opened, session,
                          note="the same path the chord takes when there is nobody to talk to")
             report.check("and the launcher is what it opens on",
                          all(name in session.text() for name in INSTALLED + MISSING), session)
-            report.check("the ribbon is gone while the drawer is up",
-                         not ribbon_rows(session), session,
+            report.check("the opening handle is gone while the drawer is up",
+                         ribbon_handle(session, edge, "‹") is None, session,
                          note="the drawer and the way back to it are never both on screen")
 
-            # And out again by the ✕ on its own title bar, which hides the column and nothing
-            # else. The list of four is not a conversation yet; that this closes it at all is the
-            # check here, and the pty is put to the same question further down.
+        # ---- the way out, on the drawer's own edge ---------------------------------------------
+        # The mirror: the same pill on the open drawer's left border, with the chevron the other
+        # way round. That column is also the width seam, and the two are told apart by what the
+        # hand does — so both gestures are put to it here, the drag first so the click is not
+        # measured against a drawer this file has already moved.
+        seam = drawer_column(session)
+        handle = ribbon_handle(session, seam, "›") if seam is not None else None
+        report.check("an open drawer carries a closing handle on its left edge",
+                     handle is not None, session,
+                     note="a › in column %s, the drawer's own border" % seam)
+        if handle:
+            rows, bg = handle
+            report.check("the closing handle is a filled pill too",
+                         bg != "default" and len(rows) >= 3, session,
+                         note="%d contiguous filled cells at rows %s" % (len(rows), rows))
+
+            # Press, move, release: that is a resize, and it has to stay one. The seam goes right
+            # (a narrower drawer) and then back, so what follows runs at the width it started at.
+            grab = rows[len(rows) // 2]
+            drag(session, seam, grab, seam + 8)
+            moved = session.wait(lambda s: (drawer_column(s) or seam) > seam, 6)
+            report.check("a press that moves on that edge still resizes the drawer", moved,
+                         session,
+                         note="seam at %s, now at %s" % (seam, drawer_column(session)))
+            report.check("and the drawer is still open after it",
+                         drawer_column(session) is not None, session,
+                         note="a drag is not a click, however far it went")
+            back = drawer_column(session)
+            if back is not None and back != seam:
+                drag(session, back, grab, seam)
+                session.wait(lambda s: (drawer_column(s) or 0) <= seam + 1, 6)
+                report.check("and dragging it back puts the seam where it was",
+                             abs((drawer_column(session) or 0) - seam) <= 1, session,
+                             note="back at %s" % drawer_column(session))
+
+            # And a press that does *not* move, on the same cells: that is the handle.
+            seam = drawer_column(session) or seam
+            click(session, seam, grab)
+            shut = session.wait(lambda s: drawer_column(s) is None, 6)
+            report.check("a clean click on that edge closes the drawer", shut, session,
+                         note="the drag begins on the first movement, so a still press is a click")
+            report.check("and the frames have their columns back",
+                         vertical_borders(session, middle) == borders_before, session,
+                         note="%d vertical borders before it opened, %d after it closed"
+                              % (borders_before, vertical_borders(session, middle)))
+            report.check("and the opening handle is back on the window's edge",
+                         ribbon_handle(session, edge, "‹") is not None, session)
+
+            # Back in, so the ✕ can be put to the same question — two ways out is the point, and
+            # the one in the corner is the one people already know.
+            opening = ribbon_handle(session, edge, "‹")
+            if opening:
+                click(session, edge, opening[0][len(opening[0]) // 2])
+                session.wait(lambda s: drawer_column(s) is not None, 8)
             spot = close_cell(session)
-            report.check("the drawer's title bar carries a ✕", spot is not None, session)
+            report.check("the drawer's title bar carries a ✕ as well", spot is not None, session)
             if spot:
                 click(session, *spot)
                 shut = session.wait(lambda s: drawer_column(s) is None, 6)
-                report.check("clicking the ✕ closes the drawer", shut, session)
-                report.check("and the frames have their columns back",
-                             vertical_borders(session, middle) == borders_before, session,
-                             note="%d vertical borders before it opened, %d after it closed"
-                                  % (borders_before, vertical_borders(session, middle)))
-                report.check("and the ribbon is back on the edge",
-                             len(ribbon_rows(session)) > 2, session)
+                report.check("clicking the ✕ closes the drawer too", shut, session)
 
         # ---- summoning ---------------------------------------------------------------------
         # There is no agent anywhere, so the key that hands an agent the context has nobody to
@@ -454,17 +552,42 @@ def check_drawer(binary, report):
                          vertical_borders(session, middle) < open_borders, session,
                          note="%d vertical borders with the drawer, %d without it"
                               % (open_borders, vertical_borders(session, middle)))
-            marks = ribbon_rows(session)
-            report.check("the ribbon comes back when the drawer goes away",
-                         len(marks) > 2, session)
-            if marks:
-                click(session, session.cols - 1, marks[len(marks) // 2])
+            opening = ribbon_handle(session, session.cols - 1, "‹")
+            report.check("the handle comes back when the drawer goes away",
+                         opening is not None, session)
+            if opening:
+                rows, _ = opening
+                click(session, session.cols - 1, rows[len(rows) // 2])
                 returned = session.wait(lambda s: drawer_column(s) is not None, 8)
-                report.check("clicking the ribbon brings the agent back", returned, session,
+                report.check("clicking the handle brings the agent back", returned, session,
                              note="summoning, not the launcher: there is somebody in there")
                 report.check("with the conversation exactly where it was",
                              "\n".join(session.frame_of("AGENT-STUB claude ready")) == talk,
                              session, note="the ✕ hid the column and never touched the pty")
+
+            # And the closing handle over the same conversation, which is the pair of gestures a
+            # hand on the mouse would actually use: out by the edge, back by the edge, and the
+            # agent none the wiser.
+            closing = ribbon_handle(session, drawer_column(session), "›")
+            report.check("the closing handle is there over a running agent too",
+                         closing is not None, session)
+            if closing:
+                rows, _ = closing
+                grab = rows[len(rows) // 2]
+                click(session, drawer_column(session), grab)
+                gone = session.wait(lambda s: drawer_column(s) is None, 6)
+                report.check("a clean click on it hides the drawer", gone, session)
+                report.check("and says the agent is still running in it",
+                             "still running" in session.text(), session)
+                opening = ribbon_handle(session, session.cols - 1, "‹")
+                if opening:
+                    rows, _ = opening
+                    click(session, session.cols - 1, rows[len(rows) // 2])
+                    session.wait(lambda s: drawer_column(s) is not None, 8)
+                    report.check("and the conversation comes back untouched",
+                                 "\n".join(session.frame_of("AGENT-STUB claude ready")) == talk,
+                                 session,
+                                 note="the edge closes the column, never the pty behind it")
 
         # ---- the other mode: autocollapse ----------------------------------------------------
         # The setting is flipped through the box a user would flip it in, so the row and the
