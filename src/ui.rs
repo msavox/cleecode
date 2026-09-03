@@ -35,6 +35,18 @@ pub struct Areas {
     /// by the overlay (the terminal seam's arithmetic, which is a percentage of what the drawer
     /// left) reads `drawer`; code about what is on screen reads [`drawer_rect`].
     pub drawer_overlay: Option<Rect>,
+    /// The one column the ribbon rides: the right edge of the main area, carved out of it the
+    /// way the drawer's own column is, so it is a region nobody else owns rather than a strip
+    /// painted over somebody's last column of text.
+    ///
+    /// Carved whenever the drawer is not a pinned column — which includes *while an
+    /// autocollapsing drawer is open over the top of it*. That is deliberate: the whole promise
+    /// of autocollapse is that nothing underneath is resized, and a column handed back to the
+    /// frames every time the drawer appeared would be a `SIGWINCH` on the way in and another on
+    /// the way out. The overlay simply covers these cells while it is up, so the ribbon is not
+    /// drawn and not clickable then — see [`drawer_ribbon_rect`], which is what the drawing and
+    /// the mouse both ask.
+    pub drawer_ribbon: Option<Rect>,
     pub status: Rect,
 }
 
@@ -42,6 +54,13 @@ pub struct Areas {
 /// mouse asks, since a click lands on what it can see and not on what owns the cells.
 pub fn drawer_rect(areas: &Areas) -> Option<Rect> {
     areas.drawer.or(areas.drawer_overlay)
+}
+
+/// The ribbon as something to see and to click, which is the column above *and* the drawer being
+/// away. One function for the drawing and for the hit testing, so a mark that is not on screen can
+/// never be the thing a click lands on.
+pub fn drawer_ribbon_rect(areas: &Areas) -> Option<Rect> {
+    drawer_rect(areas).is_none().then_some(areas.drawer_ribbon).flatten()
 }
 
 pub struct LayoutParams {
@@ -111,6 +130,58 @@ fn drawer_split(main: Rect, pct: u16) -> (Rect, Rect) {
     (h[0], h[1])
 }
 
+/// The ribbon's column, one cell wide, off the right of the main area — and what is left for
+/// everybody else.
+///
+/// The narrowest main area that can spare it: below this the column would be a larger share of
+/// the window than the frames it is advertising, and a window that small has other problems than
+/// finding the drawer with a mouse. `None` then, and the ribbon simply is not there — the chord
+/// and the View menu still are.
+fn drawer_ribbon_split(main: Rect) -> (Rect, Option<Rect>) {
+    const NARROWEST: u16 = 8;
+    if main.width < NARROWEST || main.height == 0 {
+        return (main, None);
+    }
+    let rest = Rect { width: main.width - 1, ..main };
+    let ribbon = Rect { x: main.x + main.width - 1, width: 1, ..main };
+    (rest, Some(ribbon))
+}
+
+/// The mark the ribbon is drawn with, and the rows it appears on.
+///
+/// One row in three rather than a solid rule: a filled column is a border, and the screen has
+/// enough of those already — this is meant to be noticed rather than read. A single mark in the
+/// middle was the other candidate and is worse, because it is a button to find rather than an
+/// edge that is simply there the whole height of the window.
+const RIBBON_MARK: &str = "\u{2039}";
+const RIBBON_SPACING: u16 = 3;
+
+/// The rows of `rect` that carry a mark, centred in it so the run reads as deliberate rather than
+/// as something that ran out at the bottom.
+pub fn drawer_ribbon_marks(rect: Rect) -> Vec<u16> {
+    if rect.height == 0 {
+        return Vec::new();
+    }
+    let count = (rect.height / RIBBON_SPACING).max(1);
+    let span = (count - 1) * RIBBON_SPACING + 1;
+    let top = rect.y + (rect.height - span) / 2;
+    (0..count).map(|i| top + i * RIBBON_SPACING).collect()
+}
+
+/// The ribbon: the way back into a drawer that is away, for a hand that is on the mouse.
+///
+/// Dim until the pointer is on it, and then the accent — the same bargain the scrollbars strike,
+/// and for the same reason: a control that is quiet enough to live at the edge of every window
+/// has to say something when it is about to be clicked.
+pub fn draw_drawer_ribbon(f: &mut Frame, pal: Palette, rect: Rect, engaged: bool) {
+    let colour = if engaged { pal.accent } else { pal.text_dim };
+    let style = Style::default().fg(colour);
+    for y in drawer_ribbon_marks(rect) {
+        let cell = Rect { x: rect.x, y, width: rect.width, height: 1 };
+        f.render_widget(Paragraph::new(Span::styled(RIBBON_MARK, style)), cell);
+    }
+}
+
 pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     let menu_h = if p.show_menubar || p.menu_active { 1 } else { 0 };
     let outer = Layout::default()
@@ -135,15 +206,24 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     // In autocollapse the carve does not happen at all — that is the point of the mode. The
     // rectangle is the same one either way, so the drawer does not shift under the eye when the
     // setting changes; what changes is whether anything else was moved out of its way.
-    let (main_area, drawer, drawer_overlay) = if p.drawer_open {
+    //
+    // And where the drawer is *not* a column of the layout, the ribbon is: one cell off the same
+    // edge, so the way back in with a mouse is a region nobody else owns rather than a mark
+    // painted over the last column of somebody's text. It is carved in both arrangements and in
+    // both modes — including under an open autocollapsing drawer, where it is covered rather than
+    // given back. Handing that column to the frames whenever the overlay appeared would resize
+    // them twice for every visit, which is exactly the cost the mode exists to avoid.
+    let (main_area, drawer, drawer_overlay, drawer_ribbon) = if p.drawer_open {
         let (rest, column) = drawer_split(main_area, p.drawer_pct);
         if p.drawer_pinned {
-            (rest, Some(column), None)
+            (rest, Some(column), None, None)
         } else {
-            (main_area, None, Some(column))
+            let (rest, ribbon) = drawer_ribbon_split(main_area);
+            (rest, None, Some(column), ribbon)
         }
     } else {
-        (main_area, None, None)
+        let (rest, ribbon) = drawer_ribbon_split(main_area);
+        (rest, None, None, ribbon)
     };
 
     if p.terminal_on_right {
@@ -165,7 +245,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         } else {
             (rest, None)
         };
-        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, drawer_ribbon, status }
     } else {
         let (main_top, terminals) = if p.show_terminal {
             let v = Layout::default()
@@ -187,7 +267,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
             (None, main_top)
         };
 
-        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, drawer_ribbon, status }
     }
 }
 
@@ -1044,6 +1124,14 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if let Some(overlay) = areas.drawer_overlay {
         f.render_widget(Clear, overlay);
         draw_drawer(f, app, overlay);
+    }
+
+    // The ribbon, on the column the drawer would be flush against — and only while the drawer is
+    // away, which is what `drawer_ribbon_rect` asks. Drawn after both of the above rather than
+    // before, so the one rule is visible in one place: what is on screen is the drawer or the way
+    // back to it, never both.
+    if let Some(ribbon) = drawer_ribbon_rect(&areas) {
+        draw_drawer_ribbon(f, pal, ribbon, app.drawer_ribbon_engaged(ribbon));
     }
 
     draw_status(f, app, areas.status);
@@ -4953,10 +5041,13 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
                 lang,
                 resizing,
                 focused,
-                // No ✕ in the corner. The drawer is closed from the View menu, and closing it
-                // does not end the conversation — a button that looks like every other pane's
-                // close button would promise that it does.
-                closable: false,
+                // The ✕ in the corner, in the cell every other pane keeps it in. It reads as the
+                // terminal panel's close button and does something quieter: it takes the column
+                // away and leaves the pty running, which is the View menu's own path and the
+                // only thing closing the drawer has ever meant. `App::click_drawer` claims that
+                // cell before anything in the frame can, so the resemblance never becomes a
+                // route into `close_terminal`.
+                closable: true,
                 engaged,
                 // Never read: the drawer's one tab is always named after its agent.
                 number: 0,
@@ -5018,7 +5109,13 @@ fn draw_drawer_launcher(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(pal, focused, resizing))
-        .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)));
+        .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)))
+        // The same ✕, in the same cell, as the drawer wears with an agent in it: the empty
+        // drawer is as dismissable as the full one, and a control that came and went with the
+        // contents would be one to hunt for. `terminal_close_cell` is where it is.
+        .title_top(
+            Line::from(Span::styled("\u{2715}", Style::default().fg(pal.danger))).right_aligned(),
+        );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -5863,6 +5960,98 @@ mod tests {
                 "the frames run on underneath it, which is what makes this a repaint and not a reflow"
             );
         }
+    }
+
+    /// The ribbon is the drawer's absence made clickable: one carved column on the same edge,
+    /// in both arrangements, and never on screen at the same time as the drawer itself.
+    ///
+    /// The assertion that matters most is the last one. Under an autocollapsing drawer the column
+    /// stays carved — it is covered, not handed back — because the frames underneath must come
+    /// out of `compute_layout` identical whether the drawer is up or away, and a column returned
+    /// to them on the way in is a `SIGWINCH` to every pty in the window.
+    #[test]
+    fn the_ribbon_is_one_carved_column_on_the_right_whenever_the_drawer_is_away() {
+        let full = Rect::new(0, 0, 200, 40);
+        let params = |drawer_open, terminal_on_right, drawer_pinned| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            menu_active: false,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right,
+            drawer_open,
+            drawer_pct: 40,
+            drawer_pinned,
+        };
+
+        for on_right in [false, true] {
+            for pinned in [false, true] {
+                let closed = compute_layout(full, &params(false, on_right, pinned));
+                let ribbon = closed.drawer_ribbon.expect("a closed drawer leaves a ribbon");
+
+                // The same edge the drawer takes, one cell of it, the full height of the main
+                // area — so it is there to be reached wherever the pointer is up or down the
+                // window.
+                assert_eq!(ribbon.width, 1, "one honest column, and only one");
+                assert_eq!(ribbon.x + ribbon.width, full.width, "flush with the right edge");
+                assert_eq!(ribbon.y, 1, "below the menu bar");
+                assert_eq!(ribbon.height, full.height - 2, "and above the status line");
+                assert_eq!(drawer_ribbon_rect(&closed), Some(ribbon), "and it is on screen");
+
+                // Carved, not painted: nothing else reaches the column, which is why a click on
+                // it cannot be a click on the editor's scrollbar riding the same edge.
+                assert!(closed.editor.x + closed.editor.width <= ribbon.x, "the editor stops short");
+                for rect in closed.terminals.iter().flatten() {
+                    assert!(rect.x + rect.width <= ribbon.x, "so does every terminal window");
+                }
+            }
+
+            // Pinned and open: the drawer has the edge, and there is no ribbon at all.
+            let pinned_open = compute_layout(full, &params(true, on_right, true));
+            assert!(pinned_open.drawer_ribbon.is_none(), "the drawer occupies the edge itself");
+            assert!(drawer_ribbon_rect(&pinned_open).is_none());
+
+            // Autocollapsed and open: the column is still carved, and still not on screen.
+            let closed = compute_layout(full, &params(false, on_right, false));
+            let over = compute_layout(full, &params(true, on_right, false));
+            assert_eq!(
+                over.drawer_ribbon, closed.drawer_ribbon,
+                "the column stays carved under the overlay, so nothing underneath is resized"
+            );
+            assert!(
+                drawer_ribbon_rect(&over).is_none(),
+                "covered by the drawer it summons: the two are never both on screen"
+            );
+        }
+
+        // A window with no room to spare keeps its columns for the frames. The chord and the
+        // View menu are still the way in there.
+        let cramped = compute_layout(Rect::new(0, 0, 6, 10), &params(false, false, true));
+        assert!(cramped.drawer_ribbon.is_none());
+    }
+
+    /// The marks are inside the ribbon and spread down it, at every height a window can be.
+    #[test]
+    fn the_ribbons_marks_are_spread_down_the_column_it_was_given() {
+        for height in [1u16, 2, 3, 5, 12, 40, 200] {
+            let rect = Rect::new(9, 1, 1, height);
+            let marks = drawer_ribbon_marks(rect);
+            assert!(!marks.is_empty(), "a ribbon with a row in it has a mark on it");
+            for y in &marks {
+                assert!(*y >= rect.y && *y < rect.y + rect.height, "and every mark is in it");
+            }
+            for pair in marks.windows(2) {
+                assert_eq!(pair[1] - pair[0], RIBBON_SPACING, "evenly, one row in three");
+            }
+            // Centred: the gap above the first mark and the one below the last are the same, to
+            // within the odd row that cannot be halved.
+            let above = marks[0] - rect.y;
+            let below = rect.y + rect.height - 1 - marks[marks.len() - 1];
+            assert!(above.abs_diff(below) <= 1, "the run sits in the middle of the column");
+        }
+        assert!(drawer_ribbon_marks(Rect::new(0, 0, 1, 0)).is_empty());
     }
 
     /// The launcher's rows are laid out once and read by both the drawing and the mouse. What

@@ -94,6 +94,37 @@ def vertical_borders(session, row):
     return session.full_line(row).count("│")
 
 
+def click(session, col, row):
+    """One press and release, in the SGR encoding CleeCode turns on at startup. One-based."""
+    session.send(f"\x1b[<0;{col + 1};{row + 1}M")
+    session.send(f"\x1b[<0;{col + 1};{row + 1}m")
+
+
+def ribbon_rows(session):
+    """The rows carrying the ribbon's mark, read out of the window's last column.
+
+    The column itself, not a search of the whole screen: the ribbon's promise is that it is on the
+    edge, and a mark found anywhere else would be a different thing wearing the same character."""
+    edge = session.cols - 1
+    return [y for y in range(session.rows) if session.full_line(y)[edge] == "‹"]
+
+
+def close_cell(session):
+    """Where the drawer's ✕ is drawn, as a (column, row).
+
+    Found on screen rather than worked out from the width, so what gets clicked is the button a
+    person can see. Searched from the drawer's own left border rightwards, because the terminal
+    windows carry the same character in the same corner."""
+    left = drawer_column(session)
+    if left is None:
+        return None
+    for y in range(session.rows):
+        at = session.full_line(y).find("✕", left)
+        if at >= 0:
+            return at, y
+    return None
+
+
 def caption_style(session, name):
     """The colour the launcher drew an agent's lower-case name in.
 
@@ -231,6 +262,48 @@ def check_drawer(binary, report):
         middle = session.rows // 2
         borders_before = vertical_borders(session, middle)
 
+        # ---- the way in with a mouse ---------------------------------------------------------
+        # The drawer has never been summoned in this session, so what is on the right edge is the
+        # ribbon: one carved column, a mark every third row, the height of the main area. It is
+        # the only thing on screen that says the drawer exists to a hand that is not on the
+        # keyboard.
+        marks = ribbon_rows(session)
+        report.check("a closed drawer leaves a ribbon on the right edge",
+                     len(marks) > 2, session,
+                     note="marks in column %d at rows %s" % (session.cols - 1, marks))
+        report.check("and the ribbon runs the height of the main area",
+                     bool(marks) and marks[0] >= 1 and marks[-1] <= session.rows - 2, session,
+                     note="never over the menu bar or the status line")
+        if marks:
+            # A click on it is the mouse's Ctrl+Shift+A: the summoning half of that key and no
+            # more of it. It has to win over the editor's scrollbar, which rides the right of the
+            # frame beside it — the carve is what keeps the two apart.
+            click(session, session.cols - 1, marks[len(marks) // 2])
+            opened = session.wait(lambda s: drawer_column(s) is not None, 8)
+            report.check("clicking the ribbon opens the drawer", opened, session,
+                         note="the same path the chord takes when there is nobody to talk to")
+            report.check("and the launcher is what it opens on",
+                         all(name in session.text() for name in INSTALLED + MISSING), session)
+            report.check("the ribbon is gone while the drawer is up",
+                         not ribbon_rows(session), session,
+                         note="the drawer and the way back to it are never both on screen")
+
+            # And out again by the ✕ on its own title bar, which hides the column and nothing
+            # else. The list of four is not a conversation yet; that this closes it at all is the
+            # check here, and the pty is put to the same question further down.
+            spot = close_cell(session)
+            report.check("the drawer's title bar carries a ✕", spot is not None, session)
+            if spot:
+                click(session, *spot)
+                shut = session.wait(lambda s: drawer_column(s) is None, 6)
+                report.check("clicking the ✕ closes the drawer", shut, session)
+                report.check("and the frames have their columns back",
+                             vertical_borders(session, middle) == borders_before, session,
+                             note="%d vertical borders before it opened, %d after it closed"
+                                  % (borders_before, vertical_borders(session, middle)))
+                report.check("and the ribbon is back on the edge",
+                             len(ribbon_rows(session)) > 2, session)
+
         # ---- summoning ---------------------------------------------------------------------
         # There is no agent anywhere, so the key that hands an agent the context has nobody to
         # hand it to. It opens the panel whose job that is instead of reporting a dead end.
@@ -360,6 +433,38 @@ def check_drawer(binary, report):
                 back = session.wait(lambda s: "AGENT-STUB claude ready" in s.text(), 8)
                 report.check("showing it again brings the conversation back", back, session,
                              note="hiding the column never touched the pty")
+
+        # ---- the same round trip, with the mouse alone -----------------------------------------
+        # The ✕ over a running agent is the one that has to be trusted: it is drawn in the cell
+        # every other pane's close button lives in, and every other pane's close button ends what
+        # is inside. This one hides the column and leaves the conversation going, which is the
+        # only thing closing the drawer has ever meant.
+        talk = "\n".join(session.frame_of("AGENT-STUB claude ready"))
+        open_borders = vertical_borders(session, middle)
+        spot = close_cell(session)
+        report.check("the drawer wears its ✕ with an agent in it too", spot is not None, session)
+        if spot and talk.strip():
+            click(session, *spot)
+            shut = session.wait(lambda s: drawer_column(s) is None, 6)
+            report.check("the ✕ over a running agent hides the drawer", shut, session)
+            report.check("and says the agent is still running in it",
+                         "still running" in session.text(), session,
+                         note="the View menu's own close path, not the terminal panel's")
+            report.check("and the frames took the column back",
+                         vertical_borders(session, middle) < open_borders, session,
+                         note="%d vertical borders with the drawer, %d without it"
+                              % (open_borders, vertical_borders(session, middle)))
+            marks = ribbon_rows(session)
+            report.check("the ribbon comes back when the drawer goes away",
+                         len(marks) > 2, session)
+            if marks:
+                click(session, session.cols - 1, marks[len(marks) // 2])
+                returned = session.wait(lambda s: drawer_column(s) is not None, 8)
+                report.check("clicking the ribbon brings the agent back", returned, session,
+                             note="summoning, not the launcher: there is somebody in there")
+                report.check("with the conversation exactly where it was",
+                             "\n".join(session.frame_of("AGENT-STUB claude ready")) == talk,
+                             session, note="the ✕ hid the column and never touched the pty")
 
         # ---- the other mode: autocollapse ----------------------------------------------------
         # The setting is flipped through the box a user would flip it in, so the row and the

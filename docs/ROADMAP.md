@@ -2396,6 +2396,17 @@ riscritti con la strada temp+rename.
   > con la status line che dichiara e la documentazione che insegna il cassetto.
   > Cinquantasei controlli nel driver del cassetto e dei preset, 577 test. Resta il secondo
   > tempo del congedo, alla release successiva a quella che porta il cassetto.
+  >
+  > **E la terza (2026-09-03): il cassetto tutto col mouse.** Col cassetto via, sul bordo
+  > destro corre un nastro largo una colonna — segni `‹` radi, spenti finché il puntatore non
+  > ci si posa — e un clic lì è esattamente la strada di evocazione di Ctrl+Shift+A: il
+  > selettore se non c'è nessuno, il pane dell'agente se c'è. La ✕ sulla barra del titolo
+  > chiude, cioè nasconde la colonna e lascia girare il pty, che è l'unica cosa che chiudere
+  > il cassetto ha mai voluto dire. La colonna del nastro è *ritagliata* dal layout, anche
+  > sotto un cassetto in autocollapse: restituirla ai frame a ogni evocazione sarebbe
+  > proprio il SIGWINCH che quel modo esiste per non pagare, e ritagliarla è anche ciò che
+  > tiene il clic lontano dalla scrollbar dell'editor che correva su quel bordo. Sedici
+  > controlli in più nel driver del cassetto, 579 test.
 
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
