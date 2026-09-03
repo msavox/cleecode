@@ -43,6 +43,18 @@ three gamma
 # chance to detect them.
 CRLF_TEXT = b"one\r\ntwo\r\nthree\r\n"
 
+# The two halves of the large-file check, in a language with keywords and colours and no
+# language server in `lsp::SERVERS` — so the check is about the mode and not about whatever
+# happens to be installed on the machine running it.
+#
+# `configuration_marker` lives only in the large file and `counter_local` only in the small one,
+# so a completion popup says plainly which buffer its words came from.
+LARGE_LINE = "    int configuration_marker = 1; // padding padding padding padding pad\n"
+SMALL_JAVA = """class Sample {
+    int counter_local = 1;
+}
+"""
+
 
 def completion(session, report):
     """The word-completion popup, from opening it to undoing what it wrote."""
@@ -324,6 +336,126 @@ def the_status_bar_names_line_endings_and_converts_them(binary, report):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def colours_in(session, needle):
+    """The distinct foreground colours the editor drew `needle` and the rest of its line in.
+
+    One colour means the run of text was painted flat — which is what an unhighlighted buffer
+    looks like, and the only evidence from outside the process that the highlighter did not
+    run. Read from the needle up to the pane's own right border: the gutter is styled either
+    way, and the border is a colour of its own that would make every line look highlighted."""
+    row = session.row_of(needle)
+    if row is None:
+        return set()
+    drawn = session.full_line(row)
+    start = drawn.index(needle)
+    end = drawn.find("│", start)
+    cells = session.cells(row)[start:end if end > 0 else len(drawn)]
+    return {cell.fg for cell in cells if (cell.data or " ").strip()}
+
+
+def a_file_over_the_line_says_what_it_is_not_doing(binary, report):
+    """The declared large-file mode: a file past 50 MB opens with no colours, no words of its
+    own in the completion popup, a shallow undo history — and says so, twice.
+
+    A real fixture over the real threshold, because the threshold is the thing being tested and
+    a test-only way to move it would be a second definition of the mode. It costs about a second
+    to write and about a second to open, which is the honest price of checking a limit rather
+    than checking a mock of one.
+
+    Its own session, and a small file of the same language beside the large one — both open at
+    once, on purpose. The small file is the control that says the missing colours and the
+    missing words are the *mode* and not the language, and having the large file sitting in a
+    background tab while the popup opens in the small one is the other half of the rule: one
+    huge file open anywhere must not tax completion everywhere."""
+    root = tempfile.mkdtemp(prefix="clee_large_")
+    big_path = os.path.join(root, "big.java")
+    with open(big_path, "w") as handle:
+        handle.write(LARGE_LINE * ((52 * 1024 * 1024) // len(LARGE_LINE) + 1))
+    small_path = os.path.join(root, "small.java")
+    with open(small_path, "w") as handle:
+        handle.write(SMALL_JAVA)
+
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the large-file session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x0f")                              # Ctrl+O, quick-open
+        session.wait(lambda s: "big.java" in s.text(), 8)
+        session.send("big")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        # Generous: this is the one check in the file that reads fifty megabytes off disk.
+        if not session.wait(lambda s: "configuration_marker" in s.text(), 30):
+            report.check("the large file opens at all", False, session)
+            return
+
+        report.check("opening it says the size and what is off",
+                     "52 MB" in session.text() and "no highlighting" in session.text(), session,
+                     note=session.lines()[-1])
+        report.check("the status bar keeps saying so beside row:col",
+                     "· large" in session.lines()[-1], session, note=session.lines()[-1])
+        report.check("the text is drawn flat, with no highlighting",
+                     len(colours_in(session, "configuration_marker")) == 1, session,
+                     note=repr(colours_in(session, "configuration_marker")))
+
+        # Typing still works, and still opens a popup — on the language's keywords. What it must
+        # not offer is a word out of the fifty-megabyte buffer under the cursor.
+        report.check("typing opens the popup on keywords",
+                     session.press("co", lambda s: s.popup_open()), session)
+        words = session.popup_words()
+        report.check("the language's keywords are still offered", "const" in words, session,
+                     note=str(words))
+        report.check("no word comes out of the large buffer",
+                     "configuration_marker" not in words, session, note=str(words))
+        session.press("\x1b", lambda s: not s.popup_open(), 3)
+        first = session.buffer_line(1) or ""
+        report.check("the keystrokes landed in the buffer", first.startswith("co"), session,
+                     note=repr(first))
+
+        # Saved rather than left dirty: an unsaved buffer this size would be copied into the
+        # recovery directory on the autosave tick and left there when this session is killed,
+        # and the driver has no business leaving fifty megabytes on somebody's disk.
+        session.send("\x13")                              # Ctrl+S
+        session.wait(lambda s: True, 2.0)
+        with open(big_path, "rb") as handle:
+            head = handle.read(8)
+        report.check("a large buffer saves what was typed into it", head.startswith(b"co"),
+                     session, note=repr(head))
+
+        # The control, in the same session and the same language: colours are back, the chip
+        # says nothing about size, and the popup offers this buffer's own word — but still not
+        # the large tab's, which is sitting right there in the background.
+        session.send("\x0f")
+        session.wait(lambda s: "small.java" in s.text(), 8)
+        session.send("small")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        if not session.wait(lambda s: "counter_local" in s.text(), 10):
+            report.check("the small file of the same language opens", False, session)
+            return
+        report.check("an ordinary file of the same language is highlighted",
+                     len(colours_in(session, "int counter_local")) > 1, session,
+                     note=repr(colours_in(session, "int counter_local")))
+        report.check("and its chip says nothing about size",
+                     "· large" not in session.lines()[-1], session, note=session.lines()[-1])
+
+        session.press("\x1b[B", lambda s: True, 1)         # onto the line with the word
+        session.press("\x1b[F", lambda s: True, 1)         # End
+        report.check("the popup opens in the ordinary file",
+                     session.press("co", lambda s: s.popup_open()), session)
+        words = session.popup_words()
+        report.check("it offers this buffer's own words", "counter_local" in words, session,
+                     note=str(words))
+        report.check("a large file in a background tab still contributes nothing",
+                     "configuration_marker" not in words, session, note=str(words))
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def a_pane_is_told_what_it_is_talking_to(binary, root, report):
     """A terminal pane must be told it is talking to CleeCode's parser, not to the terminal
     CleeCode happens to be displayed in.
@@ -467,6 +599,7 @@ def main():
     try:
         typing_in_a_column_selection(binary, report)
         the_status_bar_names_line_endings_and_converts_them(binary, report)
+        a_file_over_the_line_says_what_it_is_not_doing(binary, report)
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)

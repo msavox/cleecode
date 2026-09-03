@@ -43,6 +43,17 @@ else is exactly what opens read-only above — and LF or CRLF, right beside `row
 menu's **Convert line endings** flips it for the next save; it is deliberately not on the undo
 stack, since a checkpoint is a version of the text and the ending is not text.
 
+Past 50 MB a file opens in a **declared large-file mode**, and the bar declares it: the size on
+the way in, then the word `large` beside the encoding for as long as the file is open. Such a
+buffer gets no syntax highlighting, contributes none of its own words to the completion popup
+(keywords and session names still arrive, and one huge file left open in a background tab does
+not tax completion in the others), and keeps twenty undo steps instead of five hundred — a step
+is a copy of the whole text, so five hundred of them at this size is not a deep history but an
+out-of-memory kill with your unsaved work inside it. Project search leaves a file that size out
+too, open or not. It is a constant and not a setting: a knob would be a promise to behave at
+every value somebody turns it to, and this is the line past which the editor would rather say
+what it is not doing than do it and stop answering the keyboard.
+
 An editor with an agent running in one of its terminal panes is being written to while you read
 it, so the reload says what it did: **the lines that arrived are lit in the gutter**, their line
 numbers green, until an edit of your own — or `Esc` — puts them out. A diagnostic or a breakpoint

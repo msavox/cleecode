@@ -2265,6 +2265,39 @@ riscritti con la strada temp+rename.
 - **Un modo large-file dichiarato**: sopra una soglia (50 MB?) niente highlighting, niente
   indice del completamento, undo a profondità ridotta — e la barra che lo dice. Meglio un
   editor che dichiara i suoi limiti di uno che li scopre congelandosi.
+
+  > **Fatto (2026-09-03).** Soglia `editor::LARGE_FILE = 50 MB`, una costante e non
+  > un'impostazione: una manopola sarebbe la promessa di comportarsi bene a ogni valore, e
+  > questo non è una preferenza ma la riga oltre la quale l'editor smette di offrire quello
+  > che non può permettersi. `Editor::open` la misura con lo stesso `metadata` che già leggeva
+  > per l'mtime — `disk_len` e `large_limit` nel buffer, `is_large()` che li confronta, così
+  > modalità e dimensione annunciata non possono divergere. `open_with_limit` è la cucitura per
+  > i test: raggiungono la modalità senza scrivere cinquanta megabyte di fixture.
+  >
+  > Tre siti pagano il conto, ognuno col commento che dice quale: il colore (`ui.rs`, la scala
+  > colora dall'alto in giù e un vettore di span per riga sarebbe il file moltiplicato), le
+  > parole del completamento (`app.rs`, `offers_buffer_words` — vale per il buffer attivo e per
+  > *ogni altra scheda aperta*, che è il giro caro: un file enorme in background tasserebbe il
+  > completamento in tutti gli altri), e la profondità dell'undo (`MAX_UNDO` salito a livello
+  > modulo, 500 → 20 su un file grande, perché uno Snapshot è il testo intero: 500 × 50 MB
+  > sono 25 GB). La ricerca nel progetto era già fuori dai giochi — `search.rs` salta tutto
+  > sopra 2 MiB — e ora il manuale lo dice invece di lasciarlo scoprire.
+  >
+  > Detto due volte, per due durate diverse: il messaggio all'apertura (dimensione, cosa manca,
+  > quanti passi di undo restano) nello stesso slot di `msg_opened_read_only`, e `· large`
+  > accanto al chip encoding/EOL, che resta finché resta il file — un messaggio di stato lo
+  > riprende il gesto successivo, e allora niente più direbbe perché quel file non ha colori.
+  > La parola in più si aggiunge solo se ci sta anche lei, così non trascina via encoding ed
+  > EOL da una barra stretta. Il ricarico esterno rimisura in entrambe le direzioni (un log
+  > cresce, un artefatto viene troncato); un buffer che supera la riga *scrivendo* resta com'è
+  > nato, perché togliere i colori a metà di un incollaggio sarebbe peggio del conto.
+  >
+  > `drive_ui.py` usa un fixture vero da 52 MB — la soglia è la cosa in prova, e un modo
+  > test-only per spostarla sarebbe una seconda definizione della modalità — in `.java`, che ha
+  > colori e parole chiave e nessun language server nella tabella, così il check non dipende da
+  > cosa è installato. Accanto, un `.java` piccolo come controllo: dice che i colori mancanti
+  > sono la modalità e non il linguaggio, e con il file grande in una scheda di sfondo dimostra
+  > l'altra metà della regola. Costa una decina di secondi al driver.
 - **Le GIF animate nella scheda, in modalità grafica** (chiesto il 2026-09-02). Oggi una
   `.gif` aperta come scheda mostra il primo fotogramma e basta: il decode è un
   `DynamicImage` solo, e l'animazione vera passa solo da ▶ Run con chafa a caratteri nel

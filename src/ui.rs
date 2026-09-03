@@ -4114,7 +4114,14 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     // anyone is looking. Colouring the whole file instead made a keystroke cost a full copy of
     // the buffer plus a parse of every line in it, so typing in a long file got slower the
     // longer the file was.
-    if app.settings.syntax_highlighting {
+    //
+    // A buffer in the declared large-file mode is not coloured at all, whatever the setting
+    // says. Even bounded to the viewport the ladder colours from the top of the file down, so
+    // the first scroll into the middle of a 50 MB file parses everything above it and keeps a
+    // styled span vector per line — a copy of the file several times over, built while the
+    // editor looks like it has hung. The mode says so on the status bar instead.
+    let colour = app.settings.syntax_highlighting && !app.editors[idx].is_large();
+    if colour {
         let through = visible_rows.last().copied().unwrap_or(0) + viewport_height;
         let highlighter = &app.highlighter;
         app.editors[idx].refresh_highlight(highlighter, through);
@@ -4169,7 +4176,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             spans.push(Span::styled("▸ ", Style::default().fg(pal.accent)));
         }
 
-        let raw_spans: Vec<(Style, String)> = if app.settings.syntax_highlighting {
+        let raw_spans: Vec<(Style, String)> = if colour {
             app.editors[idx].highlighted.get(line_idx).cloned().unwrap_or_default()
         } else {
             let mut text = app.editors[idx].rope.line(line_idx).to_string();
@@ -4955,14 +4962,29 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // notice this only when it's the answer to something odd. So it is the first to go on a
     // narrow window — checked against `spent + taken`, i.e. after the message, the diagnostic
     // and the position have already claimed their room.
+    //
+    // A buffer in the declared large-file mode adds one word to the same chip. The sentence
+    // that announced the mode on open is a status message, and the next thing you do takes the
+    // status line back — after which nothing on screen would say why this file has no colours.
+    // A word that stays is what makes the mode declared rather than merely mentioned.
+    //
+    // Appended in a second step, and only if it also fits, so the encoding and the line ending
+    // are not dragged off a narrow bar by a word that is worth less than they are.
+    let fits = |width: usize| spent + taken as usize + width + 2 <= area.width as usize;
     let chip = (!app.resize_mode)
         .then(|| app.editor())
         .filter(|ed| ed.path.is_some() && ed.preview.is_none() && !ed.read_only)
-        .map(|ed| match ed.line_ending {
-            crate::editor::LineEnding::Crlf => "UTF-8 CRLF".to_string(),
-            crate::editor::LineEnding::Lf => "UTF-8 LF".to_string(),
+        .map(|ed| {
+            let base = match ed.line_ending {
+                crate::editor::LineEnding::Crlf => "UTF-8 CRLF".to_string(),
+                crate::editor::LineEnding::Lf => "UTF-8 LF".to_string(),
+            };
+            ed.is_large()
+                .then(|| format!("{base} · {}", i18n::t(app.settings.lang, Key::StatusLargeFile)))
+                .filter(|wide| fits(wide.chars().count()))
+                .unwrap_or(base)
         })
-        .filter(|c| spent + taken as usize + c.chars().count() + 2 <= area.width as usize);
+        .filter(|c| fits(c.chars().count()));
     let chip_taken = chip.as_ref().map_or(0, |c| c.chars().count() + 2) as u16;
 
     if let Some(text) = position {
