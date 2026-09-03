@@ -107,6 +107,9 @@ jobs:
       # Needs nothing installed either: the agent's side of the MCP bridge is a second copy of
       # the same binary, spoken to on a pipe.
       - run: python3 scripts/drive_mcp.py target/debug/clee
+      # Writes its own animated GIF byte by byte, so it needs no image library and no fixture:
+      # what it watches is a pane changing on the file's own clock with nothing pressed.
+      - run: python3 scripts/drive_gif.py target/debug/clee
 
   # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
   # Adopting either is a repo-wide change, so it stays a deliberate decision.

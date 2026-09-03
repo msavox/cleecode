@@ -320,6 +320,11 @@ the shells in it. In split view a picture opens in the pane that is not focused,
 being worked on visible; the layout itself is never rearranged. Pressing \fBRun\fR on one
 still runs its \fB[run_commands]\fR entry, which by default shows it in a terminal with
 .BR chafa (1).
+.PP
+An animated GIF plays in its tab, at the speed the file asks for, looping for as long as it is on
+screen. Its frames are decoded once, when it opens, and only a tab that is visible is advanced;
+nothing about it touches the keyboard. A file whose frames would not fit in memory shows its
+first frame and says so, rather than freezing to find out.
 .SH MARKDOWN
 A markdown file opens as text, since that is what you do with one. \fBRun\fR beside it shows it
 rendered in the other half of the editor, splitting it if it was not already.

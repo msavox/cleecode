@@ -3696,6 +3696,11 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     if let Some(hint) = app.figure_nav_hint(idx) {
         state.push_str(&hint);
     }
+    // A GIF whose frames were too many to hold. What is on screen is the first of them, and
+    // this is the only thing left saying so once the status line has moved on.
+    if preview.animation_refused {
+        state.push_str(&i18n::label_first_frame(lang));
+    }
     if let Some(pages) = &preview.pages {
         state.push_str(&match pages.total {
             Some(total) => i18n::msg_page_of(lang, pages.current, total),

@@ -635,6 +635,7 @@ fn run(
             app.poll_git_panel();
             app.poll_lsp();
             app.poll_figures();
+            app.poll_animations();
             app.poll_run_watch();
             app.poll_inspector();
             app.poll_autosave();

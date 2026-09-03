@@ -2310,6 +2310,58 @@ riscritti con la strada temp+rename.
   fotogramma bianco fra due, e un file i cui frame non stanno in memoria dichiara il limite
   invece di scoprirlo congelandosi.
 
+  > **Fatto (2026-09-03).** I frame arrivano sulla strada che già c'era: `Job::Picture`
+  > risponde col primo fotogramma come sempre — così ogni percorso che sapeva mostrare
+  > un'immagine continua a funzionare senza sapere che questo esiste — e si porta dietro un
+  > `Motion` accanto al risultato: `Still`, `Animated(Animation)`, oppure `TooBig` coi numeri
+  > per dirlo. Una `.gif` è l'unico formato interrogato (WebP animata e APNG esistono, ma un
+  > formato che funziona vale più di tre a metà), e la decodifica è una sola, sul thread che
+  > già decodificava: un frame GIF non è un'immagine ma una toppa composita sulle precedenti,
+  > quindi "leggi il frame 7" significa decodificare anche i sei prima — ogni giro. Tenerli
+  > trasforma un fotogramma da un decode in un memcpy più un resize.
+  >
+  > Il budget è aritmetica sull'header, quindi rifiuta *prima* di allocare:
+  > `MAX_ANIMATION_PIXELS = 32 milioni` — 128 MB a quattro byte l'uno, ben sotto i 320 MB che
+  > `MAX_PIXELS` concede a una singola immagine ferma, perché un'immagine ferma *è* il file
+  > mentre l'animazione è una comodità che il suo primo fotogramma sa surrogare. Fa 246 frame
+  > di uno screencast 480x270, 104 di un cartone 640x480, 34 di una registrazione 1280x720. I
+  > frame escono da un iteratore pigro contati contro quel numero, quindi un file troppo lungo
+  > costa i frame che ci stanno e non uno di più. Oltre: la scheda mostra il primo fotogramma —
+  > `State::Failed` nasconderebbe un'immagine che si legge benissimo — con il motivo in status
+  > line *e* `primo fotogramma` sulla barra della preview, che resta finché resta la scheda:
+  > un messaggio di stato se lo prende il gesto successivo, e allora la scheda sembrerebbe
+  > soltanto un'immagine ferma senza più niente a spiegare perché.
+  >
+  > Il tempo è quello del file, non un tick: ogni frame porta il suo delay, e
+  > `Animation::due(now)` restituisce qualcosa solo quando è scaduto, quindi chiamarla a ogni
+  > giro del loop costa un confronto. Due convenzioni scritte una volta sola: sotto i 20 ms un
+  > delay è un'omissione e non una velocità (0 o 1 centesimo, che tutti i browser leggono da
+  > venticinque anni come un decimo di secondo), e il pavimento vero è il `poll` da 33 ms della
+  > tastiera — sotto quello si onora "alla velocità del loop", che è una GIF a 25 fps a 25 e
+  > una a 60 a 30. Un frame per chiamata, orologio riavviato da *adesso*: tornare da un secondo
+  > di lavoro altrove riprende da lì invece di rincorrere. Il loop count del file è ignorato, di
+  > proposito: una preview che si ferma sull'ultimo fotogramma è indistinguibile da una rotta.
+  >
+  > `App::poll_animations()` sta nel blocco dei poll accanto a `poll_figures`, e muove solo le
+  > schede **a schermo** — una per pannello, due col split — perché animare una scheda che
+  > nessuno guarda è lavoro il cui intero prodotto si butta; i frame però restano, quindi
+  > riportarla davanti riprende invece di ricominciare. Passa da `Preview::show`, cioè dallo
+  > stesso `ready_from` delle figure: il protocollo tiene l'id che il terminale già conosce, ed
+  > è la differenza fra un ridisegno e uno strobo. Filtro Triangle e non Lanczos3
+  > (`scale_frame`): su un fotogramma che dura ottanta millisecondi Lanczos3 sono decine di ms
+  > del loop — che è anche la tastiera — per una nitidezza che nessuno fa in tempo a vedere.
+  > Tastiera, focus e striscia delle schede: mai toccati.
+  >
+  > `scripts/drive_gif.py` scrive una GIF89a a mano, byte per byte (niente PIL da assumere,
+  > nessun fixture binario che dica i suoi delay dove non si leggono): due fotogrammi pieni,
+  > rosso e blu, 200 ms l'uno. Poi non tocca più un tasto e guarda: 12 cambi in 2,4 secondi —
+  > che è il delay del file, non i settanta di un tick fisso — il primo colore che ritorna,
+  > zero `Loading` e zero riquadri vuoti fra due fotogrammi, e la lettera digitata che finisce
+  > nel testo nell'altra metà mentre l'immagine di fianco continua ad andare. Legge i **colori**
+  > delle celle e non i caratteri: un fotogramma pieno arriva come spazi colorati, perché il
+  > renderer a mezzi blocchi collassa la cella con le due metà uguali — la prima versione del
+  > driver leggeva i caratteri e vedeva il rosso diventare blu chiamandoli identici.
+
 - **L'agente di fianco al lavoro: il cassetto, e basta** (pensato il 2026-09-02 in tre giri
   di conversazione; semplificato il 2026-09-03 con la decisione giusta). C'era una versione
   a due stadi di questa voce — prima una composizione `clee -w octave+claude`, poi il
