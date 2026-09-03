@@ -2397,16 +2397,27 @@ riscritti con la strada temp+rename.
   > Cinquantasei controlli nel driver del cassetto e dei preset, 577 test. Resta il secondo
   > tempo del congedo, alla release successiva a quella che porta il cassetto.
   >
-  > **E la terza (2026-09-03): il cassetto tutto col mouse.** Col cassetto via, sul bordo
-  > destro corre un nastro largo una colonna — segni `‹` radi, spenti finché il puntatore non
-  > ci si posa — e un clic lì è esattamente la strada di evocazione di Ctrl+Shift+A: il
-  > selettore se non c'è nessuno, il pane dell'agente se c'è. La ✕ sulla barra del titolo
-  > chiude, cioè nasconde la colonna e lascia girare il pty, che è l'unica cosa che chiudere
-  > il cassetto ha mai voluto dire. La colonna del nastro è *ritagliata* dal layout, anche
-  > sotto un cassetto in autocollapse: restituirla ai frame a ogni evocazione sarebbe
-  > proprio il SIGWINCH che quel modo esiste per non pagare, e ritagliarla è anche ciò che
-  > tiene il clic lontano dalla scrollbar dell'editor che correva su quel bordo. Sedici
-  > controlli in più nel driver del cassetto, 579 test.
+  > **E la terza (2026-09-03): il cassetto tutto col mouse, in tutte e due le direzioni.** Col
+  > cassetto via, sul bordo destro della finestra c'è una maniglia — una pilla piena larga una
+  > colonna e alta sette righe, accento di sfondo e il chevron `‹` sopra, che sotto il
+  > puntatore passa al colore più forte del tema — e un clic ovunque su quella colonna è
+  > esattamente la strada di evocazione di Ctrl+Shift+A: il selettore se non c'è nessuno, il
+  > pane dell'agente se c'è. Aperto, il cassetto porta la maniglia speculare sul proprio
+  > bordo sinistro, col `›`, e cliccarla lo chiude. La ✕ sulla barra del titolo resta: due
+  > vie d'uscita, e la maniglia è quella che si scopre da sé. Chiudere è sempre nascondere la
+  > colonna lasciando girare il pty, l'unica cosa che chiudere il cassetto ha mai voluto dire.
+  >
+  > Due collisioni risolte per costruzione. La colonna della maniglia d'ingresso è
+  > *ritagliata* dal layout — anche sotto un cassetto in autocollapse, perché restituirla ai
+  > frame a ogni evocazione sarebbe proprio il SIGWINCH che quel modo esiste per non pagare —
+  > e ritagliarla è anche ciò che tiene il clic lontano dalla scrollbar dell'editor che
+  > correva su quel bordo. E il bordo sinistro del cassetto è insieme maniglia di chiusura e
+  > giuntura della larghezza: non li distingue *dove* premi, li distingue cosa fa la mano
+  > dopo. La pressione non arma niente; il drag comincia al primo movimento, e un rilascio
+  > che trova la pressione ancora ferma è il clic che chiude. Solo su quel bordo: far
+  > aspettare un movimento a ogni giuntura sarebbe un ritardo su ogni resize della finestra
+  > per pagare un controllo che ce l'ha solo questa. Ventisette controlli in più nel driver
+  > del cassetto, 580 test.
 
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
