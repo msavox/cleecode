@@ -14,6 +14,10 @@ pub enum PickAction {
     /// A line found by the project search: the file to open and where in it to land. The column
     /// travels with the line so the cursor arrives on the word rather than beside it.
     FileLine(PathBuf, usize, usize),
+    /// A copy of unsaved work an earlier session left behind, carried whole rather than by the
+    /// path it was read from: the text is already in hand by the time the list is built, and
+    /// re-reading the file at Enter would be a second chance for it to have gone.
+    Recover(Box<crate::recovery::Entry>),
 }
 
 pub struct PickItem {
@@ -51,6 +55,10 @@ pub enum PickerKind {
     Symbols,
     /// Everything the servers have said is wrong, across the files that are open.
     Diagnostics,
+    /// What an earlier session was in the middle of when it stopped being a process. Opened
+    /// unasked at startup, which no other picker is — so it says what it is in its title, and
+    /// Esc costs nothing: the copies it lists stay on disk and are offered again next time.
+    Recovery,
 }
 
 /// A fuzzy-filtered chooser shared by the command palette and the file quick-open. Holds

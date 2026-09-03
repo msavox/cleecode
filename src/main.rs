@@ -21,6 +21,7 @@ mod mcp;
 mod menu;
 mod picker;
 mod preview;
+mod recovery;
 mod search;
 mod session;
 mod settings;
@@ -517,6 +518,21 @@ fn run(
         },
         }
     }
+
+    // What the last session was in the middle of, offered back.
+    //
+    // Here, once, and after every route above has finished putting tabs on screen — because the
+    // two routes bypass each other. A resume reopens `last_open_files` inside the `else` of the
+    // `match`; a named workspace never reaches that code at all. Hooking either one would leave
+    // the offer missing from exactly half of the ways CleeCode starts, and the half it was
+    // missing from would be nobody's fault and nobody's bug report.
+    //
+    // Not in minimal mode. `clee -e` is one file with everything else switched off, and a chooser
+    // opening over it unasked is everything else.
+    if edit_file.is_none() {
+        app.offer_recovery();
+    }
+
     let mut last_external_check = Instant::now();
     // Consecutive frames that failed to draw. One is a hiccup worth reporting and carrying on
     // from; a run of them means the screen can't be painted at all, and something has to give.
@@ -621,6 +637,7 @@ fn run(
             app.poll_figures();
             app.poll_run_watch();
             app.poll_inspector();
+            app.poll_autosave();
             app.poll_mcp();
             app.poll_terminal_output();
         }));
@@ -632,6 +649,16 @@ fn run(
             break;
         }
     }
+
+    // This session's untitled buffers stop being anybody's business the moment it ends on
+    // purpose. They are offered back on the strength of their pid no longer being alive, and
+    // after a clean exit that is true of this one too — so without this, every ordinary quit
+    // would leave an `[untitled]` row waiting at the next start. Named copies are left: a buffer
+    // whose changes were discarded at the quit prompt still has a file to compare against, and
+    // the offer for it costs one Esc against the alternative of throwing the work away twice.
+    //
+    // Before the minimal-mode return below, because `clee -e` exits cleanly too.
+    recovery::sweep_own_unnamed();
 
     // Minimal mode leaves no trace: not the hidden frames, not the file, not the project. It is
     // a one-off edit, and coming back to a CleeCode with everything switched off — because of a
