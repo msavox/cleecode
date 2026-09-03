@@ -331,6 +331,17 @@ kbd {
   margin-right: 0.15em;
 }
 
+/* The words from the tab title, on the page itself: right under the wordmark,
+   in the house face, brand-coloured — the one-line answer to "what is this". */
+.tagline {
+  margin: -0.35rem 0 0.9rem;
+  font-family: var(--house-face);
+  font-size: clamp(1.15rem, 3.4vw, 1.5rem);
+  font-weight: 600;
+  color: var(--m-brand, #3b82f6);
+  letter-spacing: 0.01em;
+}
+
 .identity {
   margin: 0 0 2.4rem;
   color: var(--text-muted);
