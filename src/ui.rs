@@ -170,37 +170,102 @@ const RIBBON_CLOSE_MARK: &str = "\u{203A}";
 const RIBBON_PILL_MAX: u16 = 7;
 const RIBBON_PILL_SHARE: u16 = 3;
 
-/// The block of cells a ribbon's handle fills: a run of rows in the middle of its column.
+/// How many bands the handle is extended with, three above the chevron's block and three below.
 ///
-/// A filled pill and not a run of ticks. Sparse marks down the whole edge were the first
-/// attempt and they read as decoration — something the theme does to the border — rather than as
-/// a thing to press. One solid block, centred, is what every editor with a dockable side panel
-/// puts on that edge, and it is legible at a glance from the far side of the screen.
+/// The colours are not here. They are `Palette::handle_stripes`, one set per theme, and the
+/// reasoning is written on that field: six colours are a signature, and this file drawing the
+/// same signature over nine editors would be the drawing code deciding what each of them looks
+/// like. What this file owns is the *shape* — six bands, evenly, around the block — and every
+/// theme fills it in with its own.
 ///
-/// The *column* stays the click target either way; this is only what is drawn on it. A control
-/// you can hit anywhere along the edge and see in one place is more forgiving than one that is
-/// only where it is painted.
-pub fn drawer_ribbon_pill(rect: Rect) -> Rect {
+/// They are decoration and never a state: the pointer lights the chevron's block and leaves these
+/// exactly as they are, because a thing that changes under the mouse is telling you it is a
+/// control, and only the block is.
+const RIBBON_BANDS: usize = 6;
+
+/// How tall a band gets, tallest first. The list *is* the degradation: the first height whose
+/// whole handle fits the column with a row of edge left over at each end is the one drawn, and a
+/// column too short for even the thin banding gets the chevron's block on its own.
+const RIBBON_STRIPE_HEIGHTS: [u16; 2] = [2, 1];
+
+/// Where a handle's parts sit in the column it was given.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RibbonHandle {
+    /// Everything, bands and block together, centred in the column.
+    pub rect: Rect,
+    /// The chevron's block, in the middle of it. Always drawn; always the click's own target.
+    pub pill: Rect,
+    /// How tall each band is, or `0` on a column with no room for them.
+    pub stripe: u16,
+}
+
+/// The handle a ribbon draws on its column: a filled block with the chevron in it, banded above
+/// and below in the six colours.
+///
+/// A filled block and not a run of ticks. Sparse marks down the whole edge were the first attempt
+/// and they read as decoration — something the theme does to the border — rather than as a thing
+/// to press. One solid grip, centred, is what every editor with a dockable side panel puts on
+/// that edge, and it is legible at a glance from the far side of the screen. The bands came after
+/// and are the part that makes it *this* editor's grip rather than any of theirs.
+///
+/// The *column* stays the click target whatever this returns; this is only what is drawn on it. A
+/// control you can hit anywhere along the edge and see in one place is more forgiving than one
+/// that is only where it is painted — and it is what lets the handle shrink on a short window
+/// without the target shrinking with it.
+pub fn drawer_ribbon_handle(rect: Rect) -> RibbonHandle {
     if rect.height == 0 {
-        return Rect { height: 0, ..rect };
+        let empty = Rect { height: 0, ..rect };
+        return RibbonHandle { rect: empty, pill: empty, stripe: 0 };
     }
     let tall = (rect.height / RIBBON_PILL_SHARE).clamp(1, RIBBON_PILL_MAX);
-    Rect { y: rect.y + (rect.height - tall) / 2, height: tall, ..rect }
+    let bands = RIBBON_BANDS as u16;
+    // A row of clearance at each end, so the handle reads as sitting on the edge rather than as
+    // the edge having been replaced by it.
+    let stripe = RIBBON_STRIPE_HEIGHTS
+        .into_iter()
+        .find(|s| tall + s * bands + 2 <= rect.height)
+        .unwrap_or(0);
+    let total = tall + stripe * bands;
+    let top = rect.y + (rect.height - total) / 2;
+    RibbonHandle {
+        rect: Rect { y: top, height: total, ..rect },
+        pill: Rect { y: top + stripe * (bands / 2), height: tall, ..rect },
+        stripe,
+    }
 }
 
 /// A handle: the way into a drawer that is away, or the way out of one that is here.
 ///
-/// Filled in the accent with the chevron in the colour that colour is meant to be read against,
-/// and under the pointer the whole pill goes to `bright` — the strongest colour the theme has,
+/// The block is filled in the accent with the chevron in the colour that colour is meant to be
+/// read against, and under the pointer it goes to `bright` — the strongest colour the theme has,
 /// which is a step *up* from the accent on a dark theme and a step down into it on a light one,
-/// and either way unmistakably a different thing than it was a moment ago. Both are palette
-/// roles rather than colours, so the nine themes each get their own answer: `on_accent` is by
+/// and either way unmistakably a different thing than it was a moment ago. Both are palette roles
+/// rather than colours, so the nine themes each get their own answer: `on_accent` is by
 /// construction readable on `accent`, and it is equally readable on `bright`, because a theme's
 /// brightest colour and its text-on-a-swatch colour sit at opposite ends of the same range.
+///
+/// The bands around it are the theme's own six — `Palette::handle_stripes`, quotations rather
+/// than roles — and they do not answer the pointer at all. See [`RIBBON_BANDS`].
 pub fn draw_drawer_ribbon(f: &mut Frame, pal: Palette, rect: Rect, engaged: bool, mark: &str) {
-    let pill = drawer_ribbon_pill(rect);
+    let handle = drawer_ribbon_handle(rect);
+    let pill = handle.pill;
     if pill.height == 0 || pill.width == 0 {
         return;
+    }
+    if handle.stripe > 0 {
+        let half = (RIBBON_BANDS / 2) as u16;
+        for (i, colour) in pal.handle_stripes.iter().enumerate() {
+            let i = i as u16;
+            // The order is one run top to bottom with the block in the middle of it, so the
+            // second three start below the block rather than where the first three left off.
+            let y = if i < half {
+                handle.rect.y + i * handle.stripe
+            } else {
+                pill.y + pill.height + (i - half) * handle.stripe
+            };
+            let band = Rect { y, height: handle.stripe, ..rect };
+            f.render_widget(Block::default().style(Style::default().bg(*colour)), band);
+        }
     }
     let style =
         Style::default().bg(if engaged { pal.bright } else { pal.accent }).fg(pal.on_accent);
@@ -6071,29 +6136,85 @@ mod tests {
         assert!(cramped.drawer_ribbon.is_none());
     }
 
-    /// The handle is one contiguous block, inside its column and centred in it, at every height a
-    /// window can be — including the ones where seven rows would be most of the edge.
+    /// The handle fits its column, centred, at every height a window can be — and the banding is
+    /// what gives way first when there is not enough of it. The block is the last thing standing:
+    /// it is the control, and the bands are what is around it.
     #[test]
-    fn the_ribbons_handle_is_a_block_in_the_middle_of_the_column_it_was_given() {
-        for height in [1u16, 2, 3, 5, 12, 40, 200] {
+    fn the_ribbons_handle_is_a_banded_block_in_the_middle_of_the_column_it_was_given() {
+        let bands = RIBBON_BANDS as u16;
+        for height in [1u16, 2, 3, 5, 9, 12, 20, 28, 40, 200] {
             let rect = Rect::new(9, 1, 1, height);
-            let pill = drawer_ribbon_pill(rect);
+            let handle = drawer_ribbon_handle(rect);
+            let pill = handle.pill;
+
             assert!(pill.height >= 1, "a column with a row in it carries a handle");
-            assert!(pill.height <= RIBBON_PILL_MAX, "and never a longer one than a grip");
-            assert!(
-                pill.height <= rect.height,
-                "nor one that outgrows the edge it is a handle on"
-            );
+            assert!(pill.height <= RIBBON_PILL_MAX, "and never a longer grip than a grip");
             assert_eq!(pill.x, rect.x, "on the column, and only on it");
             assert_eq!(pill.width, rect.width);
-            assert!(pill.y >= rect.y && pill.y + pill.height <= rect.y + rect.height);
-            // Centred: the gap above and the gap below are the same, to within the odd row that
-            // cannot be halved.
-            let above = pill.y - rect.y;
-            let below = rect.y + rect.height - (pill.y + pill.height);
+
+            // Everything is inside the column, and the whole of it is what is centred — the
+            // block alone would sit off-centre once the bands are unequal for want of a row.
+            assert!(handle.rect.y >= rect.y, "the handle starts inside its column");
+            assert!(
+                handle.rect.y + handle.rect.height <= rect.y + rect.height,
+                "and ends inside it"
+            );
+            assert_eq!(
+                handle.rect.height,
+                pill.height + handle.stripe * bands,
+                "the handle is the block and its bands and nothing else"
+            );
+            let above = handle.rect.y - rect.y;
+            let below = rect.y + rect.height - (handle.rect.y + handle.rect.height);
             assert!(above.abs_diff(below) <= 1, "the handle sits in the middle of the column");
+
+            // The block sits between the two runs of three, which is what puts it in the middle
+            // of the colours rather than at one end of them.
+            assert_eq!(
+                pill.y,
+                handle.rect.y + handle.stripe * (bands / 2),
+                "three bands above the block"
+            );
+            assert_eq!(
+                pill.y + pill.height + handle.stripe * (bands / 2),
+                handle.rect.y + handle.rect.height,
+                "and three below it"
+            );
+
+            // The degradation, in order: full bands, thin bands, none — and the clearance at
+            // each end is what a banded handle is asked to leave.
+            assert!(
+                RIBBON_STRIPE_HEIGHTS.contains(&handle.stripe) || handle.stripe == 0,
+                "a band is one of the heights offered, or there are no bands"
+            );
+            if handle.stripe > 0 {
+                assert!(
+                    handle.rect.height + 2 <= rect.height,
+                    "a banded handle leaves a row of edge at each end"
+                );
+                let taller = RIBBON_STRIPE_HEIGHTS
+                    .iter()
+                    .find(|s| **s > handle.stripe)
+                    .map(|s| pill.height + s * bands + 2);
+                assert!(
+                    taller.is_none_or(|wanted| wanted > rect.height),
+                    "and it is the tallest banding that would fit"
+                );
+            } else {
+                assert!(
+                    pill.height + RIBBON_STRIPE_HEIGHTS[RIBBON_STRIPE_HEIGHTS.len() - 1] * bands + 2
+                        > rect.height,
+                    "the bands are dropped only when even the thin ones do not fit"
+                );
+            }
         }
-        assert_eq!(drawer_ribbon_pill(Rect::new(0, 0, 1, 0)).height, 0);
+
+        // The two ends of the discipline, said plainly: a tall column gets the whole mark, a
+        // short one keeps the grip and loses the colours.
+        assert_eq!(drawer_ribbon_handle(Rect::new(0, 1, 1, 28)).stripe, 2);
+        assert_eq!(drawer_ribbon_handle(Rect::new(0, 1, 1, 15)).stripe, 1);
+        assert_eq!(drawer_ribbon_handle(Rect::new(0, 1, 1, 9)).stripe, 0);
+        assert_eq!(drawer_ribbon_handle(Rect::new(0, 0, 1, 0)).pill.height, 0);
     }
 
     /// The other handle, on the open drawer's own left border — in both modes, since in both the

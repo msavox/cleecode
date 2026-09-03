@@ -2398,9 +2398,22 @@ riscritti con la strada temp+rename.
   > tempo del congedo, alla release successiva a quella che porta il cassetto.
   >
   > **E la terza (2026-09-03): il cassetto tutto col mouse, in tutte e due le direzioni.** Col
-  > cassetto via, sul bordo destro della finestra c'è una maniglia — una pilla piena larga una
-  > colonna e alta sette righe, accento di sfondo e il chevron `‹` sopra, che sotto il
-  > puntatore passa al colore più forte del tema — e un clic ovunque su quella colonna è
+  > cassetto via, sul bordo destro della finestra c'è una maniglia — un blocco pieno largo una
+  > colonna e alto sette righe, accento di sfondo e il chevron `‹` sopra, che sotto il
+  > puntatore passa al colore più forte del tema, fasciato sopra e sotto da sei bande, tre e
+  > tre. **Le bande sono un campo della palette — `handle_stripes`, dichiarato da tutti e nove
+  > i temi — ed è il collaudo Turbo applicato a una decorazione:** sei colori fissi in `ui.rs`
+  > sarebbero stati lo stesso marchio dipinto sopra nove editor diversi, e sei colori sono una
+  > firma. Quindi ogni tema firma la sua, e sono citazioni e non scelte: il tema di serie (e la
+  > sua versione chiara, approfondita per la carta) porta l'arcobaleno Apple del 1977, Turbo i
+  > sei brillanti che l'EGA numerava da 9 a 14, Solarized la sua sequenza pubblicata di accenti,
+  > i base16 la riga base08–base0D dei loro stessi file di sintassi, Ocean Light e GitHub le
+  > proprie scale portate sulla carta. Dentro un set i colori restano fissi, per la ragione per
+  > cui lo sono le icone del file tree: una citazione che il tema può ridipingere non cita più
+  > niente. E sono decorazione, non stato — il puntatore accende il blocco e le lascia stare,
+  > perché quello che cambia sotto il mouse sta dicendo di essere un controllo, e il controllo
+  > è il blocco. La maniglia degrada in ordine: bande da due righe, bande da una, e su una
+  > colonna troppo corta resta il blocco da solo, che è la parte che si preme. Un clic ovunque su quella colonna è
   > esattamente la strada di evocazione di Ctrl+Shift+A: il selettore se non c'è nessuno, il
   > pane dell'agente se c'è. Aperto, il cassetto porta la maniglia speculare sul proprio
   > bordo sinistro, col `›`, e cliccarla lo chiude. La ✕ sulla barra del titolo resta: due
@@ -2416,8 +2429,8 @@ riscritti con la strada temp+rename.
   > dopo. La pressione non arma niente; il drag comincia al primo movimento, e un rilascio
   > che trova la pressione ancora ferma è il clic che chiude. Solo su quel bordo: far
   > aspettare un movimento a ogni giuntura sarebbe un ritardo su ogni resize della finestra
-  > per pagare un controllo che ce l'ha solo questa. Ventisette controlli in più nel driver
-  > del cassetto, 580 test.
+  > per pagare un controllo che ce l'ha solo questa. Trentaquattro controlli in più nel driver
+  > del cassetto, 582 test.
 
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è

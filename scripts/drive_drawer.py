@@ -117,14 +117,40 @@ def hover(session, col, row):
     session.wait(lambda s: True, 0.4)
 
 
+# The six bands the handle is extended with, top to bottom.
+#
+# Every theme declares its own set — `Palette::handle_stripes` — and these are the *default*
+# theme's, which is what a driver run against a fresh config directory is looking at: the 1977
+# Apple rainbow. The set is pinned by a unit test in theme.rs, so what is checked here is that the
+# thing the palette declares is the thing that reaches the screen, in order and unrepainted.
+APPLE_STRIPES = ["61bb46", "fdb827", "f5821f", "e03a3e", "963d97", "009ddc"]
+
+
+def ribbon_bands(session, col):
+    """The theme's bands in column `col`, as (colour, rows) top to bottom.
+
+    Runs, not rows, so a two-row band and a one-row band read the same and the check is about the
+    order of the colours and their evenness rather than about a height this file has decided on."""
+    runs = []
+    for y in range(1, session.rows - 1):
+        bg = session.cells(y)[col].bg
+        if bg not in APPLE_STRIPES:
+            continue
+        if runs and runs[-1][0] == bg and runs[-1][1][-1] == y - 1:
+            runs[-1][1].append(y)
+        else:
+            runs.append((bg, [y]))
+    return runs
+
+
 def ribbon_handle(session, col, mark):
     """The handle drawn in column `col`: (its rows, the background it is filled with), or None.
 
-    A pill, not a run of ticks — a contiguous block of filled cells with the chevron in the middle
-    of it, which is what makes it read as something to press rather than as something the theme
-    did to the border. Found by taking the chevron's own background and walking out along the
-    column while it holds, so the check is about the filled block itself and not about a colour
-    this file would have to know the name of."""
+    The chevron's own block, which is the control — the bands around it are `ribbon_bands`. A
+    block and not a run of ticks, which is what makes it read as something to press rather than as
+    something the theme did to the border. Found by taking the chevron's own background and
+    walking out along the column while it holds, so the check is about the filled block itself and
+    not about a colour this file would have to know the name of."""
     cells = {y: session.cells(y)[col] for y in range(1, session.rows - 1)}
     middle = next((y for y, cell in cells.items() if cell.data == mark), None)
     if middle is None:
@@ -315,6 +341,24 @@ def check_drawer(binary, report):
                          rows[0] >= 1 and rows[-1] <= session.rows - 2, session,
                          note="never over the menu bar or the status line")
 
+            # The bands: the 1977 rainbow, three above the block and three below, in order.
+            bands = ribbon_bands(session, edge)
+            report.check("the handle is extended with the theme's six colours",
+                         [colour for colour, _ in bands] == APPLE_STRIPES, session,
+                         note="the default theme's declared set, top to bottom: %s"
+                              % ", ".join(c for c, _ in bands))
+            if len(bands) == 6:
+                heights = {len(band) for _, band in bands}
+                report.check("the bands are even, and three sit either side of the block",
+                             len(heights) == 1
+                             and all(band[-1] < rows[0] for _, band in bands[:3])
+                             and all(band[0] > rows[-1] for _, band in bands[3:]), session,
+                             note="%d rows each, rows %s"
+                                  % (heights.pop(), [band[0] for _, band in bands]))
+                report.check("and the whole mark leaves the ends of the column alone",
+                             bands[0][1][0] >= 2 and bands[-1][1][-1] <= session.rows - 3,
+                             session, note="a row of edge above it and below it")
+
             # The pointer resting on it lights it. A control at the edge of the window has to
             # answer when it is about to be pressed, or nobody finds out it was a control.
             hover(session, edge, rows[len(rows) // 2])
@@ -323,6 +367,10 @@ def check_drawer(binary, report):
                          lit is not None and lit[1] != bg, session,
                          note="%r at rest, %r under the pointer"
                               % (bg, lit[1] if lit else None))
+            report.check("and the colours do not answer the pointer",
+                         [colour for colour, _ in ribbon_bands(session, edge)] == APPLE_STRIPES,
+                         session,
+                         note="the bands are the mark, not the state: only the block answers")
             hover(session, 4, session.rows // 2)
             rested = ribbon_handle(session, edge, "‹")
             report.check("and goes back to itself when the pointer leaves",
@@ -356,6 +404,10 @@ def check_drawer(binary, report):
             report.check("the closing handle is a filled pill too",
                          bg != "default" and len(rows) >= 3, session,
                          note="%d contiguous filled cells at rows %s" % (len(rows), rows))
+            report.check("and carries the same six colours",
+                         [colour for colour, _ in ribbon_bands(session, seam)] == APPLE_STRIPES,
+                         session,
+                         note="the two handles are one mark, drawn on whichever edge applies")
 
             # Press, move, release: that is a resize, and it has to stay one. The seam goes right
             # (a narrower drawer) and then back, so what follows runs at the width it started at.

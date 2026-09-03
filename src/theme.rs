@@ -9,6 +9,11 @@
 //! Two colours deliberately stay out. The file-type icons carry the colours of the things they
 //! stand for — Rust's orange, Python's blue — and a theme that repainted them would be renaming
 //! them. The drawing on the About box is likewise its own.
+//!
+//! `handle_stripes` is the case that went the other way, and it is worth knowing why. Six fixed
+//! colours would have been a third exception; six colours *per theme* are a role after all — the
+//! role being "the six this theme would sign its name with" — so they came in here, where a theme
+//! can answer for them.
 
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
@@ -93,6 +98,28 @@ pub struct Palette {
     /// "you are holding this", and a theme that made it blend in would be answering the wrong
     /// question.
     pub resize_border: Color,
+    /// The six bands the agent drawer's handle is extended with, top to bottom: three above the
+    /// chevron's block and three below it.
+    ///
+    /// **A field, and not a constant in `ui.rs`, because a theme asked for one.** That is the
+    /// ROADMAP's Turbo test applied to a decoration rather than to a role: the palette exists so
+    /// that a theme which wants something of its own gets to say so, and "un tema con un campo
+    /// opaco è quel meccanismo con un altro colore dentro" — a mark hard-coded in the drawing
+    /// code would be the same six colours painted over nine different editors. Six colours are a
+    /// *statement*, and every theme in here has one to make.
+    ///
+    /// So each theme declares its own, and they are quotations rather than choices: the default
+    /// pair speaks the 1977 Apple rainbow, Turbo the six bright colours EGA numbered 9 through
+    /// 14, Solarized its published accent run, the base16 themes the accent row their own syntax
+    /// files declare, and the two remaining light themes their scales taken down onto paper. The
+    /// hues are ordered as each scheme orders them, which is why the arc does not run the same
+    /// way in all of them — running them all green-to-blue would have been the drawing code
+    /// choosing again, one level up.
+    ///
+    /// Fixed colours inside each set, for the reason `ui::file_icon`'s are fixed: a quotation a
+    /// theme may repaint is not quoting anything. The set is chosen per theme; the colours in it
+    /// are not negotiated with anybody.
+    pub handle_stripes: [Color; 6],
 }
 
 impl Palette {
@@ -343,6 +370,18 @@ const CLEECODE: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(255, 140, 0),
+    // The 1977 Apple rainbow, exactly. The default theme is the one CleeCode gets to have a
+    // sense of humour in, and this is the joke: a handle you pull a computer's assistant out of,
+    // wearing the six stripes off the machine that put one in a home. Green through blue, the way
+    // that mark runs.
+    handle_stripes: [
+        Color::Rgb(0x61, 0xBB, 0x46),
+        Color::Rgb(0xFD, 0xB8, 0x27),
+        Color::Rgb(0xF5, 0x82, 0x1F),
+        Color::Rgb(0xE0, 0x3A, 0x3E),
+        Color::Rgb(0x96, 0x3D, 0x97),
+        Color::Rgb(0x00, 0x9D, 0xDC),
+    ],
 };
 
 /// The same editor on a white desk. The accents keep their meanings and lose their brightness:
@@ -377,6 +416,17 @@ const CLEECODE_LIGHT: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(200, 96, 0),
+    // The same six on paper, deepened by the rule the rest of this palette follows: the 1977
+    // colours were printed on a beige case, not on white, and left as they are the yellow and the
+    // orange are a haze at this size.
+    handle_stripes: [
+        Color::Rgb(62, 142, 44),
+        Color::Rgb(192, 138, 0),
+        Color::Rgb(194, 94, 10),
+        Color::Rgb(178, 36, 42),
+        Color::Rgb(122, 46, 124),
+        Color::Rgb(0, 117, 168),
+    ],
 };
 
 /// The blue screen, for anyone who learned to program on one.
@@ -414,6 +464,17 @@ const TURBO: Palette = Palette {
     accelerator: Some(Color::Rgb(170, 0, 0)),
     bold_chrome: true,
     resize_border: Color::Rgb(255, 85, 85),
+    // The six bright colours of the sixteen, in the order the hardware numbered them: 9 light
+    // blue through 14 yellow. Dark grey and white are the two the mark cannot have, being the
+    // chrome. There are sixteen colours and no others, which is the theme.
+    handle_stripes: [
+        Color::Rgb(85, 85, 255),
+        Color::Rgb(85, 255, 85),
+        Color::Rgb(85, 255, 255),
+        Color::Rgb(255, 85, 85),
+        Color::Rgb(255, 85, 255),
+        Color::Rgb(255, 255, 85),
+    ],
 };
 
 /// Ethan Schoonover's Solarized, dark. The surfaces and the accents are the published palette —
@@ -447,6 +508,17 @@ const SOLARIZED_DARK: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(203, 75, 22),
+    // Solarized's accent run as Ethan Schoonover publishes it — yellow, orange, red, magenta,
+    // violet, blue — which is already six colours in a stated order, so there is nothing here to
+    // choose. Every one of them is a colour this palette uses somewhere else.
+    handle_stripes: [
+        Color::Rgb(181, 137, 0),
+        Color::Rgb(203, 75, 22),
+        Color::Rgb(220, 50, 47),
+        Color::Rgb(211, 54, 130),
+        Color::Rgb(108, 113, 196),
+        Color::Rgb(38, 139, 210),
+    ],
 };
 
 /// The same palette on paper: Solarized is one scheme with two backgrounds, and the accents do
@@ -478,6 +550,17 @@ const SOLARIZED_LIGHT: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(203, 75, 22),
+    // Identical to the dark theme's, and that is the point of Solarized: one scheme, two
+    // grounds, and the accents do not move between them. Deepening these for paper would be
+    // correcting the scheme rather than quoting it.
+    handle_stripes: [
+        Color::Rgb(181, 137, 0),
+        Color::Rgb(203, 75, 22),
+        Color::Rgb(220, 50, 47),
+        Color::Rgb(211, 54, 130),
+        Color::Rgb(108, 113, 196),
+        Color::Rgb(38, 139, 210),
+    ],
 };
 
 /// base16 Eighties, by Chris Kempson. The accents are the ones its own syntax theme colours
@@ -511,6 +594,16 @@ const EIGHTIES: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(249, 145, 87),
+    // base16's accent row, base08 through base0D, in the order base16 numbers it: red, orange,
+    // yellow, green, cyan, blue. The scheme ships six accents and this is them.
+    handle_stripes: [
+        Color::Rgb(242, 119, 122),
+        Color::Rgb(249, 145, 87),
+        Color::Rgb(255, 204, 102),
+        Color::Rgb(153, 204, 153),
+        Color::Rgb(102, 204, 204),
+        Color::Rgb(102, 153, 204),
+    ],
 };
 
 /// base16 Mocha, the warm one: browns where the others have greys, which is the whole of its
@@ -544,6 +637,16 @@ const MOCHA: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(210, 139, 113),
+    // base08 through base0D again, this time Mocha's — warm and muted the whole way across,
+    // which is why its rainbow reads as one colour family lit from different sides.
+    handle_stripes: [
+        Color::Rgb(203, 96, 119),
+        Color::Rgb(210, 139, 113),
+        Color::Rgb(244, 188, 135),
+        Color::Rgb(190, 181, 91),
+        Color::Rgb(123, 189, 164),
+        Color::Rgb(138, 179, 181),
+    ],
 };
 
 /// base16 Ocean on paper. The scheme's accents were chosen against a near-black and are washed
@@ -576,6 +679,17 @@ const OCEAN_LIGHT: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(180, 96, 40),
+    // base16 Ocean's accent row in the same order, taken down onto paper by the rule the rest of
+    // this palette is: the scheme's own accents were chosen against a near-black, and six pale
+    // washes side by side would be one pale wash.
+    handle_stripes: [
+        Color::Rgb(165, 60, 70),
+        Color::Rgb(176, 92, 56),
+        Color::Rgb(150, 118, 30),
+        Color::Rgb(106, 140, 80),
+        Color::Rgb(86, 122, 121),
+        Color::Rgb(76, 105, 140),
+    ],
 };
 
 /// White paper, the lightest theme in the set. The accents are the ones its syntax theme uses for
@@ -610,6 +724,17 @@ const GITHUB: Palette = Palette {
     accelerator: None,
     bold_chrome: false,
     resize_border: Color::Rgb(203, 36, 49),
+    // Primer's own scale in Primer's own order: red, orange, green, teal, blue, purple. Every
+    // one is a colour this palette already uses for something, which is what keeps the mark part
+    // of the theme rather than a sticker on it.
+    handle_stripes: [
+        Color::Rgb(181, 42, 29),
+        Color::Rgb(176, 112, 0),
+        Color::Rgb(34, 134, 58),
+        Color::Rgb(0, 134, 179),
+        Color::Rgb(0, 92, 197),
+        Color::Rgb(121, 93, 163),
+    ],
 };
 
 #[cfg(test)]
@@ -644,6 +769,59 @@ mod tests {
                 theme.name()
             );
         }
+    }
+
+    /// Every theme signs the drawer's handle with six colours of its own, and they have to be
+    /// six colours rather than a gradient with a rounding error in it.
+    ///
+    /// Two bands the same is the failure this is for: they are drawn touching, so a pair that
+    /// matches is one band of twice the height and the mark quietly has five stripes. Adjacent is
+    /// what has to be checked — a set may reuse a hue at the far end on purpose — and the
+    /// separation is a floor rather than an equality, because two colours a couple of points
+    /// apart are the same colour to anyone looking at a two-row band from across a desk.
+    #[test]
+    fn every_theme_signs_the_handle_with_six_colours_of_its_own() {
+        // The channel distance below which two RGB colours read as one band. Generous on purpose:
+        // this is a decoration a metre away, not a diff.
+        const APART: i32 = 24;
+        let channels = |c: Color| match c {
+            Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
+            other => panic!("a band has to be a colour, not a name the terminal decides: {other:?}"),
+        };
+        for theme in Theme::ALL {
+            let stripes = theme.palette().handle_stripes;
+            for (i, pair) in stripes.windows(2).enumerate() {
+                let (a, b) = (channels(pair[0]), channels(pair[1]));
+                let apart = (a.0 - b.0).abs() + (a.1 - b.1).abs() + (a.2 - b.2).abs();
+                assert!(
+                    apart >= APART,
+                    "{}: bands {} and {} are the same band ({:?} vs {:?})",
+                    theme.name(),
+                    i,
+                    i + 1,
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
+
+    /// The default theme's six are the 1977 Apple rainbow, exactly. Written down because it is a
+    /// quotation: a colour drifting by a point here is not a tweak, it is a misquote — and it is
+    /// the set the drawer's driver reads off the screen.
+    #[test]
+    fn the_default_theme_wears_the_rainbow() {
+        assert_eq!(
+            Theme::CleeCode.palette().handle_stripes,
+            [
+                Color::Rgb(0x61, 0xBB, 0x46),
+                Color::Rgb(0xFD, 0xB8, 0x27),
+                Color::Rgb(0xF5, 0x82, 0x1F),
+                Color::Rgb(0xE0, 0x3A, 0x3E),
+                Color::Rgb(0x96, 0x3D, 0x97),
+                Color::Rgb(0x00, 0x9D, 0xDC),
+            ]
+        );
     }
 
     /// Every theme names a syntect theme that syntect actually has. A typo here would fall back
