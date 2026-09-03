@@ -7200,11 +7200,28 @@ impl App {
                 let idx = self.adopt_editor(editor);
                 self.place_in_pane(self.editor_pane_focus, idx);
                 self.focus = Focus::Editor;
-                self.status_message = if self.editor().is_read_only() {
-                    i18n::msg_opened_read_only(lang, &self.editor().title(lang))
-                } else {
-                    i18n::msg_opened(lang, &self.editor().title(lang))
+                // Said once, on the way in, in the same slot as the read-only notice and for
+                // the same reason: a tab that quietly does less than the others has to say so
+                // at the moment it opens, or the user meets the missing colours as a defect.
+                // Read-only wins the slot where both apply — a file you cannot save is the
+                // more surprising of the two — and the persistent chip beside `row:col` keeps
+                // the large-file fact on screen after this sentence is gone.
+                let said = {
+                    let editor = self.editor();
+                    if editor.is_read_only() {
+                        i18n::msg_opened_read_only(lang, &editor.title(lang))
+                    } else if editor.is_large() {
+                        i18n::msg_opened_large(
+                            lang,
+                            &editor.title(lang),
+                            editor.megabytes(),
+                            editor.undo_depth(),
+                        )
+                    } else {
+                        i18n::msg_opened(lang, &editor.title(lang))
+                    }
                 };
+                self.status_message = said;
             }
             Err(e) => self.status_message = i18n::msg_open_error(lang, &e.to_string()),
         }
@@ -12021,7 +12038,9 @@ impl App {
             return;
         };
         let mut index = crate::complete::Index::new();
-        index.add_buffer(&ed.rope, Some(ed.cursor_line));
+        if offers_buffer_words(ed) {
+            index.add_buffer(&ed.rope, Some(ed.cursor_line));
+        }
         index.add_keywords(ed.path.as_deref());
         // What the interpreter is holding right now, for a file in a language it speaks. This is
         // the third source the seam was built for in 0.7, and it offers what no buffer can: a
@@ -12031,9 +12050,13 @@ impl App {
             index.add_session(&self.session_names());
         }
         // The other tabs count too: a name you are about to write is more often in the file you
-        // were just in than nowhere at all. A preview holds no text, so it holds no words.
+        // were just in than nowhere at all.
+        //
+        // This loop is where the large-file rule earns the most: it runs over *every* open tab
+        // on every popup, so one 50 MB file left open in the background would tax completion in
+        // every other file in the session — a cost paid where nobody would think to look.
         for (i, other) in self.editors.iter().enumerate() {
-            if i != idx && other.preview.is_none() {
+            if i != idx && offers_buffer_words(other) {
                 index.add_buffer(&other.rope, None);
             }
         }
@@ -13187,6 +13210,23 @@ fn redrawn(
     true
 }
 
+/// Whether a buffer's own words belong in the completion index.
+///
+/// A preview holds no text, so it holds no words. A buffer in the declared large-file mode
+/// holds far too much: `Index::add_buffer` bounds its scan to a window around the cursor, but
+/// the window is four thousand lines *of a rope with millions in it*, walked again on every
+/// keystroke past the second letter — over lines nobody has read and words nobody wrote. The
+/// popup still opens on the other sources (the language's keywords, what the interpreter is
+/// holding), so completion does not vanish in a large file: it stops offering the one source
+/// that costs the file's size to produce.
+///
+/// Split out because it is asked of the active buffer and of every other open tab, and the two
+/// answers must be the same rule — and because it is testable, which `open_completion` around
+/// it is not without a running app.
+fn offers_buffer_words(ed: &Editor) -> bool {
+    ed.preview.is_none() && !ed.is_large()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13196,6 +13236,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The completion index's rule about which open buffers contribute their words: an ordinary
+    /// file does, a large one does not — neither as the buffer being typed in nor as one of the
+    /// other tabs, which is the expensive half.
+    #[test]
+    fn a_large_buffer_offers_no_words_to_the_completion_index() {
+        let dir = setup_dir("large_completion");
+        let small = dir.join("small.txt");
+        std::fs::write(&small, "alpha beta\n").unwrap();
+        let ed = Editor::open(small).unwrap();
+        assert!(offers_buffer_words(&ed));
+
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "gamma delta\n".repeat(400)).unwrap();
+        let ed = Editor::open_with_limit(big, 1024).unwrap();
+        assert!(!offers_buffer_words(&ed), "a large buffer is skipped, active or not");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// git is asked in the form that survives a real project: names with spaces, names in other

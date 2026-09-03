@@ -44,6 +44,11 @@ pub enum Key {
     ItemOpenMenuBar,
     ItemColumnSelection,
     ItemConvertLineEndings,
+    /// The word the status bar puts beside the encoding chip on a buffer in the declared
+    /// large-file mode. One word, because it shares a slot with the encoding and the line
+    /// ending and is the last of the three to fit — its job is to keep the fact on screen after
+    /// the sentence that explained it has scrolled away, not to explain it again.
+    StatusLargeFile,
     // The Format menu, and the View entry that hides the bar carrying the same eleven actions.
     ItemMdBold,
     ItemMdItalic,
@@ -290,6 +295,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemColumnSelection) => "Selezione verticale",
         (Lang::En, ItemConvertLineEndings) => "Convert line endings",
         (Lang::It, ItemConvertLineEndings) => "Converti fine riga",
+        (Lang::En, StatusLargeFile) => "large",
+        (Lang::It, StatusLargeFile) => "grande",
 
         (Lang::En, MenuFormat) => "Format",
         (Lang::It, MenuFormat) => "Formato",
@@ -2252,6 +2259,27 @@ pub fn msg_opened_read_only(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("Opened {name} (read-only: binary or non-UTF-8)"),
         Lang::It => format!("Aperto {name} (sola lettura: binario o non-UTF-8)"),
+    }
+}
+
+/// Said once, on opening a file over the large-file line: the size that decided it, then the
+/// three things that are not there. Said in that order because the size is the only part the
+/// user can check, and it is what makes the rest a rule rather than a failure.
+///
+/// The undo depth is a number and not "shallow": a user about to make a large edit needs to
+/// know how far back they can walk, and "shallow" is exactly the word that makes them find out
+/// the hard way. Not modal — an editor that stops to be agreed with about a file it *is*
+/// opening has interrupted for nothing.
+pub fn msg_opened_large(lang: Lang, name: &str, megabytes: u64, undo_depth: usize) -> String {
+    match lang {
+        Lang::En => format!(
+            "Opened {name} — {megabytes} MB: no highlighting, no word completion, \
+             undo keeps {undo_depth} steps"
+        ),
+        Lang::It => format!(
+            "Aperto {name} — {megabytes} MB: niente colori, niente completamento dalle parole, \
+             undo a {undo_depth} passi"
+        ),
     }
 }
 

@@ -16,6 +16,34 @@ pub enum LineEnding {
     Crlf,
 }
 
+/// The size above which a file opens in the declared large-file mode: no highlighting, no
+/// completion index, a shallow undo history, and a word on the status bar saying so.
+///
+/// A constant and not a setting, on purpose. A knob is a promise to behave sensibly at every
+/// value somebody turns it to, and this is not a preference — it is the one line where the
+/// editor stops offering what it cannot afford and says which things it dropped. Fifty
+/// megabytes is where the costs stop being theoretical: the per-buffer bills the mode avoids
+/// are each documented at the site that avoids them.
+///
+/// Nothing here is a promise that a 50 MB file *edits* well — a checkpoint is still a full copy
+/// of the text (see `Snapshot`), so typing costs one of those. It is a promise that opening one
+/// does not quietly turn into gigabytes of highlight spans and undo snapshots while the editor
+/// looks like it has hung.
+pub const LARGE_FILE: u64 = 50 * 1024 * 1024;
+
+/// How many undo steps a normal buffer keeps, and how many a large one does.
+///
+/// A `Snapshot` is the whole text, so the history's cost is depth × file size and nothing else.
+/// Five hundred steps of a normal source file is a few megabytes and worth every byte; five
+/// hundred steps of a 50 MB file is twenty-five gigabytes, which is not a deep history but an
+/// out-of-memory kill with the user's unsaved work inside it. Twenty steps of the same file is
+/// a gigabyte at worst and, far more usually, the handful of steps anyone actually walks back.
+///
+/// Reducing the depth rather than switching undo off: a large file is exactly where an
+/// accidental keystroke is hardest to find again by eye.
+const MAX_UNDO: usize = 500;
+const MAX_UNDO_LARGE: usize = 20;
+
 /// A point-in-time snapshot of the buffer used for undo/redo. Stores the full text plus
 /// cursor position; consecutive same-kind edits coalesce so one keystroke ≠ one undo step.
 #[derive(Clone)]
@@ -107,6 +135,21 @@ pub struct Editor {
     /// Set when the file couldn't be loaded as text (binary/undecodable, or a read error).
     /// Such a buffer is display-only and refuses to save, so we never truncate the original.
     pub read_only: bool,
+    /// How many bytes this buffer's file was when it was last read, and the size it is judged
+    /// against. Together they answer `is_large` — the declared large-file mode.
+    ///
+    /// Two numbers rather than a `bool`, so the mode and the size quoted in the message that
+    /// announces it cannot drift apart: there is one measurement and everything else asks it.
+    /// The limit is carried per buffer rather than read from `LARGE_FILE` at each site so a
+    /// reload re-decides by the same rule the open used — the tests open with a small limit,
+    /// and a buffer must not change mode because of who opened it.
+    ///
+    /// Both are refreshed by an external reload, since a file can grow past the line, or be
+    /// truncated back under it, while it sits in a tab. A buffer that grows past it by *typing*
+    /// stays in whatever mode it opened in: this is about the file on disk, and re-deciding
+    /// mid-edit would drop the colours out from under someone in the middle of a paste.
+    disk_len: u64,
+    large_limit: u64,
     /// Set instead of a text buffer when the file is a picture: the tab draws it rather than
     /// pretending to hold lines. Every text operation already refuses on `read_only`, which
     /// such a tab always is, so this only has to change what gets drawn.
@@ -161,6 +204,8 @@ impl Editor {
             line_ending: LineEnding::Lf,
             final_newline: false,
             read_only: false,
+            disk_len: 0,
+            large_limit: LARGE_FILE,
             preview: None,
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
@@ -206,9 +251,23 @@ impl Editor {
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
-        let disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        Editor::open_with_limit(path, LARGE_FILE)
+    }
+
+    /// `open` with the large-file line passed in, which is the only reason this seam exists:
+    /// a test can reach the mode with a file it can afford to write, rather than fifty
+    /// megabytes of fixture per assertion. Nothing in the app calls it with anything but
+    /// `LARGE_FILE` — the threshold is a declaration, not a setting.
+    pub fn open_with_limit(path: PathBuf, limit: u64) -> Result<Self> {
+        // One `metadata` call answers both questions: when the file was last written, and how
+        // big it is. The size decides the mode below; asking for it separately would be a
+        // second stat of the same file for one `u64`.
+        let stat = std::fs::metadata(&path).ok();
+        let disk_mtime = stat.as_ref().and_then(|m| m.modified().ok());
         let mut editor = Editor::empty();
         editor.disk_mtime = disk_mtime;
+        editor.large_limit = limit;
+        editor.disk_len = stat.as_ref().map_or(0, |m| m.len());
 
         // Read as bytes so we can tell "empty file" apart from "unreadable/binary file":
         // the old read_to_string(...).unwrap_or_default() turned both a read error and a
@@ -281,6 +340,21 @@ impl Editor {
         self.read_only
     }
 
+    /// True in the declared large-file mode. Asked once per frame by the renderer and once per
+    /// open tab by the completion popup, so it is a comparison of two numbers already in the
+    /// struct and nothing else — a mode that cost anything to ask about would be a poor way to
+    /// spend a large file's budget.
+    pub fn is_large(&self) -> bool {
+        self.disk_len > self.large_limit
+    }
+
+    /// The file's size in whole megabytes, for the sentence that announces the mode. Rounded
+    /// down, because the number is there to be recognised — "50 MB" against a file the user
+    /// knows is fifty-something — and a decimal place would only invite reading it as exact.
+    pub fn megabytes(&self) -> u64 {
+        self.disk_len / (1024 * 1024)
+    }
+
     /// Called periodically from the main loop. If the file changed on disk and we have
     /// no unsaved local edits, reload it silently. Returns a status message if something happened.
     pub fn check_external_changes(&mut self, lang: Lang) -> Option<String> {
@@ -304,6 +378,12 @@ impl Editor {
             self.disk_mtime = Some(mtime);
             return None;
         };
+        // Re-measured on every reload, both ways. A log or a generated file can cross the
+        // large-file line while it sits open in a tab, and a buffer that kept the mode it was
+        // born with would either colour a file it can no longer afford or stay grey after the
+        // file was truncated back under it. Taken from the text that actually arrived rather
+        // than from a second `metadata` call: it is the same number, already in hand.
+        self.disk_len = content.len() as u64;
         self.line_ending = if content.contains("\r\n") { LineEnding::Crlf } else { LineEnding::Lf };
         self.final_newline = content.ends_with('\n');
         let arriving = content.replace("\r\n", "\n");
@@ -516,6 +596,12 @@ impl Editor {
         Snapshot { text: self.rope.to_string(), cursor_line: self.cursor_line, cursor_col: self.cursor_col }
     }
 
+    /// How many undo steps this buffer keeps: shallower in the declared large-file mode, where
+    /// each step is a copy of a very large file.
+    pub fn undo_depth(&self) -> usize {
+        if self.is_large() { MAX_UNDO_LARGE } else { MAX_UNDO }
+    }
+
     /// Records the pre-edit state for undo. Must be called BEFORE mutating the rope.
     /// Consecutive same-kind character edits coalesce into a single undo step (typing a
     /// word undoes as one), while `Other` edits always start a new step. No-op inside a
@@ -530,9 +616,10 @@ impl Editor {
         self.redo_stack.clear();
         let coalesce = kind != EditKind::Other && kind == self.last_edit && !self.undo_stack.is_empty();
         if !coalesce {
-            const MAX_UNDO: usize = 500;
+            // The history's whole cost is depth × file size, because a snapshot is the text.
+            // See `MAX_UNDO`/`MAX_UNDO_LARGE` for the arithmetic that picks the two numbers.
             self.undo_stack.push_back(self.snapshot());
-            if self.undo_stack.len() > MAX_UNDO {
+            if self.undo_stack.len() > self.undo_depth() {
                 self.undo_stack.pop_front();
             }
         }
@@ -3359,6 +3446,71 @@ mod tests {
 
         ed.insert_char('x');
         assert!(ed.arrived_lines().is_empty(), "typing leaves the marks describing a file that is gone");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The declared large-file mode, reached through the limit seam rather than through fifty
+    /// megabytes of fixture: the flag, the shallower undo history, and the size the status
+    /// message quotes.
+    ///
+    /// The undo half is the one that matters most, and it is checked by counting: a snapshot is
+    /// the whole text, so a history that kept its normal depth on a very large file is the bug
+    /// this mode exists to prevent, and "the depth is smaller" is not the same claim as "the
+    /// stack actually stops there".
+    #[test]
+    fn a_large_file_opens_with_no_colours_and_a_short_history() {
+        let dir = std::env::temp_dir().join(format!("clee_large_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "x".repeat(3 * 1024 * 1024)).unwrap();
+        let mut ed = Editor::open_with_limit(big.clone(), 1024 * 1024).unwrap();
+        assert!(ed.is_large());
+        assert_eq!(ed.megabytes(), 3);
+        assert_eq!(ed.undo_depth(), MAX_UNDO_LARGE);
+
+        // Each step is its own, because `Other` never coalesces: MAX_UNDO_LARGE + 5 edits, and
+        // the oldest five must have been dropped off the front rather than kept.
+        for _ in 0..MAX_UNDO_LARGE + 5 {
+            ed.checkpoint(EditKind::Other);
+        }
+        assert_eq!(ed.undo_stack.len(), MAX_UNDO_LARGE);
+
+        // The same file under the real limit is an ordinary buffer: the mode is the size, not
+        // the file, and nothing about it is sticky.
+        let small = dir.join("small.txt");
+        std::fs::write(&small, "one\ntwo\n").unwrap();
+        let ed = Editor::open(small).unwrap();
+        assert!(!ed.is_large());
+        assert_eq!(ed.undo_depth(), MAX_UNDO);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file can cross the line while it is open — a log being written to, a build artefact
+    /// regenerated — so the reload re-measures instead of trusting what the open decided. Both
+    /// directions, because a file truncated back under the line should get its colours back.
+    #[test]
+    fn a_reload_re_decides_the_large_file_mode() {
+        let dir = std::env::temp_dir().join(format!("clee_large_reload_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("growing.log");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut ed = Editor::open_with_limit(path.clone(), 1024).unwrap();
+        assert!(!ed.is_large());
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, "line\n".repeat(1000)).unwrap();
+        assert!(ed.check_external_changes(Lang::En).is_some());
+        assert!(ed.is_large(), "a file that grew past the line is in the mode from now on");
+        assert_eq!(ed.undo_depth(), MAX_UNDO_LARGE);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, "truncated\n").unwrap();
+        assert!(ed.check_external_changes(Lang::En).is_some());
+        assert!(!ed.is_large(), "and out of it again when the file is back under the line");
+        assert_eq!(ed.undo_depth(), MAX_UNDO);
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
