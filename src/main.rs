@@ -4,6 +4,7 @@ mod app_install;
 mod clipboard;
 mod complete;
 mod dnd;
+mod drawer;
 mod editor;
 mod file_tree;
 mod find;
@@ -27,6 +28,7 @@ mod session;
 mod settings;
 mod terminal_panel;
 mod theme;
+mod tools;
 mod ui;
 mod workspace;
 mod wsnap;
@@ -582,7 +584,14 @@ fn run(
                 // the editor is still worth having without it), and only then the session.
                 if failed_draws >= 3 {
                     failed_draws = 0;
-                    if app.terminals.len() > 1 {
+                    // The drawer goes first, before any of the editor's own panes. It is the
+                    // cheapest thing on screen to lose: everything else here is work in
+                    // progress, while the drawer is summonable again with one keystroke — and
+                    // it is a whole extra frame with a pty behind it, so it is also a plausible
+                    // culprit.
+                    if app.drawer.is_some() {
+                        app.drawer = None;
+                    } else if app.terminals.len() > 1 {
                         let idx = app.active_terminal.min(app.terminals.len() - 1);
                         app.close_terminal(idx);
                     } else if app.settings.show_terminal {

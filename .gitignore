@@ -27,3 +27,4 @@ assets/python/pyenv/
 # to find out why a tick failed silently. One of these was committed by accident once.
 dbg*.log
 .claude/
+.wrangler/

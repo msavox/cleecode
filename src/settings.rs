@@ -13,6 +13,14 @@ pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
 /// Left pane's share of the editor region when split. Kept away from the extremes so neither
 /// pane can be squeezed to nothing.
 pub const SPLIT_PCT_RANGE: (u16, u16) = (20, 80);
+/// The agent drawer's share of the window. The floor is where an agent's own output starts
+/// wrapping into nonsense; the ceiling leaves the editor more than half the screen, which is
+/// the arrangement the drawer exists to sit beside rather than to replace.
+pub const DRAWER_PCT_RANGE: (u16, u16) = (20, 60);
+/// Wide enough for an agent to be readable beside the code it is reading, narrow enough that the
+/// editor is still the thing you are looking at. Shared with the workspace file, whose `[drawer]`
+/// block defaults to the same number when it says nothing.
+pub const DRAWER_PCT_DEFAULT: u16 = 40;
 
 /// Missing keys fall back to the default for that key alone, rather than throwing the file away.
 ///
@@ -45,6 +53,17 @@ pub struct Settings {
     // before split resizing existed still load, landing on the old fixed 50/50.
     #[serde(default = "default_split_pct")]
     pub split_pct: u16,
+    /// The agent drawer's percentage of the window. A percentage rather than a column count —
+    /// the name would have been `drawer_width` — because it sits beside `terminal_pct` in every
+    /// piece of arithmetic there is: the same seam drag, the same clamp, the same carve out of
+    /// the main area. A fixed column count that is right at 200 columns crushes the editor at 80.
+    #[serde(default = "default_drawer_pct")]
+    pub drawer_pct: u16,
+    /// Which agent the drawer's launcher opens highlighted — the last one started in it. Empty
+    /// until one has been, and read through `Agent::of_program`, so a hand-edited name that no
+    /// longer means anything costs the highlight and nothing else.
+    #[serde(default)]
+    pub drawer_agent: String,
     // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
     // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
@@ -279,6 +298,10 @@ fn default_split_pct() -> u16 {
     50
 }
 
+fn default_drawer_pct() -> u16 {
+    DRAWER_PCT_DEFAULT
+}
+
 fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
@@ -364,6 +387,8 @@ impl Default for Settings {
             terminal_pct: 35,
             terminal_on_right: false,
             split_pct: default_split_pct(),
+            drawer_pct: default_drawer_pct(),
+            drawer_agent: String::new(),
             show_menubar: true,
             show_md_toolbar: true,
             run_commands: default_run_commands(),
@@ -569,6 +594,7 @@ impl Settings {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
         self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
         self.split_pct = self.split_pct.clamp(SPLIT_PCT_RANGE.0, SPLIT_PCT_RANGE.1);
+        self.drawer_pct = self.drawer_pct.clamp(DRAWER_PCT_RANGE.0, DRAWER_PCT_RANGE.1);
     }
 }
 

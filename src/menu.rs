@@ -4,6 +4,7 @@ use crate::i18n::{self, Key, Lang};
 pub enum MenuAction {
     ToggleSidebar,
     ToggleTerminal,
+    ToggleDrawer,
     NewTerminalTab,
     CloseTerminalTab,
     RenameTerminal,
@@ -121,6 +122,7 @@ impl MenuAction {
     pub const ALL: &'static [MenuAction] = &[
         MenuAction::ToggleSidebar,
         MenuAction::ToggleTerminal,
+        MenuAction::ToggleDrawer,
         MenuAction::NewTerminalTab,
         MenuAction::CloseTerminalTab,
         MenuAction::RenameTerminal,
@@ -274,6 +276,10 @@ pub struct MenuStates {
     /// outside a repository it is on and does nothing, and the status line is where that is
     /// said — a menu that read "off" there would be answering a different question.
     pub follow_agent_edits: bool,
+    /// Whether the agent drawer has a column right now. Not whether an agent is running in it:
+    /// the row switches the *column*, and a drawer whose agent has exited is still open, showing
+    /// the list of four.
+    pub drawer_open: bool,
 }
 
 /// What `action` says about its state, in the column the shortcuts live in. `None` for the
@@ -289,6 +295,9 @@ pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<
         }
         MenuAction::ToggleFollowAgentEdits => {
             Some(i18n::t(lang, if states.follow_agent_edits { Key::On } else { Key::Off }))
+        }
+        MenuAction::ToggleDrawer => {
+            Some(i18n::t(lang, if states.drawer_open { Key::On } else { Key::Off }))
         }
         _ => None,
     }
@@ -308,10 +317,13 @@ pub fn item_value_width(lang: Lang, action: MenuAction) -> usize {
         .into_iter()
         .flat_map(|plots_in_tabs| {
             [true, false].into_iter().flat_map(move |md_toolbar| {
-                [true, false].into_iter().map(move |follow_agent_edits| MenuStates {
-                    plots_in_tabs,
-                    md_toolbar,
-                    follow_agent_edits,
+                [true, false].into_iter().flat_map(move |follow_agent_edits| {
+                    [true, false].into_iter().map(move |drawer_open| MenuStates {
+                        plots_in_tabs,
+                        md_toolbar,
+                        follow_agent_edits,
+                        drawer_open,
+                    })
                 })
             })
         })
@@ -464,6 +476,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
                 item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+J")),
+                // No chord of its own, and not for want of looking: every Ctrl+Shift letter is
+                // spoken for. `Ctrl+Shift+A` summons the drawer when there is no agent anywhere
+                // to talk to, which covers opening it; putting it away is a decision, and a
+                // decision is what a menu row is for.
+                item(Key::ItemToggleDrawer, MenuAction::ToggleDrawer, None),
                 item(Key::ItemToggleMenuBar, MenuAction::ToggleMenuBar, Some("Ctrl+B")),
                 // Reachable from the palette on purpose: Ctrl+Shift+B is the only key that
                 // opens the menus, and a terminal without disambiguated key reporting sends
@@ -813,9 +830,9 @@ mod tests {
     fn the_plot_item_says_which_of_the_two_it_is() {
         for lang in [Lang::En, Lang::It] {
             let tabs =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false });
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false, drawer_open: false });
             let windows =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true, follow_agent_edits: false });
+                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true, follow_agent_edits: false, drawer_open: false });
             assert!(tabs.is_some() && windows.is_some(), "{lang:?}");
             assert_ne!(tabs, windows, "{lang:?}: both states read the same");
             // Wide enough for either, so the dropdown does not resize under the cursor at the
@@ -834,7 +851,7 @@ mod tests {
             for item in def.items {
                 assert!(
                     item.shortcut.is_none()
-                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false })
+                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false, drawer_open: false })
                             .is_none(),
                     "\"{}\" has both a shortcut and a state to read out",
                     i18n::t(Lang::En, item.label_key)

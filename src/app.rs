@@ -28,6 +28,10 @@ pub enum Focus {
     FileTree,
     Editor,
     Terminal,
+    /// The agent drawer. A frame of its own rather than a fourth terminal window, because the
+    /// keyboard goes somewhere different depending on what is in it: to the pty when an agent is
+    /// running, to the launcher's list when one is not.
+    Drawer,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -489,6 +493,15 @@ pub struct App {
     /// Index of the focused window within `terminals`.
     pub active_terminal: usize,
     pub focus: Focus,
+    /// The agent drawer, once it has been summoned. `None` until then, and never again after —
+    /// closing it hides its column and leaves the struct, so the pty inside goes on running and
+    /// reopening resumes the conversation instead of starting one.
+    ///
+    /// Outside `terminals` on purpose; the reason is written on [`crate::drawer::Drawer`], and
+    /// it is the whole design. Everything in this file that walks `terminals` has to name the
+    /// drawer separately or leave it alone deliberately — the polling loops do the first, the
+    /// workspace rebuild and every "which shell can I type into" scan do the second.
+    pub drawer: Option<crate::drawer::Drawer>,
     pub should_quit: bool,
     /// Set when something that can change what is on screen has happened, and cleared by the
     /// frame loop when it draws. A frame is a full layout plus a repaint of every pane, and an
@@ -2038,6 +2051,12 @@ pub enum DragTarget {
     /// button number it was told about, so the drag and the release it eventually gets are
     /// reported as the same button in the same pane the press happened in.
     TerminalMouse(usize, u16),
+    /// The seam between the editor side of the window and the agent drawer.
+    DrawerWidth,
+    /// A text selection being dragged inside the drawer's pane. No index: there is only one.
+    DrawerSelection,
+    /// A button the drawer's agent was told went down, and has to be told came back up.
+    DrawerMouse(u16),
     /// Dragging a scrollbar's thumb along its track.
     Scrollbar(ScrollbarId),
 }
@@ -2051,6 +2070,10 @@ pub enum ScrollbarId {
     /// The vertical bar of terminal window `i`. Terminals have no horizontal one: the pty is
     /// sized to its pane, so output wraps rather than running off the side.
     Terminal(usize),
+    /// The agent drawer's bar. Not `Terminal(n)` for any `n`: the drawer is not one of the
+    /// panel's windows, and a bar that shared an id with one of them would be dragged by the
+    /// pointer hovering over the other.
+    Drawer,
 }
 
 /// Which part of a scrollbar a point falls on.
@@ -2099,6 +2122,8 @@ pub enum ResizeCmd {
     /// The seam between terminal windows `seam` and `seam + 1`: `delta` is added to the first
     /// window's weight and taken from the second, so only the pair resizes.
     TerminalWeight { seam: usize, delta: i16 },
+    /// Delta in percent for `drawer_pct`.
+    Drawer(i16),
 }
 
 /// The layout facts a resize nudge depends on, gathered so the resolver stays a pure, testable
@@ -2114,6 +2139,9 @@ pub struct ResizeLayout {
     /// movable too, and until now only with the mouse.
     pub terminal_index: usize,
     pub terminal_count: usize,
+    /// Whether the agent drawer has a column right now. It is the rightmost one when it does,
+    /// which is the third arrangement the two resolvers below have to know about.
+    pub drawer_open: bool,
 }
 
 /// Where a directional move lands. A "frame" for this purpose is finer-grained than `Focus`:
@@ -2124,26 +2152,110 @@ pub enum FocusTarget {
     Tree,
     Editor(EditorPane),
     Terminal(usize),
+    Drawer,
+}
+
+/// Where the agent `Ctrl+Shift+A` is talking to lives.
+///
+/// An enum rather than an index because the drawer has no index: it is not one of the terminal
+/// panel's windows, and the number that used to be this answer would have had to mean "not a
+/// number" for one of its values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentPane {
+    /// The drawer. Checked first, always.
+    Drawer,
+    /// Terminal window `i`, by its place on screen.
+    Terminal(usize),
+}
+
+/// What applying a workspace does to the drawer.
+///
+/// Pure, and short, because the interesting thing about it is what it *cannot* say. There is no
+/// variant that rebuilds a drawer that already exists: `rebuild_terminals` drains and replaces
+/// every terminal window on a workspace switch, and the drawer's promise is the opposite one —
+/// an agent you are mid-conversation with survives opening another project. A workspace governs
+/// the column, and only the column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DrawerFromWorkspace {
+    /// Nothing to do. A file that says nothing about a drawer has no opinion about one — it may
+    /// simply predate the field — and acting on an opinion nobody expressed would put away a
+    /// panel somebody was using.
+    LeaveAlone,
+    /// A drawer already exists: open or close its column, at this width. Its pane is untouched.
+    SetOpen { open: bool, width: u16 },
+    /// No drawer yet and the workspace wants one open. Nothing is being replaced here, because
+    /// there was nothing to replace. `agent` is `None` where the file named nobody, or named
+    /// somebody we do not know — the launcher is the honest answer to `agent = "clod"`.
+    Summon { agent: Option<crate::session::Agent>, width: u16 },
+}
+
+pub fn drawer_from_workspace(
+    saved: Option<&crate::workspace::WorkspaceDrawer>,
+    have_one: bool,
+) -> DrawerFromWorkspace {
+    let Some(saved) = saved else { return DrawerFromWorkspace::LeaveAlone };
+    if have_one {
+        return DrawerFromWorkspace::SetOpen { open: saved.open, width: saved.width };
+    }
+    if !saved.open {
+        // Nothing to open and nothing to close: a closed drawer that does not exist is a drawer
+        // that does not exist.
+        return DrawerFromWorkspace::LeaveAlone;
+    }
+    DrawerFromWorkspace::Summon {
+        agent: saved.agent.as_deref().and_then(crate::session::Agent::of_program),
+        width: saved.width,
+    }
+}
+
+/// Which pane the context goes to, out of everything that claims to hold an agent.
+///
+/// Four claims, in this order, and the order is the whole function — which is why it is pure and
+/// pinned by a test rather than woven into the pty walking that produces the claims.
+///
+/// The drawer comes first because it is the panel that exists to hold an agent: with one there,
+/// it is the one you meant, even with another agent at a prompt two panes away. Within each
+/// place, a *running* process beats a *declared* startup command, because a pane whose agent has
+/// since exited is a shell, and a shell is not an agent — that precedence predates the drawer and
+/// is not changed by it.
+pub fn agent_precedence(
+    drawer_running: Option<crate::session::Agent>,
+    drawer_declared: Option<crate::session::Agent>,
+    terminal_running: Option<(usize, crate::session::Agent)>,
+    terminal_declared: Option<(usize, crate::session::Agent)>,
+) -> Option<(AgentPane, crate::session::Agent)> {
+    drawer_running
+        .or(drawer_declared)
+        .map(|agent| (AgentPane::Drawer, agent))
+        .or_else(|| {
+            terminal_running
+                .or(terminal_declared)
+                .map(|(index, agent)| (AgentPane::Terminal(index), agent))
+        })
 }
 
 /// The frame that lies in the given direction, or `None` at the edge of the window.
 ///
 /// Navigation is spatial rather than by category: you press the direction the thing you want is
 /// in, and it does not matter whether that thing is a file tree, an editor pane or a shell. The
-/// layout has only two arrangements, so the whole map is small:
+/// layout has two arrangements, and the agent drawer adds a column to the right of either:
 ///
 /// ```text
-///   terminals below (classic)        terminals on the right
-///   ┌──────┬──────────────┐          ┌──────┬─────────┬──────┐
-///   │ tree │ editor       │          │ tree │ editor  │ term │
-///   ├──────┴──────────────┤          │      │         ├──────┤
-///   │ term │ term         │          │      │         │ term │
-///   └──────┴──────────────┘          └──────┴─────────┴──────┘
-///   windows side by side             windows stacked
+///   terminals below (classic)        terminals on the right        with the drawer open
+///   ┌──────┬──────────────┐          ┌──────┬─────────┬──────┐     ┌──────┬───────┬──────┐
+///   │ tree │ editor       │          │ tree │ editor  │ term │     │ tree │ editor│ dr   │
+///   ├──────┴──────────────┤          │      │         ├──────┤     ├──────┴───────┤ aw   │
+///   │ term │ term         │          │      │         │ term │     │ term │ term  │ er   │
+///   └──────┴──────────────┘          └──────┴─────────┴──────┘     └──────┴───────┴──────┘
+///   windows side by side             windows stacked               always the rightmost
 /// ```
 ///
 /// The terminal strip spans the full width in the classic layout, which is why its windows are
 /// walked with left/right there and with up/down when the panel is a column instead.
+///
+/// The drawer is always the last column, so Right reaches it from whatever the rightmost frame
+/// would otherwise have been and Left leaves it for that same frame. It has no up or down: a
+/// column that fills the height has nothing above or below it to go to.
 pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget> {
     use ResizeSide::*;
     let last_window = l.terminal_count.checked_sub(1)?;
@@ -2162,6 +2274,9 @@ pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget
                 Some(FocusTarget::Editor(EditorPane::Right))
             }
             Right if l.show_terminal && l.terminal_on_right => Some(FocusTarget::Terminal(0)),
+            // Only once nothing nearer has claimed Right: the drawer is beyond the terminal
+            // column, not instead of it.
+            Right if l.drawer_open => Some(FocusTarget::Drawer),
             Down if l.show_terminal && !l.terminal_on_right => Some(FocusTarget::Terminal(0)),
             _ => None,
         },
@@ -2174,16 +2289,40 @@ pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget
                 Some(FocusTarget::Editor(if l.split_view { EditorPane::Right } else { EditorPane::Left }));
             match side {
                 s if s == prev => l.terminal_index.checked_sub(1).map(FocusTarget::Terminal),
-                s if s == next => (l.terminal_index < last_window).then_some(FocusTarget::Terminal(l.terminal_index + 1)),
+                // Past the last window along the tiling axis there is the drawer, or the window
+                // edge. In the right-docked layout the axis is vertical and Right is not it, so
+                // Right falls through to the arm below and reaches the drawer directly.
+                s if s == next => (l.terminal_index < last_window)
+                    .then_some(FocusTarget::Terminal(l.terminal_index + 1))
+                    .or(l.drawer_open.then_some(FocusTarget::Drawer)),
                 s if s == leave => back_to_editor,
+                Right if l.drawer_open => Some(FocusTarget::Drawer),
                 _ => None,
             }
         }
+        // Left is the way out, into whatever the drawer is sitting beside: the terminal panel
+        // where it is the right-hand column, the editor otherwise. Nothing else moves — the
+        // drawer spans the full height, so up and down have nowhere to go.
+        Focus::Drawer => match side {
+            Left if l.show_terminal && l.terminal_on_right => {
+                Some(FocusTarget::Terminal(l.terminal_index.min(last_window)))
+            }
+            Left => Some(FocusTarget::Editor(if l.split_view {
+                EditorPane::Right
+            } else {
+                EditorPane::Left
+            })),
+            _ => None,
+        },
     }
 }
 
 const SIDEBAR_STEP: i16 = 2;
 const TERMINAL_STEP: i16 = 5;
+/// The drawer moves in the same percentage steps the terminal panel does, because it is the same
+/// kind of scalar and a seam that moved at a different speed from the one beside it would feel
+/// like two different controls.
+const DRAWER_STEP: i16 = 5;
 const SPLIT_STEP: i16 = 5;
 /// A tenth of the default weight: ten nudges take a window from its share to a neighbour's.
 const WEIGHT_STEP: i16 = 100;
@@ -2192,9 +2331,11 @@ const WEIGHT_STEP: i16 = 100;
 /// border coincides with the window edge — there is nothing there to drag. `grow` pushes the
 /// border outward (the frame gets bigger); `!grow` pulls it inward.
 ///
-/// The whole layout has only three movable seams — sidebar↔editor, editor↔terminal, and (in
-/// split view) editor-left↔editor-right — so every frame has at most two of them, always on
-/// sides that the arrow keys can tell apart.
+/// The layout has four movable seams — sidebar↔editor, editor↔terminal, (in split view)
+/// editor-left↔editor-right, and (with the drawer open) everything↔drawer — so every frame has
+/// at most two of them, always on sides that the arrow keys can tell apart. The drawer's is the
+/// window's rightmost seam, reachable from the drawer itself and from whichever frame it took
+/// its column from.
 pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<ResizeCmd> {
     let s: i16 = if grow { 1 } else { -1 };
     use ResizeSide::*;
@@ -2225,7 +2366,11 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
                 // *focused* window to grow.
                 let seam = if toward_next { l.terminal_index } else { l.terminal_index.checked_sub(1)? };
                 if seam + 1 >= l.terminal_count {
-                    return None;
+                    // Past the last window there is no neighbour to trade weight with — but in
+                    // the classic layout the strip's right end is the drawer's seam, and that
+                    // one does move.
+                    return (l.drawer_open && side == Right)
+                        .then_some(ResizeCmd::Drawer(-s * DRAWER_STEP));
                 }
                 let delta = if toward_next { s * WEIGHT_STEP } else { -s * WEIGHT_STEP };
                 return Some(ResizeCmd::TerminalWeight { seam, delta });
@@ -2234,9 +2379,19 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
             match (l.terminal_on_right, side) {
                 (true, Left) => Some(ResizeCmd::Terminal(s * TERMINAL_STEP)),
                 (false, Up) => Some(ResizeCmd::Terminal(s * TERMINAL_STEP)),
+                // Docked right, the panel's other side is the drawer's seam: growing the
+                // terminal takes the columns from the drawer, which is the frame on the far
+                // side of it.
+                (true, Right) if l.drawer_open => Some(ResizeCmd::Drawer(-s * DRAWER_STEP)),
                 _ => None,
             }
         }
+        // One seam, on its left, wherever the drawer's column was carved from. Growing the
+        // drawer widens it, which is the direction the border moves.
+        Focus::Drawer => match side {
+            Left => Some(ResizeCmd::Drawer(s * DRAWER_STEP)),
+            _ => None,
+        },
         Focus::Editor => {
             // Which seams the focused editor region touches depends on whether it is split, and
             // on which pane holds focus.
@@ -2258,6 +2413,9 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
                 Right if terminal_far && l.show_terminal && l.terminal_on_right => {
                     Some(ResizeCmd::Terminal(-s * TERMINAL_STEP))
                 }
+                // With no terminal column between them, the editor's right border *is* the
+                // drawer's seam; growing the editor takes the columns from the drawer.
+                Right if terminal_far && l.drawer_open => Some(ResizeCmd::Drawer(-s * DRAWER_STEP)),
                 Down if terminal_far && l.show_terminal && !l.terminal_on_right => {
                     Some(ResizeCmd::Terminal(-s * TERMINAL_STEP))
                 }
@@ -2265,6 +2423,25 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
             }
         }
     }
+}
+
+/// Extends a pane's selection by one cell, anchoring it at the terminal's own cursor the first
+/// time there is nothing to extend.
+///
+/// A free function rather than a method because two frames now select this way — the terminal
+/// panel, addressed by index, and the drawer, which has no index — and the only thing they did
+/// not share was how to reach the pane.
+fn extend_pane_selection(term: &mut TerminalPanel, d_row: i16, d_col: i16) {
+    let from = match term.selection {
+        Some(selection) => selection.cursor,
+        None => {
+            let cursor = term.cursor_cell();
+            term.begin_selection(cursor);
+            cursor
+        }
+    };
+    let next = (from.0.saturating_add_signed(d_row), from.1.saturating_add_signed(d_col));
+    term.extend_selection(next);
 }
 
 /// Adds a signed delta to a layout scalar without wrapping; `clamp_layout` then bounds it.
@@ -2621,6 +2798,7 @@ impl App {
             manual: None,
             last_full: Rect::new(0, 0, 0, 0),
             focus: Focus::FileTree,
+            drawer: None,
             should_quit: false,
             redraw: true,
             terminal_generation: 0,
@@ -2803,6 +2981,7 @@ impl App {
             plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
             md_toolbar: self.settings.show_md_toolbar,
             follow_agent_edits: self.settings.follow_agent_edits,
+            drawer_open: self.drawer_is_open(),
         }
     }
 
@@ -2959,10 +3138,37 @@ impl App {
         self.terminals.get_mut(i).map(|w| w.active_tab_mut())
     }
 
+    /// Whether the agent drawer has a column on screen right now.
+    ///
+    /// Open is about the column, not about the agent: a drawer whose agent has exited is still
+    /// open, showing the list of four. Every layout question asks this one.
+    pub fn drawer_is_open(&self) -> bool {
+        self.drawer.as_ref().is_some_and(|d| d.open)
+    }
+
+    /// The drawer's pane, when there is an agent in it rather than the launcher.
+    fn drawer_panel(&self) -> Option<&TerminalPanel> {
+        self.drawer.as_ref()?.window.as_ref().map(|w| w.active_tab())
+    }
+
+    fn drawer_panel_mut(&mut self) -> Option<&mut TerminalPanel> {
+        self.drawer.as_mut()?.window.as_mut().map(|w| w.active_tab_mut())
+    }
+
     pub fn poll_terminal_exits(&mut self) {
+        let lang = self.settings.lang;
         // A workspace's startup commands are typed here rather than at spawn time, once each
         // shell is actually at a prompt.
         for window in &mut self.terminals {
+            for tab in &mut window.tabs {
+                tab.flush_pending();
+            }
+        }
+        // And the drawer, which is not in `terminals`. This is the *only* call site of
+        // `flush_pending` there is, so an agent left out of it would never be started at all: its
+        // pane would sit at a shell prompt with the command still queued, which on screen is
+        // indistinguishable from the agent failing to launch.
+        if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut()) {
             for tab in &mut window.tabs {
                 tab.flush_pending();
             }
@@ -2985,6 +3191,26 @@ impl App {
         if self.terminals.len() != before {
             self.active_terminal = self.active_terminal.min(self.terminals.len().saturating_sub(1));
             reaped = true;
+        }
+        // The drawer is reaped on its own terms, and deliberately *not* under the invariant
+        // above. Never leaving the workspace without a terminal is right for the terminal panel;
+        // applied here it would put a shell where an agent had been, which on screen is
+        // indistinguishable from the agent still being there — the worst possible lie for a pane
+        // whose whole job is holding a conversation. An agent that has ended returns the drawer
+        // to the launcher: the conversation is over, and the choice is on offer again.
+        if let Some(drawer) = self.drawer.as_mut() {
+            let ended = drawer.window.as_mut().is_some_and(|window| {
+                window.reap_exited();
+                window.tabs.is_empty()
+            });
+            if ended {
+                let agent = drawer.agent;
+                drawer.back_to_launcher();
+                if let Some(agent) = agent {
+                    self.status_message = i18n::msg_drawer_agent_ended(lang, agent.label());
+                }
+                reaped = true;
+            }
         }
         if reaped {
             self.redraw = true;
@@ -3023,6 +3249,17 @@ impl App {
             }
             Focus::Editor => self.editor_mut().insert_multiline(&text),
             Focus::Terminal => self.handle_terminal_paste(&text),
+            // Straight into the agent's pane, by the same route a terminal takes it — brackets
+            // where the program asked for them. Over the launcher there is nothing a paste
+            // could mean, so it is dropped rather than typed at a list.
+            Focus::Drawer => {
+                let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut()) else {
+                    return;
+                };
+                let panel = window.active_tab_mut();
+                let bytes = panel.paste_bytes(&text);
+                panel.write_input(&bytes);
+            }
         }
     }
 
@@ -3367,9 +3604,14 @@ impl App {
     /// counter that has been running long enough to overflow is still only being compared with
     /// itself, and a pane closing lowers the total exactly as legitimately as output raises it.
     pub fn poll_terminal_output(&mut self) {
+        // The drawer's pane is folded into the same sum. It is not in `terminals`, and leaving it
+        // out is not a small bug: nothing else raises the redraw flag for output, so the agent
+        // would paint its first frame and then appear to freeze — every reply arriving in a
+        // buffer nobody was drawing until an unrelated keystroke happened to ask for a frame.
         let now = self
             .terminals
             .iter()
+            .chain(self.drawer.iter().filter_map(|d| d.window.as_ref()))
             .flat_map(|w| w.tabs.iter())
             .fold(0u64, |total, tab| total.wrapping_add(tab.generation()));
         if now != self.terminal_generation {
@@ -3378,7 +3620,13 @@ impl App {
         }
         // A pane that has not been revealed yet is waiting on a quiet moment rather than on
         // anything that can raise a flag, so it is drawn towards.
-        if self.terminals.iter().flat_map(|w| w.tabs.iter()).any(|tab| tab.awaiting_reveal()) {
+        if self
+            .terminals
+            .iter()
+            .chain(self.drawer.iter().filter_map(|d| d.window.as_ref()))
+            .flat_map(|w| w.tabs.iter())
+            .any(|tab| tab.awaiting_reveal())
+        {
             self.redraw = true;
         }
     }
@@ -8824,6 +9072,9 @@ impl App {
     fn cycle_focused_tab(&mut self, forward: bool) {
         match self.focus {
             Focus::Terminal => self.cycle_terminal_tab(forward),
+            // The drawer falls in with the file tree here rather than with the terminal panel:
+            // it holds one agent and has no strip of its own, so the only tabs the key can mean
+            // are the editor's.
             _ => self.cycle_editor(forward),
         }
     }
@@ -9199,6 +9450,14 @@ impl App {
                 split_view: self.split_view,
                 split_pct: self.settings.split_pct,
             },
+            // Only what the drawer *is*, never what is in it. A workspace can say "open, this
+            // wide, on codex"; it cannot say "and here is the conversation", because the
+            // conversation is a running process and a TOML file is not where one of those goes.
+            drawer: self.drawer.as_ref().map(|drawer| crate::workspace::WorkspaceDrawer {
+                open: drawer.open,
+                width: self.settings.drawer_pct,
+                agent: drawer.agent.map(|a| a.workspace_name().to_string()),
+            }),
             terminals: self
                 .terminals
                 .iter()
@@ -9268,6 +9527,8 @@ impl App {
         }
         self.settle_panes();
 
+        self.apply_workspace_drawer(ws.drawer.as_ref());
+
         self.rebuild_terminals(&ws, same_root);
         // Which shell you were looking at is part of the layout too, and it was being written to
         // the file and then ignored on the way back in.
@@ -9275,6 +9536,42 @@ impl App {
         self.active_workspace = Some(name.clone());
         self.settings.last_workspace = Some(name.clone());
         self.status_message = i18n::msg_workspace_loaded(lang, &name);
+    }
+
+    /// What a workspace is allowed to say about the drawer.
+    ///
+    /// **A live drawer's pane is never rebuilt.** That is the promise the whole design is
+    /// arranged around: `rebuild_terminals` below drains and replaces every terminal window on
+    /// every workspace switch, and the drawer sits outside that vector precisely so an agent you
+    /// are mid-conversation with survives opening another project. So the workspace governs the
+    /// column — open or closed, and how wide — and nothing else.
+    ///
+    /// It may still *summon* one: a workspace saved with an agent in the drawer, applied in a
+    /// session that has never opened one, starts that agent. Nothing is being replaced there,
+    /// because there was nothing to replace.
+    fn apply_workspace_drawer(&mut self, saved: Option<&crate::workspace::WorkspaceDrawer>) {
+        let have_one = self.drawer.is_some();
+        match drawer_from_workspace(saved, have_one) {
+            DrawerFromWorkspace::LeaveAlone => {}
+            DrawerFromWorkspace::SetOpen { open, width } => {
+                self.settings.drawer_pct = width;
+                self.settings.clamp_layout();
+                if let Some(drawer) = self.drawer.as_mut() {
+                    drawer.open = open;
+                }
+                if !open && self.focus == Focus::Drawer {
+                    self.focus = Focus::Editor;
+                }
+            }
+            DrawerFromWorkspace::Summon { agent, width } => {
+                self.settings.drawer_pct = width;
+                self.settings.clamp_layout();
+                self.drawer = Some(crate::drawer::Drawer::with_launcher(agent));
+                if let Some(agent) = agent {
+                    self.launch_drawer_agent(agent);
+                }
+            }
+        }
     }
 
     /// Rebuilds the terminal windows a workspace describes. Existing shells are handed out in
@@ -9729,6 +10026,185 @@ impl App {
         Some(idx)
     }
 
+    // ---- The agent drawer -------------------------------------------------------------------
+
+    /// Opens the drawer, summoning one into being if this session has not had one yet, and puts
+    /// the keyboard in it.
+    ///
+    /// Summoned on the launcher, with the agent you used last already highlighted — which is the
+    /// whole of "the last one is remembered". Reopening a drawer that was merely hidden shows
+    /// whatever was in it, because hiding never touched it.
+    fn open_drawer(&mut self) {
+        let remembered = crate::session::Agent::of_program(&self.settings.drawer_agent);
+        let drawer = self
+            .drawer
+            .get_or_insert_with(|| crate::drawer::Drawer::with_launcher(remembered));
+        drawer.open = true;
+        self.focus = Focus::Drawer;
+    }
+
+    /// Hides the drawer's column.
+    ///
+    /// The `Drawer` itself stays, pty and all. This is the same bargain the terminal panel makes
+    /// under `Ctrl+J`, and it is the reason putting the drawer away is a cheap thing to do: what
+    /// you are dismissing is a column of the screen, not a conversation.
+    fn close_drawer(&mut self) {
+        if let Some(drawer) = self.drawer.as_mut() {
+            drawer.open = false;
+        }
+        // The keyboard cannot stay in a frame that is no longer drawn.
+        if self.focus == Focus::Drawer {
+            self.focus = Focus::Editor;
+        }
+    }
+
+    fn toggle_drawer(&mut self) {
+        let lang = self.settings.lang;
+        if self.drawer_is_open() {
+            self.close_drawer();
+        } else {
+            self.open_drawer();
+        }
+        self.status_message = i18n::msg_drawer_toggled(lang, self.drawer_is_open());
+    }
+
+    /// Starts `agent` in the drawer, replacing the launcher with its pane.
+    ///
+    /// Two details carry the design. The pane is spawned exactly like every other one — a shell,
+    /// with the command held until it is at a prompt — so it inherits `CLEE_SESSION` from
+    /// `with_startup` and the MCP server an agent starts in here is joined to *this* CleeCode by
+    /// descent, for free. And the command is typed with `exec` in front of it, so the shell
+    /// *becomes* the agent rather than waiting behind it: when the agent ends, the pane ends, and
+    /// the drawer goes back to the launcher. Without it the agent would exit onto a shell prompt
+    /// sitting in an agent-shaped panel, which is the one thing this panel must never show.
+    /// `exec` that fails leaves an interactive shell exactly where it was, so "command not found"
+    /// is still said out loud by the shell rather than guessed at by us.
+    fn launch_drawer_agent(&mut self, agent: crate::session::Agent) {
+        let lang = self.settings.lang;
+        let command = agent.workspace_name();
+        let root = self.root.clone();
+        match TerminalPanel::with_startup(24, 80, &root, Some(&format!("exec {command}"))) {
+            Ok(mut panel) => {
+                panel.name = Some(agent.label().to_string());
+                // The command as the rest of the app has to read it: `Agent::of_command` is one
+                // of the two ways a pane is recognised as an agent's, and it reads the first
+                // word. `exec claude` would name a program called `exec`.
+                panel.startup_command = Some(command.to_string());
+                let window = TerminalWindow {
+                    tabs: vec![panel],
+                    active: 0,
+                    weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+                };
+                if let Some(drawer) = self.drawer.as_mut() {
+                    drawer.window = Some(window);
+                    drawer.agent = Some(agent);
+                    drawer.selected = agent.index();
+                }
+                // Written now rather than at exit, for the same reason the workspace is: a crash
+                // must not cost the one thing the launcher remembers.
+                self.settings.drawer_agent = command.to_string();
+                self.settings.save();
+                self.status_message = i18n::msg_drawer_started(lang, agent.label());
+            }
+            Err(e) => {
+                self.status_message =
+                    i18n::msg_drawer_start_error(lang, agent.label(), &e.to_string())
+            }
+        }
+    }
+
+    /// Keys while the drawer has the keyboard.
+    ///
+    /// One focus, two keyboards, and which one is in force is simply what is drawn: the launcher
+    /// answers to up, down and Enter, while a running agent gets everything, byte for byte, the
+    /// way a terminal pane does.
+    fn handle_drawer_key(&mut self, key: KeyEvent) {
+        if self.drawer.as_ref().is_none_or(|d| !d.showing_launcher()) {
+            self.handle_drawer_agent_key(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Up => {
+                if let Some(drawer) = self.drawer.as_mut() {
+                    drawer.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(drawer) = self.drawer.as_mut() {
+                    drawer.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(agent) = self.drawer.as_ref().map(|d| d.highlighted()) {
+                    self.launch_drawer_agent(agent);
+                }
+            }
+            // The keyboard goes back to the editor and the column stays exactly where it is.
+            // Pinned means pinned: a panel that withdrew the moment you looked away would be the
+            // autocollapse mode, which is a separate decision nobody has made yet.
+            KeyCode::Esc => self.focus = Focus::Editor,
+            _ => {}
+        }
+    }
+
+    /// Keys into the drawer's running agent — the terminal panel's own rules, on the one pane
+    /// that is not in the terminal panel. Shift+arrows select inside the pane, Shift+PageUp and
+    /// PageDown walk the history, Esc drops a selection, and everything else is the agent's.
+    fn handle_drawer_agent_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            let step = match key.code {
+                KeyCode::Left => Some((0, -1)),
+                KeyCode::Right => Some((0, 1)),
+                KeyCode::Up => Some((-1, 0)),
+                KeyCode::Down => Some((1, 0)),
+                _ => None,
+            };
+            if let Some((d_row, d_col)) = step {
+                let text = self.drawer_panel_mut().and_then(|term| {
+                    extend_pane_selection(term, d_row, d_col);
+                    term.selection_text()
+                });
+                self.copy_selection_text(text);
+                return;
+            }
+            let page = self.drawer_panel().map(|t| (t.rows.saturating_sub(1)).max(1) as isize);
+            let paged = match key.code {
+                KeyCode::PageUp => page.map(|p| -p),
+                KeyCode::PageDown => page,
+                _ => None,
+            };
+            if let Some(delta) = paged {
+                let bytes = key_to_bytes(key);
+                if let Some(term) = self.drawer_panel_mut() {
+                    if term.alternate_screen() {
+                        // A full-screen program — which every one of the four is — has no
+                        // history of ours to page through and its own to page through instead.
+                        term.write_input(&bytes);
+                    } else {
+                        term.scroll_by(delta);
+                    }
+                }
+                return;
+            }
+        }
+        if key.code == KeyCode::Esc && self.drawer_panel().is_some_and(|t| t.selection.is_some()) {
+            if let Some(term) = self.drawer_panel_mut() {
+                term.clear_selection();
+            }
+            return;
+        }
+        let bytes = key_to_bytes(key);
+        if !bytes.is_empty()
+            && let Some(term) = self.drawer_panel_mut()
+        {
+            // Typing snaps back to the live output, for the same reason a terminal pane does it:
+            // the agent is about to answer, and an answer that lands off-screen is worse than
+            // losing your place in the history.
+            term.scroll_to_bottom();
+            term.write_input(&bytes);
+        }
+    }
+
     // ---- Handing the editor's context to an agent -------------------------------------------
 
     /// Which on-screen terminal holds a coding agent, and which agent it is.
@@ -9745,16 +10221,31 @@ impl App {
     ///
     /// The pane's own startup command is the fallback, for the pane that was opened by a preset
     /// to run an agent and says so even where the table has gone quiet.
-    fn agent_terminal(&self) -> Option<(usize, crate::session::Agent)> {
-        let pids: Vec<Option<u32>> =
-            self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
-        if let Some(found) = dnd::agent_running(&pids) {
-            return Some(found);
-        }
-        self.terminals.iter().enumerate().find_map(|(index, window)| {
+    ///
+    /// The drawer is asked first, and it is asked exactly the same two questions: it runs the
+    /// real CLI in a real pty, so the process table is as honest about it as about any other
+    /// pane. Precedence rather than a separate feature — the drawer is the panel that exists to
+    /// hold an agent, so an agent in it is the one you meant, even with another agent sitting at
+    /// a prompt in an ordinary terminal.
+    fn agent_pane(&self) -> Option<(AgentPane, crate::session::Agent)> {
+        // One process-table snapshot for every candidate at once — the drawer's pane in front,
+        // then the panel's windows. Reading the table is the expensive half of this question and
+        // it happens on a keystroke, so asking it twice to keep two lists apart would be paying
+        // for tidiness.
+        let mut pids: Vec<Option<u32>> = vec![self.drawer_panel().and_then(|t| t.child_pid())];
+        pids.extend(self.terminals.iter().map(|w| w.active_tab().child_pid()));
+        let running = dnd::agent_running(&pids);
+        let drawer_running = running.filter(|(i, _)| *i == 0).map(|(_, agent)| agent);
+        let terminal_running = running.filter(|(i, _)| *i > 0).map(|(i, agent)| (i - 1, agent));
+        let drawer_declared = self
+            .drawer_panel()
+            .and_then(|t| t.startup_command.as_deref())
+            .and_then(crate::session::Agent::of_command);
+        let terminal_declared = self.terminals.iter().enumerate().find_map(|(index, window)| {
             let command = window.active_tab().startup_command.as_deref()?;
             crate::session::Agent::of_command(command).map(|agent| (index, agent))
-        })
+        });
+        agent_precedence(drawer_running, drawer_declared, terminal_running, terminal_declared)
     }
 
     /// The path as it should be written at an agent's prompt: relative to the project root where
@@ -9813,8 +10304,14 @@ impl App {
     /// the text is rather than in the buffer they were reading.
     pub fn send_context_to_agent(&mut self) {
         let lang = self.settings.lang;
-        let Some((idx, agent)) = self.agent_terminal() else {
-            self.status_message = i18n::msg_agent_none(lang);
+        let Some((pane, agent)) = self.agent_pane() else {
+            // Nobody to talk to — so the key summons the panel whose job that is, on its
+            // launcher. The one chord this feature has does the whole of the feature: with an
+            // agent it hands over the context, without one it gets you an agent. There is no
+            // spare `Ctrl+Shift` letter to spend on the second half (`Z` is redo, and binding it
+            // would shadow redo silently), and there does not need to be.
+            self.open_drawer();
+            self.status_message = i18n::msg_drawer_summoned(lang);
             return;
         };
         let Some((path, what)) = self.agent_context() else {
@@ -9822,20 +10319,40 @@ impl App {
             return;
         };
         let name = self.path_for_agent(&path);
-        let Some(term) = self.window_tab(idx) else { return };
+        let Some(term) = (match pane {
+            AgentPane::Drawer => self.drawer_panel(),
+            AgentPane::Terminal(idx) => self.window_tab(idx),
+        }) else {
+            return;
+        };
         // Composed against what the pane can hold, then handed to the same paste path a
         // clipboard goes through — brackets where the program asked for them, nothing where it
         // did not.
         let text = agent.context(&name, &what, term.holds_a_paste());
         let bytes = term.paste_bytes(&text);
-        if let Some(term) = self.window_tab_mut(idx) {
-            term.write_input(&bytes);
-        }
-        self.settings.show_terminal = true;
-        self.active_terminal = idx;
-        self.focus = Focus::Terminal;
         let reference = text.lines().next().unwrap_or_default().to_string();
-        self.status_message = i18n::msg_agent_sent(lang, &reference, agent.label(), idx);
+        // The focus follows the text either way: Enter is the next key in the sentence the user
+        // has started, and it has to land where the text is.
+        match pane {
+            AgentPane::Drawer => {
+                if let Some(term) = self.drawer_panel_mut() {
+                    term.write_input(&bytes);
+                }
+                self.open_drawer();
+                self.status_message =
+                    i18n::msg_agent_sent_to_drawer(lang, &reference, agent.label());
+            }
+            AgentPane::Terminal(idx) => {
+                if let Some(term) = self.window_tab_mut(idx) {
+                    term.write_input(&bytes);
+                }
+                self.settings.show_terminal = true;
+                self.active_terminal = idx;
+                self.focus = Focus::Terminal;
+                self.status_message =
+                    i18n::msg_agent_sent_to_terminal(lang, &reference, agent.label(), idx);
+            }
+        }
     }
 
     /// Writes a piece of a buffer where an interpreter can be pointed at it.
@@ -10397,12 +10914,16 @@ impl App {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        let mut order = vec![Focus::FileTree, Focus::Editor, Focus::Terminal];
+        // Left to right across the window, which is the order the frames are in.
+        let mut order = vec![Focus::FileTree, Focus::Editor, Focus::Terminal, Focus::Drawer];
         if !self.settings.show_sidebar {
             order.retain(|f| *f != Focus::FileTree);
         }
         if !self.settings.show_terminal {
             order.retain(|f| *f != Focus::Terminal);
+        }
+        if !self.drawer_is_open() {
+            order.retain(|f| *f != Focus::Drawer);
         }
         if order.is_empty() {
             return;
@@ -10699,6 +11220,14 @@ impl App {
             self.handle_terminal_key(key);
             return;
         }
+        // The drawer strikes the same bargain, and it has to: an agent is a full-screen program
+        // that reads Ctrl+C to stop what it is doing, and one that could not be interrupted
+        // would be an agent you cannot work with. It is only ever reached when an agent is
+        // running — the launcher answers to arrows and Enter, which are reserved above.
+        if self.focus == Focus::Drawer && ctrl && !reserved && self.drawer_panel().is_some() {
+            self.handle_drawer_agent_key(key);
+            return;
+        }
 
         // No Alt+<letter> and no Alt+<digit> anywhere in CleeCode. macOS only sends Option as
         // Meta on US keyboard layouts, so on any other one — Italian, German, French — those
@@ -10813,6 +11342,7 @@ impl App {
             Focus::FileTree => self.handle_file_tree_key(key),
             Focus::Editor => self.handle_editor_key(key),
             Focus::Terminal => self.handle_terminal_key(key),
+            Focus::Drawer => self.handle_drawer_key(key),
         }
     }
 
@@ -10866,6 +11396,7 @@ impl App {
                     self.cycle_focus(true);
                 }
             }
+            MenuAction::ToggleDrawer => self.toggle_drawer(),
             MenuAction::OpenMenuBar => self.menu.open(),
             MenuAction::ColumnSelection => {
                 let lang = self.settings.lang;
@@ -11147,6 +11678,7 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.active_terminal = index.min(self.terminals.len().saturating_sub(1));
             }
+            FocusTarget::Drawer => self.focus = Focus::Drawer,
         }
     }
 
@@ -11161,6 +11693,7 @@ impl App {
             terminal_on_right: self.settings.terminal_on_right,
             terminal_index: self.active_terminal,
             terminal_count: self.terminals.len(),
+            drawer_open: self.drawer_is_open(),
         }
     }
 
@@ -11174,6 +11707,7 @@ impl App {
             terminal_on_right: self.settings.terminal_on_right,
             terminal_index: self.active_terminal,
             terminal_count: self.terminals.len(),
+            drawer_open: self.drawer_is_open(),
         };
         match resize_command(&layout, side, grow) {
             Some(ResizeCmd::Sidebar(d)) => {
@@ -11188,6 +11722,9 @@ impl App {
             Some(ResizeCmd::TerminalWeight { seam, delta }) => {
                 self.nudge_terminal_weight(seam, delta);
                 return;
+            }
+            Some(ResizeCmd::Drawer(d)) => {
+                self.settings.drawer_pct = nudge_u16(self.settings.drawer_pct, d);
             }
             None => {
                 self.status_message = i18n::msg_resize_edge(self.settings.lang);
@@ -11289,6 +11826,11 @@ impl App {
                 out.push((ScrollbarId::Terminal(i), *rect, ui::Axis::Vertical));
             }
         }
+        // Only when there is an agent in it: the launcher is a list of four names, and a
+        // scrollbar down the side of it would be a control for scrolling nothing.
+        if let (Some(rect), true) = (areas.drawer, self.drawer_panel().is_some()) {
+            out.push((ScrollbarId::Drawer, rect, ui::Axis::Vertical));
+        }
         out
     }
 
@@ -11310,6 +11852,7 @@ impl App {
                 ui::editor_scroll_metrics(self, idx, axis, height, width)
             }
             ScrollbarId::Terminal(i) => ui::terminal_scroll_metrics(self.window_tab(i)?),
+            ScrollbarId::Drawer => ui::terminal_scroll_metrics(self.drawer_panel()?),
         }
     }
 
@@ -11439,6 +11982,11 @@ impl App {
                     term.scroll_by(delta);
                 }
             }
+            ScrollbarId::Drawer => {
+                if let Some(term) = self.drawer_panel_mut() {
+                    term.scroll_by(delta);
+                }
+            }
         }
     }
 
@@ -11466,6 +12014,12 @@ impl App {
                     term.scroll_to_offset(held.saturating_sub(position));
                 }
             }
+            ScrollbarId::Drawer => {
+                if let Some(term) = self.drawer_panel_mut() {
+                    let held = term.scrollback_lines();
+                    term.scroll_to_offset(held.saturating_sub(position));
+                }
+            }
         }
     }
 
@@ -11485,6 +12039,16 @@ impl App {
     }
 
     fn try_start_seam_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
+        // The drawer's left border, first, because it is the outermost seam: it is the right
+        // edge of whatever frame it took its column from, and that frame's own seam check would
+        // otherwise claim the same two columns.
+        if let Some(drawer) = areas.drawer {
+            let border_x = drawer.x;
+            if row >= drawer.y && row < drawer.y + drawer.height && col + 1 >= border_x && col <= border_x + 1 {
+                self.dragging = Some(DragTarget::DrawerWidth);
+                return true;
+            }
+        }
         if let Some(sidebar) = areas.sidebar {
             let border_x = sidebar.x + sidebar.width;
             if row >= sidebar.y && row < sidebar.y + sidebar.height && (col == border_x.saturating_sub(1) || col == border_x) {
@@ -11560,10 +12124,15 @@ impl App {
                 let main_bottom = full.height.saturating_sub(1);
                 let main_height = main_bottom.saturating_sub(main_top).max(1);
                 if self.settings.terminal_on_right {
-                    let main_right = full.width;
+                    // The window's right edge, unless the drawer has taken a column off it: the
+                    // terminal's percentage is a percentage of what is left after the drawer,
+                    // so its seam has to be measured against that same right-hand edge or every
+                    // drag comes out scaled by the drawer's width.
+                    let areas = ui::compute_layout(full, &ui::LayoutParams::from_app(self));
+                    let main_right = areas.drawer.map_or(full.width, |d| d.x);
                     let main_left = if self.settings.show_sidebar { self.settings.sidebar_width } else { 0 };
                     let main_width = main_right.saturating_sub(main_left).max(1);
-                    let term_cols_from_right = main_right.saturating_sub(col);
+                    let term_cols_from_right = main_right.saturating_sub(col.min(main_right));
                     self.settings.terminal_pct = ((term_cols_from_right as u32 * 100) / main_width as u32) as u16;
                 } else {
                     let term_rows_from_bottom = main_bottom.saturating_sub(row);
@@ -11581,11 +12150,23 @@ impl App {
                     self.settings.clamp_layout();
                 }
             }
+            Some(DragTarget::DrawerWidth) => {
+                // Measured from the window's right edge against the main area, which is what the
+                // drawer's percentage is a percentage of — the column comes off `main_area`
+                // before anything else is placed. See `ui::compute_layout`.
+                let main_width = full.width.max(1);
+                let cols_from_right = full.width.saturating_sub(col);
+                self.settings.drawer_pct =
+                    ((cols_from_right as u32 * 100) / main_width as u32) as u16;
+                self.settings.clamp_layout();
+            }
             Some(DragTarget::TerminalSplit(i)) => self.drag_terminal_split(i, col, row, full),
             // All handled where the drag happens, against the frame it started in.
             Some(DragTarget::TextSelection)
             | Some(DragTarget::TerminalSelection(_))
             | Some(DragTarget::TerminalMouse(..))
+            | Some(DragTarget::DrawerSelection)
+            | Some(DragTarget::DrawerMouse(_))
             | Some(DragTarget::Scrollbar(_))
             | None => {}
         }
@@ -12338,19 +12919,7 @@ impl App {
     fn move_terminal_selection(&mut self, d_row: i16, d_col: i16) {
         let index = self.active_terminal;
         let Some(term) = self.window_tab_mut(index) else { return };
-        let from = match term.selection {
-            Some(selection) => selection.cursor,
-            None => {
-                let cursor = term.cursor_cell();
-                term.begin_selection(cursor);
-                cursor
-            }
-        };
-        let next = (
-            from.0.saturating_add_signed(d_row),
-            from.1.saturating_add_signed(d_col),
-        );
-        term.extend_selection(next);
+        extend_pane_selection(term, d_row, d_col);
         self.copy_terminal_selection(index);
     }
 
@@ -12371,7 +12940,16 @@ impl App {
     /// taken. Silent when the selection is only blank cells, so dragging across empty space
     /// doesn't wipe the clipboard.
     fn copy_terminal_selection(&mut self, index: usize) {
-        let Some(text) = self.window_tab(index).and_then(|t| t.selection_text()) else { return };
+        let text = self.window_tab(index).and_then(|t| t.selection_text());
+        self.copy_selection_text(text);
+    }
+
+    /// Puts a pane's selected text on the clipboard and says how much was taken. Silent on a
+    /// selection of blank cells, so dragging across empty space doesn't wipe the clipboard — and
+    /// shared with the drawer, whose pane is reached by a different route but selects the same
+    /// way.
+    fn copy_selection_text(&mut self, text: Option<String>) {
+        let Some(text) = text else { return };
         if text.trim().is_empty() {
             return;
         }
@@ -12682,6 +13260,12 @@ impl App {
                     row,
                     mouse.modifiers,
                     areas,
+                ) || self.drawer_takes_press(
+                    terminal_panel::BUTTON_LEFT,
+                    col,
+                    row,
+                    mouse.modifiers,
+                    areas,
                 ) {
                     return;
                 }
@@ -12711,6 +13295,9 @@ impl App {
                         }
                     }
                 }
+                if let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) {
+                    self.click_drawer(rect, col, row);
+                }
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 // Right-click raises the context menu for the frame under the pointer. Modals and
@@ -12726,6 +13313,12 @@ impl App {
                 // Over a pane that asked for the mouse, the right button is the program's too —
                 // lazygit and mc both use it — and Shift is still the way to our own menu.
                 if self.terminal_takes_press(
+                    terminal_panel::BUTTON_RIGHT,
+                    col,
+                    row,
+                    mouse.modifiers,
+                    areas,
+                ) || self.drawer_takes_press(
                     terminal_panel::BUTTON_RIGHT,
                     col,
                     row,
@@ -12749,6 +13342,7 @@ impl App {
                 Some(DragTarget::Sidebar)
                 | Some(DragTarget::TerminalHeight)
                 | Some(DragTarget::EditorSplit)
+                | Some(DragTarget::DrawerWidth)
                 | Some(DragTarget::TerminalSplit(_)) => {
                     self.continue_drag(col, row, full);
                 }
@@ -12780,6 +13374,17 @@ impl App {
                 Some(DragTarget::TerminalMouse(index, button)) => {
                     self.terminal_mouse_drag(index, button, MouseAction::Drag, col, row, areas);
                 }
+                Some(DragTarget::DrawerSelection) => {
+                    if let Some(rect) = areas.drawer
+                        && let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row)
+                        && let Some(term) = self.drawer_panel_mut()
+                    {
+                        term.extend_selection(cell);
+                    }
+                }
+                Some(DragTarget::DrawerMouse(button)) => {
+                    self.drawer_mouse_drag(button, MouseAction::Drag, col, row, areas);
+                }
                 None => {}
             },
             MouseEventKind::Up(button) => {
@@ -12801,6 +13406,29 @@ impl App {
                         if held == terminal_panel::mouse_button_code(button) =>
                     {
                         self.terminal_mouse_drag(index, held, MouseAction::Release, col, row, areas);
+                        self.dragging = None;
+                    }
+                    Some(DragTarget::DrawerSelection) if button == MouseButton::Left => {
+                        // A drag that never left its cell is a click that focused the pane, not a
+                        // one-character selection — the same rule the terminal panel applies.
+                        let single = self
+                            .drawer_panel()
+                            .and_then(|t| t.selection)
+                            .is_some_and(|s| s.is_single_cell());
+                        if single {
+                            if let Some(term) = self.drawer_panel_mut() {
+                                term.clear_selection();
+                            }
+                        } else {
+                            let text = self.drawer_panel().and_then(|t| t.selection_text());
+                            self.copy_selection_text(text);
+                        }
+                        self.dragging = None;
+                    }
+                    Some(DragTarget::DrawerMouse(held))
+                        if held == terminal_panel::mouse_button_code(button) =>
+                    {
+                        self.drawer_mouse_drag(held, MouseAction::Release, col, row, areas);
                         self.dragging = None;
                     }
                     _ if button == MouseButton::Left => self.dragging = None,
@@ -12869,6 +13497,26 @@ impl App {
                 // shell has the focus.
                 let cell = cell_at(ui::terminal_content_rect(term_areas[i]), col, row);
                 self.wheel_over_terminal(i, delta, cell);
+                return;
+            }
+        }
+        // The drawer, by the same rule and for the same reason: an agent is a full-screen
+        // program that scrolls a view of its own, and a notch dropped on the way would make its
+        // conversation unreadable past the height of the pane.
+        if let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) {
+            let cell = cell_at(ui::terminal_content_rect(rect), col, row);
+            let up = delta < 0;
+            let Some(term) = self.drawer_panel_mut() else { return };
+            if let Some((row, col)) = cell
+                && let Some(report) = term.wheel_report(up, row, col)
+            {
+                // One notch, one report: how far a notch goes through a scrollback is our idea,
+                // and a program that handles the wheel has its own.
+                term.write_input(&report);
+                return;
+            }
+            if !term.alternate_screen() {
+                term.scroll_by(delta);
             }
         }
     }
@@ -12924,6 +13572,78 @@ impl App {
         };
         if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {
             self.report_terminal_mouse(index, cell, button, action);
+        }
+    }
+
+    /// The drawer's version of [`Self::terminal_takes_press`]: the agent gets the click when it
+    /// asked for the mouse, and Shift is the way to keep it for our own selection.
+    fn drawer_takes_press(
+        &mut self,
+        button: u16,
+        col: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+        areas: &ui::Areas,
+    ) -> bool {
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            return false;
+        }
+        let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) else { return false };
+        let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) else { return false };
+        let Some(term) = self.drawer_panel_mut() else { return false };
+        let Some(report) = term.mouse_report(button, MouseAction::Press, cell.0, cell.1) else {
+            return false;
+        };
+        term.write_input(&report);
+        self.focus = Focus::Drawer;
+        self.dragging = Some(DragTarget::DrawerMouse(button));
+        true
+    }
+
+    /// Reports a movement or a release to the drawer's agent, at whatever cell the pointer is
+    /// over now — `cell_at` clamps, because a drag that wanders outside is still a drag the
+    /// program is tracking.
+    fn drawer_mouse_drag(
+        &mut self,
+        button: u16,
+        action: MouseAction,
+        col: u16,
+        row: u16,
+        areas: &ui::Areas,
+    ) {
+        let Some(rect) = areas.drawer else { return };
+        let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) else { return };
+        let Some(term) = self.drawer_panel_mut() else { return };
+        if let Some(report) = term.mouse_report(button, action, cell.0, cell.1) {
+            term.write_input(&report);
+        }
+    }
+
+    /// A left click inside the drawer that the agent did not take.
+    ///
+    /// On the launcher it is the mouse's Enter: the name under the pointer is chosen and started.
+    /// A click on the gap between two names only takes the focus — the ROADMAP asks for the
+    /// names to be clickable, not for the whitespace around them to start something. On a
+    /// running agent it anchors a selection, exactly as a click in a terminal pane does.
+    fn click_drawer(&mut self, rect: Rect, col: u16, row: u16) {
+        self.focus = Focus::Drawer;
+        if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
+            // Asked of the same function that drew the list, so a click can never start the
+            // agent above the one under the pointer.
+            let (_, rows) = ui::drawer_launcher_rows(ui::inner_rect(rect));
+            let Some(index) = rows.iter().position(|r| within(*r, col, row)) else { return };
+            if let Some(drawer) = self.drawer.as_mut() {
+                drawer.selected = index;
+            }
+            let Some(agent) = self.drawer.as_ref().map(|d| d.highlighted()) else { return };
+            self.launch_drawer_agent(agent);
+            return;
+        }
+        if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {
+            if let Some(term) = self.drawer_panel_mut() {
+                term.begin_selection(cell);
+            }
+            self.dragging = Some(DragTarget::DrawerSelection);
         }
     }
 
@@ -13119,6 +13839,11 @@ impl App {
                 (ContextTarget::Terminal, rect)
             }
             Focus::Editor => (ContextTarget::Editor, areas.editor),
+            // The same menu a terminal pane gets: what is in the drawer is a terminal, and copy,
+            // paste and the rest mean there exactly what they mean in one.
+            Focus::Drawer => {
+                (ContextTarget::Terminal, areas.drawer.unwrap_or(self.last_full))
+            }
         };
         let versioned = self.selected_file_is_versioned();
         self.context_menu = Some(ContextMenu::new(target, (rect.x + 2, rect.y + 1), versioned));
@@ -13691,6 +14416,166 @@ mod tests {
         assert_eq!(resize_command(&split_left, Left, true), Some(ResizeCmd::Sidebar(-SIDEBAR_STEP)));
     }
 
+    /// The drawer is the rightmost column in both arrangements: Right reaches it from whatever
+    /// was rightmost before, Left leaves it for that same frame, and it is not in the way when
+    /// it is closed.
+    #[test]
+    fn the_arrows_reach_the_drawer_and_come_back() {
+        use ResizeSide::*;
+        // Classic: the drawer is to the right of the editor, and of the terminal strip below it.
+        let editor = ResizeLayout { drawer_open: true, ..classic_like() };
+        assert_eq!(focus_neighbour(&editor, Right), Some(FocusTarget::Drawer));
+        let closed = ResizeLayout { drawer_open: false, ..classic_like() };
+        assert_eq!(focus_neighbour(&closed, Right), None, "closed, the window edge is there");
+
+        let strip_end = ResizeLayout {
+            focus: Focus::Terminal,
+            terminal_count: 2,
+            terminal_index: 1,
+            drawer_open: true,
+            ..classic_like()
+        };
+        assert_eq!(focus_neighbour(&strip_end, Right), Some(FocusTarget::Drawer));
+        let strip_middle = ResizeLayout { terminal_index: 0, ..strip_end };
+        assert_eq!(
+            focus_neighbour(&strip_middle, Right),
+            Some(FocusTarget::Terminal(1)),
+            "the next window first: the drawer is past the end of the strip, not beside each pane"
+        );
+
+        // Docked right, the terminal column sits between the editor and the drawer, so the
+        // editor's Right must still find the terminal and not jump the queue.
+        let docked = ResizeLayout { terminal_on_right: true, drawer_open: true, ..classic_like() };
+        assert_eq!(focus_neighbour(&docked, Right), Some(FocusTarget::Terminal(0)));
+        let from_terminal = ResizeLayout { focus: Focus::Terminal, ..docked };
+        assert_eq!(focus_neighbour(&from_terminal, Right), Some(FocusTarget::Drawer));
+
+        // And out again, into whatever the drawer took its column from.
+        let in_drawer = ResizeLayout { focus: Focus::Drawer, ..editor };
+        assert_eq!(focus_neighbour(&in_drawer, Left), Some(FocusTarget::Editor(EditorPane::Left)));
+        assert_eq!(focus_neighbour(&in_drawer, Up), None, "a full-height column has no up");
+        assert_eq!(focus_neighbour(&in_drawer, Down), None);
+        let in_drawer_docked = ResizeLayout { focus: Focus::Drawer, ..docked };
+        assert_eq!(focus_neighbour(&in_drawer_docked, Left), Some(FocusTarget::Terminal(0)));
+    }
+
+    /// The fourth seam. It is the window's rightmost, so it is reachable from the drawer itself
+    /// and from whichever frame gave up the column — and growing either side shrinks the other.
+    #[test]
+    fn the_drawer_seam_moves_from_both_sides_of_it() {
+        use ResizeSide::*;
+        let editor = ResizeLayout { drawer_open: true, ..classic_like() };
+        assert_eq!(resize_command(&editor, Right, true), Some(ResizeCmd::Drawer(-DRAWER_STEP)));
+        assert_eq!(resize_command(&editor, Right, false), Some(ResizeCmd::Drawer(DRAWER_STEP)));
+
+        let in_drawer = ResizeLayout { focus: Focus::Drawer, ..editor };
+        assert_eq!(resize_command(&in_drawer, Left, true), Some(ResizeCmd::Drawer(DRAWER_STEP)));
+        assert_eq!(resize_command(&in_drawer, Right, true), None, "its other side is the window");
+
+        // Docked right, the terminal is the frame beside the drawer and the editor's Right is
+        // the terminal seam, exactly as it was before the drawer existed.
+        let docked = ResizeLayout { terminal_on_right: true, drawer_open: true, ..classic_like() };
+        assert_eq!(resize_command(&docked, Right, true), Some(ResizeCmd::Terminal(-TERMINAL_STEP)));
+        let from_terminal = ResizeLayout { focus: Focus::Terminal, ..docked };
+        assert_eq!(
+            resize_command(&from_terminal, Right, true),
+            Some(ResizeCmd::Drawer(-DRAWER_STEP))
+        );
+
+        // In the classic strip the last window's right edge is the seam; the ones before it are
+        // still trading weight with their neighbour.
+        let last = ResizeLayout {
+            focus: Focus::Terminal,
+            terminal_count: 2,
+            terminal_index: 1,
+            drawer_open: true,
+            ..classic_like()
+        };
+        assert_eq!(resize_command(&last, Right, true), Some(ResizeCmd::Drawer(-DRAWER_STEP)));
+        let first = ResizeLayout { terminal_index: 0, ..last };
+        assert!(matches!(
+            resize_command(&first, Right, true),
+            Some(ResizeCmd::TerminalWeight { seam: 0, .. })
+        ));
+
+        // Closed, none of this is reachable: the seam is the window's edge again.
+        let closed = ResizeLayout { drawer_open: false, ..classic_like() };
+        assert_eq!(resize_command(&closed, Right, true), None);
+    }
+
+    /// The order `Ctrl+Shift+A` resolves its target in, pinned where it can be read: the drawer
+    /// first, and within each place a running process before a declared startup command.
+    #[test]
+    fn the_drawer_is_asked_before_the_terminals() {
+        use crate::session::Agent;
+        // The case the drawer exists for: an agent in it, another one at a prompt in a terminal.
+        // The drawer wins, and it wins whichever way each of them was recognised.
+        assert_eq!(
+            agent_precedence(Some(Agent::Claude), None, Some((2, Agent::Codex)), None),
+            Some((AgentPane::Drawer, Agent::Claude))
+        );
+        assert_eq!(
+            agent_precedence(None, Some(Agent::Claude), Some((2, Agent::Codex)), None),
+            Some((AgentPane::Drawer, Agent::Claude)),
+            "a drawer known only by its startup command still beats a terminal"
+        );
+        // With nothing in the drawer, the terminals answer exactly as they did before it existed.
+        assert_eq!(
+            agent_precedence(None, None, Some((1, Agent::Codex)), Some((0, Agent::Gemini))),
+            Some((AgentPane::Terminal(1), Agent::Codex)),
+            "a running process beats a pane that merely says it was opened for one"
+        );
+        assert_eq!(
+            agent_precedence(None, None, None, Some((0, Agent::Gemini))),
+            Some((AgentPane::Terminal(0), Agent::Gemini))
+        );
+        // Nobody anywhere is what summons the drawer, so it has to be tellable from the rest.
+        assert_eq!(agent_precedence(None, None, None, None), None);
+    }
+
+    /// A workspace governs the drawer's column and never its contents. The variant that would
+    /// rebuild a live drawer does not exist, and this is where that is said out loud.
+    #[test]
+    fn a_workspace_never_rebuilds_a_drawer_that_is_already_there() {
+        use crate::workspace::WorkspaceDrawer;
+        let saved = |open, agent: Option<&str>| WorkspaceDrawer {
+            open,
+            width: 45,
+            agent: agent.map(str::to_string),
+        };
+
+        // A live drawer: the file may open or close its column, and that is the whole of what it
+        // may do. Note the agent named in the file is ignored — the one in the pane stays.
+        assert_eq!(
+            drawer_from_workspace(Some(&saved(true, Some("codex"))), true),
+            DrawerFromWorkspace::SetOpen { open: true, width: 45 }
+        );
+        assert_eq!(
+            drawer_from_workspace(Some(&saved(false, Some("codex"))), true),
+            DrawerFromWorkspace::SetOpen { open: false, width: 45 }
+        );
+
+        // No drawer yet: an open one in the file is summoned, agent and all.
+        assert_eq!(
+            drawer_from_workspace(Some(&saved(true, Some("codex"))), false),
+            DrawerFromWorkspace::Summon { agent: Some(crate::session::Agent::Codex), width: 45 }
+        );
+        assert_eq!(
+            drawer_from_workspace(Some(&saved(true, Some("clod"))), false),
+            DrawerFromWorkspace::Summon { agent: None, width: 45 },
+            "a name we do not know opens the launcher rather than running it"
+        );
+        assert_eq!(
+            drawer_from_workspace(Some(&saved(false, Some("codex"))), false),
+            DrawerFromWorkspace::LeaveAlone,
+            "a closed drawer that does not exist is a drawer that does not exist"
+        );
+
+        // A file from before the field existed says nothing, which is not the same as saying no.
+        assert_eq!(drawer_from_workspace(None, true), DrawerFromWorkspace::LeaveAlone);
+        assert_eq!(drawer_from_workspace(None, false), DrawerFromWorkspace::LeaveAlone);
+    }
+
     fn classic_like() -> ResizeLayout {
         ResizeLayout {
             focus: Focus::Editor,
@@ -13701,6 +14586,7 @@ mod tests {
             terminal_on_right: false,
             terminal_index: 0,
             terminal_count: 1,
+            drawer_open: false,
         }
     }
 

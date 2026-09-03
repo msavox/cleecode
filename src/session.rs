@@ -442,6 +442,39 @@ impl Agent {
         }
     }
 
+    /// The agent's place in [`Agent::all`], which is the order everything about the four is
+    /// listed in: the presets, the drawer's launcher, and the memo below.
+    pub fn index(self) -> usize {
+        match self {
+            Agent::Claude => 0,
+            Agent::OpenCode => 1,
+            Agent::Codex => 2,
+            Agent::Gemini => 3,
+        }
+    }
+
+    /// Whether this agent is installed on this machine.
+    ///
+    /// Asked once for all four and remembered, the same bargain [`crate::preview::has_pandoc`]
+    /// makes: the answer is a walk of every directory on the PATH, the drawer's launcher asks it
+    /// on every frame it is drawn, and a program does not get installed while a screen is up.
+    ///
+    /// It decides only how the name is *drawn* — an agent that is not here is shown dim and said
+    /// to be missing, because the empty launcher is also where you find out what CleeCode knows
+    /// how to run. It never removes a name from the list, and it is never the reason a start
+    /// fails: the shell is the one that gets to say a command was not found.
+    pub fn on_path(self) -> bool {
+        static FOUND: std::sync::OnceLock<[bool; 4]> = std::sync::OnceLock::new();
+        FOUND.get_or_init(|| {
+            let mut found = [false; 4];
+            for agent in Agent::all() {
+                found[agent.index()] =
+                    agent.programs().iter().any(|name| crate::tools::tool(name).is_some());
+            }
+            found
+        })[self.index()]
+    }
+
     /// What to call it on screen.
     pub fn label(self) -> &'static str {
         match self {

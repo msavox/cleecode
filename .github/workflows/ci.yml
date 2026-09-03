@@ -93,7 +93,7 @@ jobs:
           git config --global user.email ci@cleecode.invalid
           git config --global user.name "CleeCode CI"
           git config --global init.defaultBranch master
-      # These seven are the deterministic subset: no Octave, no matplotlib, no display. The rest
+      # These eight are the deterministic subset: no Octave, no matplotlib, no display. The rest
       # (drive_cells, drive_workspace, drive_figures, drive_presets, drive_inspect, drive_debug,
       # drive_python) need real interpreters and stay manual for now — each is its own step so a
       # failure names itself rather than hiding in a combined log.
@@ -110,6 +110,10 @@ jobs:
       # Writes its own animated GIF byte by byte, so it needs no image library and no fixture:
       # what it watches is a pane changing on the file's own clock with nothing pressed.
       - run: python3 scripts/drive_gif.py target/debug/clee
+      # Stubs the agents it needs onto the front of PATH, so it needs no real agent installed —
+      # and on a runner where none of the four is, its "not installed" checks run rather than
+      # skip, which is the half a developer's laptop usually cannot exercise.
+      - run: python3 scripts/drive_drawer.py target/debug/clee
 
   # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
   # Adopting either is a repo-wide change, so it stays a deliberate decision.

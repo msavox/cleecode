@@ -50,6 +50,30 @@ pub struct WorkspaceLayout {
     pub split_pct: u16,
 }
 
+/// What the agent drawer was doing when the workspace was saved.
+///
+/// Every field defaulted, unlike [`WorkspaceLayout`] beside it, and for a reason rather than by
+/// oversight: the layout block predates the file format being hand-edited and its all-required
+/// convention is now what the round-trip test guards. This block is new, so a `[drawer]` written
+/// by hand with the one line somebody meant — `open = true` — has to load.
+///
+/// The agent is stored by its program name (`claude`, `codex`) rather than by a number, because
+/// that is what the file is for: it is the word you would type, and a workspace file is meant to
+/// be readable by whoever opens it in an editor.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct WorkspaceDrawer {
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default = "default_drawer_width")]
+    pub width: u16,
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+fn default_drawer_width() -> u16 {
+    crate::settings::DRAWER_PCT_DEFAULT
+}
+
 /// Scalars first, then the nested tables: TOML rejects a bare value written after a table,
 /// and `save` swallows serialization errors, so the field order here is load-bearing.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -65,6 +89,15 @@ pub struct Workspace {
     #[serde(default)]
     pub active_terminal: usize,
     pub layout: WorkspaceLayout,
+    /// The drawer, when there was one.
+    ///
+    /// It serializes as a table (`[drawer]`), so it belongs down here with `layout` and above
+    /// `terminals` — every scalar is already written by the time TOML reaches it, and the array
+    /// of tables that follows may come after another table. `None` is written as nothing at all,
+    /// which is why a file saved before the drawer existed and a file saved without one are the
+    /// same file.
+    #[serde(default)]
+    pub drawer: Option<WorkspaceDrawer>,
     #[serde(default)]
     pub terminals: Vec<WorkspaceTerminal>,
 }
@@ -165,6 +198,10 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
                 split_view: false,
                 split_pct: 50,
             },
+            // The built-ins say nothing about the drawer: they are about the shape of the window
+            // and the shells in it, and a preset that closed a drawer somebody already had open
+            // would be answering a question it was not asked.
+            drawer: None,
             terminals: Vec::new(),
         },
     })
@@ -234,6 +271,8 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
             split_view: false,
             split_pct: 50,
         },
+        // See the layout preset above: a built-in has no opinion about the drawer.
+        drawer: None,
         terminals,
     }
 }
@@ -280,6 +319,8 @@ fn agent_workspace(agent: crate::session::Agent, shape: &Shape) -> Workspace {
             split_view: false,
             split_pct: 50,
         },
+        // See the layout preset above: a built-in has no opinion about the drawer.
+        drawer: None,
         terminals: vec![WorkspaceTerminal {
             weight: default_weight(),
             active: 0,
@@ -438,6 +479,11 @@ mod tests {
                 split_view: true,
                 split_pct: 60,
             },
+            drawer: Some(WorkspaceDrawer {
+                open: true,
+                width: 45,
+                agent: Some("codex".to_string()),
+            }),
             terminals: vec![
                 WorkspaceTerminal {
                     weight: 1200,
@@ -475,6 +521,42 @@ mod tests {
         assert_eq!(back.terminals[0].tabs[0].startup_command.as_deref(), Some("claude"));
         assert_eq!(back.terminals[1].tabs[1].startup_command.as_deref(), Some("octave"));
         assert_eq!(back.terminals[1].active, 1);
+        // The drawer is a table written between `[layout]` and the `[[terminals]]` array, which
+        // is the placement the ordering rule above is about — a field added anywhere else would
+        // have stopped every workspace from being written, silently.
+        let drawer = back.drawer.expect("the drawer survives the round trip");
+        assert_eq!((drawer.open, drawer.width, drawer.agent.as_deref()), (true, 45, Some("codex")));
+    }
+
+    /// A workspace saved without a drawer writes no `[drawer]` block at all, so files from
+    /// before the drawer existed and files from a session that never opened one are the same
+    /// file — and both load.
+    #[test]
+    fn a_workspace_without_a_drawer_writes_nothing_about_one() {
+        let dir = temp_dir("no-drawer");
+        let mut ws = sample("Plain");
+        ws.drawer = None;
+        let path = save_in(&dir, &ws).expect("must save");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("drawer"), "no empty block is left behind:\n{text}");
+        assert_eq!(load_in(&dir, "Plain").expect("must load back"), ws);
+    }
+
+    /// The `[drawer]` block is hand-editable like the rest of the file: one line of it has to be
+    /// enough. This is why its fields are defaulted where `[layout]`'s are required.
+    #[test]
+    fn a_hand_written_drawer_block_needs_only_the_line_you_meant() {
+        let dir = temp_dir("hand-drawer");
+        let text = "name = \"bare\"\nroot = \"/work/project\"\n\n[layout]\n\
+                    show_sidebar = true\nshow_terminal = true\nshow_menubar = true\n\
+                    sidebar_width = 30\nterminal_pct = 35\nterminal_on_right = false\n\
+                    split_view = false\nsplit_pct = 50\n\n[drawer]\nopen = true\n";
+        std::fs::write(dir.join("bare.toml"), text).unwrap();
+        let ws = load_in(&dir, "bare").expect("a one-line drawer block must load");
+        let drawer = ws.drawer.expect("the block is there");
+        assert!(drawer.open);
+        assert_eq!(drawer.width, crate::settings::DRAWER_PCT_DEFAULT, "the rest defaults");
+        assert_eq!(drawer.agent, None, "and an unnamed drawer opens on the launcher");
     }
 
     #[test]
@@ -742,5 +824,6 @@ mod tests {
         let ws = load_in(&dir, "bare").expect("minimal file must load");
         assert!(ws.open_files.is_empty() && ws.terminals.is_empty());
         assert_eq!(ws.active_terminal, 0);
+        assert!(ws.drawer.is_none(), "a file that says nothing about a drawer describes none");
     }
 }
