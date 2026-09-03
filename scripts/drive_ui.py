@@ -31,6 +31,14 @@ SAMPLE = """fn configure_pipeline() {
 }
 """
 
+# Three lines of equal shape, so a column written down them is obvious in the dump when a check
+# fails, and a fourth that is too short to reach the column the others share.
+COLUMNS = """one alpha
+two beta
+ab
+three gamma
+"""
+
 
 def completion(session, report):
     """The word-completion popup, from opening it to undoing what it wrote."""
@@ -127,6 +135,115 @@ def closing_the_last_tab(binary, root, report):
         session.send("\x1b")
     finally:
         session.close()
+
+
+def typing_in_a_column_selection(binary, report):
+    """A column selection that writes: one key, one character on every line of the block.
+
+    The roadmap's version of multi-cursor — one cursor and one anchor describing a column, rather
+    than a list of independent carets — so what has to be checked from outside is that the column
+    *survives the keystroke*. The unit tests own the rope arithmetic; what they cannot own is the
+    wiring: whether the palette's switch reaches the editor, whether a printable key routed
+    through the app's key handler still finds the block up, and whether Esc gets you out of a mode
+    in which every letter you type happens four times.
+
+    Its own session with its own fixture, whose third line is deliberately too short to reach the
+    column the others share: the rule is that a rectangle over ragged text writes only where there
+    is line to write on, and never pads a short line out with spaces nobody typed.
+
+    And its own project directory, not the shared one. This session is a long one and it ends with
+    an unsaved buffer, which is exactly what the autosave writes a recovery copy of — and the next
+    session started in the same directory would open onto the offer to restore it rather than onto
+    the editor the checks after this one are written against."""
+    root = tempfile.mkdtemp(prefix="clee_columns_")
+    with open(os.path.join(root, "columns.txt"), "w") as handle:
+        handle.write(COLUMNS)
+    session = Session(binary, root)
+    lines = lambda: [session.buffer_line(n) for n in (1, 2, 3, 4)]
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the column-selection session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x0f")                             # Ctrl+O, quick-open
+        session.wait(lambda s: "columns.txt" in s.text(), 8)
+        session.send("columns")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        if not session.wait(lambda s: "three gamma" in s.text(), 8):
+            report.check("the column fixture opens", False, session)
+            return
+
+        # Column 4 on every line — past the end of the short one, which is the interesting part.
+        # Waited on the position the status bar reports rather than on the clock: a rectangle
+        # anchored one column off would still write a column, and every check below would pass
+        # while testing something nobody asked for.
+        at_column_five = session.press("\x1b[C" * 4, lambda s: s.lines()[-1].endswith("1:5"))
+        report.check("the cursor is where the block is about to be anchored", at_column_five,
+                     session, note=session.lines()[-1][-8:])
+        session.send("\x10")                             # Ctrl+P, the palette
+        session.wait(lambda s: "matches" in s.text(), 6)
+        session.send("column sel")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        report.check("the palette reaches column selection",
+                     session.wait(lambda s: "Column selection on" in s.text(), 6), session)
+
+        session.press("\x1b[1;2B" * 3, lambda s: True, 1)  # Shift+Down, down all four lines
+        session.press("#", lambda s: (s.buffer_line(1) or "") == "one #alpha")
+        report.check("one keystroke writes on every line of the block",
+                     lines()[:2] == ["one #alpha", "two #beta"] and lines()[3] == "thre#e gamma",
+                     session, note=str(lines()))
+        report.check("a line too short for the column is left alone, not padded out to it",
+                     lines()[2] == "ab", session, note=repr(lines()[2]))
+
+        # The block now has no width, so there is nothing shaded and one terminal cursor for four
+        # lines. What tells the user their next key happens four times is the column of carets —
+        # read here as cell colour, since that is all it is.
+        row = session.row_of("one #alpha")
+        left = session.full_line(row).index("one #alpha")
+        caret = session.cells(row)[left + 5]
+        plain = session.cells(row)[left + 1]
+        report.check("a caret is drawn at the column the next key would write at",
+                     caret.bg != plain.bg, session, note=f"{caret.bg} against {plain.bg}")
+        short = session.cells(row + 2)[left + 5]        # the "ab" line, two rows down
+        report.check("and no caret on the line that is too short to receive one",
+                     short.bg == plain.bg, session, note=f"{short.bg} against {plain.bg}")
+
+        session.press("12", lambda s: (s.buffer_line(1) or "") == "one #12alpha")
+        report.check("the characters that follow land as a column",
+                     lines() == ["one #12alpha", "two #12beta", "ab", "thre#12e gamma"],
+                     session, note=str(lines()))
+
+        session.press("\x7f", lambda s: (s.buffer_line(1) or "") == "one #1alpha")
+        report.check("Backspace eats one column back on every line",
+                     lines() == ["one #1alpha", "two #1beta", "ab", "thre#1e gamma"],
+                     session, note=str(lines()))
+
+        session.press("\x1a", lambda s: (s.buffer_line(1) or "") == "one #12alpha")
+        report.check("one Ctrl+Z puts back the whole keystroke, all lines of it",
+                     lines() == ["one #12alpha", "two #12beta", "ab", "thre#12e gamma"],
+                     session, note=str(lines()))
+
+        # Out of the mode. The block is drawn as a column of carets and nothing else, so the
+        # thing to check is not the picture but what the next letter does: one line, not two.
+        session.press("\x1b[H", lambda s: True, 1)       # Home, a known column to start from
+        session.send("\x10")
+        session.wait(lambda s: "matches" in s.text(), 6)
+        session.send("column sel")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: "Column selection on" in s.text(), 6)
+        session.press("\x1b[1;2A", lambda s: True, 1)    # Shift+Up: a block over two lines
+        session.press("\x1b", lambda s: True, 1)         # Esc
+        session.press("Q", lambda s: (s.buffer_line(3) or "").startswith("Q"))
+        report.check("Esc drops the block, and typing goes back to one line",
+                     lines() == ["one #12alpha", "two #12beta", "Qab", "thre#12e gamma"],
+                     session, note=str(lines()))
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def a_pane_is_told_what_it_is_talking_to(binary, root, report):
@@ -270,6 +387,7 @@ def main():
         session.close()
 
     try:
+        typing_in_a_column_selection(binary, report)
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)
