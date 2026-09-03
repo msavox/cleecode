@@ -24,7 +24,11 @@ pictures, and the recorder has none.*
 ones written this decade included — line numbers, multi-file tabs,
 undo with coalescing, find and replace, go-to-line, code folding, auto-indent and auto-closing
 brackets. Selection works with the mouse or the keyboard, goes to the system clipboard, and can
-be **rectangular** — `Alt`+drag for a column selection over ragged text.
+be **rectangular** — `Alt`+drag for a column selection over ragged text. A rectangle also
+**writes**: with one up, a printable key puts its character on every line of the block and
+`Backspace` takes one off each, and the column stays where it is for the next key, so a prefix or
+a comment marker goes down twenty lines as fast as you can type it. Lines too short to reach the
+column are left alone rather than padded out to it, and `Esc` drops the block.
 
 `Ctrl+L` splits the editor into two independent editors sharing one pool of buffers: each half
 has its own tabs, no file is in both strips at once, and closing the last tab of a half closes
@@ -369,7 +373,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Alt+Up` / `Alt+Down` | Move the current line up / down |
 | `Alt+Shift+Down` | Duplicate the current line |
 | `Tab` / `Shift+Tab` | Indent / outdent |
-| `Alt`+drag | Column selection (also in the Edit menu, then `Shift`+arrows) |
+| `Alt`+drag | Column selection (also in the Edit menu, then `Shift`+arrows). Typing writes on every line of the block, `Backspace` deletes on every line, `Esc` drops it |
 
 
 In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click

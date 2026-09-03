@@ -7749,6 +7749,10 @@ impl App {
 
     fn select_all(&mut self) {
         let ed = self.editor_mut();
+        // Everything is a run of text, never a rectangle. A column selection left switched on
+        // would otherwise make Select All a block as wide as the last line and as tall as the
+        // file — and then a keystroke would write down the whole of it.
+        ed.selection_block = false;
         ed.selection_anchor = Some((0, 0));
         let last_line = ed.rope.len_lines().saturating_sub(1);
         ed.cursor_line = last_line;
@@ -11812,7 +11816,15 @@ impl App {
             // Puts out the lines the last reload lit in the gutter. Every *edit* does this on
             // its own — see `Editor::mark_edited_from` — which leaves the reader who only wants
             // to look, and Esc is what that reader already presses to dismiss things.
-            KeyCode::Esc => self.editor_mut().forget_arrived_lines(),
+            // …and the selection with them, which is what Esc means everywhere else: never mind.
+            // A column selection makes that the way out of a mode — while one is up every
+            // printable key writes on all of its lines, and the user needs one key that stops it
+            // without moving the cursor or reopening the menu that started it.
+            KeyCode::Esc => {
+                let ed = self.editor_mut();
+                ed.forget_arrived_lines();
+                ed.clear_selection();
+            }
             _ => {}
         }
         self.follow_completion(key, ctrl);

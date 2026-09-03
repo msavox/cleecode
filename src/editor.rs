@@ -371,8 +371,15 @@ impl Editor {
         len
     }
 
+    /// Absolute char index of `(line, col)`, with the column held inside the line it names.
+    ///
+    /// The clamp is not decoration. A column selection keeps one column for every line it covers,
+    /// and a line shorter than that column leaves the cursor sitting past its end — see
+    /// `block_write_span`. Unclamped, the next edit at that position would land somewhere in the
+    /// line *below*, or past the end of the rope, which ropey answers with a panic rather than
+    /// forgiveness.
     fn char_idx(&self, line: usize, col: usize) -> usize {
-        self.rope.line_to_char(line) + col
+        self.rope.line_to_char(line) + col.min(self.line_char_len(line))
     }
 
     /// Normalized (start, end) selection endpoints in document order, or None if empty/absent.
@@ -405,9 +412,14 @@ impl Editor {
     /// end up looking right and copying wrong. Columns past the end of a short line are clipped
     /// rather than padded: a rectangle drawn over ragged text selects only the text that is
     /// there.
+    ///
+    /// In column mode only `block_range` gets a say, including when it has nothing to say: the
+    /// two endpoints of a rectangle with no width are also the ends of a run of text, and read
+    /// that way they would shade — and copy, and cut — everything lying between them.
     pub fn selected_columns(&self, line: usize) -> Option<(usize, usize)> {
         let len = self.line_char_len(line);
-        if let Some((first, last, c0, c1)) = self.block_range() {
+        if self.selection_block {
+            let (first, last, c0, c1) = self.block_range()?;
             if line < first || line > last {
                 return None;
             }
@@ -421,8 +433,50 @@ impl Editor {
         Some((if line == sl { sc } else { 0 }, if line == el { ec } else { len }))
     }
 
+    /// Where a keystroke in column mode writes: `(first line, last line, column)`.
+    ///
+    /// The same answer for both shapes a column selection can have, because typing treats them
+    /// the same way: a rectangle with width loses its cells and the character takes their place
+    /// at the left edge, and a rectangle with none — the state typing itself leaves behind — just
+    /// gets the character at the column it stands on. `None` unless column mode is on with an
+    /// anchor down.
+    ///
+    /// The column can sit past the end of a short line, which is the whole reason `char_idx`
+    /// clamps: one column belongs to the block, not to any one of the lines under it.
+    fn block_write_span(&self) -> Option<(usize, usize, usize)> {
+        if !self.selection_block {
+            return None;
+        }
+        let (anchor_line, anchor_col) = self.selection_anchor?;
+        let (line, col) = (self.cursor_line, self.cursor_col);
+        Some((anchor_line.min(line), anchor_line.max(line), anchor_col.min(col)))
+    }
+
+    /// The column to draw a caret on for `line`, for a column selection with no width.
+    ///
+    /// A rectangle with width shades itself through `selected_columns` and answers `None` here.
+    /// One with no width has nothing to shade and everything to say: it is what typing in a block
+    /// leaves standing, and the next key writes on every line it covers. Without a caret on each
+    /// of them the user is editing N lines while seeing one cursor.
+    ///
+    /// Lines too short to reach the column get no caret, by the same clip-not-pad rule
+    /// `selected_columns` states: they will not receive the character either.
+    pub fn block_caret(&self, line: usize) -> Option<usize> {
+        if self.block_range().is_some() {
+            return None;
+        }
+        let (first, last, col) = self.block_write_span()?;
+        if line < first || line > last {
+            return None;
+        }
+        (self.line_char_len(line) >= col).then_some(col)
+    }
+
     pub fn selected_text(&self) -> Option<String> {
-        if let Some((first, last, _, _)) = self.block_range() {
+        if self.selection_block {
+            // As in `selected_columns`: in column mode a rectangle with no width is nothing
+            // selected, not the run of text its two corners would otherwise describe.
+            let (first, last, _, _) = self.block_range()?;
             // Each row of the rectangle becomes a line, so pasting it elsewhere reproduces the
             // shape — a short line contributes an empty one rather than being skipped.
             let rows: Vec<String> = (first..=last)
@@ -445,6 +499,9 @@ impl Editor {
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
         self.selection_block = false;
+        // The column a block held could be past the end of the line the cursor is on — see
+        // `settle_column`. It belonged to the block, and the block is gone.
+        self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
     }
 
     pub fn start_or_extend_selection(&mut self) {
@@ -530,6 +587,12 @@ impl Editor {
         if self.read_only {
             return false;
         }
+        // A column selection with no width is dropped rather than deleted, so what follows sees
+        // the buffer the way the ordinary keys do: Delete over one takes a character, not the
+        // stretch of text between the block's two corners.
+        if self.selection_block && self.block_range().is_none() {
+            self.clear_selection();
+        }
         if self.selection_range().is_none() && self.block_range().is_none() {
             return false;
         }
@@ -551,10 +614,20 @@ impl Editor {
             }
             self.cursor_line = first;
             self.cursor_col = c0;
-            self.selection_anchor = None;
-            self.selection_block = false;
+            // Through `clear_selection`, which also brings the column back inside the line it
+            // landed on: the block's left edge can be past the end of a short first line.
+            self.clear_selection();
             self.mark_edited();
             return true;
+        }
+        // A column selection with no width has no cells to cut — but its two endpoints are still
+        // a pair of positions, and read as a run of text they span every character between them.
+        // Letting that fall through would make Enter in a three-line block swallow the two lines
+        // under it. So the mode goes here, which is also what the callers want: each of them is
+        // about to write a run of text at one place (a newline, a tab, a paste), and a rectangle
+        // left standing over an edit that is not rectangular belongs to nothing.
+        if self.selection_block {
+            self.clear_selection();
         }
         let Some(((sl, sc), (el, ec))) = self.selection_range() else { return false };
         let start_idx = self.rope.line_to_char(sl) + sc;
@@ -653,6 +726,53 @@ impl Editor {
         self.mark_edited();
     }
 
+    /// Types `ch` into every line of the active column selection, and leaves the block standing
+    /// one column to the right so the next key does it again.
+    ///
+    /// This is the multi-cursor the roadmap asked for in the shape the editor already half had:
+    /// one cursor and one anchor describing a column, rather than a list of independent carets.
+    /// A rectangle with width loses its cells first — the character replaces what was selected,
+    /// exactly as typing over an ordinary selection does.
+    ///
+    /// Lines shorter than the column are skipped, not padded out with spaces to reach it. That is
+    /// the rule `selected_columns` states for reading a rectangle, and it has to be the same rule
+    /// for writing one: a block dragged across ragged text would otherwise fill the short lines
+    /// with trailing whitespace the user never typed, on every keystroke.
+    ///
+    /// One checkpoint for the whole column, so a keystroke costs one snapshot and one Ctrl+Z
+    /// takes back all of the lines it wrote — N nested inserts would push N copies of the file.
+    fn insert_char_block(&mut self, ch: char) {
+        let Some((first, last, col)) = self.block_write_span() else { return };
+        // Nothing reaches the column on any line: no edit, and so no checkpoint either — one
+        // would throw away a redo the user had not touched. Deleting the rectangle first cannot
+        // change this answer, since a line long enough to lose cells at `col` is still long
+        // enough to reach `col` afterwards.
+        if !(first..=last).any(|line| self.line_char_len(line) >= col) {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        self.in_compound = true;
+        if self.block_range().is_some() {
+            // Cuts the rectangle and clears the mode with it; the block is put back below, now
+            // with no width, which is what the caret column left behind is.
+            self.delete_selection_raw();
+        }
+        // Bottom-up, so the lines above keep the offsets they were measured at.
+        for line in (first..=last).rev() {
+            if self.line_char_len(line) >= col {
+                let idx = self.rope.line_to_char(line) + col;
+                self.rope.insert_char(idx, ch);
+            }
+        }
+        self.in_compound = false;
+        self.last_edit = EditKind::Other;
+        self.selection_block = true;
+        self.selection_anchor = Some((first, col + 1));
+        self.cursor_line = last;
+        self.cursor_col = col + 1;
+        self.mark_edited_from(first);
+    }
+
     fn char_before_cursor(&self) -> Option<char> {
         let idx = self.cursor_char_idx();
         if idx == 0 {
@@ -671,6 +791,13 @@ impl Editor {
     /// bracket right before the matching one steps over it instead of inserting a duplicate.
     pub fn insert_char_pairs(&mut self, ch: char, auto_pairs: bool) {
         if self.read_only {
+            return;
+        }
+        // A column selection writes on every line it covers, and it does it without pairing:
+        // one `(` typed into a block of eight lines is eight brackets and eight closers to step
+        // back over, which is not what anybody meant by typing one character.
+        if self.selection_block && self.selection_anchor.is_some() {
+            self.insert_char_block(ch);
             return;
         }
         if !auto_pairs || self.selection_range().is_some() {
@@ -795,8 +922,62 @@ impl Editor {
         self.mark_edited();
     }
 
+    /// Backspace over an active column selection: the counterpart of `insert_char_block`.
+    ///
+    /// A rectangle with width loses its cells, exactly as it always has; what is new is what it
+    /// leaves behind — the block, now with no width, standing on the same lines at the left edge,
+    /// so a Backspace and a keystroke go on meaning the same column. A rectangle with no width
+    /// takes the character in front of the column off every line that has one, and steps the
+    /// whole block back with it.
+    ///
+    /// Answers whether it handled the key, so `backspace` can carry on with the ordinary one.
+    fn backspace_block(&mut self) -> bool {
+        let Some((first, last, col)) = self.block_write_span() else { return false };
+        if self.block_range().is_some() {
+            self.checkpoint(EditKind::Other);
+            self.in_compound = true;
+            self.delete_selection_raw();
+            self.in_compound = false;
+            self.last_edit = EditKind::Other;
+            self.selection_block = true;
+            self.selection_anchor = Some((first, col));
+            self.cursor_line = last;
+            self.cursor_col = col;
+            self.mark_edited_from(first);
+            return true;
+        }
+        // At column zero there is nothing in front to take. The key is still the block's — it
+        // must not fall through and start joining lines together, which is what a Backspace at
+        // the start of a line does.
+        if col == 0 {
+            return true;
+        }
+        // A line reaching the column has a character at `col - 1`; a shorter one has nothing
+        // under the block at all, and is left alone. Same rule, same reason, as writing.
+        let lines: Vec<usize> = (first..=last).filter(|&line| self.line_char_len(line) >= col).collect();
+        if lines.is_empty() {
+            return true;
+        }
+        self.checkpoint(EditKind::Other);
+        self.in_compound = true;
+        for &line in lines.iter().rev() {
+            let idx = self.rope.line_to_char(line) + col;
+            self.rope.remove(idx - 1..idx);
+        }
+        self.in_compound = false;
+        self.last_edit = EditKind::Other;
+        self.selection_anchor = Some((first, col - 1));
+        self.cursor_line = last;
+        self.cursor_col = col - 1;
+        self.mark_edited_from(first);
+        true
+    }
+
     pub fn backspace(&mut self) {
         if self.read_only {
+            return;
+        }
+        if self.selection_block && self.selection_anchor.is_some() && self.backspace_block() {
             return;
         }
         if self.delete_selection() {
@@ -989,10 +1170,26 @@ impl Editor {
         self.clamp_out_of_folds();
     }
 
+    /// Settles the column after a vertical move: back inside the line the cursor landed on —
+    /// unless a column selection is up, which owns the column for as long as it lasts.
+    ///
+    /// Without the exception a rectangle dragged down through ragged text collapses onto the
+    /// width of the shortest line it passes, and never widens again: there is no goal column to
+    /// widen back to, only the one the clamp left. It would also make the clip-not-pad rule of
+    /// `selected_columns` unreachable from the keyboard, since no block could ever hold a column
+    /// past the end of one of its own lines. Everything that reads the cursor while a block is up
+    /// clips for itself — `selected_columns`, `insert_char_block`, `char_idx` — and
+    /// `clear_selection` brings the cursor back inside its line on the way out of the mode.
+    fn settle_column(&mut self) {
+        if !self.selection_block {
+            self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        }
+    }
+
     pub fn move_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+            self.settle_column();
         }
         self.clamp_out_of_folds();
     }
@@ -1000,7 +1197,7 @@ impl Editor {
     pub fn move_down(&mut self) {
         if self.cursor_line + 1 < self.rope.len_lines() {
             self.cursor_line += 1;
-            self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+            self.settle_column();
         }
         self.clamp_out_of_folds();
     }
@@ -1015,21 +1212,21 @@ impl Editor {
 
     pub fn page_up(&mut self, page: usize) {
         self.cursor_line = self.cursor_line.saturating_sub(page);
-        self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        self.settle_column();
         self.clamp_out_of_folds();
     }
 
     pub fn page_down(&mut self, page: usize) {
         let max_line = self.rope.len_lines().saturating_sub(1);
         self.cursor_line = (self.cursor_line + page).min(max_line);
-        self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        self.settle_column();
         self.clamp_out_of_folds();
     }
 
     // ---- Word-wise motion & deletion ------------------------------------------------
 
     fn cursor_char_idx(&self) -> usize {
-        self.rope.line_to_char(self.cursor_line) + self.cursor_col
+        self.char_idx(self.cursor_line, self.cursor_col)
     }
 
     fn set_cursor_char_idx(&mut self, idx: usize) {
@@ -2320,6 +2517,171 @@ mod tests {
         ed.selection_anchor = Some((0, 4));
         assert_eq!(ed.block_range(), None);
         assert_eq!(ed.selected_text(), None);
+    }
+
+    /// Puts a column selection on lines `first..=last` between columns `c0` and `c1`, the way a
+    /// drag with Alt or the Edit menu and Shift+arrows would leave it. `c0 == c1` is the caret
+    /// column typing leaves behind.
+    fn block(ed: &mut Editor, first: usize, last: usize, c0: usize, c1: usize) {
+        ed.selection_block = true;
+        ed.selection_anchor = Some((first, c0));
+        ed.cursor_line = last;
+        ed.cursor_col = c1;
+    }
+
+    /// The whole point of the feature: one key, one character on every line of the block — and
+    /// the block still there afterwards, one column along, so the next key does it again. A line
+    /// too short to reach the column is skipped rather than padded out to it, which is the rule
+    /// `selected_columns` already states for reading a rectangle.
+    #[test]
+    fn typing_in_a_column_selection_writes_on_every_line_it_covers() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nGH\nijklmn");
+        block(&mut ed, 0, 2, 4, 4);
+
+        ed.insert_char_pairs('X', true);
+        assert_eq!(ed.rope.to_string(), "abcdXef\nGH\nijklXmn", "GH cannot reach column 4");
+        assert!(ed.selection_block, "the column outlives the keystroke, or it is not a column");
+        assert_eq!(ed.selection_anchor, Some((0, 5)));
+        assert_eq!((ed.cursor_line, ed.cursor_col), (2, 5));
+
+        // And again, without touching anything in between: the second character lands under the
+        // first on every line, which is what makes it a column and not three separate edits.
+        ed.insert_char_pairs('Y', true);
+        assert_eq!(ed.rope.to_string(), "abcdXYef\nGH\nijklXYmn");
+
+        // One Ctrl+Z per keystroke, not one per line.
+        assert!(ed.undo());
+        assert_eq!(ed.rope.to_string(), "abcdXef\nGH\nijklXmn");
+        assert!(ed.undo());
+        assert_eq!(ed.rope.to_string(), "abcdef\nGH\nijklmn");
+        assert!(ed.redo());
+        assert_eq!(ed.rope.to_string(), "abcdXef\nGH\nijklXmn");
+    }
+
+    /// A block dragged down through a short line keeps its column. Clamped to the shortest line
+    /// it passed it would collapse — permanently, since nothing remembers where it was — and the
+    /// rule that a short line is skipped would describe a state no keyboard could reach.
+    #[test]
+    fn a_column_selection_keeps_its_column_across_a_line_too_short_for_it() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdefgh\nGH\nijklmnop");
+        block(&mut ed, 0, 0, 4, 4);
+        ed.move_down();
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 4), "the column belongs to the block");
+        ed.move_down();
+        assert_eq!((ed.cursor_line, ed.cursor_col), (2, 4));
+        ed.insert_char_pairs('|', true);
+        assert_eq!(ed.rope.to_string(), "abcd|efgh\nGH\nijkl|mnop");
+
+        // Leaving the mode hands the column back to the line the cursor is on.
+        ed.cursor_line = 1;
+        ed.clear_selection();
+        assert_eq!(ed.cursor_col, 2);
+
+        // And without a block, a vertical move clamps exactly as it always has.
+        ed.cursor_line = 0;
+        ed.cursor_col = 6;
+        ed.move_down();
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 2));
+    }
+
+    /// Typing over a rectangle that has width replaces it, the way typing over any selection
+    /// does — and what is left standing is the caret column, ready for the next character.
+    #[test]
+    fn typing_over_a_rectangle_replaces_it_and_goes_on_as_a_column() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nghijkl");
+        block(&mut ed, 0, 1, 2, 4);
+
+        ed.insert_char_pairs('Z', true);
+        assert_eq!(ed.rope.to_string(), "abZef\nghZkl");
+        assert_eq!(ed.block_range(), None, "the rectangle spent itself; the column remains");
+        assert_eq!(ed.block_caret(0), Some(3));
+        assert_eq!(ed.block_caret(1), Some(3));
+
+        ed.insert_char_pairs('W', true);
+        assert_eq!(ed.rope.to_string(), "abZWef\nghZWkl");
+        assert!(ed.undo());
+        assert_eq!(ed.rope.to_string(), "abZef\nghZkl", "the replacement is one step of its own");
+    }
+
+    /// A bracket typed into a block is one bracket per line and nothing else. Pairing eight
+    /// closers nobody asked for, on eight lines, is not what one keystroke should mean.
+    #[test]
+    fn a_column_selection_does_not_auto_pair() {
+        let mut ed = Editor::empty();
+        ed.insert_str("ab\ncd");
+        block(&mut ed, 0, 1, 2, 2);
+        ed.insert_char_pairs('(', true);
+        assert_eq!(ed.rope.to_string(), "ab(\ncd(");
+    }
+
+    /// Backspace is the same key on a column as on a line: it takes the character in front of
+    /// the caret — of every caret. A rectangle with width loses its cells instead, and leaves the
+    /// column standing at its left edge so the next key still means all of these lines.
+    #[test]
+    fn backspace_in_a_column_selection_eats_one_column_from_every_line() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nGH\nijklmn");
+        block(&mut ed, 0, 2, 4, 4);
+
+        ed.backspace();
+        assert_eq!(ed.rope.to_string(), "abcef\nGH\nijkmn", "GH has nothing under the column");
+        assert_eq!(ed.selection_anchor, Some((0, 3)));
+        assert_eq!((ed.cursor_line, ed.cursor_col), (2, 3));
+        assert!(ed.undo());
+        assert_eq!(ed.rope.to_string(), "abcdef\nGH\nijklmn", "one step for the whole column");
+
+        // At column zero there is nothing in front. The key stays the block's rather than
+        // falling through and joining the lines together.
+        block(&mut ed, 0, 2, 0, 0);
+        ed.backspace();
+        assert_eq!(ed.rope.to_string(), "abcdef\nGH\nijklmn");
+        assert!(ed.selection_block);
+
+        block(&mut ed, 0, 1, 2, 4);
+        ed.backspace();
+        assert_eq!(ed.rope.to_string(), "abef\nGH\nijklmn");
+        assert!(ed.selection_block, "the rectangle goes, the column stays");
+        assert_eq!(ed.block_caret(0), Some(2));
+        // A line whose end *is* the column is not too short for it: the character goes on the
+        // end, which is where the column points.
+        ed.insert_char_pairs('!', true);
+        assert_eq!(ed.rope.to_string(), "ab!ef\nGH!\nijklmn");
+    }
+
+    /// The caret column is drawn only where the next keystroke will actually write, and never
+    /// under a rectangle that has width — that one shades itself.
+    #[test]
+    fn the_caret_column_is_drawn_where_the_next_key_would_write() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nGH\nijklmn");
+        block(&mut ed, 0, 2, 4, 4);
+        assert_eq!(ed.block_caret(0), Some(4));
+        assert_eq!(ed.block_caret(1), None, "GH does not reach column 4, so nothing will land");
+        assert_eq!(ed.block_caret(2), Some(4));
+
+        block(&mut ed, 0, 1, 2, 4);
+        assert_eq!(ed.block_caret(0), None, "a rectangle with width is shown as a selection");
+        ed.clear_selection();
+        assert_eq!(ed.block_caret(0), None, "and nothing at all is shown without the mode");
+    }
+
+    /// A column selection with no width has two endpoints, and read as an ordinary selection they
+    /// span every character between them. Enter, Tab and a paste all delete the selection before
+    /// they write: read the wrong way, one of them would swallow the lines under the block.
+    #[test]
+    fn a_widthless_column_selection_is_never_read_as_a_run_of_text() {
+        let mut ed = Editor::empty();
+        ed.insert_str("abcdef\nghijkl\nmnopqr");
+        block(&mut ed, 0, 2, 3, 3);
+        assert_eq!(ed.selected_text(), None);
+        assert_eq!(ed.selected_columns(1), None);
+
+        ed.insert_newline(false);
+        assert_eq!(ed.rope.to_string(), "abcdef\nghijkl\nmno\npqr", "only a newline, at the caret");
+        assert!(!ed.selection_block, "and the mode is dropped, since a newline is not a column");
     }
 
     /// The ordinary selection has to keep behaving exactly as before, since both now go through

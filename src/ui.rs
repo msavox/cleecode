@@ -3308,6 +3308,21 @@ fn highlight_selection(pal: Palette, spans: Vec<(Style, String)>, sel_from: usiz
     restyle_range(spans, sel_from, sel_to, |style| style.bg(pal.selection))
 }
 
+/// One cell of a line marked as the caret of a column selection that has no width.
+///
+/// The selection's own colour, because that is what it is: a selection one character wide, on
+/// every line the block covers. The blank is there for the common case — a block standing at the
+/// end of its lines, where the column the next keystroke writes at has no character under it yet
+/// and `restyle_range` would have nothing to colour.
+fn block_caret_mark(pal: Palette, spans: Vec<(Style, String)>, col: usize) -> Vec<(Style, String)> {
+    let mut spans = spans;
+    let width: usize = spans.iter().map(|(_, text)| text.chars().count()).sum();
+    if col >= width {
+        spans.push((Style::default(), " ".repeat(col + 1 - width)));
+    }
+    restyle_range(spans, col, col + 1, |style| style.bg(pal.selection))
+}
+
 pub fn severity_colour(pal: Palette, severity: crate::lsp::Severity) -> Color {
     match severity {
         crate::lsp::Severity::Error => pal.danger,
@@ -4179,6 +4194,14 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         // matches what a copy would take.
         let raw_spans = match app.editors[idx].selected_columns(line_idx) {
             Some((from, to)) => highlight_selection(pal, raw_spans, from, to),
+            None => raw_spans,
+        };
+        // The column of carets a rectangle with no width leaves standing: what typing in a block
+        // produces, and what says the next key will write on all of these lines at once. There is
+        // one terminal cursor and it can only be in one place, so this is the only thing telling
+        // the user their keystroke is about to happen eight times.
+        let raw_spans = match app.editors[idx].block_caret(line_idx) {
+            Some(col) => block_caret_mark(pal, raw_spans, col),
             None => raw_spans,
         };
 
