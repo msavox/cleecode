@@ -151,6 +151,11 @@ pub enum Key {
     SettingPlotsNoDisplay,
     SettingPlotsTabs,
     SettingPlotsWindows,
+    /// The agent drawer's two modes. The values name what each one does to the rest of the
+    /// screen, because that is the whole of the difference between them.
+    SettingDrawerMode,
+    SettingDrawerPinned,
+    SettingDrawerAutocollapse,
     SettingSplash,
     SettingMouseEnabled,
     SettingLanguage,
@@ -598,6 +603,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, SettingPlotsWindows) => "the interpreter's own windows",
         (Lang::It, SettingPlotsWindows) => "finestre dell'interprete",
 
+        (Lang::En, SettingDrawerMode) => "Agent drawer",
+        (Lang::It, SettingDrawerMode) => "Cassetto agente",
+        (Lang::En, SettingDrawerPinned) => "pinned, part of the layout",
+        (Lang::It, SettingDrawerPinned) => "fisso, parte del layout",
+        (Lang::En, SettingDrawerAutocollapse) => "autocollapse, over the frames",
+        (Lang::It, SettingDrawerAutocollapse) => "a scomparsa, sopra i frame",
         (Lang::En, SettingSplash) => "Splash screen at startup",
         (Lang::It, SettingSplash) => "Schermata iniziale all'avvio",
 
@@ -1932,6 +1943,23 @@ pub fn msg_drawer_agent_ended(lang: Lang, agent: &str) -> String {
     match lang {
         Lang::En => format!("{agent} has ended — the drawer is back to the list"),
         Lang::It => format!("{agent} è terminato — il cassetto torna alla lista"),
+    }
+}
+
+/// Said the moment one of the four agent presets opens — `clee -w claude` and its three
+/// siblings. They still work this release, and this is the release that says out loud that they
+/// will not work in every one after it: the drawer is the agent surface now, and a published
+/// command kept alive forever as an alias for a feature that replaced it is a promise gone bad
+/// rather than a promise kept. Three facts, one line: it is deprecated, what to press instead,
+/// and that the name is going.
+pub fn msg_agent_preset_deprecated(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!(
+            "clee -w {name} is deprecated — Ctrl+Shift+A opens the agent drawer; this name goes in a future release"
+        ),
+        Lang::It => format!(
+            "clee -w {name} è deprecato — Ctrl+Shift+A apre il cassetto agente; questo nome sparirà in una release futura"
+        ),
     }
 }
 

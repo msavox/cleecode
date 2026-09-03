@@ -146,19 +146,29 @@ pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 
 ![CleeCode main view](docs/screenshots/main.png)
 
-**Your coding agent, inside the editor.** `clee -w claude`, `clee -w opencode`, `clee -w codex` or
-`clee -w gemini` opens the editor with the agent running in one terminal tab and a plain shell in
-the next. The agent is the TUI you already have, with the subscription you already pay for —
+**Your coding agent, inside the editor.** `Ctrl+Shift+A` opens the agent drawer: a panel down the
+right of the window, in whatever you were already doing. Empty, it is the list — claude, codex,
+opencode, gemini, each one drawn large, arrows and Enter to start it, the ones you do not have
+shown anyway and dimmed so the empty drawer is also where you find out what CleeCode runs. It is
+pinned by default, a column of the layout that everything makes room for; set it to autocollapse
+in the settings and it paints itself over the frames instead, withdrawing the moment the keyboard
+goes back to your work and returning on the same key. Dismissing it is not killing it: the agent
+goes on running and the conversation is where you left it, through workspace switches included.
+The agent is the TUI you already have, with the subscription you already pay for —
 CleeCode holds no API key and rebuilds no chat. Subscription login and API keys both work,
 because the editor is agnostic by construction: the agent in the pane is the real CLI and
 authenticates itself, with the login or the key it finds in your environment — CleeCode never
-asks for, stores, or sees a credential of any kind. `Ctrl+Shift+A` writes where you are at the
-agent's prompt — selection, diagnostic or cursor line, as `path:line` — and never presses Enter
-for you; it finds the agent even where the process table calls it `node`, which is what a
-`claude` installed from npm runs as. The files the agent rewrites reload on their own, the new
-lines lit in the gutter until you type again; follow mode (*View → Follow edits made outside*,
-off until you ask) opens the files you did not have open beside your work, without ever taking
-the keyboard.
+asks for, stores, or sees a credential of any kind. That same `Ctrl+Shift+A`, once an agent is
+running, writes where you are at its prompt — selection, diagnostic or cursor line, as
+`path:line` — and never presses Enter for you; it finds the agent even where the process table
+calls it `node`, which is what a `claude` installed from npm runs as. The files the agent
+rewrites reload on their own, the new lines lit in the gutter until you type again; follow mode
+(*View → Follow edits made outside*, off until you ask) opens the files you did not have open
+beside your work, without ever taking the keyboard.
+
+The four `clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` presets still
+open, and are deprecated: the drawer does what they were for, from any workspace, and those names
+go away in a future release.
 
 The editor can also answer the agent's questions. `clee --mcp` makes it an MCP server with four
 read-only tools — the open files, the selection, the diagnostics, and `open_file`, which shows

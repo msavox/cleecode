@@ -21,9 +21,27 @@ pub struct Areas {
     pub sidebar: Option<Rect>,
     pub editor: Rect,
     pub terminals: Option<Vec<Rect>>,
-    /// The agent drawer's column, when it is open. Always the rightmost thing in the window.
+    /// The agent drawer's column, when it is open **and pinned**. Always the rightmost thing in
+    /// the window, and carved out of the main area before anything else is placed, so no other
+    /// frame's rect ever overlaps it.
     pub drawer: Option<Rect>,
+    /// The same rectangle when the drawer is open and set to autocollapse: painted over the
+    /// frames rather than taken out of them, so it is *not* subtracted from anything above and
+    /// every other rect here is exactly what it would be with no drawer at all.
+    ///
+    /// Two fields rather than one plus a flag because the difference is what the rest of the
+    /// layout means: `drawer` is a region nobody else owns, `drawer_overlay` is a region
+    /// somebody else also owns and the drawer is simply on top of. Code that must not be fooled
+    /// by the overlay (the terminal seam's arithmetic, which is a percentage of what the drawer
+    /// left) reads `drawer`; code about what is on screen reads [`drawer_rect`].
+    pub drawer_overlay: Option<Rect>,
     pub status: Rect,
+}
+
+/// Where the drawer is on screen right now, in whichever mode it is in — the one question the
+/// mouse asks, since a click lands on what it can see and not on what owns the cells.
+pub fn drawer_rect(areas: &Areas) -> Option<Rect> {
+    areas.drawer.or(areas.drawer_overlay)
 }
 
 pub struct LayoutParams {
@@ -44,6 +62,9 @@ pub struct LayoutParams {
     pub drawer_open: bool,
     /// Its share of the window, as a percentage. See `settings::drawer_pct`.
     pub drawer_pct: u16,
+    /// Whether it is part of the layout (pinned) or painted over it (autocollapse). See
+    /// `settings::drawer_pinned` for why the mode and the compositing are one setting.
+    pub drawer_pinned: bool,
 }
 
 impl LayoutParams {
@@ -59,6 +80,7 @@ impl LayoutParams {
             terminal_on_right: app.settings.terminal_on_right,
             drawer_open: app.drawer.as_ref().is_some_and(|d| d.open),
             drawer_pct: app.settings.drawer_pct,
+            drawer_pinned: app.settings.drawer_pinned,
         }
     }
 }
@@ -72,6 +94,21 @@ fn terminal_panes(area: Rect, weights: &[u16], direction: Direction) -> Vec<Rect
         weights.iter().map(|&w| Constraint::Fill(w.max(1))).collect()
     };
     Layout::default().direction(direction).constraints(constraints).split(area).to_vec()
+}
+
+/// Splits the main area into (what is left of it, the drawer's rectangle).
+///
+/// One function for both modes, and therefore for drawing and for hit testing alike: the pinned
+/// column and the autocollapsed overlay are the same rectangle, and the only thing the mode
+/// decides is whether the first half of this pair is handed to everybody else or thrown away.
+/// Two copies of this arithmetic would be two chances for a click to land a column off the
+/// border it can see.
+fn drawer_split(main: Rect, pct: u16) -> (Rect, Rect) {
+    let h = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(100 - pct), Constraint::Percentage(pct)])
+        .split(main);
+    (h[0], h[1])
 }
 
 pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
@@ -94,17 +131,19 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     // takes its share of what the drawer left, which is what "the drawer is part of the layout
     // and everything makes room for it" means in arithmetic. This is the pinned mode's whole
     // cost: opening the drawer resizes the frames, and every pty in them gets a SIGWINCH.
-    let (main_area, drawer) = if p.drawer_open {
-        let h = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(100 - p.drawer_pct),
-                Constraint::Percentage(p.drawer_pct),
-            ])
-            .split(main_area);
-        (h[0], Some(h[1]))
+    //
+    // In autocollapse the carve does not happen at all — that is the point of the mode. The
+    // rectangle is the same one either way, so the drawer does not shift under the eye when the
+    // setting changes; what changes is whether anything else was moved out of its way.
+    let (main_area, drawer, drawer_overlay) = if p.drawer_open {
+        let (rest, column) = drawer_split(main_area, p.drawer_pct);
+        if p.drawer_pinned {
+            (rest, Some(column), None)
+        } else {
+            (main_area, None, Some(column))
+        }
     } else {
-        (main_area, None)
+        (main_area, None, None)
     };
 
     if p.terminal_on_right {
@@ -126,7 +165,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         } else {
             (rest, None)
         };
-        Areas { menu_bar, sidebar, editor, terminals, drawer, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, status }
     } else {
         let (main_top, terminals) = if p.show_terminal {
             let v = Layout::default()
@@ -148,7 +187,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
             (None, main_top)
         };
 
-        Areas { menu_bar, sidebar, editor, terminals, drawer, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, status }
     }
 }
 
@@ -992,6 +1031,19 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     // it covers is anything else's.
     if let Some(drawer_area) = areas.drawer {
         draw_drawer(f, app, drawer_area);
+    }
+
+    // And the other mode: cells painted over frames that were never told anything happened, the
+    // way the git panel goes over the editor. `Clear` first, because what is underneath is a
+    // real editor and real panes still drawn at their full width — the whole saving is that
+    // nothing under here was resized, so nothing under here sent a `SIGWINCH`.
+    //
+    // Above the panes and below every modal, which is the same place the completion popup and
+    // the git panel sit: the drawer is a frame, and a box that takes the keyboard is entitled to
+    // cover it.
+    if let Some(overlay) = areas.drawer_overlay {
+        f.render_widget(Clear, overlay);
+        draw_drawer(f, app, overlay);
     }
 
     draw_status(f, app, areas.status);
@@ -5723,7 +5775,7 @@ mod tests {
     #[test]
     fn the_drawer_takes_its_column_off_the_right_and_the_rest_makes_room() {
         let full = Rect::new(0, 0, 200, 40);
-        let params = |drawer_open, terminal_on_right| LayoutParams {
+        let params = |drawer_open, terminal_on_right, drawer_pinned| LayoutParams {
             show_sidebar: true,
             show_terminal: true,
             show_menubar: true,
@@ -5734,11 +5786,12 @@ mod tests {
             terminal_on_right,
             drawer_open,
             drawer_pct: 40,
+            drawer_pinned,
         };
 
         for on_right in [false, true] {
-            let closed = compute_layout(full, &params(false, on_right));
-            let open = compute_layout(full, &params(true, on_right));
+            let closed = compute_layout(full, &params(false, on_right, true));
+            let open = compute_layout(full, &params(true, on_right, true));
             let drawer = open.drawer.expect("an open drawer has a column");
             assert!(closed.drawer.is_none(), "and a closed one has none");
 
@@ -5757,6 +5810,58 @@ mod tests {
                 assert!(rect.x + rect.width <= drawer.x, "so does every terminal window");
             }
             assert!(open.editor.width < closed.editor.width, "the editor gave up the room");
+            assert!(open.drawer_overlay.is_none(), "a pinned drawer is never an overlay");
+        }
+    }
+
+    /// The other mode, in both arrangements: the same rectangle, and nothing else moved.
+    ///
+    /// The point of autocollapse is what it does *not* do. Every rect here has to come out
+    /// identical to the closed-drawer layout, because a rect that changed is a pane that was
+    /// resized and a pane that was resized is a `SIGWINCH` to the pty inside it — which is the
+    /// whole cost the mode exists to avoid. And it has to be the same rectangle the pinned mode
+    /// carves, or the drawer would jump sideways when the setting is changed.
+    #[test]
+    fn an_autocollapsing_drawer_is_painted_over_a_layout_that_never_heard_about_it() {
+        let full = Rect::new(0, 0, 200, 40);
+        let params = |drawer_open, terminal_on_right, drawer_pinned| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            menu_active: false,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right,
+            drawer_open,
+            drawer_pct: 40,
+            drawer_pinned,
+        };
+
+        for on_right in [false, true] {
+            let closed = compute_layout(full, &params(false, on_right, false));
+            let over = compute_layout(full, &params(true, on_right, false));
+            let pinned = compute_layout(full, &params(true, on_right, true));
+
+            let overlay = over.drawer_overlay.expect("an open unpinned drawer is an overlay");
+            assert!(over.drawer.is_none(), "and it is not a column of the layout");
+            assert_eq!(
+                Some(overlay),
+                pinned.drawer,
+                "the same rectangle in both modes: the drawer does not move, what is under it does"
+            );
+            assert_eq!(overlay.x + overlay.width, full.width, "flush with the window's right edge");
+            assert_eq!(overlay.y, 1);
+            assert_eq!(overlay.height, full.height - 2, "the full height of the main area");
+
+            // Nothing made room. This is the assertion the mode is for.
+            assert_eq!(over.editor, closed.editor, "the editor was not resized");
+            assert_eq!(over.sidebar, closed.sidebar);
+            assert_eq!(over.terminals, closed.terminals, "and neither was any pty's pane");
+            assert!(
+                over.editor.x + over.editor.width > overlay.x,
+                "the frames run on underneath it, which is what makes this a repaint and not a reflow"
+            );
         }
     }
 
@@ -5807,6 +5912,7 @@ mod tests {
             terminal_on_right: false,
             drawer_open: false,
             drawer_pct: crate::settings::DRAWER_PCT_DEFAULT,
+            drawer_pinned: true,
         };
 
         assert_eq!(compute_layout(full, &params(false, false)).menu_bar.height, 0, "hidden and idle");

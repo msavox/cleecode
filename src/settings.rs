@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 15;
+pub const SETTINGS_COUNT: usize = 16;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -64,6 +64,23 @@ pub struct Settings {
     /// longer means anything costs the highlight and nothing else.
     #[serde(default)]
     pub drawer_agent: String,
+    /// Whether the drawer is pinned — a column of the layout, with every other frame making room
+    /// for it — or autocollapses, painted over the frames and gone again the moment the focus
+    /// leaves it.
+    ///
+    /// The mode and the compositing are one setting rather than two because the driver is
+    /// technical and not decorative: carving a column resizes every frame, and a resized frame is
+    /// a `SIGWINCH` to the pty inside it — an interpreter and every TUI in a pane redraw whole,
+    /// twice per summoning. Painting cells over the top is what the git panel already does, and
+    /// it touches no pty at all. So pinned reflows, because it is part of the layout and the
+    /// layout is what everything else is measured against; autocollapse overlays, because a
+    /// question asked in passing must not cost half the screen a repaint on the way out and
+    /// another on the way back.
+    ///
+    /// Pinned by default: a panel that moves by itself is a surprise until it is the one you
+    /// asked for.
+    #[serde(default = "default_drawer_pinned")]
+    pub drawer_pinned: bool,
     // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
     // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
@@ -302,6 +319,10 @@ fn default_drawer_pct() -> u16 {
     DRAWER_PCT_DEFAULT
 }
 
+fn default_drawer_pinned() -> bool {
+    true
+}
+
 fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
@@ -389,6 +410,7 @@ impl Default for Settings {
             split_pct: default_split_pct(),
             drawer_pct: default_drawer_pct(),
             drawer_agent: String::new(),
+            drawer_pinned: default_drawer_pinned(),
             show_menubar: true,
             show_md_toolbar: true,
             run_commands: default_run_commands(),
@@ -776,6 +798,32 @@ mod tests {
         }
     }
 
+    /// The drawer's row reads out which of its two modes it is in, in both languages, and
+    /// picking it moves between them. Pinned is the default, and that is the decision: a panel
+    /// that moves by itself is a surprise until it is the one you asked for.
+    #[test]
+    fn the_drawer_row_says_which_mode_it_is_in() {
+        assert!(Settings::default().drawer_pinned, "pinned until asked otherwise");
+        for lang in [Lang::En, Lang::It] {
+            let mut settings = Settings { lang, ..Settings::default() };
+            // Found by its label rather than by a number written here: `activate` is a match on
+            // the index, and the point of the test is that the row and the arm are the same row.
+            let label = i18n::t(lang, Key::SettingDrawerMode);
+            let idx = settings
+                .rows()
+                .iter()
+                .position(|r| r.label == label)
+                .expect("the drawer's mode has a row");
+            let value = |s: &Settings| s.rows()[idx].value.clone();
+            assert_eq!(value(&settings), i18n::t(lang, Key::SettingDrawerPinned));
+            settings.activate(idx);
+            assert!(!settings.drawer_pinned);
+            assert_eq!(value(&settings), i18n::t(lang, Key::SettingDrawerAutocollapse));
+            settings.activate(idx);
+            assert_eq!(value(&settings), i18n::t(lang, Key::SettingDrawerPinned), "two states, a ring");
+        }
+    }
+
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
     /// The modal is sized from `SETTINGS_COUNT` and the cursor wraps on it, so a row past that
@@ -1059,6 +1107,17 @@ fn plots_value(lang: i18n::Lang, in_tabs: bool, can_open_a_window: bool) -> Stri
     i18n::t(lang, if in_tabs { Key::SettingPlotsTabs } else { Key::SettingPlotsWindows }).to_string()
 }
 
+/// What the agent drawer's row reads: which of its two modes it is in.
+///
+/// A value row rather than an on/off one, for the reason the plot row is: neither state is the
+/// absence of the other, so a switch labelled with one of the two names would leave the reader
+/// guessing what "off" is. Each name says what it does to the rest of the screen, which is the
+/// only difference between them a user can see.
+fn drawer_mode_value(lang: i18n::Lang, pinned: bool) -> String {
+    i18n::t(lang, if pinned { Key::SettingDrawerPinned } else { Key::SettingDrawerAutocollapse })
+        .to_string()
+}
+
 pub struct SettingRow {
     pub label: &'static str,
     pub value: String,
@@ -1093,6 +1152,10 @@ impl Settings {
                 label: i18n::t(lang, Key::SettingPlotsInTabs),
                 value: plots_value(lang, self.plots_in_tabs, crate::wsnap::can_open_a_window()),
             },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingDrawerMode),
+                value: drawer_mode_value(lang, self.drawer_pinned),
+            },
             SettingRow { label: i18n::t(lang, Key::SettingSplash), value: b(self.show_splash) },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
@@ -1122,9 +1185,13 @@ impl Settings {
                     self.plots_in_tabs = !self.plots_in_tabs;
                 }
             }
-            12 => self.show_splash = !self.show_splash,
-            13 => self.mouse_enabled = !self.mouse_enabled,
-            14 => self.lang = self.lang.next(),
+            // Two states, so picking the row is cycling the pair. Nothing is touched but the
+            // flag: the mode changes what the next frame is laid out as, and the pty in the
+            // drawer never hears about it.
+            12 => self.drawer_pinned = !self.drawer_pinned,
+            13 => self.show_splash = !self.show_splash,
+            14 => self.mouse_enabled = !self.mouse_enabled,
+            15 => self.lang = self.lang.next(),
             _ => {}
         }
     }
