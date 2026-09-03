@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CleeCode — an editor with your coding agent inside it</title>
+<meta name="description" content="An editor, a file tree and real terminals in one window. Written in Rust, driven from the keyboard — with your coding agent running inside it, on the subscription you already pay for.">
+<meta name="author" content="msavox">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<a class="skip" href="#install">Skip to install</a>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="wordmark"><span class="turtle" aria-hidden="true">🐢</span> CleeCode</p>
+    <p class="identity">An editor, a file tree and real terminals in one window — written in Rust, driven from the keyboard.</p>
+
+    <div class="pitch">
+      <h1>Your coding agent — Claude Code, codex, opencode, gemini — with the subscription you already pay for, inside the editor, its edits visible live in your buffers.</h1>
+      <p class="pitch-tail">No API key to configure, to keep safe, or to pay per token. No GUI editor can say that whole sentence.</p>
+    </div>
+
+    <p class="quiet">Subscription login <em>and</em> API keys both work, because the editor never touches credentials at all: the agent in the pane is the real CLI and authenticates itself, with the login or the key it finds in your environment. There is no field to paste a secret into, and nothing to steal in the config.</p>
+
+    <p class="cta">
+      <a class="button primary" href="#install">Install</a>
+      <a class="button" href="https://github.com/msavox/cleecode">GitHub</a>
+    </p>
+
+    <p class="version">Current release <strong>v0.15.1</strong> · macOS, Linux, Windows · <a href="https://github.com/msavox/cleecode/blob/master/LICENSE">MIT</a></p>
+  </div>
+</header>
+
+<section class="demo" aria-label="CleeCode in action">
+  <div class="wrap-wide">
+    <img src="assets/demo.gif" alt="CleeCode in action: editing a file with the tree on the left and terminals below" width="1800" height="1000">
+  </div>
+</section>
+
+<main>
+
+<section id="agent" class="feature">
+  <div class="wrap">
+    <p class="kicker">The agent inside</p>
+    <h2>It already runs in a pane. The work was telling it what only the editor knows.</h2>
+    <p><code>clee -w claude</code>, <code>clee -w opencode</code>, <code>clee -w codex</code> or <code>clee -w gemini</code> opens the editor with the agent running in one terminal tab and a plain shell in the next — under the editor on a window narrower than 150 columns, where two columns would leave the agent forty. There is nothing to install and nothing to configure: these are real ptys, and all four are terminal programs. The agent is the TUI you already have, not a chat window rebuilt inside an editor.</p>
+    <p><kbd>Ctrl+Shift+A</kbd> hands it whatever you are looking at — the selection, the diagnostic under the cursor, or the line the cursor is on — written at its prompt as <code>path:line</code>. And then it stops. Nothing is ever submitted: the text sits at the prompt and Enter is yours to press once you have read what you are about to ask. The way back was always there, since an agent prints <code>file:line</code> all day and a double-click opens it.</p>
+    <p>The files it rewrites reload on their own, the arrived lines lit green in the gutter until you type again or press <kbd>Esc</kbd>. A buffer with your unsaved edits never reloads itself: your work wins over the agent's, always. <em>Follow mode</em> — off until you ask for it — opens the files it touched beside your work without ever taking the keyboard; it watches the difference between two <code>git status</code> sweeps, so an agent and a <code>sed</code> in a shell trip it identically.</p>
+    <p>And the editor can answer back. <code>clee --mcp</code> makes CleeCode an MCP server with four read-only tools: <code>open_files</code>, <code>selection</code>, <code>diagnostics</code>, and <code>open_file</code>, which shows a file beside your work without touching your keyboard. One line of configuration per agent:</p>
+    <pre><code>claude mcp add clee -- clee --mcp</code></pre>
+    <p class="note">codex, opencode and gemini take one line each in their own config file — the shapes are in the <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour</a>. The Claude Code line is the one verified against a running agent; the other three are written from those projects' documented shapes. Nothing writes to a buffer: reading has no risk and is offered generously, writing needs your consent, and the way to ask for it is not built yet.</p>
+  </div>
+</section>
+
+<section id="numeric" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">Octave &amp; Python</p>
+    <h2>A live numeric session, with the panel beside it that no terminal gives you.</h2>
+    <p><code>clee -w octave</code> or <code>clee -w pylab</code> starts the interpreter you already have — in a terminal you can type into — and puts a second window beside it showing what that session holds: every variable with its size, class and range, filling in by itself whenever a command finishes.</p>
+    <figure>
+      <img src="assets/octave-ide.png" alt="The Octave workspace: the script on the left, a figure as a tab, the prompt below and the variables panel beside" width="1600" height="1071" loading="lazy">
+      <figcaption>One window: the script on the left, <code>figure(1)</code> arriving as the <code>fig1.png</code> tab, the Octave prompt below it and the workspace panel beside — <code>x</code> and <code>y</code> with their size, class and range, listed without asking.</figcaption>
+    </figure>
+    <p>Nothing CleeCode wants to know is typed at your prompt. Your transcript stays a record of what <em>you</em> did, and a busy interpreter is never interrupted mid-computation to answer a question about itself. <kbd>Ctrl+Shift+X</kbd> sends a cell to the running session, plots arrive as tabs beside the script that drew them, <kbd>Ctrl+Shift+I</kbd> looks inside a variable, and <kbd>Ctrl+Shift+P</kbd> sets a breakpoint — where the panel shows the <em>frame's</em> variables rather than the session's.</p>
+    <figure>
+      <img src="assets/pylab-ide.png" alt="The pylab workspace: a matplotlib figure as a tab, the session below and its variables beside" width="1600" height="1084" loading="lazy">
+      <figcaption>The same arrangement in Python. <code>▶ Run</code> on <code>plot.py</code> did not start a fresh interpreter: it typed <code>exec(open(...).read())</code> at the prompt that was already there, so the session kept everything the file made — which is what the panel on the right is listing, and what lets the next line you type carry on from where the script left off.</figcaption>
+    </figure>
+    <p class="note">Everything works in both languages and almost none of it works the same way underneath. The <a href="https://github.com/msavox/cleecode/blob/master/docs/numeric.md">full walkthrough</a> says what is different between the two, and what is not built yet.</p>
+  </div>
+</section>
+
+<section id="editing" class="feature">
+  <div class="wrap">
+    <p class="kicker">The day's work</p>
+    <h2>Tabs, a split, git, and search that knows the whole project.</h2>
+    <p>syntect highlighting over two-face's grammars — 200-odd languages, the ones written this decade included — multi-file tabs, a split editor sharing one pool of buffers, find and replace with regular expressions, project-wide search, code folding, and a column selection that <em>writes</em>: with a rectangle up, a printable key puts its character on every line of the block.</p>
+    <p>Words already in your buffers are offered as you type, along with what a language server suggests where one is installed, and its errors underlined where they are. <kbd>Ctrl+Shift+J</kbd> goes to a definition and <kbd>Ctrl+Shift+L</kbd> comes back, a stack deep. <kbd>Ctrl+Shift+D</kbd> opens a git panel that stages, commits, switches branch and draws the history as a graph — all of it through <code>git</code> on PATH rather than a library, so what the panel does is what the terminal beside it would do: hooks run, commits are signed, credential helpers are asked.</p>
+    <p>Fetch, pull and push are typed into one of your shells rather than run behind the panel, and that is the point rather than a shortcut: they can stop to ask for a passphrase, a two-factor code or a host key, and a modal panel has nowhere to put such a question. A terminal is exactly the thing that can ask it.</p>
+    <p class="next"><strong>Coming in 0.16 — the daily refactoring.</strong> The other half of the language server, on master and not yet in a release: references and document symbols in a picker, rename with a diff-shaped preview and one undo step per buffer, format on demand as a single edit, and replace-in-project under the same discipline — grouped by file, nothing written until you agree, open buffers taking one <kbd>Ctrl+Z</kbd> each.</p>
+  </div>
+</section>
+
+<section id="safety" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">It does not close on you</p>
+    <h2>A broken terminal costs you that terminal, at most.</h2>
+    <p>CleeCode hosts long-running shells, so a crash costing you an <code>ssh</code> session or a build would be the worst thing it could do. An internal failure is contained and reported in the status line rather than ending the process, and the details go to <code>~/.config/cleecode/panic.log</code>. Files changed underneath you are reloaded only when they are not dirty; a binary or non-UTF-8 file opens read-only rather than being corrupted on save; and every write goes out through a temporary file and a rename.</p>
+    <p class="next"><strong>Coming next.</strong> The shield keeps the process alive, but a <code>SIGKILL</code> still costs you what was never saved. Autosave of the dirty buffers into a recovery folder, offered back at the next start, is written and on master — not yet in a release.</p>
+  </div>
+</section>
+
+<section id="themes" class="feature">
+  <div class="wrap">
+    <p class="kicker">Nine themes, and the far end of an ssh</p>
+    <h2>The IDE that works over ssh with nothing to install on the far end.</h2>
+    <p>Five dark themes and four light ones. The button beside the background toggle on the menu bar opens the list, or <em>View → Theme…</em> if your hands are on the keyboard. The choice is written out at once, because the reason to reach for it is usually that the screen has become hard to read, and having to make it again next session would be its own small misery.</p>
+    <figure>
+      <img src="assets/themes.png" alt="The nine themes: CleeCode, Turbo, Solarized Dark, Eighties, Mocha, CleeCode Light, Solarized Light, Ocean Light and GitHub" width="1420" height="919" loading="lazy">
+      <figcaption>Turbo is the blue screen, for anyone who learned to program on one: a light bar over a dark field, and the initial of each menu entry in red. The four light ones paint their own surface — they have to, or their dark text lands on whatever your terminal's background is. The dark ones do not have to, so on a translucent terminal they stay translucent unless you ask otherwise.</figcaption>
+    </figure>
+    <p>That is the ground CleeCode stands on. Not VS Code's, and not Zed's: one binary, batteries included, the mouse working, the compiler's output clickable — on a server you reached over <code>ssh</code>, with nothing installed at the far end and nothing to configure before the first hour is useful. The git panel deliberately speaks the old spellings (<code>reset HEAD --</code>, <code>stash save</code>) because a long-lived server reached over <code>ssh</code> is exactly where the newer commands are missing. Drop a file onto a terminal inside an <code>ssh</code> session and it goes up with <code>scp</code>.</p>
+    <p class="note">Best in a terminal that can draw pictures — Ghostty, kitty, WezTerm or iTerm2 — where pictures, PDFs and Markdown are shown as themselves rather than as coloured blocks. It works anywhere; those are where it looks like these screenshots.</p>
+  </div>
+</section>
+
+<section id="install" class="install">
+  <div class="wrap">
+    <p class="kicker">Install</p>
+    <h2>Three lines on macOS and Linux.</h2>
+    <pre><code>brew tap msavox/clee
+brew trust msavox/clee
+brew install clee</code></pre>
+    <p class="note"><code>brew trust</code> exists from Homebrew 6 onwards, and there it is required rather than a formality: a formula is Ruby code Homebrew executes locally, so it refuses to load one from a third-party tap until you trust the source. On older Homebrew the command does not exist and is not needed — skip it and install. The formula builds from source: well under a minute on macOS, longer on Linux, where it also pulls <code>libxcb</code>.</p>
+
+    <h3>Prebuilt binaries</h3>
+    <p>Attached to every <a href="https://github.com/msavox/cleecode/releases">release</a>, each built on the architecture it names.</p>
+    <ul class="downloads">
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">macOS <span>arm64</span></a>
+        <p>Apple silicon. The supported platform: where CleeCode is developed, tested and released.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">macOS <span>x86_64</span></a>
+        <p>Intel Macs.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Linux <span>x86_64</span></a>
+        <p>Needs glibc and libxcb — <code>libxcb1</code> on Debian/Ubuntu, <code>libxcb</code> on Fedora/Arch. For Alpine or musl, build from source.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Linux <span>arm64</span></a>
+        <p>An Ampere or Graviton server, and a 64-bit Raspberry Pi OS. Same libxcb note.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Windows <span>x86_64</span></a>
+        <p>Compiles and starts in CI. Not yet driven daily by anybody — treat it as experimental, and bug reports are welcome.</p>
+      </li>
+    </ul>
+    <p class="note">Outside macOS the binaries are experimental: Linux and Windows are written for throughout — paths, clipboard, shell, fonts, venvs — and compile in CI, where the binary is also started to confirm it links and launches. Beyond that nobody has used the editor there.</p>
+
+    <h3>From source</h3>
+    <p>Needs a <a href="https://rustup.rs">Rust toolchain</a> 1.85 or newer (edition 2024). On Linux the clipboard also wants the X11/xcb headers; on Windows, the MSVC toolchain plus <em>Desktop development with C++</em>.</p>
+    <pre><code>cargo install --locked --git https://github.com/msavox/cleecode</code></pre>
+    <p class="note">That puts <code>clee</code> in <code>~/.cargo/bin</code>, so make sure it is on your <code>PATH</code>. Then <code>clee --install-font</code> installs the bundled Nerd Font for the file tree's icons, and on macOS <code>clee --install-app</code> builds <code>CleeCode.app</code> so the editor can live in the Dock like any other.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="house">CleeCode is a Marunja product.</p>
+    <p class="links">
+      <a href="https://github.com/msavox/cleecode">GitHub</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://marunja.com">marunja.com</a>
+    </p>
+    <p class="copy">© msavox — Matteo Savoia. MIT licensed.</p>
+  </div>
+</footer>
+
+</body>
+</html>
