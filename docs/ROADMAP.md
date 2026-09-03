@@ -2310,30 +2310,27 @@ riscritti con la strada temp+rename.
   fotogramma bianco fra due, e un file i cui frame non stanno in memoria dichiara il limite
   invece di scoprirlo congelandosi.
 
-- **L'agente di fianco al lavoro: la composizione, e poi il cassetto** (pensato il
-  2026-09-02, in tre giri di conversazione). Il capitolo numerico e l'agente nello stesso
-  posto di lavoro, in due stadi.
+- **L'agente di fianco al lavoro: il cassetto, e basta** (pensato il 2026-09-02 in tre giri
+  di conversazione; semplificato il 2026-09-03 con la decisione giusta). C'era una versione
+  a due stadi di questa voce — prima una composizione `clee -w octave+claude`, poi il
+  cassetto che l'avrebbe assorbita — ed è stata tagliata dall'osservazione che la taglia:
+  se il pannello dell'agente è indipendente, la composizione non serve. Costruirla prima
+  avrebbe voluto dire un parser di `+` e un builder di layout obsoleti il giorno stesso in
+  cui il cassetto arriva; un meccanismo, non due. Il ponte per l'attesa esiste già ed è il
+  workspace salvato a mano: preset, `Ctrl+Shift+T`, il nome dell'agente, `Ctrl+Shift+W` —
+  e col pannello a destra le finestre si impilano già in verticale, quindi il layout
+  editor | agente sopra l'interprete si monta oggi, senza codice. (Un eventuale zucchero
+  `clee -w octave --agent claude` — il preset col cassetto già aperto — si valuta a
+  cassetto esistente, come riga di comando sopra il meccanismo e non come meccanismo.)
 
-  *Il passo economico è la composizione:* `clee -w octave+claude` — il primo nome un preset
-  di sessione, il secondo un agente, niente nove preset in `BUILT_INS` perché 3 linguaggi ×
-  3 agenti non direbbero niente che `+` non dica da sé. Il layout esiste già: col pannello a
-  destra le finestre si impilano in verticale (la geometria del preset agente), quindi
-  editor a sinistra e colonna destra con l'agente in alto a peso doppio — una conversazione
-  legge in giù e vuole righe — l'interprete sotto con la shell come scheda, il pannello
-  variabili in fondo. Zero macchina nuova, e si prova a mano oggi coi workspace salvati.
-  L'agente in finestra propria resta a schermo, che non è estetica: `Ctrl+Shift+A` guarda
-  solo la scheda visibile di ogni finestra. Sui terminali larghi e bassi si degrada alle
-  tre finestre sotto, e più stretto ancora l'agente diventa scheda, col limite detto.
-
-  *La destinazione è il cassetto:* un pannello laterale che compare da destra per l'agente,
+  *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
   ucciso: il pty sopravvive come già sopravvive il pannello sotto `Ctrl+J`, quindi la
   conversazione resta. È un secondo pannello terminali accanto a quello di sempre, e il
   prezzo è esattamente lì: l'assunzione un-pannello-un-orientamento tocca il layout, il
   giro del focus, il resize coi seam, il mouse e il formato workspace (campo nuovo,
   versionato). Il rendering invece si riusa intero, perché dentro è una finestra terminale
-  come le altre. Il cassetto assorbe la composizione — `octave+claude` diventa il preset
-  con il cassetto già aperto — e `Ctrl+Shift+A` dà precedenza al suo agente. La domanda
+  come le altre. `Ctrl+Shift+A` dà precedenza al suo agente. La domanda
   "quale agente evoca il tasto" si risolve da sé: **lo stato vuoto è il selettore**. Un
   cassetto aperto senza agente dentro mostra i quattro nomi — claude, opencode, gemini,
   codex — scritti grandi in ASCII, cliccabili e scorribili con le frecce, Invio avvia.
