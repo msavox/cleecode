@@ -20,8 +20,13 @@
   --code-bg:     #101010;
   --shadow:      0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.55);
 
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* The house faces first — Quicksand for the marks, Open Sans for prose,
+     JetBrains Mono for code, as marunja.com uses them. They are named, not
+     fetched: no CDN, so a machine without them falls through to the system
+     stack rather than the page waiting on a font server. */
+  --house-face: "Quicksand", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --sans: "Open Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
   --wrap: 46rem;
   --wrap-wide: 76rem;
@@ -153,10 +158,110 @@ kbd {
   padding: 0 1.35rem;
 }
 
+/* ---- Topbar: the house above the product ----
+   These colours are Marunja's own, not CleeCode's: the bar belongs to the house,
+   the page below it belongs to the editor. Values taken from marunja.css. */
+
+.topbar {
+  --m-bg:     #0d1420;
+  --m-line:   #2c3c52;
+  --m-text:   #f0f6fc;
+  --m-text-2: #aabbce;
+  --m-text-3: #7a8fa8;
+  --m-brand:  #3b82f6;
+  --m-tip:    #34d399;
+
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--m-bg) 90%, transparent);
+  backdrop-filter: saturate(150%) blur(10px);
+  -webkit-backdrop-filter: saturate(150%) blur(10px);
+  border-bottom: 1px solid var(--m-line);
+}
+
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+  .topbar { background: var(--m-bg); }
+}
+
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 3rem;
+  flex-wrap: wrap;
+}
+
+.brand {
+  margin: 0;
+  font-family: var(--house-face);
+  font-size: 1.06rem;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand a { text-decoration: none; }
+
+/* The house wordmark, as marunja.com draws it: Quicksand 700 in a blue-to-green
+   gradient. Colour first, so a browser without background-clip still reads it. */
+.house-mark {
+  font-weight: 700;
+  color: var(--m-brand);
+  background: linear-gradient(135deg, var(--m-brand), var(--m-tip));
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .house-mark { color: transparent; }
+}
+
+.house-mark:hover { opacity: 0.82; }
+
+.brand .sep {
+  color: var(--m-text-3);
+  font-weight: 400;
+  margin: 0 0.5rem;
+}
+
+.product-mark {
+  color: var(--m-text);
+  font-weight: 600;
+}
+
+.product-mark:hover { color: var(--m-tip); }
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 1.15rem;
+  font-family: var(--house-face);
+  font-size: 0.87rem;
+  font-weight: 600;
+}
+
+.topnav a {
+  color: var(--m-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.topnav a:hover { color: var(--m-text); }
+
+/* The bar is navigation, not chrome to fight with on a phone. */
+@media (max-width: 46rem) {
+  .topnav { display: none; }
+  .topbar-inner { min-height: 2.6rem; }
+}
+
 /* ---- Hero ---- */
 
+/* The sticky bar must not sit on top of the heading an anchor just jumped to. */
+[id] { scroll-margin-top: 3.75rem; }
+
 .hero {
-  padding: 4.5rem 0 3rem;
+  padding: 3.6rem 0 3rem;
   border-bottom: 1px solid var(--line);
   background:
     radial-gradient(120% 80% at 50% 0%, rgba(78, 201, 212, 0.10), transparent 62%),
@@ -173,9 +278,10 @@ kbd {
 
 .wordmark {
   margin: 0 0 0.55rem;
+  font-family: var(--house-face);
   font-size: clamp(2.1rem, 7vw, 3rem);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.005em;
   line-height: 1.1;
 }
 
@@ -193,10 +299,11 @@ kbd {
 
 .pitch h1 {
   margin: 0;
+  font-family: var(--house-face);
   font-size: clamp(1.4rem, 4.4vw, 2.05rem);
   line-height: 1.32;
-  font-weight: 650;
-  letter-spacing: -0.015em;
+  font-weight: 700;
+  letter-spacing: -0.005em;
   border-left: 3px solid var(--accent);
   padding-left: 1.1rem;
 }
@@ -303,10 +410,11 @@ kbd {
 .feature h2,
 .install h2 {
   margin: 0 0 1.4rem;
-  font-size: clamp(1.35rem, 3.6vw, 1.72rem);
+  font-family: var(--house-face);
+  font-size: clamp(1.35rem, 3.6vw, 1.78rem);
   line-height: 1.32;
-  font-weight: 650;
-  letter-spacing: -0.015em;
+  font-weight: 700;
+  letter-spacing: -0.005em;
 }
 
 .feature p,
@@ -379,9 +487,9 @@ figcaption {
 
 .install h3 {
   margin: 2.6rem 0 0.9rem;
-  font-size: 1.12rem;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-family: var(--house-face);
+  font-size: 1.14rem;
+  font-weight: 700;
 }
 
 .downloads {
