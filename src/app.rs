@@ -10043,6 +10043,19 @@ impl App {
         self.focus = Focus::Drawer;
     }
 
+    /// The ribbon's click: the mouse's half of `Ctrl+Shift+A`, and only the summoning half.
+    ///
+    /// Exactly [`Self::open_drawer`], which is what that chord does when it has nobody to hand
+    /// anything to — the launcher when no agent has been started, the running agent's pane when
+    /// one has. Deliberately *not* `send_context_to_agent`: a click on the edge of the window is
+    /// not a sentence anybody has started, and putting a file reference at an agent's prompt
+    /// because a hand brushed the ribbon would be the one thing that key is careful never to do.
+    fn summon_drawer_from_ribbon(&mut self) {
+        let lang = self.settings.lang;
+        self.open_drawer();
+        self.status_message = i18n::msg_drawer_toggled(lang, true);
+    }
+
     /// Puts the drawer away when the focus has left it and the mode is autocollapse.
     ///
     /// Called once after every event rather than at each of the dozen places `self.focus` is
@@ -11910,6 +11923,15 @@ impl App {
             .then_some((total as usize, position as usize, viewport as usize))
     }
 
+    /// Whether the pointer is resting on the drawer's ribbon, which is when it brightens.
+    ///
+    /// The scrollbars' rule, one column over: `scrollbar_engaged` is the precedent and this is
+    /// the simpler half of it — there is no drag to account for, because the ribbon is a button
+    /// and nothing about it follows the pointer.
+    pub fn drawer_ribbon_engaged(&self, rect: Rect) -> bool {
+        self.pointer.is_some_and(|(col, row)| within(rect, col, row))
+    }
+
     /// Whether a scrollbar should show itself in full rather than as a hint: the pointer is
     /// resting on it, or it is the one being dragged. Both are the moment its arrows and groove
     /// have to be aimable instead of merely suggestive.
@@ -12160,12 +12182,16 @@ impl App {
                 let main_bottom = full.height.saturating_sub(1);
                 let main_height = main_bottom.saturating_sub(main_top).max(1);
                 if self.settings.terminal_on_right {
-                    // The window's right edge, unless the drawer has taken a column off it: the
+                    // The window's right edge, unless something has taken a column off it: the
                     // terminal's percentage is a percentage of what is left after the drawer,
                     // so its seam has to be measured against that same right-hand edge or every
-                    // drag comes out scaled by the drawer's width.
+                    // drag comes out scaled by the drawer's width. The ribbon answers the same
+                    // question when the drawer is not a column of the layout — it is one cell
+                    // rather than a third of the window, but it is a cell the frames do not have
+                    // and the arithmetic is the arithmetic.
                     let areas = ui::compute_layout(full, &ui::LayoutParams::from_app(self));
-                    let main_right = areas.drawer.map_or(full.width, |d| d.x);
+                    let main_right =
+                        areas.drawer.or(areas.drawer_ribbon).map_or(full.width, |r| r.x);
                     let main_left = if self.settings.show_sidebar { self.settings.sidebar_width } else { 0 };
                     let main_width = main_right.saturating_sub(main_left).max(1);
                     let term_cols_from_right = main_right.saturating_sub(col.min(main_right));
@@ -13234,6 +13260,23 @@ impl App {
                     }
                     return;
                 }
+                // The ribbon, which is on screen exactly while the drawer is away. Named here
+                // rather than left to the walk below, for the same reason the overlaid drawer's
+                // own controls are named above: it is the rightmost column of the window, and
+                // every test after this one reaches a column *outwards* from the frame it
+                // belongs to — a seam grab takes the cell either side of a border, and the
+                // border the last frame ends on is the one next door to this.
+                //
+                // The collision the edge invites is the editor's vertical scrollbar, which rides
+                // the right of the frame it is in. It does not arise, and that is the whole
+                // reason the ribbon is a carved column rather than a strip painted over the
+                // frames: with a column taken out of the main area every frame beside it ends
+                // one cell earlier and its bar rides the last column of what it was left, so no
+                // cell is owned twice. Asking first only keeps the tolerances off it.
+                if ui::drawer_ribbon_rect(areas).is_some_and(|r| within(r, col, row)) {
+                    self.summon_drawer_from_ribbon();
+                    return;
+                }
                 // Terminal title-bar controls (window ✕, tab ✕, tab switch) live on the top
                 // border, which in the bottom layout doubles as the resize seam — so claim them
                 // before try_start_drag, or the drag would swallow every such click.
@@ -13706,6 +13749,17 @@ impl App {
     /// names to be clickable, not for the whitespace around them to start something. On a
     /// running agent it anchors a selection, exactly as a click in a terminal pane does.
     fn click_drawer(&mut self, rect: Rect, col: u16, row: u16) {
+        // The ✕ on the title bar, before anything about what is inside the frame: it is the one
+        // cell of the drawer that is not the drawer's contents. It goes to the View menu's own
+        // close — the column is hidden and the pty goes on running — and never to
+        // `close_terminal`, which the identical button on every other pane leads to. The
+        // resemblance is the point of the control and the reason it has to be claimed here.
+        if ui::terminal_close_cell(rect) == Some((col, row)) {
+            let lang = self.settings.lang;
+            self.close_drawer();
+            self.status_message = i18n::msg_drawer_toggled(lang, false);
+            return;
+        }
         self.focus = Focus::Drawer;
         if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
             // Asked of the same function that drew the list, so a click can never start the
