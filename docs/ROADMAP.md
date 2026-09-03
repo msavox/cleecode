@@ -2362,6 +2362,16 @@ riscritti con la strada temp+rename.
   > renderer a mezzi blocchi collassa la cella con le due metà uguali — la prima versione del
   > driver leggeva i caratteri e vedeva il rosso diventare blu chiamandoli identici.
 
+> **Il giro dei cinque è chiuso (2026-09-03).** Autosave col recupero, la colonna che
+> scrive, il chip UTF-8/EOL con la conversione, il modo large-file dichiarato, e le GIF
+> animate: tutti su master in una notte e una mattina, ognuno col suo Fatto qui sopra,
+> 561 test e otto driver pty — tre dei quali nati in questo giro (recover, replace, gif).
+> Una bolletta residua dichiarata e non pagata: il `didOpen` spedisce ancora il buffer
+> intero al language server, quindi un `.rs` da cinquanta mega è un messaggio da cinquanta
+> mega a rust-analyzer — il modo large-file non dice il falso (non promette niente sui
+> server), ma è il quarto sito naturale il giorno che si vuole coprirlo. Della 0.17 resta
+> il cassetto qui sotto, che è design da fare a quattro mani prima che codice.
+
 - **L'agente di fianco al lavoro: il cassetto, e basta** (pensato il 2026-09-02 in tre giri
   di conversazione; semplificato il 2026-09-03 con la decisione giusta). C'era una versione
   a due stadi di questa voce — prima una composizione `clee -w octave+claude`, poi il
