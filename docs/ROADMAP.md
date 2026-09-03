@@ -2431,6 +2431,27 @@ riscritti con la strada temp+rename.
   > aspettare un movimento a ogni giuntura sarebbe un ritardo su ogni resize della finestra
   > per pagare un controllo che ce l'ha solo questa. Trentaquattro controlli in più nel driver
   > del cassetto, 582 test.
+  >
+  > **E la quarta (2026-09-03): il selettore mette le facce, e chi manca si installa.** I
+  > wordmark a lettere escono di scena: al loro posto quattro evocazioni dei marchi, disegnate
+  > a pixel di mezzo blocco — dieci righe di pixel in cinque di terminale — nei colori dei
+  > proprietari, valori fissi e non ruoli di palette, per la regola delle icone del file tree:
+  > una citazione che il tema può ridipingere non cita più niente. **La regola «wordmark e non
+  > logo» scritta qui sotto è superata da questa:** un'evocazione di poche decine di celle, a
+  > una taglia a cui nessun logo sopravvive alla copia, identifica il programma che la riga
+  > lancia come l'estensione identifica un file — uso nominativo, non l'artwork di nessuno
+  > ricopiato. Il burst di Anthropic con Clawd accanto, la tessera bianco-su-nero di opencode,
+  > il nodo di OpenAI, la scintilla di Gemini col suo gradiente blu-violetto — che cambia
+  > perfino dentro una singola riga, perché una cella a mezzo blocco porta due colori, sopra e
+  > sotto. E la riga spenta smette di ingoiare l'Invio: un agente non installato adesso si
+  > offre — Invio o clic *scrivono* il comando di installazione documentato dal progetto al
+  > prompt di una shell libera, mai inviato, con la status line che dichiara di chi è l'Invio
+  > — la disciplina di Ctrl+Shift+A, e qui non è un vezzo: due dei quattro si installano con
+  > uno script scaricato in pipe. La risposta a «è installato?» diventa per questo una sonda
+  > con memoria di due secondi invece del ricordo a vita di `Agent::on_path`: la cosa più
+  > probabile dopo un «no» è che diventi un sì, all'invito del pannello stesso.
+  > Settantasette controlli nel driver del cassetto — l'offerta si prova solo dove gli agenti
+  > mancano davvero — e 587 test.
 
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è

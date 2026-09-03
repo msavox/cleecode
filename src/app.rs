@@ -10055,6 +10055,10 @@ impl App {
     /// whatever was in it, because hiding never touched it.
     fn open_drawer(&mut self) {
         let remembered = crate::session::Agent::of_program(&self.settings.drawer_agent);
+        // The launcher is about to say which of the four are installed, and the last time it said
+        // so may have been before the user went and installed one at its invitation. Opening the
+        // panel is the moment to ask again — see `drawer::installed`.
+        crate::drawer::forget_installed();
         let drawer = self
             .drawer
             .get_or_insert_with(|| crate::drawer::Drawer::with_launcher(remembered));
@@ -10165,6 +10169,49 @@ impl App {
         }
     }
 
+    /// The launcher's one gesture, whichever hand makes it: Enter on the highlighted row, or a
+    /// click on it.
+    ///
+    /// A name that is here starts. A name that is *not* here used to do nothing at all — the row
+    /// was drawn dim and said so, and then swallowed the press, which is the worst thing a control
+    /// can do: it looks broken rather than honest. So it now does the one useful thing there is to
+    /// do about a missing program, and types its install command at a shell prompt.
+    ///
+    /// **Typed, never submitted.** The same rule as `Ctrl+Shift+A`, and here it is not a nicety:
+    /// two of the four install with a script downloaded and piped into a shell, and an editor that
+    /// pressed Enter on that line on somebody's behalf would be running a remote script because a
+    /// mouse landed on a row. The line goes to the prompt, the user reads it, and Enter is theirs.
+    ///
+    /// Into a *shell*, not into the drawer: the drawer's pane is the agent's home and the agent is
+    /// the thing that is missing. `a_shell_to_type_into` picks a free one or opens one, which is
+    /// the same machinery Run and the git remotes use, with the same reason — a command typed
+    /// where it cannot run is worse than a pane nobody asked for.
+    fn choose_drawer_agent(&mut self, agent: crate::session::Agent) {
+        if crate::drawer::installed(agent) {
+            self.launch_drawer_agent(agent);
+            return;
+        }
+        let lang = self.settings.lang;
+        let command = crate::drawer::install_command(agent);
+        // Whatever happens next, the answer to "is it installed?" is about to be worth asking
+        // again — including when no shell could be found, since the user may well go and install
+        // it in a terminal of their own.
+        crate::drawer::forget_installed();
+        let Some(at) = self.a_shell_to_type_into() else {
+            self.status_message = crate::drawer::msg_install_no_shell(lang, agent.label(), command);
+            return;
+        };
+        if let Some(term) = self.window_tab_mut(at) {
+            term.type_line(command);
+        }
+        self.active_terminal = at;
+        self.settings.show_terminal = true;
+        // The keyboard follows the line: the next keystroke that matters is the Enter this
+        // deliberately did not press, and it has to land where the command is.
+        self.focus = Focus::Terminal;
+        self.status_message = crate::drawer::msg_install_typed(lang, agent.label(), command);
+    }
+
     /// Keys while the drawer has the keyboard.
     ///
     /// One focus, two keyboards, and which one is in force is simply what is drawn: the launcher
@@ -10188,7 +10235,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(agent) = self.drawer.as_ref().map(|d| d.highlighted()) {
-                    self.launch_drawer_agent(agent);
+                    self.choose_drawer_agent(agent);
                 }
             }
             // The keyboard goes back to the editor, and what the column does about it is the
@@ -13792,9 +13839,10 @@ impl App {
 
     /// A left click inside the drawer that the agent did not take.
     ///
-    /// On the launcher it is the mouse's Enter: the name under the pointer is chosen and started.
-    /// A click on the gap between two names only takes the focus — the ROADMAP asks for the
-    /// names to be clickable, not for the whitespace around them to start something. On a
+    /// On the launcher it is the mouse's Enter: the name under the pointer is chosen — started if
+    /// it is installed, offered for installing if it is not, which is [`Self::choose_drawer_agent`]
+    /// either way. A click on the gap between two names only takes the focus — the ROADMAP asks
+    /// for the names to be clickable, not for the whitespace around them to start something. On a
     /// running agent it anchors a selection, exactly as a click in a terminal pane does.
     fn click_drawer(&mut self, rect: Rect, col: u16, row: u16) {
         // The ✕ on the title bar, before anything about what is inside the frame: it is the one
@@ -13818,7 +13866,7 @@ impl App {
                 drawer.selected = index;
             }
             let Some(agent) = self.drawer.as_ref().map(|d| d.highlighted()) else { return };
-            self.launch_drawer_agent(agent);
+            self.choose_drawer_agent(agent);
             return;
         }
         if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {

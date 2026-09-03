@@ -34,9 +34,35 @@ from pty_drive import Report, Session, binary_from_argv  # noqa: E402
 
 # Stubbed, so the launcher can start them and the process table can be asked about them.
 INSTALLED = ["claude", "codex"]
-# Left off the PATH on purpose: the launcher has to show these too, and say why it cannot run
-# them. The empty drawer is where you find out what CleeCode knows about.
+# Left off the PATH on purpose: the launcher has to show these too, say why it cannot run them,
+# and offer to install them. The empty drawer is where you find out what CleeCode knows about.
 MISSING = ["opencode", "gemini"]
+
+# What the launcher types at a shell prompt for an agent that is not here — `drawer::
+# install_command`, the not-Windows arm, which is the one a run of this file is looking at. Copied
+# rather than derived because a check that reads the answer out of the thing it is checking checks
+# nothing: if these two drift, this file is supposed to fail.
+INSTALL_COMMANDS = {
+    "claude": "curl -fsSL https://claude.ai/install.sh | bash",
+    "opencode": "curl -fsSL https://opencode.ai/install | bash",
+    "codex": "npm install -g @openai/codex",
+    "gemini": "npm install -g @google/gemini-cli",
+}
+
+# How tall a mark is, in cells — `drawer::ART_ROWS`. The caption sits directly under it.
+ART_ROWS = 5
+
+# The brand colours each mark is drawn in. Fixed values rather than palette roles, exactly as the
+# file tree's icons are, which is what makes them nameable here at all: a mark that changed colour
+# with the theme would not be that program's mark any more.
+MARK_INKS = {
+    "claude": ["d97757", "f0805a"],   # Anthropic's coral burst, and Clawd a shade up from it
+    "opencode": ["fafafa", "141414"], # their white on their black
+    "codex": ["e8e8e8"],              # OpenAI's knot
+}
+# gemini's sparkle is not one colour: it runs blue at the top into violet at the bottom, and the
+# check is that the two ends are the two ends.
+GEMINI_TOP, GEMINI_BOTTOM = "4796e3", "9168c0"
 
 # The same stand-in drive_presets.py uses, and for the same reason: a `read` returns when Enter is
 # pressed and not before, so a line only ever appears as SUBMITTED because a person pressed it.
@@ -184,23 +210,53 @@ def close_cell(session):
     return None
 
 
+def caption_row(session, name):
+    """The row the launcher drew an agent's lower-case caption on, or None.
+
+    Pinned to the *column* rather than found by searching the whole line, which is what the older
+    version of this did and what made it findable by accident: "AGENT-STUB codex ready" in a
+    terminal pane satisfies every test a plain text search can make about the word `codex`. The
+    caption is at a known offset — the drawer's border, then the two-column marker gutter — so
+    that is what is asked for."""
+    left = drawer_column(session)
+    if left is None:
+        return None
+    for y in range(session.rows):
+        if session.full_line(y).find(name, left) == left + 3:
+            return y
+    return None
+
+
 def caption_style(session, name):
     """The colour the launcher drew an agent's lower-case name in.
 
-    The caption, not the wordmark: it is one span of one style, so a single cell answers, and it
-    is drawn in the same colour as the wordmark above it."""
-    for y in range(session.rows):
-        line = session.full_line(y)
-        at = line.find(name)
-        if at < 0:
-            continue
-        # Only the launcher's own caption: it is preceded by the two-column marker gutter and
-        # followed by a space or the honest phrase, never by more letters.
-        after = line[at + len(name):at + len(name) + 1]
-        if after and after not in " ·":
-            continue
-        return session.cells(y)[at].fg
-    return None
+    The caption, not the mark above it: it is one span of one style, so a single cell answers.
+    The mark itself is drawn in its owner's own colours whatever this says — see `mark_inks`."""
+    row = caption_row(session, name)
+    if row is None:
+        return None
+    return session.cells(row)[drawer_column(session) + 3].fg
+
+
+def mark_inks(session, name):
+    """Every colour used in the five rows of `name`'s mark, one set per row, top to bottom.
+
+    Read out of the drawer only — right of its left border — and including the background of each
+    cell as well as its foreground, because a half-block cell whose two halves are different
+    colours carries the lower one as its background. That is not an implementation detail to be
+    stepped around here: it is the only way a colour can change *inside* a row of a terminal, and
+    it is what draws gemini's gradient."""
+    row = caption_row(session, name)
+    left = drawer_column(session)
+    if row is None or left is None or row - ART_ROWS < 0:
+        return None
+    rows = []
+    for y in range(row - ART_ROWS, row):
+        inks = set()
+        for cell in session.cells(y)[left + 1:]:
+            inks.update(c for c in (cell.fg, cell.bg) if c != "default")
+        rows.append(inks)
+    return rows
 
 
 def menu_action(session, menu_letter, label, report, note):
@@ -464,9 +520,51 @@ def check_drawer(binary, report):
         if not summoned:
             return
 
-        names = [n for n in INSTALLED + MISSING if n in session.text()]
+        names = [n for n in INSTALLED + MISSING if caption_row(session, n) is not None]
         report.check("the launcher shows all four agents", len(names) == 4, session,
                      note="found %s" % names)
+
+        # ---- the marks --------------------------------------------------------------------
+        # Each row is that program's own mark drawn in cells, with the lower-case name kept as a
+        # caption under it. The captions above are what makes the list readable; these checks are
+        # that the thing above each caption is the *right* mark, told apart by the only property a
+        # driver can read at this resolution — the colours, which are the owners' own and fixed.
+        for name, inks in MARK_INKS.items():
+            drawn = mark_inks(session, name)
+            report.check("%s's mark is drawn above its caption" % name, drawn is not None, session,
+                         note="five rows of half-blocks, then the name")
+            if drawn is None:
+                continue
+            everywhere = set().union(*drawn)
+            report.check("and it is drawn in %s's own colours" % name,
+                         all(ink in everywhere for ink in inks), session,
+                         note="wanted %s, found %s" % (inks, sorted(everywhere)))
+            # And nobody else's: four marks in a column that shared a colour would be four
+            # decorations rather than four marks.
+            others = [other for other in INSTALLED + MISSING if other != name]
+            elsewhere = set()
+            for other in others:
+                for row in mark_inks(session, other) or []:
+                    elsewhere |= row
+            report.check("and that colour belongs to it alone",
+                         not (set(inks) & elsewhere), session,
+                         note="%s also appears above %s" % (set(inks) & elsewhere, others))
+
+        # gemini's is the one that is not a colour but a run of them: blue at the top of the
+        # sparkle into violet at the bottom. A flat mark would satisfy every check above and be
+        # the wrong picture, so the two ends are asked for by name.
+        sparkle = mark_inks(session, "gemini")
+        report.check("gemini's sparkle is drawn above its caption", sparkle is not None, session)
+        if sparkle:
+            report.check("and it runs blue at the top into violet at the bottom",
+                         GEMINI_TOP in sparkle[0] and GEMINI_BOTTOM in sparkle[-1], session,
+                         note="top row %s, bottom row %s"
+                              % (sorted(sparkle[0]), sorted(sparkle[-1])))
+            report.check("which is a gradient and not two halves",
+                         len(set().union(*sparkle)) > len(sparkle), session,
+                         note="%d colours down %d rows: it changes inside a row as well, which is "
+                              "what the half-block's background is for"
+                              % (len(set().union(*sparkle)), len(sparkle)))
 
         # ---- the column is part of the layout, not over the top of it -----------------------
         left = drawer_column(session)
@@ -738,8 +836,63 @@ def check_drawer(binary, report):
         report.check("an agent that ends returns the drawer to the list of four", gone, session,
                      note="never a respawned shell: that would look like the agent still being there")
         if gone:
-            still_four = all(name in session.text() for name in INSTALLED + MISSING)
+            still_four = all(caption_row(session, name) is not None
+                             for name in INSTALLED + MISSING)
             report.check("and the four names are on offer again", still_four, session)
+
+        # ---- a name that is not here offers to install it -----------------------------------
+        # Last, because it is the only section that leaves the keyboard somewhere else on purpose:
+        # the command goes to a shell and the focus follows it, since the Enter this deliberately
+        # did not press has to land where the line is.
+        #
+        # Skipped on a machine that really has both, for the same reason the dim check above is:
+        # CleeCode finds an agent installed on this laptop however the driver arranges PATH, and
+        # then offering to install it would be the bug.
+        if absent is None:
+            print("  SKIP  the install offer: this machine really has %s" % ", ".join(MISSING))
+        elif gone:
+            command = INSTALL_COMMANDS[absent]
+            row = caption_row(session, absent)
+            report.check("the launcher still lists %s to press" % absent, row is not None, session)
+            for how in ("clicking", "Enter"):
+                if row is None:
+                    break
+                if how == "clicking":
+                    click(session, drawer_column(session) + 4, row)
+                else:
+                    # The click above left the highlight on that same name, so Enter is the other
+                    # hand making the same gesture — which is the point of checking both.
+                    session.press(session.chord("a"),
+                                  lambda s: drawer_column(s) is not None, 8)
+                    session.send("\r")
+                typed = session.wait(lambda s: command in s.text(), 8)
+                report.check("%s an agent that is not installed types its install command"
+                             % how, typed, session, note=command)
+                if not typed:
+                    break
+                at = session.column_of(command)
+                seam = drawer_column(session)
+                report.check("and types it into a shell, not into the drawer",
+                             at is not None and (seam is None or at < seam), session,
+                             note="column %s, drawer border at %s — the drawer is the agent's "
+                                  "home and the agent is the thing that is missing" % (at, seam))
+                line = next((session.full_line(y) for y in range(session.rows)
+                             if command in session.full_line(y)), "")
+                report.check("and it is sitting at a prompt, unsent",
+                             "$" in line.split(command)[0], session,
+                             note="the shell's own prompt is still on the line: %r"
+                                  % line.strip()[:70])
+                report.check("nothing was submitted", "SUBMITTED" not in session.text(), session)
+                status = session.full_line(session.rows - 1)
+                report.check("and the status line says what happened and why",
+                             absent in status and command in status, session,
+                             note=status.strip()[:110])
+                # Disarmed before anything else in this file can press Enter. A driver that walks
+                # away leaving `curl … | bash` on a live prompt is a driver that installs things.
+                session.press("\x15", lambda s: command not in s.text(), 5)
+                report.check("and the line can be taken back off the prompt",
+                             command not in session.text(), session,
+                             note="typed is not run: nothing here ever became a command")
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)
