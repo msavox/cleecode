@@ -10742,6 +10742,27 @@ impl App {
                 let on = self.editor().selection_block;
                 self.status_message = i18n::msg_column_selection(lang, on);
             }
+            MenuAction::ConvertLineEndings => {
+                let lang = self.settings.lang;
+                let ed = self.editor_mut();
+                if ed.read_only {
+                    self.status_message = i18n::msg_format_read_only(lang).to_string();
+                } else {
+                    let to_crlf = ed.line_ending == crate::editor::LineEnding::Lf;
+                    ed.line_ending = if to_crlf {
+                        crate::editor::LineEnding::Crlf
+                    } else {
+                        crate::editor::LineEnding::Lf
+                    };
+                    // Marked dirty, not checkpointed: `save` reads this field to decide what to
+                    // write, so the flip has to survive to the next save — but a Snapshot holds
+                    // text and cursor, not the ending, so a checkpoint here would give Ctrl+Z
+                    // nothing of this to undo and make it look like it restored the old ending
+                    // when it didn't.
+                    ed.dirty = true;
+                    self.status_message = i18n::msg_line_endings_converted(lang, to_crlf);
+                }
+            }
             MenuAction::ToggleMenuBar => self.settings.show_menubar = !self.settings.show_menubar,
             // Not saved here: the settings file is written on the way out, the same as every
             // other switch on this menu.

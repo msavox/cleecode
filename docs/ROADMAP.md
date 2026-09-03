@@ -2249,6 +2249,19 @@ riscritti con la strada temp+rename.
 - **La barra di stato dice cosa stai editando**: encoding ed EOL accanto a riga:colonna, con
   la conversione CRLF↔LF a un comando. Piccolo, ma è il genere di assenza che un utente Windows
   o un file legacy trasformano in sfiducia.
+
+  > **Fatto (2026-09-03).** Il chip "UTF-8 LF"/"UTF-8 CRLF" accanto a `riga:colonna` in
+  > `draw_status` (ui.rs), solo per un buffer scrivibile con un file dietro — niente preview,
+  > niente file binario/non-UTF-8 (quelli si aprono già in sola lettura, quindi UTF-8 è
+  > l'unica cosa onesta da dire). È l'ultimo della fila nel budget additivo della barra: cade
+  > per primo su una finestra stretta, dopo messaggio, diagnostica e posizione. Il comando è
+  > `MenuAction::ConvertLineEndings` nel menu Edit, senza corda: capovolge `line_ending` e
+  > segna il buffer sporco, ma **non** passa per l'undo — uno Snapshot tiene testo e cursore,
+  > non la terminazione, e un checkpoint qui farebbe mentire Ctrl+Z. `Editor::save` riapplicava
+  > già la terminazione al salvataggio, quindi lì zero modifiche; nuovo `Editor::save` copre
+  > entrambe le direzioni con `final_newline` intatto. `drive_ui.py` guida l'intero giro:
+  > apre un fixture CRLF vero, legge il chip, passa dalla palette, controlla il messaggio di
+  > stato e i byte salvati su disco, e verifica che il chip sparisca su una tab di preview.
 - **Un modo large-file dichiarato**: sopra una soglia (50 MB?) niente highlighting, niente
   indice del completamento, undo a profondità ridotta — e la barra che lo dice. Meglio un
   editor che dichiara i suoi limiti di uno che li scopre congelandosi.

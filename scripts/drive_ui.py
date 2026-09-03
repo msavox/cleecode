@@ -39,6 +39,10 @@ ab
 three gamma
 """
 
+# Real \r\n bytes, written binary so Python never normalises them away before the editor gets a
+# chance to detect them.
+CRLF_TEXT = b"one\r\ntwo\r\nthree\r\n"
+
 
 def completion(session, report):
     """The word-completion popup, from opening it to undoing what it wrote."""
@@ -246,6 +250,80 @@ def typing_in_a_column_selection(binary, report):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def the_status_bar_names_line_endings_and_converts_them(binary, report):
+    """The chip beside row:col — "UTF-8 LF" / "UTF-8 CRLF" — and the Edit menu's "Convert line
+    endings" that flips it.
+
+    Its own fixture, written with real CRLF bytes on disk, and its own session: this is the one
+    check in the file that asserts on raw saved bytes, and it ends with a save whose result the
+    next check in this file must not have to account for.
+
+    A second fixture, a garbage .ico, exists only to open a preview tab — extension-gated, so it
+    never has to decode — and check the chip is absent there: a preview has no buffer to be UTF-8
+    or CRLF about."""
+    root = tempfile.mkdtemp(prefix="clee_eol_")
+    crlf_path = os.path.join(root, "windows.txt")
+    with open(crlf_path, "wb") as handle:
+        handle.write(CRLF_TEXT)
+    preview_path = os.path.join(root, "not_really.ico")
+    with open(preview_path, "wb") as handle:
+        handle.write(b"not actually an icon")
+
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the line-ending session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x0f")                              # Ctrl+O, quick-open
+        session.wait(lambda s: "windows.txt" in s.text(), 8)
+        session.send("windows")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        if not session.wait(lambda s: "one" in s.text(), 8):
+            report.check("the CRLF fixture opens", False, session)
+            return
+
+        report.check("the status bar shows CRLF on open",
+                     session.wait(lambda s: "UTF-8 CRLF" in s.lines()[-1], 6), session,
+                     note=session.lines()[-1])
+
+        session.send("\x10")                              # Ctrl+P, the palette
+        session.wait(lambda s: "matches" in s.text(), 6)
+        session.send("convert line")
+        session.wait(lambda s: True, 0.5)
+        report.check("the palette reaches the convert command",
+                     "Convert line endings" in session.text(), session)
+        session.send("\r")
+
+        report.check("the bar says LF after converting",
+                     session.wait(lambda s: "UTF-8 LF" in s.lines()[-1], 6), session,
+                     note=session.lines()[-1])
+        report.check("the status message names the change",
+                     session.wait(lambda s: "CRLF" in s.text() and "LF" in s.text(), 3), session,
+                     note=session.lines()[-2:])
+
+        session.send("\x13")                              # Ctrl+S
+        session.wait(lambda s: True, 1.5)
+        with open(crlf_path, "rb") as handle:
+            saved = handle.read()
+        report.check("the bytes on disk carry no CRLF after saving",
+                     b"\r\n" not in saved, session, note=repr(saved))
+
+        session.send("\x0f")                              # Ctrl+O, open the preview fixture
+        session.wait(lambda s: "not_really.ico" in s.text(), 8)
+        session.send("not_really")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        session.wait(lambda s: True, 1.5)                 # give the decode a moment to fail
+        report.check("the chip is absent on a preview tab",
+                     "UTF-8" not in session.lines()[-1], session, note=session.lines()[-1])
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def a_pane_is_told_what_it_is_talking_to(binary, root, report):
     """A terminal pane must be told it is talking to CleeCode's parser, not to the terminal
     CleeCode happens to be displayed in.
@@ -388,6 +466,7 @@ def main():
 
     try:
         typing_in_a_column_selection(binary, report)
+        the_status_bar_names_line_endings_and_converts_them(binary, report)
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)

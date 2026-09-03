@@ -4944,6 +4944,27 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .filter(|p| spent + p.chars().count() <= area.width as usize);
     let taken = position.as_ref().map_or(0, |p| p.chars().count() + 2) as u16;
 
+    // What the buffer on disk would be saved as: always "UTF-8" — a buffer that could not be
+    // decoded as UTF-8 opens read-only rather than being edited (`Editor::open`), so a writable
+    // buffer's encoding is never in question, and naming it honestly costs nothing extra here.
+    // Naming it *wrong* would cost a charset-detection dependency this editor doesn't have.
+    // Then the line ending, which the Edit menu's "Convert line endings" flips.
+    //
+    // Shown beside the position it is a fact about the same way, but it is the least important
+    // of the four things on this line: nobody opens a file to check its line endings, they
+    // notice this only when it's the answer to something odd. So it is the first to go on a
+    // narrow window — checked against `spent + taken`, i.e. after the message, the diagnostic
+    // and the position have already claimed their room.
+    let chip = (!app.resize_mode)
+        .then(|| app.editor())
+        .filter(|ed| ed.path.is_some() && ed.preview.is_none() && !ed.read_only)
+        .map(|ed| match ed.line_ending {
+            crate::editor::LineEnding::Crlf => "UTF-8 CRLF".to_string(),
+            crate::editor::LineEnding::Lf => "UTF-8 LF".to_string(),
+        })
+        .filter(|c| spent + taken as usize + c.chars().count() + 2 <= area.width as usize);
+    let chip_taken = chip.as_ref().map_or(0, |c| c.chars().count() + 2) as u16;
+
     if let Some(text) = position {
         let width = text.chars().count() as u16;
         let spot = Rect { x: area.right() - width, y: area.y, width, height: 1 };
@@ -4952,9 +4973,17 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             spot,
         );
     }
-    if let Some((text, colour)) = said {
+    if let Some(text) = chip {
         let width = text.chars().count() as u16;
         let spot = Rect { x: area.right() - width - taken, y: area.y, width, height: 1 };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, colour_of(pal.text_dim)))),
+            spot,
+        );
+    }
+    if let Some((text, colour)) = said {
+        let width = text.chars().count() as u16;
+        let spot = Rect { x: area.right() - width - taken - chip_taken, y: area.y, width, height: 1 };
         f.render_widget(Paragraph::new(Line::from(Span::styled(text, colour_of(colour)))), spot);
     }
 

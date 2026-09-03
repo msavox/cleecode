@@ -38,6 +38,11 @@ its place, which made that tab the one tab you could not close. Files changed un
 not dirty, and a binary or non-UTF-8 file opens
 read-only rather than being corrupted on save.
 
+The status bar names what a writable buffer will be saved as — UTF-8, always, since anything
+else is exactly what opens read-only above — and LF or CRLF, right beside `row:col`. The Edit
+menu's **Convert line endings** flips it for the next save; it is deliberately not on the undo
+stack, since a checkpoint is a version of the text and the ending is not text.
+
 An editor with an agent running in one of its terminal panes is being written to while you read
 it, so the reload says what it did: **the lines that arrived are lit in the gutter**, their line
 numbers green, until an edit of your own — or `Esc` — puts them out. A diagnostic or a breakpoint
