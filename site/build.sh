@@ -10,12 +10,20 @@
 # This file is the single place the asset list lives. Add a picture to the page,
 # add its line to ASSETS below; the check at the end refuses to finish if the
 # page points at something dist/ does not have.
+#
+# The house logo is vendored beside this script as site/marunja_logo_512.png —
+# copied once from marunja-suite/resources, so the site builds on a machine
+# that has only this repo. The header's two typefaces (Quicksand for the
+# wordmark, Open Sans for nav/text) are vendored under site/fonts/ — see
+# site/fonts/OFL-NOTICE.txt for their SIL OFL provenance.
 
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 docs="$here/../docs"
 dist="$here/dist"
+fonts="$here/fonts"
+logo_src="$here/marunja_logo_512.png"
 
 # The images the page uses: "<path under docs/>  <name under dist/assets/>".
 ASSETS='
@@ -28,8 +36,14 @@ screenshots/pylab-ide.png     pylab-ide.png
 screenshots/themes.png        themes.png
 '
 
+# The header typefaces, vendored under site/fonts/ (see OFL-NOTICE.txt there).
+FONTS='
+quicksand-variable.woff2
+opensans-variable.woff2
+'
+
 rm -rf "$dist"
-mkdir -p "$dist/assets"
+mkdir -p "$dist/assets" "$dist/fonts"
 
 cp "$here/index.html" "$dist/index.html"
 cp "$here/style.css"  "$dist/style.css"
@@ -45,12 +59,34 @@ echo "$ASSETS" | while read -r src dest; do
   echo "  asset  assets/$dest  (docs/$src)"
 done
 
-# Every local src= and href= in the page must resolve inside dist/. Absolute
-# URLs and in-page anchors are somebody else's problem; everything else is ours.
+if [ ! -f "$logo_src" ]; then
+  echo "missing asset: $logo_src" >&2
+  exit 1
+fi
+cp "$logo_src" "$dist/assets/marunja_logo_512.png"
+echo "  asset  assets/marunja_logo_512.png  ($logo_src)"
+
+echo "$FONTS" | while read -r f; do
+  [ -n "${f:-}" ] || continue
+  if [ ! -f "$fonts/$f" ]; then
+    echo "missing font: site/fonts/$f" >&2
+    exit 1
+  fi
+  cp "$fonts/$f" "$dist/fonts/$f"
+  echo "  font   fonts/$f"
+done
+cp "$fonts/OFL-NOTICE.txt" "$dist/fonts/OFL-NOTICE.txt"
+echo "  font   fonts/OFL-NOTICE.txt"
+
+# Every local src=, href= and CSS url() in the page/stylesheet must resolve
+# inside dist/. Absolute URLs and in-page anchors are somebody else's problem;
+# everything else is ours.
 missing=0
-for ref in $(grep -oE '(src|href)="[^"]*"' "$dist/index.html" \
-             | sed -e 's/^[^"]*"//' -e 's/"$//' \
-             | grep -vE '^(https?:|mailto:|#)' | sort -u); do
+for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" \
+                | sed -e 's/^[^"]*"//' -e 's/"$//'; \
+                grep -oE "url\([^)]*\)" "$dist/style.css" \
+                | sed -e "s/^url(//" -e "s/)$//" -e "s/^['\"]//" -e "s/['\"]$//"; } \
+             | grep -vE '^(https?:|mailto:|data:|#)' | sort -u); do
   if [ -f "$dist/$ref" ]; then
     echo "  ok     $ref"
   else
