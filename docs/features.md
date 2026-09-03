@@ -273,9 +273,12 @@ with their tab names and startup commands. Reopening one brings the shells back 
 with `clee -w NAME`; the name it is running under sits in the corner of the menu bar.
 
 Each is one hand-editable TOML file under `~/.config/cleecode/workspaces/`, so they travel
-between machines. A built-in **Default layout** is always there and cannot be deleted or
-overwritten. A bare `clee` never reopens a named workspace — that stays a deliberate act — but it
-does restore the project, its open files and the layout you left.
+between machines. Four built-ins are always there and cannot be deleted or overwritten:
+**Default layout** puts the frames back to CleeCode's own shape; `octave` and `pylab` open the
+interpreter you already have, prompt and workspace panel arranged for that kind of work; and
+`minimal` strips the frames away entirely — no sidebar, no terminal, no menu bar, just the editor.
+A bare `clee` never reopens a named workspace — that stays a deliberate act — but it does restore
+the project, its open files and the layout you left.
 
 ### The agent drawer
 
@@ -310,10 +313,6 @@ sent to a prompt nobody can see is worse than no text at all. And then it stops.
 ever submitted**: no newline is sent, the text sits at the prompt, and Enter is yours to press
 once you have read what you are about to ask. The way back was already there — an agent prints
 `file:line` all day, and double-clicking one opens the file at that line.
-
-The four `clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` presets still
-open, and are deprecated: a panel that is always one key away is what they were reaching for, and
-those names go away in a future release.
 
 ### Finding your way
 

@@ -1946,20 +1946,15 @@ pub fn msg_drawer_agent_ended(lang: Lang, agent: &str) -> String {
     }
 }
 
-/// Said the moment one of the four agent presets opens — `clee -w claude` and its three
-/// siblings. They still work this release, and this is the release that says out loud that they
-/// will not work in every one after it: the drawer is the agent surface now, and a published
-/// command kept alive forever as an alias for a feature that replaced it is a promise gone bad
-/// rather than a promise kept. Three facts, one line: it is deprecated, what to press instead,
-/// and that the name is going.
-pub fn msg_agent_preset_deprecated(lang: Lang, name: &str) -> String {
+/// Said when `clee -w NAME` is typed with one of the four retired agent names — `claude` and its
+/// three siblings, which opened a preset before 0.16 and open nothing now. A hard cut, not a
+/// phase-out: there was no deprecation release for these to have lived through, so the first and
+/// only word about it is this one, at the moment someone reaches for the command that used to
+/// work. Two facts, one line: the name is gone, and what replaced it.
+pub fn msg_agent_preset_retired(lang: Lang, name: &str) -> String {
     match lang {
-        Lang::En => format!(
-            "clee -w {name} is deprecated — Ctrl+Shift+A opens the agent drawer; this name goes in a future release"
-        ),
-        Lang::It => format!(
-            "clee -w {name} è deprecato — Ctrl+Shift+A apre il cassetto agente; questo nome sparirà in una release futura"
-        ),
+        Lang::En => format!("{name} is no longer a preset — Ctrl+Shift+A opens the agent drawer"),
+        Lang::It => format!("{name} non è più un preset — Ctrl+Shift+A apre il cassetto agente"),
     }
 }
 

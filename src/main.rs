@@ -485,26 +485,20 @@ fn run(
                     }
                 }
                 None => match workspace::built_in(&name, &app.workspace_shape()) {
-                    Some(ws) => {
-                        app.apply_workspace(ws);
-                        // The four agent presets still open, and this release is where they
-                        // start saying they are on their way out: the drawer is the agent
-                        // surface now, and `clee -w claude` was a published command, so the
-                        // withdrawal is announced before it happens rather than discovered
-                        // afterwards. Said here and not in `built_in`, because a workspace of
-                        // the user's own shadowing the name opened *that* one — and it has its
-                        // own message, in the arm above.
-                        if let Some(agent) =
-                            workspace::built_in_named(&name).and_then(session::Agent::of_program)
-                        {
-                            app.status_message = i18n::msg_agent_preset_deprecated(
+                    Some(ws) => app.apply_workspace(ws),
+                    // Unknown, but not necessarily meaningless: the four agent presets used to
+                    // live here, and `clee -w claude` was a published command before the drawer
+                    // replaced it. Someone still typing it deserves the retirement said out loud
+                    // rather than the generic "no such workspace" — every other unknown name gets
+                    // that one.
+                    None => {
+                        app.status_message = match session::Agent::of_program(&name) {
+                            Some(agent) => i18n::msg_agent_preset_retired(
                                 app.settings.lang,
                                 agent.workspace_name(),
-                            );
+                            ),
+                            None => i18n::msg_workspace_unknown(app.settings.lang, &name),
                         }
-                    }
-                    None => {
-                        app.status_message = i18n::msg_workspace_unknown(app.settings.lang, &name)
                     }
                 },
             }

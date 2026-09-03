@@ -166,10 +166,6 @@ rewrites reload on their own, the new lines lit in the gutter until you type aga
 (*View → Follow edits made outside*, off until you ask) opens the files you did not have open
 beside your work, without ever taking the keyboard.
 
-The four `clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` presets still
-open, and are deprecated: the drawer does what they were for, from any workspace, and those names
-go away in a future release.
-
 The editor can also answer the agent's questions. `clee --mcp` makes it an MCP server with four
 read-only tools — the open files, the selection, the diagnostics, and `open_file`, which shows
 you a file beside your work without touching your keyboard. One line of configuration per agent.
@@ -215,7 +211,9 @@ teaches you not to need it, and View hides it once it has.
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named
 workspace and open it with `clee -w NAME`. Double-click a row of output to go where it points:
-a `path:line` opens in the editor at that line, a `https://…` opens in the browser.
+a `path:line` opens in the editor at that line, a `https://…` opens in the browser. Four
+workspaces ship built in and need no file of their own: the default layout, `octave` and `pylab`
+below, and `minimal` — no sidebar, no terminal, no menu bar, just the editor.
 
 **Previews.** A `.png` opens as pixels, a PDF as pages that re-render when you typeset them, a
 Markdown file as a document beside its source. When a file wants a real application instead,
