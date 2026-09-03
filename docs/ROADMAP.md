@@ -2333,14 +2333,18 @@ riscritti con la strada temp+rename.
   come le altre. `Ctrl+Shift+A` dà precedenza al suo agente.
 
   E la logica si estende (2026-09-03): a cassetto esistente, nemmeno i preset agente hanno
-  più senso come macchina — un pannello LLM sempre disponibile è quello che i preset
-  cercavano di dare per nome. Ma `clee -w claude` è un comando pubblicato, e un comando
-  pubblicato è una promessa: i quattro nomi restano in `BUILT_INS` come alias sottili —
-  workspace di default col cassetto già aperto su quell'agente — e a morire è
-  `agent_workspace()` col suo layout dedicato. Chi ha imparato il comando non se ne
-  accorge; il codice speciale sparisce; il cassetto in pin dà l'agente-di-fianco che il
-  preset dava. Conseguenza di priorità: il cassetto è l'unica superficie agente del
-  programma, e nel blocco 0.17 viene prima di ogni altra cosa di design. La domanda
+  più senso — un pannello LLM sempre disponibile è quello che i preset cercavano di dare
+  per nome. `clee -w claude` è un comando pubblicato, e la decisione è di **ritirare la
+  promessa dichiarandola**: obsoleta, rimpiazzata dalla feature nuova. La strada del
+  ritiro, in due tempi. Nella release che porta il cassetto, i quattro nomi vengono
+  deprecati ad alta voce — il comando per quella release apre ancora qualcosa di sensato
+  (il default col cassetto su quell'agente) ma la status line dice che è deprecato e cosa
+  lo sostituisce, le note di release annunciano il ritiro, e README, manuale e features
+  smettono di insegnarlo. La release dopo, i nomi escono da `BUILT_INS` e
+  `agent_workspace()` muore con loro: un comando ritirato che sopravvive per sempre come
+  alias è una promessa marcita, non mantenuta. Conseguenza di priorità: il cassetto è
+  l'unica superficie agente del programma, e nel blocco 0.17 viene prima di ogni altra
+  cosa di design. La domanda
   "quale agente evoca il tasto" si risolve da sé: **lo stato vuoto è il selettore**. Un
   cassetto aperto senza agente dentro mostra i quattro nomi — claude, opencode, gemini,
   codex — scritti grandi in ASCII, cliccabili e scorribili con le frecce, Invio avvia.
