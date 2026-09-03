@@ -19,10 +19,13 @@ dist="$here/dist"
 
 # The images the page uses: "<path under docs/>  <name under dist/assets/>".
 ASSETS='
-demo.gif                     demo.gif
-screenshots/octave-ide.png   octave-ide.png
-screenshots/pylab-ide.png    pylab-ide.png
-screenshots/themes.png       themes.png
+demo.gif                      demo.gif
+screenshots/preview-image.jpg preview-image.jpg
+screenshots/preview-pdf.png   preview-pdf.png
+screenshots/preview-md.png    preview-md.png
+screenshots/octave-ide.png    octave-ide.png
+screenshots/pylab-ide.png     pylab-ide.png
+screenshots/themes.png        themes.png
 '
 
 rm -rf "$dist"
