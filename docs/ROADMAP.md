@@ -2502,6 +2502,22 @@ La 1.0 non è una release di funzionalità: è un elenco di frasi che devono ess
 > dichiara ad alta voce quale binario sta guidando; ma la dichiarazione è un cerotto, e la
 > frase del punto 5 resta la risposta: in CI il binario è sempre quello appena costruito.
 
+**La pulizia della casa, con la 1.0** (annotato il 2026-09-03). Quando le sei frasi sono
+vere, il repo si mette in ordine — con un confine netto: **la storia non si tocca**. I commit
+sono il racconto del progetto e riscriverli romperebbe i checksum di chiunque abbia clonato;
+la lezione del tag ritirato della prima settimana vale al quadrato. Si spazza il resto:
+il codice morto dei ritiri completati (i preset agente e `agent_workspace()`, se non già
+usciti); `docs/ROADMAP.md` stesso, che a quel punto è un documento storico di migliaia di
+righe — si separa in una roadmap che guarda avanti e un archivio delle annotazioni datate,
+che meritano di restare leggibili ma non di stare in mezzo; gli script one-off in `scripts/`
+che nessun driver e nessuna CI chiama più; i design doc superati in `docs/design/`, marcati
+come storici invece che cancellati; e un giro su dipendenze e feature flag di Cargo. Restano
+fuori dalla pulizia, per decisione già scritta: rustfmt e clippy repo-wide (chiamata
+dell'utente, non igiene), e ogni riscrittura di storia. Con la 1.0 si rinnova anche
+**l'icona dell'applicazione** — prodotta fuori, con gli strumenti giusti per un'immagine, e
+portata dentro come asset del bundle che `--install-app` costruisce; qui arriva solo il file
+finito, nei formati che macOS e Windows vogliono.
+
 ## Cosa resta fuori, e perché è una decisione
 
 - **Il debugging DAP** (gdb/lldb per C e Rust). La risposta dichiarata resta: il debugger gira
