@@ -34,6 +34,25 @@
   color-scheme: dark;
 }
 
+/* Self-hosted, no CDN: the two families marunja.com's header actually loads.
+   Both are variable fonts — one file per family serves every weight below.
+   License: SIL OFL 1.1, see fonts/OFL-NOTICE.txt for both copyright lines. */
+@font-face {
+  font-family: "Quicksand";
+  font-style: normal;
+  font-weight: 500 700;
+  font-display: swap;
+  src: url("fonts/quicksand-variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Open Sans";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("fonts/opensans-variable.woff2") format("woff2");
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     /* CleeCode Light: the same editor on a white desk. */
@@ -189,24 +208,34 @@ kbd {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  min-height: 3rem;
+  height: 64px;             /* marunja.com's --vp-nav-height, to the pixel */
+  padding: 0 8px 0 24px;    /* marunja.com's .wrapper padding below 768px */
   flex-wrap: wrap;
+}
+
+@media (min-width: 768px) {
+  .topbar-inner { padding: 0 32px; }  /* marunja.com's .wrapper padding at/above 768px */
 }
 
 .brand {
   margin: 0;
-  font-family: var(--house-face);
-  font-size: 1.06rem;
-  letter-spacing: 0.2px;
+  display: flex;
+  align-items: center;
   white-space: nowrap;
 }
 
 .brand a { text-decoration: none; }
 
-/* The house wordmark, as marunja.com draws it: Quicksand 700 in a blue-to-green
+/* The house mark, exactly as marunja.com's VPNavBarTitle draws it: a 28×28
+   logo with a 10px gutter, then Quicksand 700/17px in a blue-to-green
    gradient. Colour first, so a browser without background-clip still reads it. */
 .house-mark {
+  display: flex;
+  align-items: center;
+  font-family: var(--house-face);
+  font-size: 17px;
   font-weight: 700;
+  letter-spacing: 0.2px;
   color: var(--m-brand);
   background: linear-gradient(135deg, var(--m-brand), var(--m-tip));
   -webkit-background-clip: text;
@@ -219,40 +248,52 @@ kbd {
 
 .house-mark:hover { opacity: 0.82; }
 
+.house-logo {
+  margin-right: 10px;
+  height: 28px;
+  width: 28px;
+  filter: drop-shadow(0 2px 6px rgba(59, 130, 246, 0.3));
+}
+
 .brand .sep {
   color: var(--m-text-3);
   font-weight: 400;
   margin: 0 0.5rem;
+  font-family: var(--house-face);
+  font-size: 17px;
 }
 
 .product-mark {
+  font-family: var(--house-face);
+  font-size: 17px;
   color: var(--m-text);
   font-weight: 600;
 }
 
 .product-mark:hover { color: var(--m-tip); }
 
+/* Nav links, as marunja.com's VPNavBarMenuLink draws them: base (Open Sans)
+   14px/500, 12px of horizontal padding standing in for the gap. */
 .topnav {
   display: flex;
   align-items: center;
-  gap: 1.15rem;
-  font-family: var(--house-face);
-  font-size: 0.87rem;
-  font-weight: 600;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .topnav a {
-  color: var(--m-text-2);
+  padding: 0 12px;
+  color: var(--m-text);
   text-decoration: none;
   white-space: nowrap;
 }
 
-.topnav a:hover { color: var(--m-text); }
+.topnav a:hover { color: var(--m-brand); }
 
 /* The bar is navigation, not chrome to fight with on a phone. */
 @media (max-width: 46rem) {
   .topnav { display: none; }
-  .topbar-inner { min-height: 2.6rem; }
 }
 
 /* ---- Hero ---- */
