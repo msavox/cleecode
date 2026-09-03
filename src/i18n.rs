@@ -131,6 +131,7 @@ pub enum Key {
     SettingCompletion,
     SettingLanguageServer,
     SettingFollowAgentEdits,
+    SettingAutosaveRecovery,
     SettingPlotsInTabs,
     SettingPlotsNoDisplay,
     SettingPlotsTabs,
@@ -210,6 +211,7 @@ pub enum Key {
     PickerVenvBrowse,
     PickerWorkspaceOpen,
     PickerWorkspaceDelete,
+    PickerRecovery,
     // The frames the modals hang in. A box whose title is in one language and whose prompt is
     // in another reads as an unfinished translation, which is what it was.
     ModalDelete,
@@ -549,6 +551,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, SettingFollowAgentEdits) => "Follow edits made outside (open the files)",
         (Lang::It, SettingFollowAgentEdits) => "Segui le modifiche da fuori (apri i file)",
 
+        // Says what it keeps rather than what it is called: "autosave" reads as "your file is
+        // written for you", and this never writes your file. It writes a copy elsewhere.
+        (Lang::En, SettingAutosaveRecovery) => "Keep recovery copies of unsaved files",
+        (Lang::It, SettingAutosaveRecovery) => "Tieni copie di ripristino dei file non salvati",
+
         // Named for the question rather than for one of its two answers. As "Plots as tabs"
         // with an on/off beside it, the row said nothing about what "off" meant — and "off"
         // meant the interpreter's own windows, which is a whole other way of working and the
@@ -779,6 +786,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, PickerWorkspaceDelete) => "Delete workspace (Enter deletes)",
         (Lang::It, PickerWorkspaceDelete) => "Elimina workspace (Invio elimina)",
+
+        // Honest about all three things at once: this is work CleeCode never saved, restoring it
+        // does not save it either, and nothing is lost by pressing Esc. A title that only said
+        // "recovered files" would leave somebody guessing at every one of those.
+        (Lang::En, PickerRecovery) => {
+            "Unsaved work from a session that ended (Enter restores it, unsaved; Esc keeps it for later)"
+        }
+        (Lang::It, PickerRecovery) => {
+            "Lavoro non salvato di una sessione finita (Invio lo ripristina, non salvato; Esc lo tiene per dopo)"
+        }
 
         // Modal titles. Written without the spaces that pad them against the border: the border
         // is the drawing's business, and a title with its padding baked in cannot be measured.
@@ -1548,6 +1565,60 @@ pub fn msg_jumped_to(lang: Lang, name: &str, line: usize) -> String {
     match lang {
         Lang::En => format!("{name}, line {line}"),
         Lang::It => format!("{name}, riga {line}"),
+    }
+}
+
+/// How old a recovery copy is, for the row that offers it.
+///
+/// Coarse on purpose, and coarser the further back it goes. The question the row answers is "is
+/// this the work I remember losing", and to that "4 minutes ago" and "4 minutes and 12 seconds
+/// ago" are the same answer — while the second one invites reading a precision into it that a
+/// five-second tick does not have.
+pub fn msg_recovery_age(lang: Lang, seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    match (lang, seconds, minutes, hours) {
+        (Lang::En, s, _, _) if s < 60 => "moments ago".to_string(),
+        (Lang::It, s, _, _) if s < 60 => "poco fa".to_string(),
+        (Lang::En, _, m, _) if m < 60 => format!("{m} min ago"),
+        (Lang::It, _, m, _) if m < 60 => format!("{m} min fa"),
+        (Lang::En, _, _, h) if h < 24 => format!("{h} h ago"),
+        (Lang::It, _, _, h) if h < 24 => format!("{h} h fa"),
+        (Lang::En, _, _, _) => format!("{days} d ago"),
+        (Lang::It, _, _, _) => format!("{days} g fa"),
+    }
+}
+
+/// Said once a copy is back in a buffer. The second half is the whole point and is not decoration:
+/// nothing has been written to the file, so the work is exactly as unsaved as it was before the
+/// session ended, and Ctrl+Z is still holding what is on disk.
+pub fn msg_recovery_restored(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("{name} restored, unsaved — Ctrl+S to keep it, Ctrl+Z for the file on disk"),
+        Lang::It => {
+            format!("{name} ripristinato, non salvato — Ctrl+S per tenerlo, Ctrl+Z per il file su disco")
+        }
+    }
+}
+
+/// Said when a recovery copy could not be written: a full disk, a config directory that is not
+/// writable, a home directory that is not there. Once, not every five seconds — see
+/// `App::poll_autosave` — and it names the directory, because the fix is always something about
+/// that directory and a message that did not say which one would send the user looking.
+pub fn msg_recovery_failed(lang: Lang, path: &str, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("Cannot keep recovery copies in {path}: {detail}"),
+        Lang::It => format!("Non riesco a tenere le copie di ripristino in {path}: {detail}"),
+    }
+}
+
+/// Said when the copy is there but the buffer it belongs in will not take it — a file that has
+/// become unreadable, or binary, since the session that was editing it ended.
+pub fn msg_recovery_refused(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("{name} cannot hold text any more — the copy is left where it is"),
+        Lang::It => format!("{name} non può più contenere testo — la copia resta dov'è"),
     }
 }
 

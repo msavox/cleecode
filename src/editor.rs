@@ -60,6 +60,17 @@ pub struct Editor {
     /// I last rendered it", and far cheaper than comparing the text itself every frame.
     revision: u64,
     pub dirty: bool,
+    /// Which recovery copy this buffer's autosave writes to while it has no file name, and what
+    /// identifies its copy after a Save As has given it one. Handed out once per buffer and never
+    /// reused, so two untitled tabs can never write over each other's work. See `recovery.rs`.
+    pub recovery_id: u64,
+    /// The revision the last recovery copy held, or `None` when there is no copy.
+    ///
+    /// This and `dirty` together are what keep the autosave tick from rewriting the same bytes
+    /// every few seconds for as long as a file is left open unsaved. The pair can be trusted
+    /// because both halves have exactly one author: `dirty` is set in `mark_edited_from` and
+    /// nowhere else, and cleared by `save` and nowhere else, and `revision` moves with it.
+    pub autosaved_revision: Option<u64>,
     pub disk_mtime: Option<SystemTime>,
     /// Coloured spans for the first `syntax_cache.valid_lines()` lines of the buffer, and nothing
     /// for the ones below: they are not stale, they are not made yet. The renderer asks for the
@@ -110,6 +121,17 @@ pub struct Editor {
     in_compound: bool,
 }
 
+/// The next unnamed buffer's recovery number, counted per process.
+///
+/// Never reset and never reused, because the number is half of a file name on disk: a counter
+/// that started again would let a second untitled buffer overwrite the copy of the first, and
+/// the work lost would be exactly the work this is for.
+fn next_recovery_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Editor {
     pub fn empty() -> Self {
         Editor {
@@ -125,6 +147,8 @@ impl Editor {
             viewport_seen: (0, 0),
             revision: 0,
             dirty: false,
+            recovery_id: next_recovery_id(),
+            autosaved_revision: None,
             disk_mtime: None,
             highlighted: Vec::new(),
             syntax_cache: LineCache::default(),
@@ -239,6 +263,14 @@ impl Editor {
         // save destroyed the only copy of the work — the one thing a save must never do.
         crate::settings::write_atomic(&path, text.as_bytes())?;
         self.dirty = false;
+        // The work is on disk under its own name now, so the copy kept against a crash has
+        // nothing left to protect. Hooked here rather than at the three call sites — Save, Save
+        // All, Save As — because this is the one place a save is known to have *succeeded*, and
+        // a copy removed after a failed write would be the one thing this module exists to
+        // prevent. Removing a file that was never written is a no-op, so a buffer saved before
+        // the first autosave tick costs nothing here.
+        crate::recovery::forget(Some(&path), self.recovery_id);
+        self.autosaved_revision = None;
         self.disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         Ok(())
     }

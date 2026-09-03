@@ -423,6 +423,16 @@ struct RunWatch {
 /// How often a watched run's session is asked what it is holding.
 const RUN_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How often the unsaved buffers are copied into the recovery directory.
+///
+/// Five seconds is the whole of the trade and there is no setting for it. Shorter costs a write
+/// per buffer more often for work that has usually not moved — the revision gate in
+/// `App::poll_autosave` catches the idle case, but a fast typist would then be writing their
+/// whole file to disk several times a second. Longer widens the only gap this feature has: the
+/// edits made after the last copy and before the ending. Five is short enough that what is lost
+/// is a sentence, and long enough that nobody ever notices it happening.
+const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How long after the last thing a run published it counts as finished. Counted from the moment
 /// the session was seen to write, not from the moment the prompt came back — the two are the same
 /// only for a script that draws nothing. Long enough that a script printing four figures one at a
@@ -795,6 +805,16 @@ pub struct App {
     /// requests back out of. `None` on a machine with nowhere to put it, which costs the MCP
     /// server and nothing else.
     mcp: Option<crate::mcp::Session>,
+    /// When the recovery copies were last taken. See [`App::poll_autosave`].
+    last_autosave: Instant,
+    /// Whether the user has already been told that the copies cannot be written.
+    ///
+    /// A latch and not a counter, because the failure it reports — a full disk, an unwritable
+    /// config directory — does not go away on its own: without it the same sentence would replace
+    /// the status line every five seconds for the rest of the session, which is not a warning,
+    /// it is a wall. Cleared by the next tick that writes something, so a disk that was freed up
+    /// can complain again if it fills a second time.
+    autosave_complained: bool,
 }
 
 /// Which of the five questions the git panel is answering.
@@ -2711,6 +2731,8 @@ impl App {
             git_asked: 0,
             mcp,
             git_wanted: None,
+            last_autosave: Instant::now(),
+            autosave_complained: false,
         })
     }
 
@@ -3349,6 +3371,205 @@ impl App {
         self.reload_changed_previews();
         self.file_tree.refresh();
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
+    }
+
+    /// Copies every changed unsaved buffer into the recovery directory, a few seconds at a time.
+    ///
+    /// What this is for, stated exactly, because a safety net believed to be finer than it is is
+    /// worse than none. The panic shield in `main.rs` already means a bug inside CleeCode costs a
+    /// status line and not the session — the loop carries on, the buffers are untouched, and
+    /// nothing here is what saves you from that. This covers the endings the shield cannot see:
+    /// `SIGKILL`, a stack overflow (which aborts without unwinding, so `catch_unwind` never
+    /// runs), a machine losing power, a terminal emulator taking its children down with it. And
+    /// it does *not* cover the last few seconds of typing: the copy is taken on a tick, so an
+    /// edit made after the last one and before the ending was never written down anywhere.
+    ///
+    /// Self-throttled rather than ticked from `run`, in the shape `poll_run_watch` uses, because
+    /// the interval is this function's business and not the loop's — and because the setting that
+    /// turns it off is read here, where it can be changed mid-session and take effect at once.
+    ///
+    /// A buffer is copied only when it is dirty *and* its text has moved since its own last copy.
+    /// The pair is trustworthy: `dirty` is set in exactly one place (`Editor::mark_edited_from`)
+    /// and cleared in exactly one other (`Editor::save`), and the revision moves with the first.
+    /// Without the revision half, a file left open unsaved would have its whole text rewritten
+    /// every five seconds for as long as the editor stayed open.
+    pub fn poll_autosave(&mut self) {
+        if !self.settings.autosave_recovery || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+            return;
+        }
+        self.last_autosave = Instant::now();
+        let mut wrote = false;
+        let mut failure = None;
+        for editor in &mut self.editors {
+            // A picture has no text to copy and can never be dirty — but saying so here means a
+            // preview tab cannot become somebody's recovery directory through some future path
+            // that forgets. The rest of the rule is in `recovery::needs_copy`, stated where it
+            // can be read and tested on its own.
+            if editor.preview.is_some() {
+                continue;
+            }
+            if !crate::recovery::needs_copy(
+                editor.dirty,
+                editor.is_read_only(),
+                editor.revision(),
+                editor.autosaved_revision,
+            ) {
+                continue;
+            }
+            match crate::recovery::write_entry(
+                editor.path.as_deref(),
+                editor.recovery_id,
+                &editor.rope.to_string(),
+            ) {
+                Ok(_) => {
+                    editor.autosaved_revision = Some(editor.revision());
+                    wrote = true;
+                }
+                Err(e) => failure = Some(e.to_string()),
+            }
+        }
+        match failure {
+            // Said once. The status line is one line and the next action takes it back, so a
+            // sentence repeated every five seconds is not emphasis — it is the status line
+            // becoming unusable for everything else.
+            Some(detail) if !self.autosave_complained => {
+                self.autosave_complained = true;
+                let where_ = crate::recovery::dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "~".to_string());
+                self.status_message =
+                    i18n::msg_recovery_failed(self.settings.lang, &where_, &detail);
+            }
+            Some(_) => {}
+            None if wrote => self.autosave_complained = false,
+            None => {}
+        }
+    }
+
+    /// Offers back what an earlier session was in the middle of, if anything.
+    ///
+    /// Called once at startup by `run`, after whichever route put the tabs on screen. Nothing
+    /// happens in the ordinary case — the directory is empty, or holds only copies belonging to
+    /// other projects and to CleeCodes that are still running.
+    pub fn offer_recovery(&mut self) {
+        if !self.settings.autosave_recovery {
+            return;
+        }
+        let found = crate::recovery::scan(&self.root);
+        self.open_recovery_picker(found);
+    }
+
+    /// Puts the offer on screen, one row per copy. Does nothing when there is nothing to offer,
+    /// which is what lets the restore call it again with whatever is left.
+    fn open_recovery_picker(&mut self, entries: Vec<crate::recovery::Entry>) {
+        if entries.is_empty() {
+            return;
+        }
+        let lang = self.settings.lang;
+        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let now = std::time::SystemTime::now();
+        let items = entries
+            .into_iter()
+            .map(|entry| {
+                let name = match &entry.original {
+                    // Relative to the project, like every other list of files here: the absolute
+                    // path is the same forty characters on every row and says nothing.
+                    Some(path) => {
+                        path.strip_prefix(&root).unwrap_or(path).display().to_string()
+                    }
+                    None => i18n::t(lang, Key::UntitledFile).to_string(),
+                };
+                let age = i18n::msg_recovery_age(
+                    lang,
+                    now.duration_since(entry.saved).map(|d| d.as_secs()).unwrap_or(0),
+                );
+                crate::picker::PickItem {
+                    label: format!("{name}  ·  {age}"),
+                    shortcut: None,
+                    action: crate::picker::PickAction::Recover(Box::new(entry)),
+                }
+            })
+            .collect();
+        // The title card gives way to this. It is two seconds of decoration in front of a
+        // question about work that was nearly lost, and it would also swallow the first key
+        // pressed at it.
+        self.show_splash = false;
+        self.picker = Some(crate::picker::Picker::new(
+            i18n::t(lang, Key::PickerRecovery),
+            crate::picker::PickerKind::Recovery,
+            items,
+        ));
+    }
+
+    /// Puts one copy back into a buffer, and takes the copy off disk.
+    ///
+    /// The buffer is left **dirty**, and that is the point rather than an oversight. CleeCode
+    /// never decided to stop; deciding on the user's behalf that this text is now the file would
+    /// be making a second decision they did not make either. So the text is put back where they
+    /// left it and the choice of what to do with it is theirs — including throwing it away, which
+    /// is why the whole replacement goes in as a *single* undo step: one Ctrl+Z and the buffer is
+    /// the file that is on disk, exactly.
+    ///
+    /// The copy is removed either way. Its content is in the buffer now, and if it is still
+    /// wanted five seconds from now the autosave tick will have written it again.
+    fn restore_recovery(&mut self, entry: crate::recovery::Entry) {
+        let lang = self.settings.lang;
+        let idx = match &entry.original {
+            Some(path) => {
+                if path.exists() {
+                    self.open_file_in_tab(path.clone());
+                }
+                match self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
+                    Some(idx) => idx,
+                    // The file itself is gone — deleted, or on a branch that no longer has it.
+                    // The copy is then the only version of it left anywhere, so it comes back as
+                    // a buffer pointed at the name it had, ready to be saved back into place.
+                    None => {
+                        let mut editor = Editor::empty();
+                        editor.path = Some(path.clone());
+                        editor.syntax_dirty = true;
+                        let idx = self.adopt_editor(editor);
+                        self.place_in_pane(self.editor_pane_focus, idx);
+                        idx
+                    }
+                }
+            }
+            None => {
+                let mut editor = Editor::empty();
+                editor.rope = ropey::Rope::from_str(&entry.text);
+                // No undo step to offer here: there is no earlier version of a buffer that was
+                // never on disk. Marked by hand for the same reason — nothing was *edited*, the
+                // buffer arrived already changed, and it has to look that way to the tab strip,
+                // to the quit prompt and to the next autosave tick.
+                editor.dirty = true;
+                let idx = self.adopt_editor(editor);
+                self.place_in_pane(self.editor_pane_focus, idx);
+                self.focus = Focus::Editor;
+                self.status_message = i18n::msg_recovery_restored(
+                    lang,
+                    i18n::t(lang, Key::UntitledFile),
+                );
+                let _ = std::fs::remove_file(&entry.file);
+                return;
+            }
+        };
+        let Some(editor) = self.editors.get_mut(idx) else { return };
+        if editor.is_read_only() {
+            // A file that has become binary or unreadable since. The copy stays where it is
+            // rather than being dropped on the floor: it is still the only version of that work.
+            self.status_message = i18n::msg_recovery_refused(lang, &self.editors[idx].title(lang));
+            return;
+        }
+        let whole = editor.rope.len_chars();
+        editor.replace_char_range(0, whole, &entry.text);
+        // The cursor lands after the inserted text, which for a whole-file replacement is the
+        // bottom of the file — a view scrolled to the end of a document nobody asked to be at
+        // the end of. The undo snapshot was taken before this, so moving it now costs no step.
+        editor.cursor_line = 0;
+        editor.cursor_col = 0;
+        self.focus = Focus::Editor;
+        self.status_message = i18n::msg_recovery_restored(lang, &self.editors[idx].title(lang));
+        let _ = std::fs::remove_file(&entry.file);
     }
 
     pub fn poll_git_status(&mut self) {
@@ -8060,6 +8281,7 @@ impl App {
         let mut workspace = None;
         let mut file_line = None;
         let mut inspect = None;
+        let mut recover = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
@@ -8070,7 +8292,32 @@ impl App {
                     file_line = Some((p.clone(), *line, *col))
                 }
                 crate::picker::PickAction::Inspect(name) => inspect = Some(name.clone()),
+                crate::picker::PickAction::Recover(entry) => recover = Some(entry.clone()),
             }
+        }
+        if let Some(entry) = recover {
+            // The rest of the list is taken out before the picker goes, and put back up
+            // afterwards. Two sessions' worth of unsaved work is several files, and a chooser
+            // that closed on the first Enter would mean restarting CleeCode once per file — for
+            // a list it had already built and was about to throw away.
+            let rest: Vec<crate::recovery::Entry> = self
+                .picker
+                .take()
+                .map(|p| {
+                    p.items
+                        .into_iter()
+                        .filter_map(|item| match item.action {
+                            crate::picker::PickAction::Recover(other) if other.file != entry.file => {
+                                Some(*other)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.restore_recovery(*entry);
+            self.open_recovery_picker(rest);
+            return;
         }
         if let Some(name) = inspect {
             self.picker = None;
@@ -8320,6 +8567,14 @@ impl App {
         self.save_as_then = None;
 
         let Some(editor) = self.editors.get_mut(idx) else { return };
+        // Save As on a buffer that already had a name leaves the old name behind, and with it a
+        // recovery copy keyed to a file this buffer is no longer about. `Editor::save` below
+        // clears the copy under the *new* name; this is the only place that still knows the old
+        // one. Cleared before the write, since after it the buffer no longer remembers.
+        let was = editor.path.take();
+        if let Some(was) = &was {
+            crate::recovery::forget(Some(was), editor.recovery_id);
+        }
         editor.path = Some(path.clone());
         // The name decides the language, so the buffer is re-highlighted on the next frame.
         editor.syntax_dirty = true;
@@ -8362,6 +8617,16 @@ impl App {
     fn close_editor_at(&mut self, idx: usize) {
         if idx >= self.editors.len() {
             return;
+        }
+        // A buffer with nothing unsaved in it has nothing left to recover, so its copy goes with
+        // it rather than waiting to be offered back at the next start as work that is already on
+        // disk. A *dirty* one keeps its copy deliberately: the tab is being closed over unsaved
+        // changes, and one Esc at the next start is a cheaper mistake than the other one.
+        if !self.editors[idx].dirty {
+            crate::recovery::forget(
+                self.editors[idx].path.as_deref(),
+                self.editors[idx].recovery_id,
+            );
         }
         // Closing the only tab leaves nothing open, and that is the whole point of it. It used
         // to put a fresh untitled buffer in its place, which made the last tab the one tab you
