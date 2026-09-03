@@ -69,7 +69,10 @@ groove to jump, click the end arrows to step a line.
 
 Pictures, PDFs and Markdown open as themselves. A `.png` gets a tab that draws it — real pixels
 on a terminal with a graphics protocol (kitty, iTerm2, sixel), coloured half-blocks elsewhere —
-instead of the blank read-only buffer a binary file used to give. A PDF opens as pages, turned
+instead of the blank read-only buffer a binary file used to give. An animated `.gif` plays there
+too, at the speed the file itself asks for and looping for as long as the tab is on screen; one
+whose frames would not fit in memory shows its first frame and says why, rather than freezing to
+find out. A PDF opens as pages, turned
 with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
 Run, and the page beside it is the one you just typeset.
 
@@ -282,7 +285,9 @@ way it wants to be opened: in a terminal tab named after it, with a plain shell 
 and the editor beside it — underneath it on a window narrower than 150 columns, where two columns
 would leave the agent forty. There is nothing to install and nothing to configure, because these
 are real ptys and all four are terminal programs. If the agent is not on your `PATH`, the pane
-shows the shell saying so; nothing here checks on your behalf.
+shows the shell saying so; nothing here checks on your behalf. Subscription login and API keys
+both work, and for the same reason: the agent authenticates itself, with the login or the key it
+finds in your environment — CleeCode never asks for, stores, or sees a credential of any kind.
 
 `Ctrl+Shift+A` hands the one that is running whatever you are looking at: the selection, or the
 diagnostic under the cursor, or the line the cursor is on — written at its prompt as `path:line`,

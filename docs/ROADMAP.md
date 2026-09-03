@@ -2390,10 +2390,16 @@ Tre pezzi, in ordine di dipendenza:
   feature principali mostrate (gli screenshot dei temi e le tape demo esistono già in
   `docs/` e si rigenerano da script — il sito li riusa, non li duplica), e i pulsanti di
   download per sistema operativo. Il selling point in testa è quello della 0.15: il tuo
-  agente — Claude Code, codex, opencode — con l'abbonamento che hai già, dentro l'editor,
-  e i suoi edit visibili live nei buffer; nessuna chiave API da configurare, da custodire
-  o da pagare a consumo. Nessun editor GUI può dire questa frase intera, e la vetrina la
-  dice per prima. Statico, su una pagina Cloudflare; il DNS è del dominio
+  agente — Claude Code, codex, opencode, gemini — con l'abbonamento che hai già, dentro
+  l'editor, e i suoi edit visibili live nei buffer; nessuna chiave API da configurare, da
+  custodire o da pagare a consumo. Nessun editor GUI può dire questa frase intera, e la
+  vetrina la dice per prima. E subito sotto, la precisazione che evita la domanda
+  (2026-09-03): **subscription E chiavi API funzionano entrambe**, perché CleeCode è
+  agnostico per costruzione — l'agente nel pane è il CLI vero e si autentica da sé, col
+  login o con la chiave che trova nell'ambiente; "nessuna chiave custodita" significa che
+  l'editor non chiede, non conserva e non vede mai una credenziale, di nessun tipo. Non un
+  campo dove incollare un segreto, niente da rubare nella config. Il sito lo spiega con
+  queste due frasi, perché è la domanda che ogni valutatore fa al secondo minuto. Statico, su una pagina Cloudflare; il DNS è del dominio
   marunja.com e ci arriva con una redirezione. Il sito dice anche la strada che c'è già:
   `brew install` dal tap per macOS. E il sito madre ricambia: su marunja.com un piccolo
   banner — o una card, come quella che Maestrino ha già — che manda a

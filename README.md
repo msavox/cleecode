@@ -149,7 +149,10 @@ pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 **Your coding agent, inside the editor.** `clee -w claude`, `clee -w opencode`, `clee -w codex` or
 `clee -w gemini` opens the editor with the agent running in one terminal tab and a plain shell in
 the next. The agent is the TUI you already have, with the subscription you already pay for —
-CleeCode holds no API key and rebuilds no chat. `Ctrl+Shift+A` writes where you are at the
+CleeCode holds no API key and rebuilds no chat. Subscription login and API keys both work,
+because the editor is agnostic by construction: the agent in the pane is the real CLI and
+authenticates itself, with the login or the key it finds in your environment — CleeCode never
+asks for, stores, or sees a credential of any kind. `Ctrl+Shift+A` writes where you are at the
 agent's prompt — selection, diagnostic or cursor line, as `path:line` — and never presses Enter
 for you; it finds the agent even where the process table calls it `node`, which is what a
 `claude` installed from npm runs as. The files the agent rewrites reload on their own, the new
