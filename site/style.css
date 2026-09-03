@@ -20,6 +20,15 @@
   --code-bg:     #101010;
   --shadow:      0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(0, 0, 0, 0.55);
 
+  /* The hero's terminal frame. The body sits darker than the page, the way an
+     editor pane sits inside its chrome; the bar is the surface colour above it. */
+  --term-bg:   #101010;
+  --term-bar:  #242424;
+  --term-line: #333333;
+  --dot-1:     #7a5b5b;   /* the stoplight, desaturated until it is palette */
+  --dot-2:     #7a6f52;
+  --dot-3:     #5a7a60;
+
   /* The house faces first — Quicksand for the marks, Open Sans for prose,
      JetBrains Mono for code, as marunja.com uses them. They are named, not
      fetched: no CDN, so a machine without them falls through to the system
@@ -71,6 +80,15 @@
     --changed:     #148446;
     --code-bg:     #eceef2;
     --shadow:      0 1px 0 rgba(0, 0, 0, 0.03), 0 14px 34px rgba(20, 24, 32, 0.14);
+
+    /* On paper the window inverts its relationship to the page: the body is
+       the lighter surface and the page around it carries the tint. */
+    --term-bg:   #ffffff;
+    --term-bar:  #e4e7ec;
+    --term-line: #d0d4da;
+    --dot-1:     #c39d9d;
+    --dot-2:     #c2b795;
+    --dot-3:     #9dbca8;
 
     color-scheme: light;
   }
@@ -315,6 +333,121 @@ kbd {
       radial-gradient(120% 80% at 50% 0%, rgba(0, 92, 153, 0.08), transparent 62%),
       var(--bg);
   }
+}
+
+/* ---- The hero, inside a terminal window ----
+   The frame is drawn, not pictured: no image, no script. It reads as the thing
+   the product is — a window with panes in it — and it degrades to a plain dark
+   card when the viewport gets too narrow to be a window at all. */
+
+.hero > .wrap {
+  /* A little wider than the prose column, so the frame has room around the
+     text rather than squeezing it. */
+  max-width: 54rem;
+}
+
+.term {
+  max-width: 100%;
+  border: 1px solid var(--term-line);
+  border-radius: 10px;
+  background: var(--term-bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;   /* the ghost banner can never push the page sideways */
+}
+
+.term-bar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.85rem;
+  background: var(--term-bar);
+  border-bottom: 1px solid var(--term-line);
+}
+
+.term-dots {
+  display: flex;
+  gap: 0.42rem;
+}
+
+.term-dots i {
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 50%;
+  display: block;
+}
+
+/* Dimmed to the page rather than the stoplight: the frame is a hint, not a
+   costume. Each keeps just enough hue to be recognised as the button it is. */
+.term-dots i:nth-child(1) { background: var(--dot-1); }
+.term-dots i:nth-child(2) { background: var(--dot-2); }
+.term-dots i:nth-child(3) { background: var(--dot-3); }
+
+.term-title {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Balances the dots so the title sits in the true centre of the bar. */
+.term-pad {
+  display: block;
+  width: calc(0.68rem * 3 + 0.42rem * 2);
+}
+
+.term-body {
+  position: relative;
+  padding: 2.6rem 2rem 2.4rem;
+}
+
+/* The real SPLASH_BANNER from src/ui.rs, as a watermark: the program's own
+   characters, at an opacity that reads as texture and never as text. Green
+   because that is the colour draw_splash() paints it. */
+.term-ghost {
+  position: absolute;
+  top: 1.2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  font-family: var(--mono);
+  /* Capped so it never grows past the frame, and shrinks with the viewport so
+     the six lines stay one block instead of wrapping into noise. */
+  font-size: min(1.28rem, 2.2vw);
+  line-height: 1;
+  white-space: pre;
+  color: var(--changed);
+  opacity: 0.028;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Dark ink on a white window carries further than light ink on black. */
+@media (prefers-color-scheme: light) {
+  .term-ghost { opacity: 0.02; }
+}
+
+.term-content {
+  position: relative;   /* above the watermark */
+  z-index: 1;
+}
+
+@media (max-width: 40rem) {
+  .term-body { padding: 2rem 1.15rem 1.9rem; }
+  .term-title { font-size: 0.72rem; }
+}
+
+@media (max-width: 26rem) {
+  .term-bar { padding: 0.45rem 0.65rem; gap: 0.5rem; }
+  .term-body { padding: 1.7rem 0.95rem 1.6rem; }
 }
 
 .wordmark {
