@@ -66,6 +66,27 @@ fi
 cp "$logo_src" "$dist/assets/marunja_logo_512.png"
 echo "  asset  assets/marunja_logo_512.png  ($logo_src)"
 
+# The site's own icon: three sizes cut from site/icon-master.png, which is the
+# rendering the icon *is* — the exports are plain downscales of it, nothing
+# redrawn. They go to the dist root, where favicons are looked for: the 32 is
+# the tab icon, the 180 is what iOS asks for and the hero's emblem, the 512 is
+# the hi-res favicon and the social-card og:image. The master stays here as
+# the source and is not published.
+ICONS='
+icon-32.png
+icon-180.png
+icon-512.png
+'
+echo "$ICONS" | while read -r f; do
+  [ -n "${f:-}" ] || continue
+  if [ ! -f "$here/$f" ]; then
+    echo "missing icon: site/$f" >&2
+    exit 1
+  fi
+  cp "$here/$f" "$dist/$f"
+  echo "  icon   $f"
+done
+
 echo "$FONTS" | while read -r f; do
   [ -n "${f:-}" ] || continue
   if [ ! -f "$fonts/$f" ]; then
