@@ -10,6 +10,7 @@ pub enum MenuAction {
     ToggleMenuBar,
     OpenMenuBar,
     ColumnSelection,
+    ConvertLineEndings,
     OpenSettings,
     EditKeybindings,
     SaveAll,
@@ -126,6 +127,7 @@ impl MenuAction {
         MenuAction::ToggleMenuBar,
         MenuAction::OpenMenuBar,
         MenuAction::ColumnSelection,
+        MenuAction::ConvertLineEndings,
         MenuAction::OpenSettings,
         MenuAction::EditKeybindings,
         MenuAction::SaveAll,
@@ -426,6 +428,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // gesture people already reach for. From here it is still keyboard-reachable,
                 // and Shift+arrows then build the rectangle.
                 item(Key::ItemColumnSelection, MenuAction::ColumnSelection, None),
+                // A fact about the file rather than a way of moving through it, so it opens a
+                // new group of its own. No chord: this is reached the way you'd reach for it —
+                // after noticing the status line say the wrong one, not mid-edit. The status
+                // line names the change; see `i18n::msg_line_endings_converted`.
+                group(Key::ItemConvertLineEndings, MenuAction::ConvertLineEndings, None),
             ],
         },
         MenuDef {

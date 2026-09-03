@@ -43,6 +43,7 @@ pub enum Key {
     ItemToggleMenuBar,
     ItemOpenMenuBar,
     ItemColumnSelection,
+    ItemConvertLineEndings,
     // The Format menu, and the View entry that hides the bar carrying the same eleven actions.
     ItemMdBold,
     ItemMdItalic,
@@ -287,6 +288,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemOpenMenuBar) => "Apri la barra dei menu",
         (Lang::En, ItemColumnSelection) => "Column selection",
         (Lang::It, ItemColumnSelection) => "Selezione verticale",
+        (Lang::En, ItemConvertLineEndings) => "Convert line endings",
+        (Lang::It, ItemConvertLineEndings) => "Converti fine riga",
 
         (Lang::En, MenuFormat) => "Format",
         (Lang::It, MenuFormat) => "Formato",
@@ -2498,6 +2501,18 @@ pub fn msg_column_selection(lang: Lang, on: bool) -> String {
         (Lang::En, false) => "Column selection off".to_string(),
         (Lang::It, true) => "Selezione verticale attiva — Shift+frecce disegnano il rettangolo".to_string(),
         (Lang::It, false) => "Selezione verticale disattivata".to_string(),
+    }
+}
+
+/// Said after "Convert line endings" flips how the buffer will be saved. Named old → new
+/// rather than just the new state: the status line is the only place this is confirmed at
+/// all, and "now CRLF" leaves open whether that is what changed or what it always was.
+pub fn msg_line_endings_converted(lang: Lang, to_crlf: bool) -> String {
+    match (lang, to_crlf) {
+        (Lang::En, true) => "Line endings: LF → CRLF (written on next save)".to_string(),
+        (Lang::En, false) => "Line endings: CRLF → LF (written on next save)".to_string(),
+        (Lang::It, true) => "Fine riga: LF → CRLF (scritti al prossimo salvataggio)".to_string(),
+        (Lang::It, false) => "Fine riga: CRLF → LF (scritti al prossimo salvataggio)".to_string(),
     }
 }
 

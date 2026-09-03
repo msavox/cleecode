@@ -2913,6 +2913,42 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Mirrors the Edit menu's "Convert line endings": flip `line_ending` directly (that
+    /// command does nothing more than this and mark the buffer dirty — see
+    /// `App::run_menu_action`) and check `save` honours the new setting rather than the one
+    /// the file was opened with. Both directions, and `final_newline` untouched by either.
+    #[test]
+    fn converted_line_ending_is_what_save_writes() {
+        let dir = std::env::temp_dir().join(format!("clicode_convert_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let crlf_path = dir.join("was_crlf.txt");
+        std::fs::write(&crlf_path, "a\r\nb\r\n").unwrap();
+        let mut ed = Editor::open(crlf_path.clone()).unwrap();
+        assert_eq!(ed.line_ending, LineEnding::Crlf);
+        assert!(ed.final_newline);
+        ed.line_ending = LineEnding::Lf;
+        ed.dirty = true;
+        ed.save().unwrap();
+        let raw = std::fs::read(&crlf_path).unwrap();
+        assert_eq!(raw, b"a\nb\n");
+        assert!(ed.final_newline, "converting the ending must not touch the final newline");
+
+        let lf_path = dir.join("was_lf.txt");
+        std::fs::write(&lf_path, "c\nd").unwrap(); // no trailing newline
+        let mut ed = Editor::open(lf_path.clone()).unwrap();
+        assert_eq!(ed.line_ending, LineEnding::Lf);
+        assert!(!ed.final_newline);
+        ed.line_ending = LineEnding::Crlf;
+        ed.dirty = true;
+        ed.save().unwrap();
+        let raw = std::fs::read(&lf_path).unwrap();
+        assert_eq!(raw, b"c\r\nd");
+        assert!(!ed.final_newline, "converting the ending must not invent a final newline");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn binary_file_is_read_only_and_refuses_save() {
         let dir = std::env::temp_dir().join(format!("clicode_bin_{}", std::process::id()));
