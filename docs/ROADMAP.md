@@ -2235,6 +2235,17 @@ riscritti con la strada temp+rename.
   secondi in una cartella di recovery, offerta al riavvio se più recente del file. Chiude per
   davvero la promessa scritta nel README: *it does not close on you* — e quando succede lo
   stesso, non ti è costato niente.
+
+  > **Fatto (2026-09-03).** Cinque secondi di tick, copia dei soli buffer sporchi e mossi
+  > dall'ultima (la porta è la revision), in `~/.config/cleecode/recovery` — nel config dir
+  > e non nella temp, perché questi dati esistono per sopravvivere al processo, come
+  > panic.log. Al riavvio un picker offre le copie più recenti del disco, e quelle senza
+  > nome delle sessioni morte: Invio ripristina nel buffer *sporco* — salvare resta una
+  > decisione — e un Ctrl+Z è la versione del disco. Il buffer senza nome, che la
+  > persistenza scarta da last_open_files per costruzione, adesso ha l'unica memoria che
+  > potesse avere. drive_recover.py ammazza davvero l'editor con kill -9 e guarda il testo
+  > tornare — il check che nessun test unitario può dare.
+
 - **La barra di stato dice cosa stai editando**: encoding ed EOL accanto a riga:colonna, con
   la conversione CRLF↔LF a un comando. Piccolo, ma è il genere di assenza che un utente Windows
   o un file legacy trasformano in sfiducia.
