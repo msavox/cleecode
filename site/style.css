@@ -459,9 +459,14 @@ kbd {
   line-height: 1.1;
 }
 
-.turtle {
-  font-size: 0.95em;
-  margin-right: 0.15em;
+.emblem {
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: -0.22em;
+  margin-right: 0.1em;
+  /* The mark is a rounded tile on its own black ground; the radius keeps its
+     square corners from printing on a surface that is not quite that black. */
+  border-radius: 22%;
 }
 
 /* The words from the tab title, on the page itself: right under the wordmark,
