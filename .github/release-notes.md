@@ -1,3 +1,56 @@
+## What's new in 0.18.0
+
+**The agent drawer.** `Ctrl+Shift+A` opens a panel down the right of the window, in whatever
+workspace you were already in. Empty, it is the launcher: the four agents drawn as their own
+marks in half-block pixels — mascot and name side by side — a frame around the one Enter would
+start, and the ones you do not have shown dimmed with the honest phrase under them. Choosing a
+missing one types its documented install command at a shell prompt and stops there: the line is
+never run, Enter stays yours. The drawer has two modes — pin, a column of the layout, and
+autocollapse, painted over the frames and withdrawing when the keyboard goes back to your work —
+and closing it never kills the agent: the pty runs on, the conversation is where you left it.
+Handles on the window's edge open and close it with the mouse, striped in six colours each theme
+signs its own way.
+
+**gemini is the fourth agent.** Same drawer, same chord, same rules as claude, codex and
+opencode — including being found when npm dresses it up as `node`.
+
+**The agent presets are retiring, and say so.** With the drawer there is nothing left for
+`clee -w claude` and friends to do that a plain workspace plus one keypress does not do better.
+This release they still open something sensible and the status line says they are deprecated and
+what replaces them; the next one removes them. A `minimal` preset — one editor, one shell —
+arrives in their place.
+
+**Rename, references, format: the language server's second half.** Rename the symbol under the
+cursor with a grouped preview and a single undo; list references and document symbols; format
+the whole file with `Ctrl+Shift+Q` as one edit. After a `.` the completion popup now asks the
+server — what follows a dot is what that type has, which the buffer's own words cannot know —
+and opens only when the answer arrives, never empty.
+
+**Search learned to write.** `Ctrl+Shift+H` grows a second field: empty, it is the search it
+always was; filled, Enter opens a preview grouped by file — the rename discipline applied to
+project-wide replace. The field empties on every opening, so a forgotten leftover can never
+silently turn the next search into a replace.
+
+**Autosave and recovery.** Every five seconds, dirty buffers are copied to
+`~/.config/cleecode/recovery` — unnamed ones included, which used to die without a trace. A
+SIGKILL, a stack overflow or the power going out now costs you at most five seconds of typing.
+
+**A block selection types.** With a column block active, every key inserts on every line of the
+block at the same column, Backspace eats one column back, and each keystroke is a single undo
+step. Lines shorter than the column are skipped, not padded.
+
+**A file over fifty megabytes is told the truth.** Above the documented threshold the editor
+declares its limits — no highlighting, no buffer words in completion, a shorter undo — instead
+of discovering them by freezing.
+
+**The status bar says how the file is built.** Encoding and line endings are read out loud, and
+a command converts them.
+
+**Animated GIFs animate.** In the preview tab, at the pace the file itself asks for.
+
+**A new coat of paint.** CleeCode has an icon — in the Dock via `clee --install-app`, in the
+browser tab, and beside the name on its new home page: <https://cleecode.pages.dev>.
+
 ## What's new in 0.15.1
 
 **Ctrl+Shift+A now finds the `claude` most people actually have.** Installed from npm,
