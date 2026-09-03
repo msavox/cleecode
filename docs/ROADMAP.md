@@ -2385,6 +2385,18 @@ riscritti con la strada temp+rename.
   `clee -w octave --agent claude` — il preset col cassetto già aperto — si valuta a
   cassetto esistente, come riga di comando sopra il meccanismo e non come meccanismo.)
 
+  > **Fatto, in due fette (2026-09-03).** La prima: il pannello pinnato fuori da
+  > `app.terminals` — perché `rebuild_terminals` drena quel vettore e la conversazione deve
+  > sopravvivere, e il driver lo prova al byte — col selettore ASCII nello stato vuoto, il
+  > lancio via `exec` (l'uscita dell'agente È l'uscita del pane: il selettore torna da sé,
+  > niente sonde), Ctrl+Shift+A che evoca quando non c'è nessuno e dà precedenza al cassetto
+  > quando c'è. La seconda: l'autocollapse che si sovrappone — l'ipotesi di lavoro qui sotto
+  > confermata dal codice: pin rifluisce, autocollapse dipinge sopra, e il driver prova che
+  > ogni cella a sinistra del seam resta identica — e il primo tempo del congedo dei preset,
+  > con la status line che dichiara e la documentazione che insegna il cassetto.
+  > Cinquantasei controlli nel driver del cassetto e dei preset, 577 test. Resta il secondo
+  > tempo del congedo, alla release successiva a quella che porta il cassetto.
+
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
   ucciso: il pty sopravvive come già sopravvive il pannello sotto `Ctrl+J`, quindi la
