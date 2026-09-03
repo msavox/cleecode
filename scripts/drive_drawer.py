@@ -49,20 +49,34 @@ INSTALL_COMMANDS = {
     "gemini": "npm install -g @google/gemini-cli",
 }
 
-# How tall a mark is, in cells — `drawer::ART_ROWS`. The caption sits directly under it.
+# How tall a mark is, in cells — `drawer::ART_ROWS`. The selection frame adds a row above and one
+# below, so an entry is ART_ROWS + 2 tall on screen.
 ART_ROWS = 5
 
 # The brand colours each mark is drawn in. Fixed values rather than palette roles, exactly as the
 # file tree's icons are, which is what makes them nameable here at all: a mark that changed colour
-# with the theme would not be that program's mark any more.
+# with the theme would not be that program's mark any more. There are no captions under the big
+# marks any more — each carries its name in brick letters — so the first ink of each entry is
+# also how this file *finds* that mark on screen: a colour no other mark uses.
 MARK_INKS = {
-    "claude": ["d97757", "f0805a"],   # Anthropic's coral burst, and Clawd a shade up from it
-    "opencode": ["fafafa", "141414"], # their white on their black
-    "codex": ["e8e8e8"],              # OpenAI's knot
+    "claude": ["d97757", "000000"],   # Clawd's coral, and the black of its eyes
+    "opencode": ["b4b2b2", "efeded"], # "open" in their grey, "code" in their white
+    "codex": ["ffffff"],              # the prompt in the cloud
+    "gemini": ["1b80fd", "d7618e"],   # the border's blue, and the pink it arrives at
 }
-# gemini's sparkle is not one colour: it runs blue at the top into violet at the bottom, and the
+# Codex's cloud is not one colour: it runs lavender at the top into blue at the bottom, and the
 # check is that the two ends are the two ends.
-GEMINI_TOP, GEMINI_BOTTOM = "4796e3", "9168c0"
+CODEX_TOP, CODEX_BOTTOM = "a9a6ff", "3e49ff"
+
+# The ink each mark's *top row* carries, which is how a mark is found on screen — see
+# `mark_rows`. opencode's word starts a row into its block (the letters sit on the middle six
+# pixel rows), so its "top" is the word's own first row; the others are found at their first.
+MARK_TOPS = {
+    "claude": "d97757",
+    "opencode": "b4b2b2",
+    "codex": CODEX_TOP,
+    "gemini": "1b80fd",
+}
 
 # The same stand-in drive_presets.py uses, and for the same reason: a `read` returns when Enter is
 # pressed and not before, so a line only ever appears as SUBMITTED because a person pressed it.
@@ -210,53 +224,59 @@ def close_cell(session):
     return None
 
 
-def caption_row(session, name):
-    """The row the launcher drew an agent's lower-case caption on, or None.
+def row_inks(session, y, left):
+    """Every colour on row `y` right of column `left` — foregrounds and backgrounds both, because
+    a half-block cell whose two halves are different colours carries the lower one as its
+    background. That is not an implementation detail to be stepped around here: it is the only
+    way a colour can change *inside* a row of a terminal, and it is what draws Codex's gradient."""
+    inks = set()
+    for cell in session.cells(y)[left + 1:]:
+        inks.update(c for c in (cell.fg, cell.bg) if c != "default")
+    return inks
 
-    Pinned to the *column* rather than found by searching the whole line, which is what the older
-    version of this did and what made it findable by accident: "AGENT-STUB codex ready" in a
-    terminal pane satisfies every test a plain text search can make about the word `codex`. The
-    caption is at a known offset — the drawer's border, then the two-column marker gutter — so
-    that is what is asked for."""
+
+def mark_rows(session, name):
+    """The rows `name`'s mark is drawn on — its top row found by colour, ART_ROWS from there.
+
+    By colour and not by text, because the big marks carry no caption: the name beside each
+    mascot is itself drawn in the mark's own inks, brick letters rather than glyphs, so the one
+    thing on screen that says "this row is claude's" is a colour no other mark uses. The ink
+    looked for is one the mark's *top* row carries — Codex's is the lavender end of the gradient,
+    which exists nowhere else on screen precisely because every other row has already mixed away
+    from it. Pinned inside the drawer — right of its left border — for the reason the old caption
+    search was pinned to a column: an agent's own output in a terminal pane satisfies any check a
+    plain text search can make."""
     left = drawer_column(session)
     if left is None:
         return None
+    top_ink = MARK_TOPS[name]
     for y in range(session.rows):
-        if session.full_line(y).find(name, left) == left + 3:
-            return y
+        if top_ink in row_inks(session, y, left):
+            return list(range(y, min(y + ART_ROWS, session.rows)))
     return None
 
 
-def caption_style(session, name):
-    """The colour the launcher drew an agent's lower-case name in.
-
-    The caption, not the mark above it: it is one span of one style, so a single cell answers.
-    The mark itself is drawn in its owner's own colours whatever this says — see `mark_inks`."""
-    row = caption_row(session, name)
-    if row is None:
-        return None
-    return session.cells(row)[drawer_column(session) + 3].fg
-
-
 def mark_inks(session, name):
-    """Every colour used in the five rows of `name`'s mark, one set per row, top to bottom.
-
-    Read out of the drawer only — right of its left border — and including the background of each
-    cell as well as its foreground, because a half-block cell whose two halves are different
-    colours carries the lower one as its background. That is not an implementation detail to be
-    stepped around here: it is the only way a colour can change *inside* a row of a terminal, and
-    it is what draws gemini's gradient."""
-    row = caption_row(session, name)
+    """Every colour used in the rows of `name`'s mark, one set per row, top to bottom."""
     left = drawer_column(session)
-    if row is None or left is None or row - ART_ROWS < 0:
+    rows = mark_rows(session, name)
+    if left is None or rows is None:
         return None
-    rows = []
-    for y in range(row - ART_ROWS, row):
-        inks = set()
-        for cell in session.cells(y)[left + 1:]:
-            inks.update(c for c in (cell.fg, cell.bg) if c != "default")
-        rows.append(inks)
-    return rows
+    return [row_inks(session, y, left) for y in rows]
+
+
+def frame_rows(session):
+    """The rows carrying the selection frame's corners, top to bottom, or None.
+
+    The frame is the launcher's answer to "what am I about to start": a ring around the chosen
+    mark. Its corner glyphs are the one thing on a launcher screen drawn *inside* the drawer that
+    is box-drawing but not the drawer's own border, which sits exactly on `drawer_column` and is
+    excluded by starting one column in."""
+    left = drawer_column(session)
+    if left is None:
+        return None
+    rows = [y for y in range(session.rows) if "┌" in session.full_line(y)[left + 1:]]
+    return rows or None
 
 
 def menu_action(session, menu_letter, label, report, note):
@@ -366,7 +386,9 @@ def check_drawer(binary, report):
         handle.write("value = 1\nprint(value)\n")
     env = {"PATH": fake_agents(root) + os.pathsep + os.environ.get("PATH", "")}
 
-    session = Session(binary, root, env=env, cols=190)
+    # Wider and taller than the default stage: the launcher's marks carry their names in bricks
+    # now, and four framed banners with their spacing need the rows a default 30 does not have.
+    session = Session(binary, root, env=env, cols=190, rows=42)
     try:
         started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
         report.check("the editor opens", started, session)
@@ -439,8 +461,11 @@ def check_drawer(binary, report):
             opened = session.wait(lambda s: drawer_column(s) is not None, 8)
             report.check("clicking the handle opens the drawer", opened, session,
                          note="the same path the chord takes when there is nobody to talk to")
+            # By the marks' own inks, not by text: the names are drawn in brick letters, which a
+            # text dump reads as half-blocks, not words.
             report.check("and the launcher is what it opens on",
-                         all(name in session.text() for name in INSTALLED + MISSING), session)
+                         all(mark_rows(session, name) is not None
+                             for name in INSTALLED + MISSING), session)
             report.check("the opening handle is gone while the drawer is up",
                          ribbon_handle(session, edge, "‹") is None, session,
                          note="the drawer and the way back to it are never both on screen")
@@ -520,19 +545,19 @@ def check_drawer(binary, report):
         if not summoned:
             return
 
-        names = [n for n in INSTALLED + MISSING if caption_row(session, n) is not None]
+        names = [n for n in INSTALLED + MISSING if mark_rows(session, n) is not None]
         report.check("the launcher shows all four agents", len(names) == 4, session,
                      note="found %s" % names)
 
         # ---- the marks --------------------------------------------------------------------
-        # Each row is that program's own mark drawn in cells, with the lower-case name kept as a
-        # caption under it. The captions above are what makes the list readable; these checks are
-        # that the thing above each caption is the *right* mark, told apart by the only property a
+        # Each entry is that program's own mark drawn in cells, its name in brick letters beside
+        # the mascot — there is no caption under a banner that already says who it is. These
+        # checks are that each entry is the *right* mark, told apart by the only property a
         # driver can read at this resolution — the colours, which are the owners' own and fixed.
         for name, inks in MARK_INKS.items():
             drawn = mark_inks(session, name)
-            report.check("%s's mark is drawn above its caption" % name, drawn is not None, session,
-                         note="five rows of half-blocks, then the name")
+            report.check("%s's mark is drawn in the launcher" % name, drawn is not None, session,
+                         note="five rows of half-blocks, name in bricks beside the mascot")
             if drawn is None:
                 continue
             everywhere = set().union(*drawn)
@@ -550,21 +575,37 @@ def check_drawer(binary, report):
                          not (set(inks) & elsewhere), session,
                          note="%s also appears above %s" % (set(inks) & elsewhere, others))
 
-        # gemini's is the one that is not a colour but a run of them: blue at the top of the
-        # sparkle into violet at the bottom. A flat mark would satisfy every check above and be
-        # the wrong picture, so the two ends are asked for by name.
-        sparkle = mark_inks(session, "gemini")
-        report.check("gemini's sparkle is drawn above its caption", sparkle is not None, session)
-        if sparkle:
-            report.check("and it runs blue at the top into violet at the bottom",
-                         GEMINI_TOP in sparkle[0] and GEMINI_BOTTOM in sparkle[-1], session,
+        # Codex's is the one that is not a colour but a run of them: lavender at the top of the
+        # cloud into blue at the bottom. A flat mark would satisfy every check above and be the
+        # wrong picture, so the two ends are asked for by name.
+        cloud = mark_inks(session, "codex")
+        report.check("codex's cloud is drawn in the launcher", cloud is not None, session)
+        if cloud:
+            report.check("and it runs lavender at the top into blue at the bottom",
+                         CODEX_TOP in cloud[0] and CODEX_BOTTOM in cloud[-1], session,
                          note="top row %s, bottom row %s"
-                              % (sorted(sparkle[0]), sorted(sparkle[-1])))
+                              % (sorted(cloud[0]), sorted(cloud[-1])))
             report.check("which is a gradient and not two halves",
-                         len(set().union(*sparkle)) > len(sparkle), session,
+                         len(set().union(*cloud)) > len(cloud), session,
                          note="%d colours down %d rows: it changes inside a row as well, which is "
                               "what the half-block's background is for"
-                              % (len(set().union(*sparkle)), len(sparkle)))
+                              % (len(set().union(*cloud)), len(cloud)))
+
+        # ---- the selection frame ------------------------------------------------------------
+        # The launcher's highlight is a ring around the chosen mark — the marks carry their own
+        # names, so the frame's only job is to be seen, and to move when the choice does.
+        ringed = frame_rows(session)
+        report.check("a frame rings the chosen mark", ringed is not None, session,
+                     note="box-drawing inside the drawer that is not the drawer's own border")
+        if ringed:
+            was = ringed[0]
+            session.press("\x1b[B", lambda s: (frame_rows(s) or [was])[0] != was, 4)
+            moved = frame_rows(session)
+            report.check("and the frame follows the arrows",
+                         moved is not None and moved[0] != was, session,
+                         note="top of the ring went from row %s to %s"
+                              % (was, moved and moved[0]))
+            session.press("\x1b[A", lambda s: (frame_rows(s) or [None])[0] == was, 4)
 
         # ---- the column is part of the layout, not over the top of it -----------------------
         left = drawer_column(session)
@@ -585,13 +626,16 @@ def check_drawer(binary, report):
         if absent is None:
             print("  SKIP  the dim names: this machine really has %s" % ", ".join(MISSING))
         else:
-            here = caption_style(session, "codex")
-            gone = caption_style(session, absent)
-            report.check("an agent that is not installed is drawn dimmer than one that is",
-                         here is not None and gone is not None and here != gone, session,
-                         note="codex is %r, %s is %r" % (here, absent, gone))
-            report.check("and says so in words",
-                         "not installed" in session.text(), session)
+            # The mark itself is dimmed with the terminal's own DIM attribute, which pyte does
+            # not surface — so what this checks is the half it can see: the honest phrase, in
+            # words, sitting under the banner of the agent it is about and not somewhere vague.
+            said = session.row_of("not installed")
+            rows = mark_rows(session, absent)
+            report.check("an agent that is not installed says so under its own banner",
+                         said is not None and rows is not None
+                         and rows[0] <= said <= rows[-1] + 2, session,
+                         note="the phrase is on row %s, %s's mark on rows %s"
+                              % (said, absent, rows))
 
         # ---- arrows and Enter ----------------------------------------------------------------
         # Four presses is a full turn of the ring, so this lands back on the first name having
@@ -836,9 +880,9 @@ def check_drawer(binary, report):
         report.check("an agent that ends returns the drawer to the list of four", gone, session,
                      note="never a respawned shell: that would look like the agent still being there")
         if gone:
-            still_four = all(caption_row(session, name) is not None
+            still_four = all(mark_rows(session, name) is not None
                              for name in INSTALLED + MISSING)
-            report.check("and the four names are on offer again", still_four, session)
+            report.check("and the four marks are on offer again", still_four, session)
 
         # ---- a name that is not here offers to install it -----------------------------------
         # Last, because it is the only section that leaves the keyboard somewhere else on purpose:
@@ -852,7 +896,8 @@ def check_drawer(binary, report):
             print("  SKIP  the install offer: this machine really has %s" % ", ".join(MISSING))
         elif gone:
             command = INSTALL_COMMANDS[absent]
-            row = caption_row(session, absent)
+            rows = mark_rows(session, absent)
+            row = rows[len(rows) // 2] if rows else None
             report.check("the launcher still lists %s to press" % absent, row is not None, session)
             for how in ("clicking", "Enter"):
                 if row is None:

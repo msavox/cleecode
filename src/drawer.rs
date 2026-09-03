@@ -128,66 +128,54 @@ pub fn stays_open(pinned: bool, has_the_keyboard: bool) -> bool {
 /// in the grids are inks, not glyphs; [`ink`] says which colour each one is, and `.` is the
 /// drawer showing through.
 ///
-/// Anthropic's burst beside Clawd, the small orange critter Claude Code is mascotted by. Two
-/// elements, because the mark and the mascot are how that CLI is recognised and either alone
-/// reads as half of it.
+/// Clawd, the small coral critter Claude Code greets you as: the wide body, the two square black
+/// eyes, the stubby arms out the sides and the four legs it stands on. Drawn from the welcome
+/// screen's own proportions — the critter alone, because the critter alone is how that CLI says
+/// hello.
 const CLAUDE_ART: &[&str] = &[
-    ".....A.....  ...CCCCCC...",
-    "A...AAA...A  ..CCCCCCCC..",
-    "AA..AAA..AA  .CCCCCCCCCC.",
-    ".AAAAAAAAA.  CCCCCCCCCCCC",
-    "..AAAAAAA..  CC..CCCC..CC",
-    "..AAAAAAA..  CC..CCCC..CC",
-    ".AAAAAAAAA.  CCCCC..CCCCC",
-    "AA..AAA..AA  CCCCCCCCCCCC",
-    "A...AAA...A  .CCC....CCC.",
-    ".....A.....  ..CC....CC..",
+    "..AAAAAAAAAAA..",
+    "..AAAAAAAAAAA..",
+    // The eyes sit on pixel rows 2 and 3 on purpose: that pair is exactly one cell, so each eye
+    // is a crisp full block rather than two half-block smudges astride a cell boundary.
+    "..AAEEAAAEEAA..",
+    "AAAAEEAAAEEAAAA",
+    "AAAAAAAAAAAAAAA",
+    "..AAAAAAAAAAA..",
+    "..AAAAAAAAAAA..",
+    "..AA.AA.AA.AA..",
+    "..AA.AA.AA.AA..",
+    "..AA.AA.AA.AA..",
 ];
 
-/// opencode's squared terminal block: a dark tile with a white rim, a prompt chevron and a block
-/// cursor inside it. The rim is what makes a black square visible on a dark drawer, and the
-/// black/white contrast is theirs.
-const OPENCODE_ART: &[&str] = &[
-    ".WWWWWWWWWWW.",
-    "WKKKKKKKKKKKW",
-    "WKWWKKKWWWKKW",
-    "WKKWWKKWWWKKW",
-    "WKKKWWKWWWKKW",
-    "WKKWWKKWWWKKW",
-    "WKWWKKKWWWKKW",
-    "WKKKKKKKKKKKW",
-    "WKKKKKKKKKKKW",
-    ".WWWWWWWWWWW.",
-];
-
-/// OpenAI's hexagonal knot, as far as thirteen columns allow: two nested hexagons joined by three
-/// strands — left, right and below — which is what is left of the weave at this size.
+/// Codex's cloud: the lobed blob with the white prompt inside it — a chevron and the underscore
+/// of a cursor. Every cloud pixel is the same ink letter: the colour comes from how far down the
+/// row is — see [`codex_gradient`] — which is the lavender-into-blue wash the real icon wears.
 const CODEX_ART: &[&str] = &[
-    "....XXXXX....",
-    "..XX.....XX..",
-    ".X..XXXXX..X.",
-    "X..X.....X..X",
-    "XXXX.....X..X",
-    "X..X.....XXXX",
-    "X..X.....X..X",
-    ".X..XXXXX..X.",
-    "..XX..X..XX..",
-    "....XXXXX....",
+    "...DDDDDDD...",
+    "..DDDDDDDDD..",
+    ".DDDDDDDDDDD.",
+    "DDDPPDDDDDDDD",
+    "DDDDPPDDDDDDD",
+    "DDDDDPPDDDDDD",
+    "DDDDPPDDDDDDD",
+    ".DDPPDDPPPPD.",
+    "..DDDDDPPPP..",
+    "...DDDDDDD...",
 ];
 
-/// Gemini's four-pointed sparkle, with the needle points its own mark has. Every pixel is the
-/// same ink letter: the colour comes from how far down the row is — see [`gemini_gradient`].
+/// Gemini CLI's tile: the rounded dark square, its border running blue on the left into pink on
+/// the right, and the bold blue chevron in the middle with the violet caught on its point.
 const GEMINI_ART: &[&str] = &[
-    ".....G.....",
-    ".....G.....",
-    "....GGG....",
-    "...GGGGG...",
-    "GGGGGGGGGGG",
-    "GGGGGGGGGGG",
-    "...GGGGG...",
-    "....GGG....",
-    ".....G.....",
-    ".....G.....",
+    ".BBBBVVVVRRR.",
+    "BNNNNNNNNNNNR",
+    "BNNNCCNNNNNNR",
+    "BNNNNCCNNNNNR",
+    "BNNNNNVVNNNNR",
+    "BNNNNNVVNNNNR",
+    "BNNNNCCNNNNNR",
+    "BNNNCCNNNNNNR",
+    "BNNNNNNNNNNNR",
+    ".BBBBBBVVRRR.",
 ];
 
 /// A colour, as it is written down by the people who own it. Not a [`crate::theme::Palette`]
@@ -196,18 +184,24 @@ const GEMINI_ART: &[&str] = &[
 /// drawing library calls a colour.
 pub type Ink = (u8, u8, u8);
 
-/// Anthropic's coral.
-const ANTHROPIC_CORAL: Ink = (0xD9, 0x77, 0x57);
-/// Clawd, a shade up from it so the critter and the burst read as two things.
-const CLAWD_ORANGE: Ink = (0xF0, 0x80, 0x5A);
-/// OpenAI's knot, white on a dark panel.
-const OPENAI_WHITE: Ink = (0xE8, 0xE8, 0xE8);
-/// opencode's two, which are only ever each other's opposite.
-const OPENCODE_WHITE: Ink = (0xFA, 0xFA, 0xFA);
-const OPENCODE_BLACK: Ink = (0x14, 0x14, 0x14);
-/// Gemini's sparkle runs blue at the top into violet at the bottom.
-const GEMINI_BLUE: Ink = (0x47, 0x96, 0xE3);
-const GEMINI_VIOLET: Ink = (0x91, 0x68, 0xC0);
+/// Clawd's coral, which is Anthropic's coral, sampled from the welcome screen itself.
+const CLAWD_CORAL: Ink = (0xD9, 0x77, 0x57);
+/// And the black of its eyes.
+const CLAWD_EYE: Ink = (0x00, 0x00, 0x00);
+/// opencode's two tones, off their own splash: "open" in the grey, "code" in the white.
+const OPENCODE_GREY: Ink = (0xB4, 0xB2, 0xB2);
+const OPENCODE_WHITE: Ink = (0xEF, 0xED, 0xED);
+/// Codex's cloud runs lavender at the top into blue at the bottom; the prompt inside is white.
+const CODEX_LAVENDER: Ink = (0xA9, 0xA6, 0xFF);
+const CODEX_BLUE: Ink = (0x3E, 0x49, 0xFF);
+const CODEX_PROMPT: Ink = (0xFF, 0xFF, 0xFF);
+/// Gemini CLI's tile: the border's blue, the violet it passes through, the pink it arrives at,
+/// the near-black it holds, and the chevron's own blue.
+const GEMINI_BLUE: Ink = (0x1B, 0x80, 0xFD);
+const GEMINI_VIOLET: Ink = (0x7F, 0x89, 0xEF);
+const GEMINI_PINK: Ink = (0xD7, 0x61, 0x8E);
+const GEMINI_NIGHT: Ink = (0x1E, 0x1E, 0x2E);
+const GEMINI_CHEVRON: Ink = (0x0C, 0x8A, 0xFC);
 
 /// How many pixel rows a mark is written in. Twice [`ART_ROWS`], because a half-block cell holds
 /// two of them.
@@ -216,10 +210,10 @@ const ART_PIXEL_ROWS: usize = 10;
 /// How many cells tall a mark is drawn.
 pub const ART_ROWS: usize = ART_PIXEL_ROWS / 2;
 
-/// The gradient down gemini's sparkle: blue at the top pixel row, violet at the bottom, mixed
+/// The gradient down Codex's cloud: lavender at the top pixel row, blue at the bottom, mixed
 /// evenly in between. Rows past the art are clamped rather than wrapped, so a caller that asks
 /// for a row that is not there gets the end of the gradient and never a panic.
-fn gemini_gradient(row: usize) -> Ink {
+fn codex_gradient(row: usize) -> Ink {
     let last = (ART_PIXEL_ROWS - 1) as u32;
     let at = (row as u32).min(last);
     let mix = |from: u8, to: u8| {
@@ -229,34 +223,110 @@ fn gemini_gradient(row: usize) -> Ink {
         ((from * (last - at) + to * at + last / 2) / last) as u8
     };
     (
-        mix(GEMINI_BLUE.0, GEMINI_VIOLET.0),
-        mix(GEMINI_BLUE.1, GEMINI_VIOLET.1),
-        mix(GEMINI_BLUE.2, GEMINI_VIOLET.2),
+        mix(CODEX_LAVENDER.0, CODEX_BLUE.0),
+        mix(CODEX_LAVENDER.1, CODEX_BLUE.1),
+        mix(CODEX_LAVENDER.2, CODEX_BLUE.2),
     )
 }
 
-/// The grid an agent's mark is written in. A `match` rather than a lookup, so a fifth agent added
-/// to [`Agent::all`] does not compile until it has been drawn — the block alphabet this replaced
-/// could only find that out at run time, and answered by drawing nothing.
-fn pixels(agent: Agent) -> &'static [&'static str] {
+/// The mascot half of an agent's mark. `None` is opencode, whose name *is* its mark — their
+/// splash is the word and nothing but the word — so its row is the wordmark alone. A `match`
+/// rather than a lookup, so a fifth agent added to [`Agent::all`] does not compile until someone
+/// has decided what its row shows — the block alphabet this replaced could only find that out at
+/// run time, and answered by drawing nothing.
+fn mascot(agent: Agent) -> Option<&'static [&'static str]> {
     match agent {
-        Agent::Claude => CLAUDE_ART,
-        Agent::OpenCode => OPENCODE_ART,
-        Agent::Codex => CODEX_ART,
-        Agent::Gemini => GEMINI_ART,
+        Agent::Claude => Some(CLAUDE_ART),
+        Agent::OpenCode => None,
+        Agent::Codex => Some(CODEX_ART),
+        Agent::Gemini => Some(GEMINI_ART),
     }
 }
 
+/// The brick alphabet the names are written in, beside each mascot: six pixel rows to a letter —
+/// three cells — `#` where the ink goes. Thirteen letters because the four names need thirteen,
+/// and no more for the reason the old three-row alphabet had no more: a font file for thirteen
+/// letters is a dependency for the sake of having one.
+const NAME_FONT: [(char, [&str; 6]); 13] = [
+    ('a', [".#.", "#.#", "###", "#.#", "#.#", "#.#"]),
+    ('c', ["###", "#..", "#..", "#..", "#..", "###"]),
+    ('d', ["##.", "#.#", "#.#", "#.#", "#.#", "##."]),
+    ('e', ["###", "#..", "##.", "#..", "#..", "###"]),
+    ('g', ["###", "#..", "#..", "#.#", "#.#", "###"]),
+    ('i', ["#", "#", "#", "#", "#", "#"]),
+    ('l', ["#..", "#..", "#..", "#..", "#..", "###"]),
+    ('m', ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#"]),
+    ('n', ["#..#", "##.#", "##.#", "#.##", "#.##", "#..#"]),
+    ('o', ["###", "#.#", "#.#", "#.#", "#.#", "###"]),
+    ('p', ["###", "#.#", "###", "#..", "#..", "#.."]),
+    ('u', ["#.#", "#.#", "#.#", "#.#", "#.#", "###"]),
+    ('x', ["#.#", "#.#", ".#.", ".#.", "#.#", "#.#"]),
+];
+
+/// The pixel row the name's letters start on. Rows 2..8 is six rows on an even boundary, which
+/// is three whole cells: letters astride a cell boundary come out as half-block smudges, and a
+/// name has to stay text-crisp beside a mascot that is allowed to be a picture.
+const NAME_TOP: usize = 2;
+
+/// The ink one letter of `agent`'s name is written in. One each, except opencode: "open" in
+/// their grey and "code" in their white is the split that makes the word their mark.
+fn name_ink(agent: Agent, letter: usize) -> char {
+    match agent {
+        Agent::Claude => 'A',
+        Agent::OpenCode => {
+            if letter < 4 {
+                'G'
+            } else {
+                'W'
+            }
+        }
+        Agent::Codex => 'P',
+        Agent::Gemini => 'C',
+    }
+}
+
+/// The whole mark as rows of ink letters: mascot, a two-column gap, and the name in bricks —
+/// or the name alone, where the name is the mark. A letter the font does not have is skipped
+/// rather than drawn as a hole; the test below is what keeps that an impossibility rather than
+/// a behaviour.
+fn pixel_grid(agent: Agent) -> Vec<String> {
+    let mut rows: Vec<String> = match mascot(agent) {
+        Some(grid) => grid.iter().map(|row| format!("{row}..")).collect(),
+        None => vec![String::new(); ART_PIXEL_ROWS],
+    };
+    for (i, letter) in agent.workspace_name().chars().enumerate() {
+        let Some((_, glyph)) = NAME_FONT.iter().find(|(l, _)| *l == letter) else { continue };
+        let ink = name_ink(agent, i);
+        let width = glyph[0].chars().count();
+        for (at, row) in rows.iter_mut().enumerate() {
+            // The gap between letters; the gap after the mascot is the mascot's own two columns.
+            if i > 0 {
+                row.push('.');
+            }
+            match at.checked_sub(NAME_TOP).and_then(|line| glyph.get(line)) {
+                Some(line) => row.extend(line.chars().map(|p| if p == '#' { ink } else { '.' })),
+                None => row.extend(std::iter::repeat_n('.', width)),
+            }
+        }
+    }
+    rows
+}
+
 /// What colour one pixel is: its letter says which ink, and the pixel row says how far down a
-/// gradient it is — which only gemini's mark uses. `None` is the drawer showing through.
+/// gradient it is — which only Codex's cloud uses. `None` is the drawer showing through.
 fn ink(mark: char, row: usize) -> Option<Ink> {
     match mark {
-        'A' => Some(ANTHROPIC_CORAL),
-        'C' => Some(CLAWD_ORANGE),
-        'X' => Some(OPENAI_WHITE),
+        'A' => Some(CLAWD_CORAL),
+        'E' => Some(CLAWD_EYE),
+        'G' => Some(OPENCODE_GREY),
         'W' => Some(OPENCODE_WHITE),
-        'K' => Some(OPENCODE_BLACK),
-        'G' => Some(gemini_gradient(row)),
+        'D' => Some(codex_gradient(row)),
+        'P' => Some(CODEX_PROMPT),
+        'B' => Some(GEMINI_BLUE),
+        'V' => Some(GEMINI_VIOLET),
+        'R' => Some(GEMINI_PINK),
+        'N' => Some(GEMINI_NIGHT),
+        'C' => Some(GEMINI_CHEVRON),
         _ => None,
     }
 }
@@ -272,7 +342,7 @@ pub struct ArtCell {
 
 /// How wide `agent`'s mark comes out, in cells.
 pub fn art_width(agent: Agent) -> u16 {
-    pixels(agent).iter().map(|row| row.chars().count()).max().unwrap_or(0) as u16
+    pixel_grid(agent).iter().map(|row| row.chars().count()).max().unwrap_or(0) as u16
 }
 
 /// The widest of the four, which is the width the launcher has to have to show any of them: the
@@ -285,11 +355,11 @@ pub fn widest_art() -> u16 {
 ///
 /// The encoding is the whole trick: two stacked pixels become one cell. Both lit and the same
 /// colour is a full block; both lit and *different* colours is an upper half-block with the lower
-/// colour behind it, which is what lets gemini's gradient change inside a single row of the
+/// colour behind it, which is what lets the cloud's gradient change inside a single row of the
 /// terminal; one lit is the half-block on that side; neither is a space.
 pub fn art(agent: Agent) -> Vec<Vec<ArtCell>> {
-    let grid = pixels(agent);
-    let width = art_width(agent) as usize;
+    let grid = pixel_grid(agent);
+    let width = grid.iter().map(|row| row.chars().count()).max().unwrap_or(0);
     (0..ART_ROWS)
         .map(|row| {
             let at = |pixel_row: usize, x: usize| {
@@ -446,7 +516,16 @@ mod tests {
     fn every_agent_has_a_mark_of_the_size_the_layout_expects() {
         for agent in Agent::all() {
             let name = agent.workspace_name();
-            let grid = pixels(agent);
+            // The font spells every name the launcher offers. `pixel_grid` skips a letter it
+            // does not have rather than panicking, which is exactly why a fifth agent arriving
+            // without its letters has to be caught here and not on screen.
+            for letter in name.chars() {
+                assert!(
+                    NAME_FONT.iter().any(|(l, _)| *l == letter),
+                    "{name}: no bricks for {letter:?}"
+                );
+            }
+            let grid = pixel_grid(agent);
             assert_eq!(grid.len(), ART_PIXEL_ROWS, "{name}: a mark is ten pixel rows");
             let width = art_width(agent);
             assert!(width > 0, "{name}: a mark with no width is not a mark");
@@ -477,44 +556,46 @@ mod tests {
 
     /// The half-block encoding, at the four cases it has: nothing, one half, both halves the same
     /// colour, both halves different. The last one is the only reason `bg` exists, and it is what
-    /// carries gemini's gradient through a single row of the terminal.
+    /// carries the cloud's gradient through a single row of the terminal.
     #[test]
     fn two_pixels_become_one_cell() {
         let codex = art(Agent::Codex);
-        // The knot's top pixel row is empty at the left edge and its second is too, so the corner
-        // cell is a space with no ink at all.
+        // The cloud's top pixel row is empty at the left edge and its second is too, so the
+        // corner cell is a space with no ink at all.
         assert_eq!(codex[0][0], ArtCell { ch: ' ', fg: None, bg: None });
-        // Its middle rows have the outer hexagon's side lit in both halves, one ink: a full block.
-        assert_eq!(codex[2][0], ArtCell { ch: '█', fg: Some(OPENAI_WHITE), bg: None });
-        // The sparkle's top point is lit in the upper half of its first cell row and in the lower
-        // half too — but the gradient has moved between them, so the cell carries both.
+        // The cloud's crown is lit in the upper half of its first cell row and in the lower half
+        // too — but the gradient has moved between them, so the cell carries both.
+        let crown = codex[0][5];
+        assert_eq!(crown.ch, '▀');
+        assert_eq!(crown.fg, Some(codex_gradient(0)));
+        assert_eq!(crown.bg, Some(codex_gradient(1)));
+        assert_ne!(crown.fg, crown.bg, "the whole point of the second colour");
+        // The tile's left border is lit in both halves of its middle rows, one ink: a full block.
         let gemini = art(Agent::Gemini);
-        let point = gemini[0][5];
-        assert_eq!(point.ch, '▀');
-        assert_eq!(point.fg, Some(gemini_gradient(0)));
-        assert_eq!(point.bg, Some(gemini_gradient(1)));
-        assert_ne!(point.fg, point.bg, "the whole point of the second colour");
-        // A half on its own is the half-block on that side, and nothing behind it.
+        assert_eq!(gemini[1][0], ArtCell { ch: '█', fg: Some(GEMINI_BLUE), bg: None });
+        // A half on its own is the half-block on that side, and nothing behind it: the border's
+        // rounded corner leaves the tile's top-left cell lit only below.
+        assert_eq!(gemini[0][0], ArtCell { ch: '▄', fg: Some(GEMINI_BLUE), bg: None });
+        // And two same-ink halves anywhere else are one block: Clawd's shoulder.
         let claude = art(Agent::Claude);
-        assert_eq!(claude[0][4], ArtCell { ch: '▄', fg: Some(ANTHROPIC_CORAL), bg: None });
-        assert_eq!(claude[0][5], ArtCell { ch: '█', fg: Some(ANTHROPIC_CORAL), bg: None });
+        assert_eq!(claude[0][2], ArtCell { ch: '█', fg: Some(CLAWD_CORAL), bg: None });
     }
 
     /// The gradient reaches both ends and only moves downwards. A "gradient" that arrived at the
-    /// bottom still blue would be four rows of flat colour nobody would notice was wrong.
+    /// bottom still lavender would be four rows of flat colour nobody would notice was wrong.
     #[test]
-    fn the_sparkle_runs_blue_into_violet() {
-        assert_eq!(gemini_gradient(0), GEMINI_BLUE);
-        assert_eq!(gemini_gradient(ART_PIXEL_ROWS - 1), GEMINI_VIOLET);
-        assert_eq!(gemini_gradient(999), GEMINI_VIOLET, "past the end is the end, not a panic");
+    fn the_cloud_runs_lavender_into_blue() {
+        assert_eq!(codex_gradient(0), CODEX_LAVENDER);
+        assert_eq!(codex_gradient(ART_PIXEL_ROWS - 1), CODEX_BLUE);
+        assert_eq!(codex_gradient(999), CODEX_BLUE, "past the end is the end, not a panic");
         for row in 1..ART_PIXEL_ROWS {
-            let (before, now) = (gemini_gradient(row - 1), gemini_gradient(row));
-            assert!(now.0 >= before.0 && now.1 <= before.1 && now.2 <= before.2, "row {row}");
+            let (before, now) = (codex_gradient(row - 1), codex_gradient(row));
+            assert!(now.0 <= before.0 && now.1 <= before.1 && now.2 >= before.2, "row {row}");
         }
         // And the two ends of the drawn art are visibly apart, which is what a reader sees.
-        let art = art(Agent::Gemini);
-        let top = art[0][5].fg.unwrap();
-        let bottom = art[ART_ROWS - 1][5].bg.or(art[ART_ROWS - 1][5].fg).unwrap();
+        let art = art(Agent::Codex);
+        let top = art[0][6].fg.unwrap();
+        let bottom = art[ART_ROWS - 1][6].bg.or(art[ART_ROWS - 1][6].fg).unwrap();
         assert_ne!(top, bottom);
     }
 
@@ -523,17 +604,24 @@ mod tests {
     /// with the theme would stop being the mark.
     #[test]
     fn the_marks_are_drawn_in_their_own_colours() {
-        let coral = |agent| art(agent).into_iter().flatten().any(|c| c.fg == Some(ANTHROPIC_CORAL));
-        assert!(coral(Agent::Claude), "the burst is Anthropic's coral");
+        let coral = |agent| art(agent).into_iter().flatten().any(|c| c.fg == Some(CLAWD_CORAL));
+        assert!(coral(Agent::Claude), "Clawd is Anthropic's coral");
         assert!(!coral(Agent::Codex), "and nobody else's mark is");
-        let clawd = art(Agent::Claude).into_iter().flatten().any(|c| c.fg == Some(CLAWD_ORANGE));
-        assert!(clawd, "the critter beside it is its own orange, so the two read apart");
-        let both: Vec<_> = art(Agent::OpenCode)
-            .into_iter()
-            .flatten()
-            .filter_map(|cell| cell.fg)
-            .collect();
-        assert!(both.contains(&OPENCODE_WHITE) && both.contains(&OPENCODE_BLACK));
+        let inks = |agent| {
+            art(agent).into_iter().flatten().flat_map(|c| [c.fg, c.bg]).flatten().collect::<Vec<_>>()
+        };
+        assert!(inks(Agent::Claude).contains(&CLAWD_EYE), "the eyes are what make it Clawd");
+        let word = inks(Agent::OpenCode);
+        assert!(
+            word.contains(&OPENCODE_GREY) && word.contains(&OPENCODE_WHITE),
+            "open in the grey, code in the white: the split is the signature"
+        );
+        let tile = inks(Agent::Gemini);
+        assert!(
+            tile.contains(&GEMINI_BLUE) && tile.contains(&GEMINI_PINK),
+            "the border runs blue into pink, so both ends have to be there"
+        );
+        assert!(inks(Agent::Codex).contains(&CODEX_PROMPT), "the prompt is what the cloud says");
     }
 
     /// Every agent has a command to install it, it is one line, and it names the program it

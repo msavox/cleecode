@@ -2433,25 +2433,31 @@ riscritti con la strada temp+rename.
   > del cassetto, 582 test.
   >
   > **E la quarta (2026-09-03): il selettore mette le facce, e chi manca si installa.** I
-  > wordmark a lettere escono di scena: al loro posto quattro evocazioni dei marchi, disegnate
-  > a pixel di mezzo blocco — dieci righe di pixel in cinque di terminale — nei colori dei
-  > proprietari, valori fissi e non ruoli di palette, per la regola delle icone del file tree:
-  > una citazione che il tema può ridipingere non cita più niente. **La regola «wordmark e non
+  > wordmark a lettere escono di scena: al loro posto quattro banner, disegnati a pixel di
+  > mezzo blocco — dieci righe di pixel in cinque di terminale — nei colori dei proprietari,
+  > valori fissi e non ruoli di palette, per la regola delle icone del file tree: una
+  > citazione che il tema può ridipingere non cita più niente. **La regola «wordmark e non
   > logo» scritta qui sotto è superata da questa:** un'evocazione di poche decine di celle, a
   > una taglia a cui nessun logo sopravvive alla copia, identifica il programma che la riga
   > lancia come l'estensione identifica un file — uso nominativo, non l'artwork di nessuno
-  > ricopiato. Il burst di Anthropic con Clawd accanto, la tessera bianco-su-nero di opencode,
-  > il nodo di OpenAI, la scintilla di Gemini col suo gradiente blu-violetto — che cambia
-  > perfino dentro una singola riga, perché una cella a mezzo blocco porta due colori, sopra e
-  > sotto. E la riga spenta smette di ingoiare l'Invio: un agente non installato adesso si
-  > offre — Invio o clic *scrivono* il comando di installazione documentato dal progetto al
-  > prompt di una shell libera, mai inviato, con la status line che dichiara di chi è l'Invio
-  > — la disciplina di Ctrl+Shift+A, e qui non è un vezzo: due dei quattro si installano con
-  > uno script scaricato in pipe. La risposta a «è installato?» diventa per questo una sonda
-  > con memoria di due secondi invece del ricordo a vita di `Agent::on_path`: la cosa più
-  > probabile dopo un «no» è che diventi un sì, all'invito del pannello stesso.
-  > Settantasette controlli nel driver del cassetto — l'offerta si prova solo dove gli agenti
-  > mancano davvero — e 587 test.
+  > ricopiato. Ogni banner è la mascotte col nome in mattoncini di fianco — Clawd corallo con
+  > gli occhi allineati alla cella perché restino quadrati; la nuvola di Codex col prompt
+  > bianco dentro e il gradiente lavanda-blu che cambia perfino dentro una singola riga,
+  > perché una cella a mezzo blocco porta due colori; la tessera di Gemini CLI col chevron e
+  > il bordo che corre dal blu al rosa — tranne opencode, il cui nome È il marchio: la scritta
+  > bicolore su una riga sola, «open» nel loro grigio e «code» nel loro bianco. Niente
+  > didascalia sotto un banner che già si firma; la scelta la dice una cornice attorno al
+  > banner scelto, il blocco è centrato nel frame, e due righe d'aria separano un banner
+  > dall'altro — cedute una alla volta prima dei banner, che sono l'ultima cosa a cadere. E
+  > la riga spenta smette di ingoiare l'Invio: un agente non installato dice «non installato»
+  > sotto il proprio banner e adesso si offre — Invio o clic *scrivono* il comando di
+  > installazione documentato dal progetto al prompt di una shell libera, mai inviato, con la
+  > status line che dichiara di chi è l'Invio — la disciplina di Ctrl+Shift+A, e qui non è un
+  > vezzo: due dei quattro si installano con uno script scaricato in pipe. La risposta a «è
+  > installato?» diventa per questo una sonda con memoria di due secondi invece del ricordo a
+  > vita di `Agent::on_path`: la cosa più probabile dopo un «no» è che diventi un sì,
+  > all'invito del pannello stesso. Ottantadue controlli nel driver del cassetto — l'offerta
+  > si prova solo dove gli agenti mancano davvero — e 587 test.
 
   *Il cassetto:* un pannello laterale che compare da destra per l'agente,
   quando serve, in qualunque workspace — lo evochi, chiedi, lo congedi, e nascosto non è
