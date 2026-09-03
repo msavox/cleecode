@@ -282,10 +282,20 @@ kbd {
 }
 
 .product-mark {
+  display: flex;
+  align-items: center;
   font-family: var(--house-face);
   font-size: 17px;
   color: var(--m-text);
   font-weight: 600;
+}
+
+/* The site's own mark beside its name, the way the house logo sits beside
+   Marunja's — a size down, since this is the product under the house. */
+.product-logo {
+  margin-right: 8px;
+  height: 24px;
+  width: 24px;
 }
 
 .product-mark:hover { color: var(--m-tip); }
@@ -457,27 +467,53 @@ kbd {
   font-weight: 700;
   letter-spacing: -0.005em;
   line-height: 1.1;
+  /* The mark's own neon: a pale green core with the green halo behind it,
+     the same light the icon gives off, so the name and the mark read as one
+     object. Three shadows, tight to wide, is what makes glow instead of blur. */
+  color: #86f7b1;
+  text-shadow:
+    0 0 6px rgba(74, 222, 128, 0.85),
+    0 0 22px rgba(74, 222, 128, 0.5),
+    0 0 55px rgba(34, 197, 94, 0.3);
 }
 
 .emblem {
+  /* Back inline: the global img reset above says block, which dropped the
+     name onto its own line under the mark instead of beside it. */
+  display: inline-block;
   width: 1.2em;
   height: 1.2em;
   vertical-align: -0.22em;
   margin-right: 0.1em;
-  /* The mark is a rounded tile on its own black ground; the radius keeps its
-     square corners from printing on a surface that is not quite that black. */
-  border-radius: 22%;
 }
 
-/* The words from the tab title, on the page itself: right under the wordmark,
-   in the house face, brand-coloured — the one-line answer to "what is this". */
+/* The words from the tab title, on the page itself: right under the wordmark —
+   the one-line answer to "what is this", striped in the six bands of the 1977
+   Apple logo, the same quotation the editor's default theme makes on the
+   drawer handle. Hard stops, not a blend: the vintage mark is bands, and a
+   smooth rainbow would be quoting something else. The bands run across the
+   line, so the sentence walks the six colours as it reads. Colour first, so a
+   browser without background-clip still reads it — the .house-mark pattern
+   above. */
 .tagline {
   margin: -0.35rem 0 0.9rem;
   font-family: var(--house-face);
   font-size: clamp(1.15rem, 3.4vw, 1.5rem);
-  font-weight: 600;
+  font-weight: 700;
   color: var(--m-brand, #3b82f6);
   letter-spacing: 0.01em;
+  /* Shrunk to the words, or the bands would be measured against the column
+     and the sentence would only ever walk the first half of them. */
+  width: fit-content;
+  background: linear-gradient(90deg,
+    #61bb46 0 16.7%, #fdb827 16.7% 33.3%, #f5821f 33.3% 50%,
+    #e03a3e 50% 66.7%, #963d97 66.7% 83.3%, #009ddc 83.3% 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .tagline { color: transparent; }
 }
 
 .identity {
