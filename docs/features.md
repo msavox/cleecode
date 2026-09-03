@@ -72,9 +72,8 @@ on a terminal with a graphics protocol (kitty, iTerm2, sixel), coloured half-blo
 instead of the blank read-only buffer a binary file used to give. An animated `.gif` plays there
 too, at the speed the file itself asks for and looping for as long as the tab is on screen; one
 whose frames would not fit in memory shows its first frame and says why, rather than freezing to
-find out. A PDF opens as pages, turned
-with the plain arrow keys, and re-renders in place when the file changes: edit the `.tex`, press
-Run, and the page beside it is the one you just typeset.
+find out. A PDF opens as pages, turned with the plain arrow keys, and re-renders in place when
+the file changes: edit the `.tex`, press Run, and the page beside it is the one you just typeset.
 
 Every preview carries a navigation bar along its bottom edge: the page arrows, `go` to jump to a
 page by number, `-` and `+` for zoom, and `fit` or `wide` to size the page to the pane or to its

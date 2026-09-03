@@ -401,6 +401,16 @@ pub struct Preview {
     /// keystrokes, needs no pandoc and no graphics — so which is wanted is a matter of what is
     /// being done, not of what the machine can manage. The `text` button on the bar sets it.
     pub text_only: bool,
+    /// The frames of a picture that moves, and where in them this tab is. `None` for every
+    /// still — which is every picture but a GIF with more than one frame in it.
+    ///
+    /// Held here rather than in a table beside the tabs for the reason `settled` is: it is a
+    /// fact about one view of one file, and a tab that closes has to take it with it.
+    pub animation: Option<Animation>,
+    /// Set when the file animates and its frames would not fit the budget. The tab then shows
+    /// the first frame — a still is honest, an empty pane is not — and the bar says why it is
+    /// not moving. See [`MAX_ANIMATION_PIXELS`].
+    pub animation_refused: bool,
 }
 
 pub struct Pages {
@@ -429,7 +439,7 @@ impl Preview {
     }
 
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false }
+        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false, animation: None, animation_refused: false }
     }
 
     pub fn document(page: usize) -> Self {
@@ -451,6 +461,8 @@ impl Preview {
             scroll_x: 0,
             text_only: false,
             reloading: false,
+            animation: None,
+            animation_refused: false,
         }
     }
 
@@ -476,6 +488,8 @@ impl Preview {
             scroll_x: 0,
             text_only: false,
             reloading: false,
+            animation: None,
+            animation_refused: false,
         }
     }
 
@@ -583,11 +597,139 @@ pub struct Decoded {
     pub result: Result<image::DynamicImage, String>,
     /// The page count, when this render was also the one that established it.
     pub total: Option<usize>,
+    /// What the file turned out to hold past the first frame, which is the one in `result`.
+    pub motion: Motion,
+}
+
+/// What a picture file has beyond the frame that was decoded for the tab.
+pub enum Motion {
+    /// One frame — which is every picture but a GIF, and most GIFs. What is in `result` is the
+    /// whole file, and the tab shows it and stands still, exactly as it always has.
+    Still,
+    /// Every frame of an animation, decoded once.
+    Animated(Animation),
+    /// It animates, and its frames do not fit the budget. The first frame is in `result` all
+    /// the same: a still is the honest answer, `State::Failed` would hide a picture that reads
+    /// perfectly, and a decode attempted anyway is the frozen window this refusal exists to
+    /// avoid. The numbers are what lets the tab say *why* it is not moving.
+    TooBig { width: u32, height: u32, frames: usize },
+}
+
+/// The frames of a picture that moves, decoded once and then cycled by the clock.
+///
+/// Decoded once and kept, rather than re-read per frame: a GIF frame is not a picture on its
+/// own but a patch composited over the ones before it, so "read frame 7" means decoding the
+/// six before it as well — every time round. Holding them turns a frame from a decode into a
+/// memcpy and a resize, which is what lets this keep time at all.
+///
+/// They are kept at their own size and fitted to the pane as each one goes up, the way a still
+/// picture is. Keeping them pre-scaled would be a second copy of the whole animation, and the
+/// first zoom or window resize would throw it away.
+pub struct Animation {
+    frames: Vec<image::DynamicImage>,
+    /// How long each frame is shown for, taken from the file's own timings — never a fixed
+    /// tick, which is what makes a GIF drawn at 3 fps and one at 25 look like themselves.
+    delays: Vec<std::time::Duration>,
+    /// Which frame is on screen.
+    frame: usize,
+    /// When it went up.
+    shown: std::time::Instant,
+}
+
+impl Animation {
+    fn new(frames: Vec<image::DynamicImage>, delays: Vec<std::time::Duration>) -> Self {
+        Animation { frames, delays, frame: 0, shown: std::time::Instant::now() }
+    }
+
+    /// Starts the clock from now, at the first frame. Called when the frames reach the tab and
+    /// not when they were decoded: a decode that took half a second would otherwise arrive with
+    /// the first frame's time already spent, and the tab would jump to the second one.
+    pub fn restart(&mut self) {
+        self.frame = 0;
+        self.shown = std::time::Instant::now();
+    }
+
+    /// Moves to the next frame if the one on screen has had its time, and says whether it did.
+    /// `false` while it has not, which is what makes calling this every turn of the loop free.
+    ///
+    /// One frame per call, and the clock restarted from `now` rather than from when the frame
+    /// was due: an editor busy elsewhere for a second comes back to an animation that goes on
+    /// from where it was, not to one racing through a second of frames to catch up.
+    ///
+    /// It never ends. A GIF carries a loop count — "play three times, then stop" — and this
+    /// ignores it: a preview tab is a thing you glance at, and one that quietly froze on its
+    /// last frame would be indistinguishable from one that broke.
+    pub fn due(&mut self, now: std::time::Instant) -> bool {
+        if self.frames.is_empty() {
+            return false;
+        }
+        let delay = self.delays.get(self.frame).copied().unwrap_or(DEFAULT_DELAY);
+        if now.duration_since(self.shown) < delay {
+            return false;
+        }
+        self.frame = (self.frame + 1) % self.frames.len();
+        self.shown = now;
+        true
+    }
+
+    /// The frame that should be on screen, at its own size.
+    pub fn current(&self) -> Option<&image::DynamicImage> {
+        self.frames.get(self.frame)
+    }
 }
 
 /// Beyond this, decoding is refused rather than attempted. A camera raw or a poster-sized scan
 /// can be hundreds of megabytes decompressed, and the point of a preview is a glance.
 const MAX_PIXELS: u64 = 80_000_000;
+
+/// How many pixels an animation may hold, over all of its frames together.
+///
+/// Thirty-two million, which at the four bytes a frame is composited into is 128 MB — and
+/// deliberately far below the 320 MB a single still is allowed by [`MAX_PIXELS`]. A still is
+/// the file and there is nothing else to show it as; an animation is a convenience its own
+/// first frame can stand in for, so it is the one that gives way first.
+///
+/// What it buys, in the shapes GIFs actually come in: 246 frames of a 480x270 screencast, 104
+/// of a 640x480 cartoon, 34 of a 1280x720 recording. Past that the tab shows the first frame
+/// and says so — the alternative is half a gigabyte of frames and a window that stops
+/// answering while they are decoded, which is the thing this whole road is built not to do.
+const MAX_ANIMATION_PIXELS: u64 = 32_000_000;
+
+/// How many frames of `width` x `height` that budget holds. At least one, always: the first
+/// frame is what the tab shows either way, so there is no size at which there is nothing.
+fn frames_within_budget(width: u32, height: u32) -> usize {
+    let per_frame = u64::from(width) * u64::from(height);
+    if per_frame == 0 {
+        return 1;
+    }
+    ((MAX_ANIMATION_PIXELS / per_frame) as usize).max(1)
+}
+
+/// How long a frame with no usable delay is shown for, and what the two conventions below fall
+/// back to. A tenth of a second is what every browser has meant by "the file did not say".
+const DEFAULT_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Under this, a delay is not a speed — it is an omission. GIF stores delays in hundredths of a
+/// second and a great many files carry 0 or 1, which taken literally means "as fast as the
+/// machine can go"; every browser has read those as a tenth of a second for twenty-five years,
+/// and a file that plays at one speed everywhere else must not play at another here.
+const SHORTEST_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The delay of one frame, with that convention applied.
+///
+/// There is a second, coarser floor this does not need to state: the frames are advanced from
+/// the event loop, which waits 33 ms on the keyboard between turns. Anything the file asks for
+/// under that is honoured as "as fast as the loop goes" — a 25 fps GIF plays at 25, a 60 fps
+/// one at 30. Buying the difference would mean a thread or a shorter poll for every keystroke
+/// in the editor, which is a real cost paid by everything, for frames nobody can see.
+fn frame_delay(delay: image::Delay) -> std::time::Duration {
+    let (numer, denom) = delay.numer_denom_ms();
+    if denom == 0 {
+        return DEFAULT_DELAY;
+    }
+    let delay = std::time::Duration::from_millis(u64::from(numer) / u64::from(denom));
+    if delay < SHORTEST_DELAY { DEFAULT_DELAY } else { delay }
+}
 
 /// What a preview tab has been asked to produce.
 pub enum Job {
@@ -626,27 +768,31 @@ pub fn start_loading(job: Job, tx: Sender<Decoded>) -> State {
     std::thread::spawn(move || {
         let path = job.path().to_path_buf();
         let page = job.page();
-        let (result, total) = match &job {
+        let (result, total, motion) = match &job {
             Job::Picture { path, box_px, fit } => {
-                (decode(path).map(|image| scale_picture(image, *box_px, *fit)), None)
+                // The frames, where there are any, are collected here on the same thread and in
+                // the same pass as the picture: they are the same decode, and asking for them
+                // from the tab would be a second read of the same file on the main one.
+                let (picture, motion) = decode_picture(path);
+                (picture.map(|image| scale_picture(image, *box_px, *fit)), None, motion)
             }
             Job::Page { path, page, width_px } => {
                 // The count is asked for alongside the first page rather than in its own pass:
                 // it needs the same tool, and a second subprocess for a number nobody is
                 // waiting on would only slow the page down.
-                (render_page(path, *page, *width_px), page_count(path))
+                (render_page(path, *page, *width_px), page_count(path), Motion::Still)
             }
             Job::Markdown { path, text, page, width_px } => match markdown_to_pdf(path, text) {
                 Ok(pdf) => {
                     let rendered = render_page(pdf.path(), *page, *width_px);
-                    (rendered, page_count(pdf.path()))
+                    (rendered, page_count(pdf.path()), Motion::Still)
                 }
-                Err(e) => (Err(e), None),
+                Err(e) => (Err(e), None, Motion::Still),
             },
         };
         // The receiver is gone when the tab was closed while this was still working, which is
         // ordinary rather than an error: nothing is waiting for the answer.
-        let _ = tx.send(Decoded { path, page, result, total });
+        let _ = tx.send(Decoded { path, page, result, total, motion });
     });
     State::Loading
 }
@@ -778,6 +924,85 @@ fn decode(path: &Path) -> Result<image::DynamicImage, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Whether a file of this name could hold more than one frame, and so is worth *asking* the GIF
+/// decoder about. The decoder answers the real question: a file called `.gif` that is not one
+/// falls straight back to the ordinary road, which reports what it actually is.
+///
+/// Only GIF for now. Animated WebP and APNG exist and `image` can read both, but each has its
+/// own decoder to reach and its own conventions to get right, and the honest version of this
+/// feature is one format that works rather than three that half do.
+fn animates(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+}
+
+/// Reads a picture and, where the file turned out to be one, the animation it is the first
+/// frame of. The first frame is what comes back either way, so every road that already knew how
+/// to show a picture goes on working without knowing this exists.
+fn decode_picture(path: &Path) -> (Result<image::DynamicImage, String>, Motion) {
+    if !animates(path) {
+        return (decode(path), Motion::Still);
+    }
+    match decode_animation(path, None) {
+        Some((first, motion)) => (Ok(first), motion),
+        // Not a GIF the frame decoder would open at all — a file with the wrong name on it, or
+        // one truncated before its first frame. Both go down the road they went down before
+        // this existed, which is the one that says what the file really is.
+        None => (decode(path), Motion::Still),
+    }
+}
+
+/// Collects the frames, refusing before it allocates rather than after.
+///
+/// The budget is worked out from the header — the dimensions are known before a single frame is
+/// decoded — and turned into a number of frames. The frames themselves are then pulled from a
+/// lazy iterator and counted against it, so a file too long for the budget costs the frames that
+/// fit and not one more: nothing is ever collected and then discovered to be too much.
+///
+/// `allowed` overrides that number, and exists for the tests: reaching the refusal honestly
+/// would mean writing a hundred megabytes of GIF to disk to watch it be refused.
+fn decode_animation(path: &Path, allowed: Option<usize>) -> Option<(image::DynamicImage, Motion)> {
+    use image::{AnimationDecoder, ImageDecoder};
+    let file = std::fs::File::open(path).ok()?;
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)).ok()?;
+    let (width, height) = decoder.dimensions();
+    // A single frame past the still budget is not an animation problem: it is the refusal
+    // `decode` already makes, said in the words it already has.
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return None;
+    }
+    let allowed = allowed.unwrap_or_else(|| frames_within_budget(width, height));
+    let mut frames: Vec<image::DynamicImage> = Vec::new();
+    let mut delays: Vec<std::time::Duration> = Vec::new();
+    let mut over = false;
+    for frame in decoder.into_frames() {
+        // A file truncated mid-frame keeps whatever arrived whole. Half a picture is the one
+        // thing worth refusing here, and the frames before it are still the file.
+        let Ok(frame) = frame else { break };
+        if frames.len() == allowed {
+            over = true;
+            break;
+        }
+        delays.push(frame_delay(frame.delay()));
+        frames.push(image::DynamicImage::ImageRgba8(frame.into_buffer()));
+    }
+    if frames.is_empty() {
+        return None;
+    }
+    if over {
+        return Some((frames.swap_remove(0), Motion::TooBig { width, height, frames: allowed }));
+    }
+    // One frame is a picture. It takes the still road exactly as it did before this existed —
+    // no timer, no state on the tab, nothing to advance.
+    if frames.len() == 1 {
+        return Some((frames.swap_remove(0), Motion::Still));
+    }
+    // The tab is handed a copy of the first frame rather than the frame itself, so the
+    // animation keeps a whole set to cycle. One frame is the whole cost of that, and it is
+    // freed as soon as the tab has scaled it to its pane.
+    let first = frames[0].clone();
+    Some((first, Motion::Animated(Animation::new(frames, delays))))
+}
+
 /// Sizes a picture for the pane it is going into, at the zoom and fit in force.
 ///
 /// A photograph has a size of its own and no idea what a pane is, so "fit", "wide" and the zoom
@@ -788,6 +1013,25 @@ fn decode(path: &Path) -> Result<image::DynamicImage, String> {
 /// A zero box means the pane has never been drawn and there is nothing to scale against, so the
 /// picture is passed through untouched.
 pub fn scale_picture(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -> image::DynamicImage {
+    scaled(image, box_px, fit, image::imageops::FilterType::Lanczos3)
+}
+
+/// The same for one frame of an animation, which is replaced ten to thirty times a second.
+///
+/// A different filter, and that is the whole difference. Lanczos3 is right for a picture you
+/// are going to sit and look at; on a frame that is gone in eighty milliseconds it is tens of
+/// milliseconds of the main loop for a sharpness nobody has time to see — and that loop is also
+/// the keyboard. Triangle is what the widget itself uses on a photograph, for the same reason.
+pub fn scale_frame(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -> image::DynamicImage {
+    scaled(image, box_px, fit, image::imageops::FilterType::Triangle)
+}
+
+fn scaled(
+    image: image::DynamicImage,
+    box_px: (u32, u32),
+    fit: Fit,
+    filter: image::imageops::FilterType,
+) -> image::DynamicImage {
     let Some((width, height)) = picture_size_in((image.width(), image.height()), box_px, fit) else {
         return image;
     };
@@ -796,7 +1040,7 @@ pub fn scale_picture(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -
     if (image.width(), image.height()) == (width, height) {
         return image;
     }
-    image.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+    image.resize_exact(width, height, filter)
 }
 
 /// The size a picture of `(w, h)` takes in a box, or `None` when there is nothing to work from.
@@ -1645,6 +1889,167 @@ mod tests {
         assert!(render_page(&not_a_pdf, 99, 1200).is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Writes a GIF of solid-coloured frames, each shown for `delay_ms`. Made here rather than
+    /// checked in as a fixture: what the tests are about is the frames and their timings, and a
+    /// binary file in the tree would state them somewhere nobody reading this can see.
+    fn write_gif(path: &Path, shades: &[u8], delay_ms: u32) {
+        use image::codecs::gif::GifEncoder;
+        let frames: Vec<image::Frame> = shades
+            .iter()
+            .map(|&shade| {
+                let pixels = image::RgbaImage::from_pixel(8, 8, image::Rgba([shade, shade, shade, 255]));
+                image::Frame::from_parts(
+                    pixels,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(delay_ms, 1),
+                )
+            })
+            .collect();
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = GifEncoder::new(file);
+        encoder.encode_frames(frames).unwrap();
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clee_gif_{}_{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The whole of the GIF road in one pass: an animated file comes back as its first frame
+    /// *and* every frame after it, with the delays the file asked for — decoded once, here,
+    /// rather than a frame at a time from the tab.
+    #[test]
+    fn an_animated_gif_arrives_with_all_its_frames_and_their_timings() {
+        let dir = scratch("frames");
+        let path = dir.join("moto.gif");
+        write_gif(&path, &[10, 120, 240], 200);
+
+        let (still, motion) = decode_picture(&path);
+        let still = still.expect("an animated GIF still has a first frame");
+        assert_eq!((still.width(), still.height()), (8, 8));
+        let Motion::Animated(animation) = motion else {
+            panic!("three frames should have been read as an animation");
+        };
+        assert_eq!(animation.frames.len(), 3);
+        assert_eq!(animation.delays, vec![std::time::Duration::from_millis(200); 3]);
+        // The still the tab is given is the animation's own first frame, not a different
+        // decode of it: the picture must not change the instant the timer first fires.
+        assert_eq!(animation.frames[0].to_rgba8(), still.to_rgba8());
+        assert_ne!(animation.frames[0].to_rgba8(), animation.frames[1].to_rgba8());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One frame is a picture. It has to come down the road it came down before any of this
+    /// existed — no frames held, nothing to advance, no timer to run.
+    #[test]
+    fn a_gif_with_one_frame_is_a_still_picture() {
+        let dir = scratch("still");
+        let path = dir.join("fermo.gif");
+        write_gif(&path, &[90], 100);
+        let (still, motion) = decode_picture(&path);
+        assert!(still.is_ok());
+        assert!(matches!(motion, Motion::Still), "one frame is not an animation");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The budget is arithmetic on the header, so it can refuse *before* allocating: the point
+    /// is not to hold the frames and then discover they were too many. The numbers below are
+    /// the shapes GIFs actually come in, and they are what the constant's comment promises.
+    #[test]
+    fn the_frame_budget_is_worked_out_before_a_frame_is_read() {
+        assert_eq!(frames_within_budget(480, 270), 246);
+        assert_eq!(frames_within_budget(640, 480), 104);
+        assert_eq!(frames_within_budget(1280, 720), 34);
+        // Whatever the size, there is always room for the one frame the tab will show.
+        assert_eq!(frames_within_budget(20_000, 20_000), 1);
+        assert_eq!(frames_within_budget(0, 0), 1);
+        // The whole budget, and not a frame more.
+        let (w, h) = (1000, 1000);
+        assert!(
+            frames_within_budget(w, h) as u64 * u64::from(w) * u64::from(h) <= MAX_ANIMATION_PIXELS
+        );
+    }
+
+    /// Past the budget the file is not refused — the tab shows the first frame and says why it
+    /// stands there. `State::Failed` would hide a picture that reads perfectly, and collecting
+    /// the frames anyway is the frozen window the budget exists to prevent.
+    #[test]
+    fn an_animation_past_the_budget_is_still_a_picture() {
+        let dir = scratch("budget");
+        let path = dir.join("lunga.gif");
+        write_gif(&path, &[10, 120, 240, 60], 100);
+        // The allowance is handed in, because reaching the real one honestly would mean
+        // writing a hundred megabytes of GIF to watch it be refused.
+        let (still, motion) = decode_animation(&path, Some(2)).expect("a GIF was written");
+        assert_eq!((still.width(), still.height()), (8, 8));
+        match motion {
+            Motion::TooBig { width, height, frames } => {
+                assert_eq!((width, height, frames), (8, 8, 2));
+            }
+            _ => panic!("four frames past an allowance of two should have declared the limit"),
+        }
+        // And under the allowance the same file animates, so the refusal is the budget talking
+        // and not the file being unreadable.
+        assert!(matches!(decode_animation(&path, Some(9)), Some((_, Motion::Animated(_)))));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The two conventions of the format. A GIF stores delays in hundredths of a second, and a
+    /// great many carry 0 or 1 — which taken literally is "as fast as the machine can go", and
+    /// which every browser has read as a tenth of a second for twenty-five years. A file that
+    /// plays at one speed everywhere else must not play at another here.
+    #[test]
+    fn a_delay_of_nearly_nothing_is_read_the_way_the_web_reads_it() {
+        let ms = |n| frame_delay(image::Delay::from_numer_denom_ms(n, 1));
+        assert_eq!(ms(0), DEFAULT_DELAY);
+        assert_eq!(ms(10), DEFAULT_DELAY);
+        assert_eq!(ms(19), DEFAULT_DELAY);
+        // A real delay is honoured as it is written.
+        assert_eq!(ms(20), std::time::Duration::from_millis(20));
+        assert_eq!(ms(80), std::time::Duration::from_millis(80));
+        assert_eq!(ms(1000), std::time::Duration::from_millis(1000));
+        // The zero denominator `frame_delay` guards against cannot be built here to be tested:
+        // `Delay::from_numer_denom_ms` asserts on it. The guard stays all the same — it is a
+        // division, and the ratio comes from a file rather than from us.
+    }
+
+    /// The timer itself: a frame keeps the screen for as long as it asked for, the next one
+    /// takes over when its time is up, and the last hands back to the first — for ever, because
+    /// a preview that quietly froze on its final frame is indistinguishable from a broken one.
+    #[test]
+    fn frames_take_their_turn_by_the_clock_and_the_last_hands_back_to_the_first() {
+        let frame = |shade: u8| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([shade; 3])))
+        };
+        let mut animation = Animation::new(
+            vec![frame(1), frame(2), frame(3)],
+            vec![std::time::Duration::from_millis(100); 3],
+        );
+        let start = std::time::Instant::now();
+        animation.shown = start;
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+
+        // Before its time is up there is nothing to do, which is what makes asking every turn
+        // of the loop free.
+        assert!(!animation.due(at(50)));
+        assert!(!animation.due(at(99)));
+        assert_eq!(animation.frame, 0);
+        assert!(animation.due(at(100)));
+        assert_eq!(animation.frame, 1);
+        // One frame per call, however long the editor was busy elsewhere: coming back from a
+        // second of other work carries on from here rather than racing through ten frames.
+        assert!(animation.due(at(1100)));
+        assert_eq!(animation.frame, 2);
+        assert!(!animation.due(at(1150)), "the clock restarts from the frame that went up");
+        assert!(animation.due(at(1250)));
+        assert_eq!(animation.frame, 0, "the animation loops rather than stopping");
+        // And what goes up is the frame it is now on, not the one it came from.
+        assert_eq!(animation.current().unwrap().to_rgb8(), animation.frames[0].to_rgb8());
     }
 
     /// Sizes are checked from the header rather than after decoding, so a file that would not

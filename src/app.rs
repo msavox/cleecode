@@ -2850,8 +2850,39 @@ impl App {
                 pages.total = Some(total);
             }
             let rendered_view = preview.source.clone();
+            // Said once, after the borrow on the tab is over: a picture is put up first and
+            // talked about afterwards.
+            let mut note = None;
             match done.result {
                 Ok(image) => {
+                    // What the file turned out to hold past its first frame. Set on every read
+                    // and not only the first, because a file changes underneath a tab: a
+                    // still `.gif` written over an animated one must stop the old frames
+                    // cycling, and an animated one written over a still must start.
+                    match done.motion {
+                        crate::preview::Motion::Still => {
+                            preview.animation = None;
+                            preview.animation_refused = false;
+                        }
+                        crate::preview::Motion::Animated(mut animation) => {
+                            // The clock starts here rather than where the frames were decoded,
+                            // so a long decode does not spend the first frame's time before
+                            // anybody has seen it.
+                            animation.restart();
+                            preview.animation = Some(animation);
+                            preview.animation_refused = false;
+                        }
+                        crate::preview::Motion::TooBig { width, height, frames } => {
+                            preview.animation = None;
+                            preview.animation_refused = true;
+                            note = Some(i18n::msg_animation_too_large(
+                                self.settings.lang,
+                                width,
+                                height,
+                                frames,
+                            ));
+                        }
+                    }
                     let (cols, rows) = (preview.area_cols, preview.area_rows);
                     // A picture asked for before the pane had ever been drawn comes back at its
                     // own size, since there was no box to scale it into then. There is one now,
@@ -2898,6 +2929,14 @@ impl App {
                     }
                     _ => preview.state = crate::preview::State::Failed(message),
                 },
+            }
+            // An animation whose frames were too many to hold. The picture is up — the first
+            // frame of it — and this is why it stands there. It is said in the status line
+            // once, and the bar keeps a short mark for as long as the tab is open: a status
+            // message is taken by the next gesture, and a tab that then merely looks like a
+            // still picture would be a question with no answer left on screen.
+            if let Some(note) = note {
+                self.status_message = note;
             }
         }
     }
@@ -4437,6 +4476,79 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The buffers actually on screen: one per editor pane, which with the split closed is one.
+    ///
+    /// Not the same question as "which buffers are open" and not the same as "which one has the
+    /// keyboard": a split shows two files at once, and the one being *looked at* in the other
+    /// half is as visible as the one being typed in.
+    fn on_screen_editors(&self) -> [Option<usize>; 2] {
+        let showing = |pane: EditorPane| {
+            let idx = self.pane_editor_index(pane);
+            (!self.pane_tabs(pane).is_empty()).then_some(idx)
+        };
+        [showing(EditorPane::Left), self.split_view.then(|| showing(EditorPane::Right)).flatten()]
+    }
+
+    /// Puts the next frame of every animated picture on screen up when its time has come.
+    ///
+    /// The clock is the file's own: each frame carries how long it is shown for, and this only
+    /// acts on the ones whose time is up, so calling it every turn of the loop costs a
+    /// comparison per visible tab and nothing else. There is no timer and no thread — the loop
+    /// already wakes thirty times a second for the keyboard, and an animation is exactly the
+    /// kind of thing that should ride on a wake-up somebody else is paying for.
+    ///
+    /// Only what is on screen moves. An animation in a background tab has no viewer, and
+    /// decoding and transmitting frames for one would be work whose entire output is discarded
+    /// — while the frames themselves are kept, so bringing the tab forward carries straight on
+    /// rather than starting again.
+    ///
+    /// It touches the keyboard, the focus and the tab strip not at all. A picture that moves is
+    /// something you look at, and the moment one could take the cursor away from what is being
+    /// written it would stop being worth having — the same rule a figure from a live session
+    /// follows, for the same reason.
+    pub fn poll_animations(&mut self) {
+        let now = std::time::Instant::now();
+        for idx in self.on_screen_editors().into_iter().flatten() {
+            let due = self.editors[idx]
+                .preview
+                .as_mut()
+                .and_then(|p| p.animation.as_mut())
+                .is_some_and(|animation| animation.due(now));
+            if due {
+                self.show_frame(idx);
+            }
+        }
+    }
+
+    /// Puts the frame an animation is on up, fitted to the pane as it is right now.
+    ///
+    /// The one place a frame becomes a picture, whether the clock moved the animation on or the
+    /// zoom moved under it. The three steps are the ones a picture arriving from the decoder
+    /// takes — fitted to the pane, cropped to the window being looked at, handed to the
+    /// protocol already on screen — and the last of those is what makes this a repaint rather
+    /// than a blink: `show` keeps the id the terminal knows the picture by.
+    fn show_frame(&mut self, idx: usize) {
+        let Some(preview) = self.editors.get_mut(idx).and_then(|e| e.preview.as_mut()) else {
+            return;
+        };
+        // Never drawn, so there is no pane to fit a frame into yet. Whatever opened the tab is
+        // on its way down the ordinary picture road, and that is what will fill it.
+        let (cols, rows) = (preview.area_cols, preview.area_rows);
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let (box_px, fit) = (preview.picture_box(), preview.fit);
+        let (scroll_x, scroll_y) = (preview.scroll_x, preview.scroll_px);
+        let Some(frame) = preview.animation.as_ref().and_then(|a| a.current()) else { return };
+        let image = crate::preview::scale_frame(frame.clone(), box_px, fit);
+        let window = crate::preview::visible_window(&image, cols, rows, scroll_x, scroll_y);
+        preview.full = Some(image);
+        preview.show(window);
+        // Nothing else knows a frame changed, and a frame put up in a buffer nobody draws is a
+        // frame nobody sees.
+        self.redraw = true;
     }
 
     /// Watches a file handed to a live session until its prompt comes back, remembering which
@@ -7450,6 +7562,14 @@ impl App {
         // and asking pandoc for a document this tab has been told not to show would be work
         // thrown away.
         if preview.text_view() {
+            return;
+        }
+        // An animated picture has nothing to re-read: every frame is already in hand at its own
+        // size, and putting the current one up again fits it to whatever the zoom and the pane
+        // have just become. Decoding the file again would also put the animation back to its
+        // first frame, which is a visible jump for a change that is not about the file at all.
+        if preview.animation.is_some() {
+            self.show_frame(idx);
             return;
         }
         let (page, width_px, source) = (preview.page(), preview.render_width(), preview.source.clone());

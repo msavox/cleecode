@@ -2746,6 +2746,35 @@ pub fn msg_preview_loading(lang: Lang) -> String {
     }
 }
 
+/// An animation whose frames would not all fit in memory. The tab shows the first frame, which
+/// is the honest half of the file it can afford; this says so, with the numbers that decided it.
+pub fn msg_animation_too_large(lang: Lang, width: u32, height: u32, frames: usize) -> String {
+    match (lang, frames) {
+        (Lang::En, 1) => format!(
+            "Too large to animate ({width}x{height}, more than one frame): showing the first frame"
+        ),
+        (Lang::En, _) => format!(
+            "Too large to animate ({width}x{height}, more than {frames} frames): showing the first frame"
+        ),
+        (Lang::It, 1) => format!(
+            "Troppo grande da animare ({width}x{height}, più di un fotogramma): mostro il primo"
+        ),
+        (Lang::It, _) => format!(
+            "Troppo grande da animare ({width}x{height}, più di {frames} fotogrammi): mostro il primo"
+        ),
+    }
+}
+
+/// The mark the preview's bar keeps for that file, for as long as the tab is open. The status
+/// message above is taken by the next gesture, and without this the tab would go on looking
+/// like an ordinary still picture with nothing left on screen to say why.
+pub fn label_first_frame(lang: Lang) -> String {
+    match lang {
+        Lang::En => " first frame ".to_string(),
+        Lang::It => " primo fotogramma ".to_string(),
+    }
+}
+
 pub fn msg_preview_failed(lang: Lang, reason: &str) -> String {
     match lang {
         Lang::En => format!("Cannot show this file: {reason}"),
