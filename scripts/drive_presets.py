@@ -114,6 +114,16 @@ def check_agent_preset(binary, name, report):
         session.send(" ")
         session.wait(lambda s: "Files" in s.text(), 8)
 
+        # The preset still works — every check below is the same one it passed yesterday — and
+        # this release is where it starts saying it will not work forever. The drawer is the
+        # agent surface now, and a published command on its way out has to announce it while it
+        # still runs, not once it has already gone. Read after the splash, because the splash is
+        # drawn instead of the status line and not over it.
+        # Matched on the stem, so the sentence reads in either language.
+        said = session.wait(lambda s: "deprecat" in s.text(), 6)
+        report.check(f"{name}: the status line says the preset is deprecated", said, session,
+                     note="and names Ctrl+Shift+A, the drawer that replaces it")
+
         # The startup command ran, and it ran *that* program: the stub says its own name.
         ready = session.wait(lambda s: f"AGENT-STUB {name} ready" in s.text(), 30)
         report.check(f"{name}: the tab starts the agent by itself", ready, session,

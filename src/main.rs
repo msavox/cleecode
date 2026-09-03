@@ -184,23 +184,30 @@ fn draw_synchronised(terminal: &mut BufferedTerminal, app: &mut App) -> std::io:
 /// `size` is the window as it is right now rather than as it was when the batch started: a
 /// resize can arrive in the middle of one, and mouse coordinates are read against the layout.
 fn apply_event(app: &mut App, event: Event, size: ratatui::layout::Size) -> Result<(), String> {
-    shielded(AssertUnwindSafe(|| match event {
-        Event::Key(key) => {
-            if key.kind == event::KeyEventKind::Press {
-                app.handle_key(key);
+    shielded(AssertUnwindSafe(|| {
+        match event {
+            Event::Key(key) => {
+                if key.kind == event::KeyEventKind::Press {
+                    app.handle_key(key);
+                }
             }
+            Event::Mouse(mouse) => {
+                let full = Rect::new(0, 0, size.width, size.height);
+                let params = ui::LayoutParams::from_app(app);
+                let areas = ui::compute_layout(full, &params);
+                app.handle_mouse(mouse, &areas, full);
+            }
+            Event::Paste(text) => app.handle_paste(text),
+            // Nothing to do: the next frame is drawn against the new size, and one is always
+            // drawn after an event.
+            Event::Resize(_, _) => {}
+            _ => {}
         }
-        Event::Mouse(mouse) => {
-            let full = Rect::new(0, 0, size.width, size.height);
-            let params = ui::LayoutParams::from_app(app);
-            let areas = ui::compute_layout(full, &params);
-            app.handle_mouse(mouse, &areas, full);
-        }
-        Event::Paste(text) => app.handle_paste(text),
-        // Nothing to do: the next frame is drawn against the new size, and one is always drawn
-        // after an event.
-        Event::Resize(_, _) => {}
-        _ => {}
+        // Where the focus ended up is only knowable once the event has been handled, and an
+        // autocollapsing drawer is on screen exactly while it holds the keyboard. Here, after
+        // every event, rather than at each of the many places the focus moves: the arrows, the
+        // frame cycle, `Esc`, a click on the editor and a menu item are not one code path.
+        app.settle_drawer();
     }))
 }
 
@@ -478,7 +485,24 @@ fn run(
                     }
                 }
                 None => match workspace::built_in(&name, &app.workspace_shape()) {
-                    Some(ws) => app.apply_workspace(ws),
+                    Some(ws) => {
+                        app.apply_workspace(ws);
+                        // The four agent presets still open, and this release is where they
+                        // start saying they are on their way out: the drawer is the agent
+                        // surface now, and `clee -w claude` was a published command, so the
+                        // withdrawal is announced before it happens rather than discovered
+                        // afterwards. Said here and not in `built_in`, because a workspace of
+                        // the user's own shadowing the name opened *that* one — and it has its
+                        // own message, in the arm above.
+                        if let Some(agent) =
+                            workspace::built_in_named(&name).and_then(session::Agent::of_program)
+                        {
+                            app.status_message = i18n::msg_agent_preset_deprecated(
+                                app.settings.lang,
+                                agent.workspace_name(),
+                            );
+                        }
+                    }
                     None => {
                         app.status_message = i18n::msg_workspace_unknown(app.settings.lang, &name)
                     }

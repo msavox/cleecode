@@ -9,6 +9,11 @@ come out of the layout rather than sit over the top of it, does the agent's outp
 after the first frame, does the conversation survive a workspace switch and being hidden, and does
 an agent that ends leave the list of four rather than a shell wearing an agent's frame.
 
+Then the same drawer in the other mode. On autocollapse it is on screen exactly while it holds
+the keyboard, and it is *painted over* the frames rather than carved out of them — so the proof
+is a picture compared with itself: every cell left of the seam has to be the cell it already was
+while the drawer was away. Nothing under it was resized, so no pty was told anything happened.
+
 Two of the four agents are stubbed onto the front of `PATH` and two are deliberately left off it,
 which is what lets the launcher's honesty be read as a colour: a name that is not installed is
 shown anyway, dim, with the reason beside it. Those two checks are skipped where the machine
@@ -146,6 +151,43 @@ def menu_action(session, menu_letter, label, report, note):
     report.check(f"{label} can be reached in the menu", False, session)
     session.send("\x1b")
     return False
+
+
+def settings_toggle(session, label, report):
+    """Opens the settings box, walks to the row called `label`, picks it and closes the box.
+
+    Returns the row as it read *after* the change, with the box still open — a two-state row is
+    checked by what it says it is, and it says it in there.
+
+    The walk is measured against the marker actually on screen — the chosen row is the one
+    written with `> ` in front of it — rather than by counting rows in the source, so a setting
+    added above this one flips nothing by surprise."""
+    if not session.press(session.chord("o"), lambda s: label in s.text(), 6):
+        report.check(f"the settings box opens for {label}", False, session)
+        return None
+    for _ in range(24):
+        want = session.row_of(label)
+        here = next((y for y in range(session.rows) if "│> " in session.full_line(y)), None)
+        if want is None or here is None:
+            break
+        if here == want:
+            session.press("\r", lambda s: True, 0.5)
+            picked = session.full_line(session.row_of(label) or want)
+            session.press("\x1b", lambda s: label not in s.text(), 3)
+            return picked
+        session.press("\x1b[B" if here < want else "\x1b[A", lambda s: True, 0.3)
+    report.check(f"{label} can be reached in the settings box", False, session)
+    session.send("\x1b")
+    return None
+
+
+def main_rows_left_of(session, column):
+    """Everything drawn left of `column`, between the menu bar and the status line.
+
+    The two rows that are left out are the two that say what just happened rather than what the
+    layout is — the status message and, while a menu is open, the bar. What is left is the frames
+    themselves, which is the thing an overlay must not have touched."""
+    return [session.full_line(y)[:column] for y in range(1, session.rows - 1)]
 
 
 def focus_terminal(session):
@@ -318,6 +360,86 @@ def check_drawer(binary, report):
                 back = session.wait(lambda s: "AGENT-STUB claude ready" in s.text(), 8)
                 report.check("showing it again brings the conversation back", back, session,
                              note="hiding the column never touched the pty")
+
+        # ---- the other mode: autocollapse ----------------------------------------------------
+        # The setting is flipped through the box a user would flip it in, so the row and the
+        # behaviour are checked as one thing. Everything from here on is about a drawer that is
+        # on screen exactly while it holds the keyboard — and about the pty behind it never
+        # noticing any of it.
+        if not open_file(session, "demo"):
+            report.check("the file opens again", False, session)
+            return
+        session.wait(lambda s: "value = 1" in s.text(), 8)
+        pinned_borders = vertical_borders(session, middle)
+        conversation = "\n".join(session.frame_of("AGENT-STUB claude ready"))
+        # The keyboard goes into the drawer before the mode changes: where the focus is is the
+        # whole of what autocollapse depends on, and a panel you are working in must not vanish
+        # from under you because a setting was flipped.
+        session.press("\x1b[1;7C", lambda s: True, 0.5)   # Ctrl+Alt+\u2192, into the drawer
+
+        row = settings_toggle(session, "Agent drawer", report)
+        if row:
+            report.check("the setting reads out its new mode",
+                         "over the frames" in row, session,
+                         note="a two-state row says which state it is in, not on/off: %r"
+                              % row.strip())
+            # Switching modes touched no pty and closed nothing: the keyboard is still in the
+            # drawer, and that is the whole of what decides whether it is on screen.
+            still_there = session.wait(lambda s: drawer_column(s) is not None, 4)
+            report.check("switching mode while it is open leaves it open", still_there, session)
+
+            # And out. One arrow leaves the drawer for the editor, which is the signal — in a
+            # TUI there is no pointer leaving a panel, but there is always a keyboard arriving
+            # somewhere else.
+            session.press("\x1b[1;7D", lambda s: drawer_column(s) is None, 6)   # Ctrl+Alt+←
+            gone = drawer_column(session) is None
+            report.check("the focus leaving withdraws the drawer", gone, session,
+                         note="autocollapse: the signal is the focus, not the mouse")
+            collapsed_borders = vertical_borders(session, middle)
+            report.check("and the frames have the screen back",
+                         collapsed_borders < pinned_borders, session,
+                         note="%d vertical borders with the column, %d without it"
+                              % (pinned_borders, collapsed_borders))
+
+            # Summoned again from the menu, so nothing is typed into the agent and the two
+            # pictures of the conversation can be compared byte for byte.
+            underneath = main_rows_left_of(session, session.cols)
+            if menu_action(session, "v", "Agent drawer", report, "the View menu"):
+                back = session.wait(lambda s: drawer_column(s) is not None, 8)
+                report.check("summoning brings it back", back, session)
+                if back:
+                    seam = drawer_column(session)
+                    report.check("the conversation is exactly where it was",
+                                 "\n".join(session.frame_of("AGENT-STUB claude ready"))
+                                 == conversation, session,
+                                 note="the same pty: hiding the column never touched it")
+                    # The mode's whole reason: it paints over the frames instead of taking a
+                    # column from them, so nothing under it was resized and no pty was sent a
+                    # SIGWINCH on the way in or the way out.
+                    report.check("it is painted over the frames, which were not resized",
+                                 [row[:seam] for row in underneath]
+                                 == main_rows_left_of(session, seam), session,
+                                 note="every cell left of the seam is the cell it already was")
+
+            # ---- Ctrl+Shift+A on a collapsed drawer ------------------------------------------
+            # The founding rule of the key: the text has to arrive where it can be read. A
+            # drawer that is away still holds the agent and still wins the precedence, so the
+            # key has to reopen it before the reference lands.
+            session.press("\x1b[1;7D", lambda s: drawer_column(s) is None, 6)   # Ctrl+Alt+←
+            report.check("it withdraws again on the way back to the editor",
+                         drawer_column(session) is None, session)
+            session.send(session.chord("a"))
+            reopened = session.wait(
+                lambda s: drawer_column(s) is not None
+                and "demo.py:1" in "\n".join(s.frame_of("AGENT-STUB claude ready")), 8)
+            report.check("Ctrl+Shift+A reopens the collapsed drawer and puts the reference in it",
+                         reopened, session,
+                         note="text at a prompt nobody can see is worse than no text")
+            report.check("and still submits nothing", "SUBMITTED" not in session.text(), session)
+
+            # Back to pinned, so the checks below run in the mode the rest of this file assumes.
+            # The keyboard is in the drawer, so it stays on screen across the change.
+            settings_toggle(session, "Agent drawer", report)
 
         # ---- an agent that ends leaves the list, not a shell -------------------------------------
         # Ctrl+D at the stub's prompt closes its stdin, which ends it. The pane was started with

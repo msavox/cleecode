@@ -84,6 +84,25 @@ impl Drawer {
     }
 }
 
+/// Whether an open drawer is still on screen now that the keyboard is wherever it is.
+///
+/// **In a TUI the signal is the focus, not the mouse passing over.** There is no hover here worth
+/// the name — the pointer may not exist at all, and a panel that withdrew when a pointer left it
+/// would be a panel that never withdrew for half the people using it. What there always is, and
+/// what always means "I have gone back to what I was doing", is the keyboard moving to another
+/// frame: an arrow out of the drawer, `Ctrl+Tab`, `Esc`, a click landing anywhere else.
+///
+/// Pinned means pinned, so the answer is yes whatever the focus is doing. Autocollapse means the
+/// drawer is on screen exactly while it has the keyboard — and the way back is the way in, which
+/// is `Ctrl+Shift+A` or the View menu. Nothing is killed either way: what closes is the column,
+/// and the pty behind it goes on running, so the collapse costs the conversation nothing.
+///
+/// A function rather than a method because there is no `App` to build in a test in this repo, and
+/// this rule is the whole of the mode.
+pub fn stays_open(pinned: bool, has_the_keyboard: bool) -> bool {
+    pinned || has_the_keyboard
+}
+
 /// A three-row block alphabet, three cells to a letter.
 ///
 /// Hand-drawn here rather than pulled from a figlet font because it needs to spell exactly four
@@ -164,6 +183,16 @@ mod tests {
     fn an_unspellable_name_has_no_wordmark() {
         assert!(wordmark("zephyr").is_none());
         assert!(wordmark("CLAUDE").is_none(), "the alphabet is lower case, as the names are");
+    }
+
+    /// The whole of autocollapse, in the only place it can be tested without an `App`: pinned
+    /// ignores the focus, autocollapse is on screen exactly while it holds the keyboard.
+    #[test]
+    fn autocollapse_is_on_screen_only_while_it_has_the_keyboard() {
+        assert!(stays_open(true, true));
+        assert!(stays_open(true, false), "pinned means pinned: looking away is not dismissing");
+        assert!(stays_open(false, true));
+        assert!(!stays_open(false, false), "the focus leaving is what puts it away");
     }
 
     #[test]

@@ -10043,6 +10043,26 @@ impl App {
         self.focus = Focus::Drawer;
     }
 
+    /// Puts the drawer away when the focus has left it and the mode is autocollapse.
+    ///
+    /// Called once after every event rather than at each of the dozen places `self.focus` is
+    /// assigned — an arrow out, `Ctrl+Tab`, `Esc`, a click that landed on the editor, a menu
+    /// item that moved the keyboard somewhere. Those are not one code path and they never will
+    /// be, so the rule is applied where they all end instead: whatever just happened, this is
+    /// what the screen owes. The state is real and not derived, so `open` goes on meaning "on
+    /// screen" for everything that reads it — the layout, the focus ring, the workspace file.
+    ///
+    /// The pty is not touched, here or anywhere else the drawer closes. See
+    /// [`crate::drawer::stays_open`] for why the focus is the signal.
+    pub fn settle_drawer(&mut self) {
+        if crate::drawer::stays_open(self.settings.drawer_pinned, self.focus == Focus::Drawer) {
+            return;
+        }
+        if let Some(drawer) = self.drawer.as_mut() {
+            drawer.open = false;
+        }
+    }
+
     /// Hides the drawer's column.
     ///
     /// The `Drawer` itself stays, pty and all. This is the same bargain the terminal panel makes
@@ -10139,9 +10159,9 @@ impl App {
                     self.launch_drawer_agent(agent);
                 }
             }
-            // The keyboard goes back to the editor and the column stays exactly where it is.
-            // Pinned means pinned: a panel that withdrew the moment you looked away would be the
-            // autocollapse mode, which is a separate decision nobody has made yet.
+            // The keyboard goes back to the editor, and what the column does about it is the
+            // mode's business, not this key's: pinned, it stays exactly where it is; on
+            // autocollapse, `settle_drawer` finds the focus gone and puts it away.
             KeyCode::Esc => self.focus = Focus::Editor,
             _ => {}
         }
@@ -10338,6 +10358,10 @@ impl App {
                 if let Some(term) = self.drawer_panel_mut() {
                     term.write_input(&bytes);
                 }
+                // And the drawer is opened whether or not it was on screen a moment ago. A
+                // collapsed one still holds the agent and still wins the precedence above — the
+                // conversation never stopped — so without this the text would arrive at a prompt
+                // nobody can see, which is the one outcome this feature must not have.
                 self.open_drawer();
                 self.status_message =
                     i18n::msg_agent_sent_to_drawer(lang, &reference, agent.label());
@@ -11828,8 +11852,17 @@ impl App {
         }
         // Only when there is an agent in it: the launcher is a list of four names, and a
         // scrollbar down the side of it would be a control for scrolling nothing.
-        if let (Some(rect), true) = (areas.drawer, self.drawer_panel().is_some()) {
-            out.push((ScrollbarId::Drawer, rect, ui::Axis::Vertical));
+        if let (Some(rect), true) = (ui::drawer_rect(areas), self.drawer_panel().is_some()) {
+            // First when it is overlaying, and only then: its bar rides the window's right edge,
+            // which on autocollapse is exactly where the editor's own vertical bar is drawn
+            // underneath it. The list is walked in order, so the one on top has to come first or
+            // the pointer grabs the bar it cannot see.
+            let bar = (ScrollbarId::Drawer, rect, ui::Axis::Vertical);
+            if areas.drawer_overlay.is_some() {
+                out.insert(0, bar);
+            } else {
+                out.push(bar);
+            }
         }
         out
     }
@@ -12041,8 +12074,11 @@ impl App {
     fn try_start_seam_drag(&mut self, col: u16, row: u16, areas: &ui::Areas) -> bool {
         // The drawer's left border, first, because it is the outermost seam: it is the right
         // edge of whatever frame it took its column from, and that frame's own seam check would
-        // otherwise claim the same two columns.
-        if let Some(drawer) = areas.drawer {
+        // otherwise claim the same two columns. Overlaid, it took its column from nobody and the
+        // border is simply painted across whatever is behind it — the seam still drags, because
+        // the width is worth adjusting in both modes and the border you can see is the one the
+        // pointer means.
+        if let Some(drawer) = ui::drawer_rect(areas) {
             let border_x = drawer.x;
             if row >= drawer.y && row < drawer.y + drawer.height && col + 1 >= border_x && col <= border_x + 1 {
                 self.dragging = Some(DragTarget::DrawerWidth);
@@ -13166,6 +13202,38 @@ impl App {
                     self.mouse_menu_bar_click(col, areas.menu_bar.width);
                     return;
                 }
+                // An overlaid drawer is asked before anything it is painted over, because what is
+                // on top of the screen is on top of the pointer. Everything inside those cells is
+                // the drawer's, and its own seam and scrollbar are named rather than looked up in
+                // the general lists: the frames underneath are still laid out full width, so
+                // their seams and their bars run through exactly these columns and would claim a
+                // click meant for a border the user can see.
+                if let Some(rect) = areas
+                    .drawer_overlay
+                    .filter(|r| row >= r.y && row < r.y + r.height && col + 1 >= r.x)
+                {
+                    if col <= rect.x + 1 {
+                        self.dragging = Some(DragTarget::DrawerWidth);
+                        return;
+                    }
+                    if let Some((ScrollbarId::Drawer, part)) = self.scrollbar_at(col, row, areas) {
+                        self.apply_scrollbar(ScrollbarId::Drawer, part, areas);
+                        if matches!(part, ScrollbarPart::Track { .. }) {
+                            self.dragging = Some(DragTarget::Scrollbar(ScrollbarId::Drawer));
+                        }
+                        return;
+                    }
+                    if !self.drawer_takes_press(
+                        terminal_panel::BUTTON_LEFT,
+                        col,
+                        row,
+                        mouse.modifiers,
+                        areas,
+                    ) {
+                        self.click_drawer(rect, col, row);
+                    }
+                    return;
+                }
                 // Terminal title-bar controls (window ✕, tab ✕, tab switch) live on the top
                 // border, which in the bottom layout doubles as the resize seam — so claim them
                 // before try_start_drag, or the drag would swallow every such click.
@@ -13295,7 +13363,7 @@ impl App {
                         }
                     }
                 }
-                if let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) {
+                if let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) {
                     self.click_drawer(rect, col, row);
                 }
             }
@@ -13375,7 +13443,7 @@ impl App {
                     self.terminal_mouse_drag(index, button, MouseAction::Drag, col, row, areas);
                 }
                 Some(DragTarget::DrawerSelection) => {
-                    if let Some(rect) = areas.drawer
+                    if let Some(rect) = ui::drawer_rect(areas)
                         && let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row)
                         && let Some(term) = self.drawer_panel_mut()
                     {
@@ -13450,6 +13518,13 @@ impl App {
     }
 
     fn scroll(&mut self, col: u16, row: u16, areas: &ui::Areas, delta: isize) {
+        // An overlaid drawer is asked first, because it is painted over frames that still think
+        // they own these cells: on autocollapse the editor is laid out full width, so the pane
+        // test below would claim every notch dropped on the agent's conversation.
+        if let Some(rect) = areas.drawer_overlay.filter(|r| within(*r, col, row)) {
+            self.wheel_over_drawer(rect, col, row, delta);
+            return;
+        }
         if let Some(sidebar) = areas.sidebar {
             if within(sidebar, col, row) {
                 self.file_tree.move_selection(delta);
@@ -13504,20 +13579,25 @@ impl App {
         // program that scrolls a view of its own, and a notch dropped on the way would make its
         // conversation unreadable past the height of the pane.
         if let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) {
-            let cell = cell_at(ui::terminal_content_rect(rect), col, row);
-            let up = delta < 0;
-            let Some(term) = self.drawer_panel_mut() else { return };
-            if let Some((row, col)) = cell
-                && let Some(report) = term.wheel_report(up, row, col)
-            {
-                // One notch, one report: how far a notch goes through a scrollback is our idea,
-                // and a program that handles the wheel has its own.
-                term.write_input(&report);
-                return;
-            }
-            if !term.alternate_screen() {
-                term.scroll_by(delta);
-            }
+            self.wheel_over_drawer(rect, col, row, delta);
+        }
+    }
+
+    /// One wheel notch inside the drawer, wherever the drawer is.
+    fn wheel_over_drawer(&mut self, rect: Rect, col: u16, row: u16, delta: isize) {
+        let cell = cell_at(ui::terminal_content_rect(rect), col, row);
+        let up = delta < 0;
+        let Some(term) = self.drawer_panel_mut() else { return };
+        if let Some((row, col)) = cell
+            && let Some(report) = term.wheel_report(up, row, col)
+        {
+            // One notch, one report: how far a notch goes through a scrollback is our idea,
+            // and a program that handles the wheel has its own.
+            term.write_input(&report);
+            return;
+        }
+        if !term.alternate_screen() {
+            term.scroll_by(delta);
         }
     }
 
@@ -13588,7 +13668,7 @@ impl App {
         if modifiers.contains(KeyModifiers::SHIFT) {
             return false;
         }
-        let Some(rect) = areas.drawer.filter(|r| within(*r, col, row)) else { return false };
+        let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) else { return false };
         let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) else { return false };
         let Some(term) = self.drawer_panel_mut() else { return false };
         let Some(report) = term.mouse_report(button, MouseAction::Press, cell.0, cell.1) else {
@@ -13611,7 +13691,7 @@ impl App {
         row: u16,
         areas: &ui::Areas,
     ) {
-        let Some(rect) = areas.drawer else { return };
+        let Some(rect) = ui::drawer_rect(areas) else { return };
         let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) else { return };
         let Some(term) = self.drawer_panel_mut() else { return };
         if let Some(report) = term.mouse_report(button, action, cell.0, cell.1) {
@@ -13842,7 +13922,7 @@ impl App {
             // The same menu a terminal pane gets: what is in the drawer is a terminal, and copy,
             // paste and the rest mean there exactly what they mean in one.
             Focus::Drawer => {
-                (ContextTarget::Terminal, areas.drawer.unwrap_or(self.last_full))
+                (ContextTarget::Terminal, ui::drawer_rect(&areas).unwrap_or(self.last_full))
             }
         };
         let versioned = self.selected_file_is_versioned();

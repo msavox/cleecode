@@ -277,23 +277,43 @@ between machines. A built-in **Default layout** is always there and cannot be de
 overwritten. A bare `clee` never reopens a named workspace — that stays a deliberate act — but it
 does restore the project, its open files and the layout you left.
 
-### An agent in the next pane
+### The agent drawer
 
-`clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` open a coding agent the
-way it wants to be opened: in a terminal tab named after it, with a plain shell in the next tab
-and the editor beside it — underneath it on a window narrower than 150 columns, where two columns
-would leave the agent forty. There is nothing to install and nothing to configure, because these
-are real ptys and all four are terminal programs. If the agent is not on your `PATH`, the pane
-shows the shell saying so; nothing here checks on your behalf. Subscription login and API keys
-both work, and for the same reason: the agent authenticates itself, with the login or the key it
-finds in your environment — CleeCode never asks for, stores, or sees a credential of any kind.
+`Ctrl+Shift+A` summons it: a panel down the right of the window, in whatever workspace you are
+already in. Empty, it is the launcher — claude, codex, opencode and gemini written large, arrows
+and Enter to start one, the last one you used already highlighted. An agent that is not on your
+`PATH` is listed anyway, dimmed and with the reason beside it, because the empty drawer is also
+where you find out what CleeCode knows how to run.
 
-`Ctrl+Shift+A` hands the one that is running whatever you are looking at: the selection, or the
-diagnostic under the cursor, or the line the cursor is on — written at its prompt as `path:line`,
-with the text of a short selection under it. And then it stops. **Nothing is ever submitted**: no
-newline is sent, the text sits at the prompt, and Enter is yours to press once you have read what
-you are about to ask. The way back was already there — an agent prints `file:line` all day, and
-double-clicking one opens the file at that line.
+It has two modes, from *Settings → Agent drawer*. **Pinned**, the default, makes it a column of
+the layout: every other frame makes room, and it stays until you put it away. **Autocollapse**
+paints it over the frames instead and withdraws it the moment the keyboard goes back to your
+work — the signal is the focus, not a pointer passing over — and the same key brings it back.
+The difference is not decoration: a column resizes every pane, and a resized pane is a `SIGWINCH`
+to the pty in it, so a question asked in passing costs nothing on the way out or back.
+
+Putting the drawer away is not killing it. The agent goes on running, the conversation is exactly
+where you left it, and it survives opening another workspace — which rebuilds every terminal in
+the window and never touches the drawer. When the agent itself ends, the launcher comes back:
+never a shell wearing the agent's frame.
+
+There is nothing to install and nothing to configure, because this is a real pty and all four are
+terminal programs. Subscription login and API keys both work, and for the same reason: the agent
+authenticates itself, with the login or the key it finds in your environment — CleeCode never
+asks for, stores, or sees a credential of any kind.
+
+With an agent running — in the drawer, or in any terminal pane — that same `Ctrl+Shift+A` hands
+it whatever you are looking at: the selection, or the diagnostic under the cursor, or the line the
+cursor is on, written at its prompt as `path:line` with the text of a short selection under it.
+The drawer is asked first, and a collapsed one is reopened before the text arrives, because text
+sent to a prompt nobody can see is worse than no text at all. And then it stops. **Nothing is
+ever submitted**: no newline is sent, the text sits at the prompt, and Enter is yours to press
+once you have read what you are about to ask. The way back was already there — an agent prints
+`file:line` all day, and double-clicking one opens the file at that line.
+
+The four `clee -w claude`, `clee -w opencode`, `clee -w codex` and `clee -w gemini` presets still
+open, and are deprecated: a panel that is always one key away is what they were reaching for, and
+those names go away in a future release.
 
 ### Finding your way
 
