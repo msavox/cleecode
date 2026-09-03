@@ -40,6 +40,15 @@ pub enum Key {
     ItemQuit,
     ItemToggleSidebar,
     ItemToggleTerminal,
+    ItemToggleDrawer,
+    /// The drawer's border title while the launcher is showing — before there is an agent to
+    /// name it after.
+    DrawerTitle,
+    /// Said beside an agent that is not on this machine. Honest and short: the name stays in
+    /// the list, because the empty drawer is also where you learn what CleeCode can run.
+    DrawerNotInstalled,
+    /// The two keys the launcher answers to, on its bottom row.
+    DrawerHint,
     ItemToggleMenuBar,
     ItemOpenMenuBar,
     ItemColumnSelection,
@@ -286,6 +295,15 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleTerminal) => "Terminal panel",
         (Lang::It, ItemToggleTerminal) => "Pannello terminale",
+
+        (Lang::En, ItemToggleDrawer) => "Agent drawer",
+        (Lang::It, ItemToggleDrawer) => "Cassetto agente",
+        (Lang::En, DrawerTitle) => "agent",
+        (Lang::It, DrawerTitle) => "agente",
+        (Lang::En, DrawerNotInstalled) => "not installed",
+        (Lang::It, DrawerNotInstalled) => "non installato",
+        (Lang::En, DrawerHint) => "\u{2191}\u{2193} choose \u{00b7} Enter starts it",
+        (Lang::It, DrawerHint) => "\u{2191}\u{2193} scegli \u{00b7} Invio lo avvia",
 
         (Lang::En, ItemToggleMenuBar) => "Menu bar",
         (Lang::It, ItemToggleMenuBar) => "Barra dei menu",
@@ -1855,7 +1873,12 @@ pub fn msg_run_piece_unsaved(lang: Lang) -> String {
 
 /// Said after context went to an agent's prompt. It names what was sent and where it went, and
 /// it says the part that matters: nothing has been submitted, and Enter is the user's to press.
-pub fn msg_agent_sent(lang: Lang, reference: &str, agent: &str, terminal: usize) -> String {
+/// Where the context landed: a numbered terminal, or the drawer.
+///
+/// The drawer is named rather than numbered because it has no number — it is not one of the
+/// terminal panel's windows, and calling it "terminal 3" would send the reader looking for a
+/// third terminal that is not there.
+pub fn msg_agent_sent_to_terminal(lang: Lang, reference: &str, agent: &str, terminal: usize) -> String {
     match lang {
         Lang::En => {
             format!("{reference} → {agent}, terminal {} — Enter sends it", terminal + 1)
@@ -1866,15 +1889,61 @@ pub fn msg_agent_sent(lang: Lang, reference: &str, agent: &str, terminal: usize)
     }
 }
 
-/// No agent anywhere, said plainly rather than by doing nothing. Names the way to get one.
-pub fn msg_agent_none(lang: Lang) -> String {
+pub fn msg_agent_sent_to_drawer(lang: Lang, reference: &str, agent: &str) -> String {
     match lang {
-        Lang::En => "No agent in any terminal — clee -w claude, opencode, codex or gemini opens one",
-        Lang::It => "Nessun agente nei terminali — clee -w claude, opencode, codex o gemini ne apre uno",
+        Lang::En => format!("{reference} → {agent}, in the drawer — Enter sends it"),
+        Lang::It => format!("{reference} → {agent}, nel cassetto — Enter lo manda"),
+    }
+}
+
+/// What `Ctrl+Shift+A` says when there was nobody to talk to. The key does not fail: it opens
+/// the drawer on its launcher, which is where an agent is chosen, so the message says what
+/// just happened rather than what did not.
+pub fn msg_drawer_summoned(lang: Lang) -> String {
+    match lang {
+        Lang::En => "No agent running — the drawer is open: choose one and press Enter",
+        Lang::It => "Nessun agente in esecuzione — cassetto aperto: scegline uno e premi Invio",
     }
     .to_string()
 }
 
+/// The drawer opened or closed from the menu. Says that closing is not killing, because that is
+/// the part nobody can see.
+pub fn msg_drawer_toggled(lang: Lang, open: bool) -> String {
+    match (lang, open) {
+        (Lang::En, true) => "Agent drawer open",
+        (Lang::En, false) => "Agent drawer hidden — the agent is still running in it",
+        (Lang::It, true) => "Cassetto agente aperto",
+        (Lang::It, false) => "Cassetto agente nascosto — l'agente dentro continua a girare",
+    }
+    .to_string()
+}
+
+pub fn msg_drawer_started(lang: Lang, agent: &str) -> String {
+    match lang {
+        Lang::En => format!("{agent} started in the drawer"),
+        Lang::It => format!("{agent} avviato nel cassetto"),
+    }
+}
+
+/// The agent in the drawer has exited. Nothing takes its place: a shell appearing where an agent
+/// was looks exactly like the agent still being there, so the launcher comes back instead.
+pub fn msg_drawer_agent_ended(lang: Lang, agent: &str) -> String {
+    match lang {
+        Lang::En => format!("{agent} has ended — the drawer is back to the list"),
+        Lang::It => format!("{agent} è terminato — il cassetto torna alla lista"),
+    }
+}
+
+pub fn msg_drawer_start_error(lang: Lang, agent: &str, error: &str) -> String {
+    match lang {
+        Lang::En => format!("Could not start {agent} in the drawer: {error}"),
+        Lang::It => format!("Impossibile avviare {agent} nel cassetto: {error}"),
+    }
+}
+
+/// A buffer with no file behind it. There is nothing to point an agent at, and the honest
+/// answer is to say what is missing rather than to send it a name that means nothing.
 pub fn msg_agent_unsaved(lang: Lang) -> String {
     match lang {
         Lang::En => "Save the file first — an agent is pointed at a path, not at a buffer",

@@ -21,6 +21,8 @@ pub struct Areas {
     pub sidebar: Option<Rect>,
     pub editor: Rect,
     pub terminals: Option<Vec<Rect>>,
+    /// The agent drawer's column, when it is open. Always the rightmost thing in the window.
+    pub drawer: Option<Rect>,
     pub status: Rect,
 }
 
@@ -38,6 +40,10 @@ pub struct LayoutParams {
     pub sidebar_width: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
+    /// Whether the agent drawer has a column of its own right now.
+    pub drawer_open: bool,
+    /// Its share of the window, as a percentage. See `settings::drawer_pct`.
+    pub drawer_pct: u16,
 }
 
 impl LayoutParams {
@@ -51,6 +57,8 @@ impl LayoutParams {
             sidebar_width: app.settings.sidebar_width,
             terminal_pct: app.settings.terminal_pct,
             terminal_on_right: app.settings.terminal_on_right,
+            drawer_open: app.drawer.as_ref().is_some_and(|d| d.open),
+            drawer_pct: app.settings.drawer_pct,
         }
     }
 }
@@ -76,6 +84,29 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     let main_area = outer[1];
     let status = outer[2];
 
+    // The drawer comes off the right of the whole main area, before either arrangement below is
+    // worked out — it is the rightmost column of the window in both, and everything else divides
+    // what is left.
+    //
+    // Before, and not inside the branches, because the right-docked terminal panel is *also* a
+    // column carved off the right. Two of them worked out independently would each take their
+    // percentage of the same edge and land on top of each other; taken in this order the terminal
+    // takes its share of what the drawer left, which is what "the drawer is part of the layout
+    // and everything makes room for it" means in arithmetic. This is the pinned mode's whole
+    // cost: opening the drawer resizes the frames, and every pty in them gets a SIGWINCH.
+    let (main_area, drawer) = if p.drawer_open {
+        let h = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(100 - p.drawer_pct),
+                Constraint::Percentage(p.drawer_pct),
+            ])
+            .split(main_area);
+        (h[0], Some(h[1]))
+    } else {
+        (main_area, None)
+    };
+
     if p.terminal_on_right {
         let (sidebar, rest) = if p.show_sidebar {
             let h = Layout::default()
@@ -95,7 +126,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         } else {
             (rest, None)
         };
-        Areas { menu_bar, sidebar, editor, terminals, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, status }
     } else {
         let (main_top, terminals) = if p.show_terminal {
             let v = Layout::default()
@@ -117,7 +148,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
             (None, main_top)
         };
 
-        Areas { menu_bar, sidebar, editor, terminals, status }
+        Areas { menu_bar, sidebar, editor, terminals, drawer, status }
     }
 }
 
@@ -954,6 +985,13 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
 
     if let Some(term_areas) = areas.terminals.clone() {
         draw_terminals(f, app, &term_areas);
+    }
+
+    // A frame of the layout, so it is drawn with the frames and not over them: in pin mode the
+    // drawer took its column out of the main area before anything else was placed, and nothing
+    // it covers is anything else's.
+    if let Some(drawer_area) = areas.drawer {
+        draw_drawer(f, app, drawer_area);
     }
 
     draw_status(f, app, areas.status);
@@ -4702,27 +4740,70 @@ fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[St
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Everything [`draw_single_terminal`] needs to know about the app around the window it is
+/// drawing.
+///
+/// Gathered up front because the window itself is borrowed mutably for the whole call, and the
+/// drawer's window is not in `app.terminals` at all — so the function cannot be handed an index
+/// and go looking. Every field here was a question asked of `app` in the middle of the old body.
+struct TerminalChrome {
+    pal: Palette,
+    lang: Lang,
+    /// Whether the layout resize mode is on, which colours the focused border differently.
+    resizing: bool,
+    focused: bool,
+    /// Whether to offer the window ✕ in the corner. False for the drawer: it is closed from the
+    /// View menu, and a ✕ there would be a promise to kill the agent.
+    closable: bool,
+    /// Whether the pointer is on this pane's scrollbar, or dragging it. Resolved by the caller,
+    /// which is the half that knows which `ScrollbarId` this pane answers to — `Terminal(i)` for
+    /// the panel, `Drawer` for the drawer.
+    engaged: bool,
+    /// The number a nameless single tab is called by, which is the pane's place on screen.
+    number: usize,
+}
+
 fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
     let active = app.active_terminal;
     let focus_terminal = app.focus == Focus::Terminal;
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let resizing = app.layout_resize_active();
+    let closable = app.terminals.len() > 1;
     for (i, area) in term_areas.iter().enumerate() {
-        let is_focused_pane = focus_terminal && i == active;
-        draw_single_terminal(f, app, *area, i, is_focused_pane);
+        let id = crate::app::ScrollbarId::Terminal(i);
+        // Asked before the window is borrowed mutably below: it is a question about the app as a
+        // whole — where the pointer is, and what is being dragged.
+        let engaged = app.scrollbar_engaged(id, *area, Axis::Vertical);
+        let chrome = TerminalChrome {
+            pal,
+            lang,
+            resizing,
+            focused: focus_terminal && i == active,
+            closable,
+            engaged,
+            number: i,
+        };
+        let Some(window) = app.terminals.get_mut(i) else { continue };
+        draw_single_terminal(f, window, *area, chrome);
     }
 }
 
-fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, focused: bool) {
-    let pal = app.palette();
-    let (labels, active_tab) = {
-        let Some(window) = app.terminals.get(index) else { return };
-        (terminal_tab_labels(window, index, app.settings.lang), window.active)
-    };
+fn draw_single_terminal(
+    f: &mut Frame,
+    window: &mut TerminalWindow,
+    area: Rect,
+    chrome: TerminalChrome,
+) {
+    let TerminalChrome { pal, lang, resizing, focused, closable, engaged, number } = chrome;
+    let labels = terminal_tab_labels(window, number, lang);
+    let active_tab = window.active;
     let tab_count = labels.len();
-    let window_close = app.terminals.len() > 1;
+    let window_close = closable;
 
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+        .border_style(focused_border_style(pal, focused, resizing));
     // With a single tab the top border carries the (possibly renamed) terminal's name; with
     // several, the tabs ride the border instead (drawn below) and stand in for the title.
     if tab_count <= 1 {
@@ -4748,11 +4829,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     let rows = content.height;
     let cols = content.width;
-    // Read before the pane is borrowed mutably below, since it is a question about the app as a
-    // whole — where the pointer is, and what is being dragged.
-    let engaged =
-        app.scrollbar_engaged(crate::app::ScrollbarId::Terminal(index), area, Axis::Vertical);
-    let Some(terminal) = app.terminals.get_mut(index).map(|w| w.active_tab_mut()) else { return };
+    let terminal = window.active_tab_mut();
     terminal.resize(rows, cols);
 
     // Keep the pane clean during shell startup: hide the banner/rc output until the shell
@@ -4760,7 +4837,7 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
     // that only gets cleared seconds later.
     if !terminal.is_ready() {
         if content.height > 0 && content.width > 0 {
-            let hint = i18n::terminal_starting(app.settings.lang);
+            let hint = i18n::terminal_starting(lang);
             let hint_w = (hint.chars().count() as u16).min(content.width);
             let rect = Rect {
                 x: content.x + content.width.saturating_sub(hint_w) / 2,
@@ -4797,6 +4874,164 @@ fn draw_single_terminal(f: &mut Frame, app: &mut App, area: Rect, index: usize, 
 
     if let Some((cy, cx)) = cursor_pos {
         f.set_cursor_position((content.x + cx, content.y + cy));
+    }
+}
+
+/// The agent drawer's column: the agent's pane when one is running, the launcher when the drawer
+/// is open with nobody in it.
+///
+/// Drawn straight after the terminal panel and before every modal, because it is a frame of the
+/// layout rather than something over the top of one — that is what pin mode means.
+pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let resizing = app.layout_resize_active();
+    let focused = app.focus == Focus::Drawer;
+    // Asked before the drawer is borrowed mutably, for the same reason `draw_terminals` asks it
+    // there: it is a question about the pointer, which belongs to the app.
+    let engaged = app.scrollbar_engaged(crate::app::ScrollbarId::Drawer, area, Axis::Vertical);
+    let Some(drawer) = app.drawer.as_mut() else { return };
+    match drawer.window.as_mut() {
+        Some(window) => draw_single_terminal(
+            f,
+            window,
+            area,
+            TerminalChrome {
+                pal,
+                lang,
+                resizing,
+                focused,
+                // No ✕ in the corner. The drawer is closed from the View menu, and closing it
+                // does not end the conversation — a button that looks like every other pane's
+                // close button would promise that it does.
+                closable: false,
+                engaged,
+                // Never read: the drawer's one tab is always named after its agent.
+                number: 0,
+            },
+        ),
+        None => draw_drawer_launcher(f, pal, lang, area, drawer.selected, focused, resizing),
+    }
+}
+
+/// Where each agent's entry sits in the launcher, and whether there is room for the wordmarks.
+///
+/// One function, used by the drawing and by the mouse alike, because the two must not be able to
+/// disagree: a click that starts the agent above the one under the pointer is precisely the bug a
+/// second copy of this arithmetic produces. The rects returned are one per agent, in
+/// [`Agent::all`] order, each covering that agent's whole block.
+///
+/// An empty list means the column is too short to show the list honestly, in which case nothing
+/// is drawn and nothing can be clicked.
+pub fn drawer_launcher_rows(inner: Rect) -> (bool, Vec<Rect>) {
+    let count = crate::session::Agent::all().len() as u16;
+    let widest = crate::session::Agent::all()
+        .iter()
+        .map(|agent| crate::drawer::wordmark_width(agent.workspace_name()))
+        .max()
+        .unwrap_or(0);
+    // A wordmark, its caption, and a blank row between one agent and the next.
+    let tall = crate::drawer::WORDMARK_ROWS as u16 + 1;
+    let fits = |per: u16| count * per + count.saturating_sub(1) <= inner.height;
+    // Two columns for the ▸ marker in front of the highlighted name.
+    let big = widest + 2 <= inner.width && fits(tall);
+    let per = if big { tall } else { 1 };
+    if !fits(per) {
+        return (big, Vec::new());
+    }
+    let total = count * per + count.saturating_sub(1);
+    let top = inner.y + (inner.height - total) / 2;
+    let rows = (0..count)
+        .map(|i| Rect { x: inner.x, y: top + i * (per + 1), width: inner.width, height: per })
+        .collect();
+    (big, rows)
+}
+
+/// The empty state: the four agents, written large, one of them highlighted.
+///
+/// The ROADMAP's answer to "which agent does the key summon" — the empty state *is* the
+/// selector, so the question never has to be settled in a setting. Every one of the four is
+/// shown whether or not it is installed, because the empty drawer is also where you find out
+/// what CleeCode knows how to run; the ones that are not here are drawn dim and said to be
+/// missing rather than quietly left out.
+fn draw_drawer_launcher(
+    f: &mut Frame,
+    pal: Palette,
+    lang: Lang,
+    area: Rect,
+    selected: usize,
+    focused: bool,
+    resizing: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(pal, focused, resizing))
+        .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (big, rows) = drawer_launcher_rows(inner);
+    for (i, agent) in crate::session::Agent::all().into_iter().enumerate() {
+        let Some(rect) = rows.get(i).copied() else { continue };
+        let name = agent.workspace_name();
+        let installed = agent.on_path();
+        // Three states, one colour each: here and chosen, here, not here. The dim one is the
+        // honest half of showing a name you cannot start.
+        let colour = if !installed {
+            pal.text_dim
+        } else if i == selected {
+            pal.accent
+        } else {
+            pal.text
+        };
+        let mut style = Style::default().fg(colour);
+        if i == selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let marker = Style::default().fg(pal.accent);
+        let mut lines: Vec<Line> = Vec::new();
+        if big {
+            // A name the alphabet cannot spell falls back to itself rather than to a word with
+            // holes in it — see `drawer::wordmark`.
+            match crate::drawer::wordmark(name) {
+                Some(art) => {
+                    for (row, art_row) in art.into_iter().enumerate() {
+                        let head = if i == selected && row == 1 { "▸ " } else { "  " };
+                        lines.push(Line::from(vec![
+                            Span::styled(head, marker),
+                            Span::styled(art_row, style),
+                        ]));
+                    }
+                }
+                None => {
+                    for _ in 0..crate::drawer::WORDMARK_ROWS {
+                        lines.push(Line::from(""));
+                    }
+                }
+            }
+        }
+        let head = if !big && i == selected { "▸ " } else { "  " };
+        let mut caption = vec![Span::styled(head, marker), Span::styled(name, style)];
+        if !installed {
+            caption.push(Span::styled(
+                format!("  {}", i18n::t(lang, Key::DrawerNotInstalled)),
+                Style::default().fg(pal.text_dim),
+            ));
+        }
+        lines.push(Line::from(caption));
+        f.render_widget(Paragraph::new(lines), rect);
+    }
+
+    // The two keys, on the bottom row, and only where there is a row to spare below the list.
+    let hint = i18n::t(lang, Key::DrawerHint);
+    let last = rows.last().map(|r| r.y + r.height).unwrap_or(inner.y);
+    if !rows.is_empty() && last + 1 < inner.y + inner.height {
+        let row = Rect { y: inner.y + inner.height - 1, height: 1, ..inner };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(pal.text_dim)))
+                .alignment(ratatui::layout::Alignment::Center)),
+            row,
+        );
     }
 }
 
@@ -5482,6 +5717,80 @@ mod tests {
         assert_eq!(picker_row_at(&few, full, inner.x + 2, inner.y + 2), None);
     }
 
+    /// The drawer's column comes off the right of the window before anything else is placed, in
+    /// both arrangements — which is the one thing that keeps it from fighting the right-docked
+    /// terminal panel for the same edge.
+    #[test]
+    fn the_drawer_takes_its_column_off_the_right_and_the_rest_makes_room() {
+        let full = Rect::new(0, 0, 200, 40);
+        let params = |drawer_open, terminal_on_right| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            menu_active: false,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right,
+            drawer_open,
+            drawer_pct: 40,
+        };
+
+        for on_right in [false, true] {
+            let closed = compute_layout(full, &params(false, on_right));
+            let open = compute_layout(full, &params(true, on_right));
+            let drawer = open.drawer.expect("an open drawer has a column");
+            assert!(closed.drawer.is_none(), "and a closed one has none");
+
+            // Rightmost, full height, and the size the percentage asked for.
+            assert_eq!(drawer.x + drawer.width, full.width, "flush with the window's right edge");
+            // The whole main area: the menu bar's row and the status line, and nothing else.
+            assert_eq!(drawer.y, 1);
+            assert_eq!(drawer.height, full.height - 2, "the full height of the main area");
+            assert_eq!(drawer.width, full.width * 40 / 100);
+
+            // Everything else fits in what is left. This is the assertion that fails if the
+            // drawer is carved inside the orientation branches instead of before them: the
+            // right-docked terminal would take its 35% of the whole width and overlap.
+            assert!(open.editor.x + open.editor.width <= drawer.x, "the editor stops at the seam");
+            for rect in open.terminals.iter().flatten() {
+                assert!(rect.x + rect.width <= drawer.x, "so does every terminal window");
+            }
+            assert!(open.editor.width < closed.editor.width, "the editor gave up the room");
+        }
+    }
+
+    /// The launcher's rows are laid out once and read by both the drawing and the mouse. What
+    /// matters is that they never overlap and never leave the frame — a click resolved against a
+    /// row drawn somewhere else starts the wrong agent.
+    #[test]
+    fn the_launcher_rows_stay_inside_the_frame_and_apart_from_each_other() {
+        let count = crate::session::Agent::all().len();
+        for width in [12u16, 24, 34, 60] {
+            for height in [3u16, 7, 12, 20, 40] {
+                let inner = Rect::new(1, 1, width, height);
+                let (big, rows) = drawer_launcher_rows(inner);
+                if rows.is_empty() {
+                    continue;
+                }
+                assert_eq!(rows.len(), count, "every agent gets a row or none of them does");
+                assert!(!big || width >= 33, "the wordmarks need room for the widest name");
+                for pair in rows.windows(2) {
+                    assert!(
+                        pair[0].y + pair[0].height <= pair[1].y,
+                        "{width}x{height}: rows must not overlap"
+                    );
+                }
+                let last = rows[count - 1];
+                assert!(
+                    last.y + last.height <= inner.y + inner.height,
+                    "{width}x{height}: the list stays inside the frame"
+                );
+                assert!(rows[0].y >= inner.y);
+            }
+        }
+    }
+
     /// menu again — and `Ctrl+Shift+B` is documented as reaching the menus while it is hidden.
     /// Without a row to draw in, opening one produced nothing at all.
     #[test]
@@ -5496,6 +5805,8 @@ mod tests {
             sidebar_width: 30,
             terminal_pct: 35,
             terminal_on_right: false,
+            drawer_open: false,
+            drawer_pct: crate::settings::DRAWER_PCT_DEFAULT,
         };
 
         assert_eq!(compute_layout(full, &params(false, false)).menu_bar.height, 0, "hidden and idle");
