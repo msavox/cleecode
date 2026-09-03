@@ -431,8 +431,13 @@ impl Agent {
             })
     }
 
-    /// The name of the built-in workspace that opens this agent, which is also what its terminal
-    /// tab is called. Lower case, because it is the command you type.
+    /// The agent's own command name — what the drawer's tab is called, and the command the
+    /// drawer runs to start it. Lower case, because it is the command you type.
+    ///
+    /// It used to also name a built-in workspace: `clee -w claude` opened a tab of this name
+    /// running this command. Those four presets are gone — the drawer replaced them — so this is
+    /// now purely the agent's own name, read only by the drawer and by `Agent::of_program`
+    /// finding itself again in its own output.
     pub fn workspace_name(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
@@ -800,13 +805,14 @@ mod tests {
         assert_eq!(Agent::of_process("bash", &argv(&["bash", "/usr/local/bin/claude"])), None);
     }
 
-    /// The seam is real only if every agent is also a preset somebody can open by name.
+    /// The seam is real only if every agent finds itself again by its own command name, and no
+    /// two of the four share one.
     #[test]
-    fn every_agent_has_a_preset_and_a_name_of_its_own() {
+    fn every_agent_has_a_command_name_and_a_label_of_its_own() {
         let mut seen: Vec<&str> = Vec::new();
         for agent in Agent::all() {
             let name = agent.workspace_name();
-            assert!(crate::workspace::is_built_in(name), "{name} is not a built-in workspace");
+            assert!(!crate::workspace::is_built_in(name), "{name} is not a preset any more");
             assert_eq!(Agent::of_program(name), Some(agent), "{name} does not find itself");
             assert!(!seen.contains(&name));
             assert!(!agent.label().is_empty());

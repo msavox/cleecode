@@ -6,18 +6,18 @@
 A preset is a promise about what appears when you type its name, and the only way to check a
 promise like that is to type it. Every check here is about the screen: is the interpreter at its
 prompt, is there a shell beside it, did the frames land where the width says they should, and —
-running the same preset in a narrow window — did they move.
+running the same preset in a narrow window — did they move. `minimal` is checked the same way, for
+the opposite promise: nothing lands at all.
 
-The agent presets are checked the same way, against a stand-in rather than the real Claude Code:
-what is being promised is a tab named after the agent that runs the agent, and a shell beside it.
-A stub on `PATH` proves that better than the real program would, because it can also say what
-reached its prompt — which is how the last two checks read `Ctrl+Shift+A` for what it is: the
-context arrives, and *nothing is submitted* until Enter is pressed.
+The four agent presets — `claude`, `opencode`, `codex`, `gemini` — are gone; the agent drawer
+replaced them. What is checked now about that retirement is the announcement: `clee -w claude`
+still has to mean something, and what it means is a status line naming Ctrl+Shift+A instead of the
+preset that used to open, over whatever the window already looked like.
 
 One check is not about a preset at all: an agent typed by hand into a plain shell, installed the
 way npm installs Claude Code. There the process table says `node`, nothing has declared the pane
-an agent's, and finding it is entirely the process table's job — which is the case the presets
-cannot exercise, because a preset pane always carries the command it was opened with.
+an agent's, and finding it is entirely the process table's job — unrelated to any of the above,
+since it is about Ctrl+Shift+A finding a running agent rather than about what a preset opens.
 
 Skips a language whose interpreter is not installed rather than passing quietly, and skips the
 npm-shaped check where there is no node to reproduce it with.
@@ -97,69 +97,68 @@ def open_file(session, name):
     return False
 
 
-def check_agent_preset(binary, name, report):
-    """`clee -w <agent>`: a tab of that name running that command, and a shell beside it."""
-    root = tempfile.mkdtemp(prefix="clee_agent_")
-    # Something for the editor to be looking at, so the shortcut has a place to point at.
-    with open(os.path.join(root, "demo.py"), "w") as handle:
-        handle.write("value = 1\nprint(value)\n")
+def check_retirement(binary, name, report):
+    """`clee -w claude`: a name that used to open a preset and now opens nothing of its own.
+
+    The stand-ins go on `PATH` too — the same ones the presets used to prove they had started the
+    right program — so the check also proves the retirement is real and not merely unannounced:
+    even with a `claude` a keystroke away, `-w claude` starts nothing for it.
+    """
+    root = tempfile.mkdtemp(prefix="clee_retired_")
     env = {"PATH": fake_agents(root) + os.pathsep + os.environ.get("PATH", "")}
 
     session = Session(binary, root, env=env, args=["-w", name], cols=190)
     try:
         started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
-        report.check(f"{name}: the preset opens", started, session)
+        report.check(f"{name}: the app still opens", started, session)
         if not started:
             return
         session.send(" ")
         session.wait(lambda s: "Files" in s.text(), 8)
 
-        # The preset still works — every check below is the same one it passed yesterday — and
-        # this release is where it starts saying it will not work forever. The drawer is the
-        # agent surface now, and a published command on its way out has to announce it while it
-        # still runs, not once it has already gone. Read after the splash, because the splash is
-        # drawn instead of the status line and not over it.
-        # Matched on the stem, so the sentence reads in either language.
-        said = session.wait(lambda s: "deprecat" in s.text(), 6)
-        report.check(f"{name}: the status line says the preset is deprecated", said, session,
-                     note="and names Ctrl+Shift+A, the drawer that replaces it")
+        # Two facts, one line, matched on the English or the Italian stem so the check reads in
+        # either language: the name is gone, and what replaced it.
+        retired = session.wait(
+            lambda s: "no longer a preset" in s.text() or "non è più un preset" in s.text(), 6)
+        report.check(f"{name}: the status line says the preset is retired", retired, session,
+                     note="and names Ctrl+Shift+A, the drawer that replaced it")
 
-        # The startup command ran, and it ran *that* program: the stub says its own name.
-        ready = session.wait(lambda s: f"AGENT-STUB {name} ready" in s.text(), 30)
-        report.check(f"{name}: the tab starts the agent by itself", ready, session,
-                     note="nothing was typed to start it")
+        # Over the default layout, not a preset that no longer exists: the sidebar and terminal
+        # this session already had, untouched by a name that resolved to nothing.
+        report.check(f"{name}: it opens over the default layout", "Files" in session.text(),
+                     session)
 
-        # On the tab, not merely somewhere on screen: the name is also in the menu bar's
-        # workspace label and in the shell echo that started it.
-        strip = next((line for line in session.lines() if "shell ✕" in line), "")
-        report.check(f"{name}: its tab carries the agent's name", f"{name} ✕" in strip, session,
-                     note=repr(strip[-70:]))
-        report.check(f"{name}: a plain shell sits beside it in the same window",
-                     "shell" in session.text(), session)
-        if not ready:
+        # And nothing was started for it — the stub would have said its own name, the same way it
+        # did when this was still a preset.
+        report.check(f"{name}: nothing was started for it",
+                     f"AGENT-STUB {name} ready" not in session.text(), session,
+                     note="a retired name opens no command any more")
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_minimal_preset(binary, report):
+    """`clee -w minimal`: no sidebar, no terminal, no menu bar — the editor and nothing else."""
+    root = tempfile.mkdtemp(prefix="clee_minimal_")
+    with open(os.path.join(root, "demo.py"), "w") as handle:
+        handle.write("value = 1\nprint(value)\n")
+
+    session = Session(binary, root, args=["-w", "minimal"], cols=190)
+    try:
+        started = session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20)
+        report.check("minimal: the preset opens", started, session)
+        if not started:
             return
+        # No sidebar means no "Files" to wait on, unlike every other preset here — so the splash
+        # is timed off its own text going away instead.
+        session.send(" ")
+        session.wait(lambda s: "msavox 2026" not in s.text(), 8)
 
-        # Ctrl+Shift+A. The reference has to arrive at the agent's own prompt — read out of that
-        # pane's frame, since "demo.py" is in the editor's tab strip the whole time.
-        if not open_file(session, "demo"):
-            report.check(f"{name}: the file opens", False, session)
-            return
-        session.wait(lambda s: "value = 1" in s.text(), 8)
-        session.send(session.chord("a"))
-        arrived = session.wait(
-            lambda s: "demo.py:1" in "\n".join(s.frame_of(f"AGENT-STUB {name} ready")), 8)
-        report.check(f"{name}: Ctrl+Shift+A writes the reference at the agent's prompt",
-                     arrived, session)
-
-        # And left it there. This is the whole discipline of the key: CleeCode never presses
-        # Enter for you, so the stub — which speaks only when a line is completed — has said
-        # nothing yet.
-        report.check(f"{name}: nothing was submitted", "SUBMITTED" not in session.text(), session,
-                     note="the agent is only asked when the user presses Enter")
-
-        # Pressing it is what sends, and the keyboard is already in the pane holding the text.
-        submitted = session.press("\r", lambda s: "SUBMITTED: demo.py:1" in s.text(), 8)
-        report.check(f"{name}: Enter is what sends it", submitted, session)
+        report.check("minimal: no Files sidebar", "Files" not in session.text(), session)
+        # No terminal panel means nothing of one's tab strip is on screen either.
+        report.check("minimal: no terminal panel on screen", "shell" not in session.text(),
+                      session)
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)
@@ -305,9 +304,10 @@ def main():
             print(f"  SKIP  {spec['name']}: {spec['needs']} not installed")
             continue
         check_preset(binary, spec, report)
-    # No skip here: an agent preset needs no agent installed, only a program of that name.
-    for name in AGENTS:
-        check_agent_preset(binary, name, report)
+    check_minimal_preset(binary, report)
+    # No skip here: a retired name needs no agent installed, only a program of that name on PATH
+    # for the check to prove it stays unstarted.
+    check_retirement(binary, "claude", report)
     check_npm_wrapper(binary, report)
     return report.finish()
 

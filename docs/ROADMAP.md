@@ -2483,6 +2483,20 @@ riscritti con la strada temp+rename.
   Ctrl+Shift+A gli dà il punto dello script, i suoi edit si ricaricano in diretta, e
   Ctrl+Shift+R fa girare il file nella sessione che tiene lo stato e le figure.
 
+  > **Il ritiro diventa secco, non a fasi (decisione utente, 2026-09-03).** Il piano in due
+  > tempi appena sopra è superato lo stesso giorno in cui è stato scritto: con il cassetto
+  > già sul master, una release-cuscinetto che tiene aperti quattro preset deprecati non
+  > compra niente che il cassetto non dia già. I quattro nomi — claude, opencode, codex,
+  > gemini — escono da `BUILT_INS` e `agent_workspace()` muore con loro nella stessa release
+  > che li ritira, non in quella dopo. La dichiarazione viaggia con la sparizione invece di
+  > precederla: `clee -w claude` non apre più il preset ma la status line dice perché — "non è
+  > più un preset — Ctrl+Shift+A apre il cassetto agente" — e le note di release dicono lo
+  > stesso a chi legge il changelog. Al posto dei quattro, un quarto preset di layout entra in
+  > `BUILT_INS`: **`minimal`**, l'editor spoglio — niente sidebar, niente terminale, niente
+  > barra dei menu. Idea dell'utente: col cassetto a un tasto di distanza, l'unico preset
+  > ancora sensato oltre al layout di default è quello minimale; ogni altra composizione la
+  > copre il cassetto, e non serve un preset per programma quando il programma è un agente.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
@@ -2539,9 +2553,10 @@ La 1.0 non è una release di funzionalità: è un elenco di frasi che devono ess
 4. Un crash — di qualunque tipo, scudo o non scudo — non costa più di qualche secondo di
    lavoro.
 5. I driver pty girano in CI su ogni push, e nessun controllo "guarda nel posto sbagliato".
-6. `clee -w claude` (o opencode, o codex) apre un posto di lavoro completo: l'agente in un
-   pane usabile, il contesto dell'editor a un tasto, i suoi edit visibili nei buffer e nel
-   pannello Git senza toccare niente.
+6. `Ctrl+Shift+A` apre un posto di lavoro completo per l'agente che scegli: un pane
+   usabile, il contesto dell'editor a un tasto, i suoi edit visibili nei buffer e nel
+   pannello Git senza toccare niente. (Fino al ritiro dei preset, 2026-09-03, questo punto
+   citava `clee -w claude`; il cassetto è la superficie che lo mantiene vero adesso.)
 
 > Il punto 5 ha già avuto la sua prova del nove (2026-09-02): i driver girati a mano contro
 > un `target/debug` stantio di tre versioni hanno prodotto un'ora di falso allarme su un
