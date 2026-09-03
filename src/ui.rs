@@ -5161,37 +5161,80 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Where each agent's entry sits in the launcher, and whether there is room for the wordmarks.
+/// Where each agent's entry sits in the launcher, and whether there is room for the marks.
 ///
 /// One function, used by the drawing and by the mouse alike, because the two must not be able to
 /// disagree: a click that starts the agent above the one under the pointer is precisely the bug a
 /// second copy of this arithmetic produces. The rects returned are one per agent, in
 /// [`Agent::all`] order, each covering that agent's whole block.
 ///
-/// An empty list means the column is too short to show the list honestly, in which case nothing
-/// is drawn and nothing can be clicked.
+/// **Three rungs, and they are given up in that order.** A mark with its caption and a blank row
+/// between one agent and the next is the whole thing; the blank row goes first, because spacing
+/// is the cheapest thing on screen to lose and the marks are what the panel is for; the marks go
+/// last, leaving four captions. An empty list means the column is too short even for those, in
+/// which case nothing is drawn and nothing can be clicked.
 pub fn drawer_launcher_rows(inner: Rect) -> (bool, Vec<Rect>) {
     let count = crate::session::Agent::all().len() as u16;
-    let widest = crate::session::Agent::all()
-        .iter()
-        .map(|agent| crate::drawer::wordmark_width(agent.workspace_name()))
-        .max()
-        .unwrap_or(0);
-    // A wordmark, its caption, and a blank row between one agent and the next.
-    let tall = crate::drawer::WORDMARK_ROWS as u16 + 1;
-    let fits = |per: u16| count * per + count.saturating_sub(1) <= inner.height;
     // Two columns for the ▸ marker in front of the highlighted name.
-    let big = widest + 2 <= inner.width && fits(tall);
+    let room = crate::drawer::widest_art() + 2 <= inner.width;
+    // A mark and its caption.
+    let tall = crate::drawer::ART_ROWS as u16 + 1;
+    let fits = |per: u16, gap: u16| count * per + count.saturating_sub(1) * gap <= inner.height;
+    let big = room && (fits(tall, 1) || fits(tall, 0));
     let per = if big { tall } else { 1 };
-    if !fits(per) {
+    let gap = u16::from(fits(per, 1));
+    if !fits(per, gap) {
         return (big, Vec::new());
     }
-    let total = count * per + count.saturating_sub(1);
+    let total = count * per + count.saturating_sub(1) * gap;
     let top = inner.y + (inner.height - total) / 2;
     let rows = (0..count)
-        .map(|i| Rect { x: inner.x, y: top + i * (per + 1), width: inner.width, height: per })
+        .map(|i| Rect { x: inner.x, y: top + i * (per + gap), width: inner.width, height: per })
         .collect();
     (big, rows)
+}
+
+/// One row of a drawn mark, as spans.
+///
+/// Runs of one style are merged rather than emitted a span per cell: a mark is a couple of dozen
+/// cells wide and four of them are drawn every frame, and ratatui allocates per span.
+///
+/// `installed` is the only thing the panel is allowed to say about a mark. The colours themselves
+/// are the owners' and are fixed — the same rule the file tree's icons run under — so a name that
+/// is not here is drawn *dim* rather than recoloured: still recognisably that program's mark,
+/// visibly not something you can start. The caption underneath carries the rest of the answer.
+fn art_spans(cells: &[crate::drawer::ArtCell], installed: bool) -> Vec<Span<'static>> {
+    let paint = |ink: Option<crate::drawer::Ink>| ink.map(|(r, g, b)| Color::Rgb(r, g, b));
+    let style = |cell: &crate::drawer::ArtCell| {
+        let mut style = Style::default();
+        if let Some(fg) = paint(cell.fg) {
+            style = style.fg(fg);
+        }
+        if let Some(bg) = paint(cell.bg) {
+            style = style.bg(bg);
+        }
+        if !installed {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        style
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut current: Option<Style> = None;
+    for cell in cells {
+        let want = style(cell);
+        if current != Some(want) {
+            if let Some(had) = current.take() {
+                spans.push(Span::styled(std::mem::take(&mut run), had));
+            }
+            current = Some(want);
+        }
+        run.push(cell.ch);
+    }
+    if let Some(had) = current {
+        spans.push(Span::styled(run, had));
+    }
+    spans
 }
 
 /// The empty state: the four agents, written large, one of them highlighted.
@@ -5227,7 +5270,10 @@ fn draw_drawer_launcher(
     for (i, agent) in crate::session::Agent::all().into_iter().enumerate() {
         let Some(rect) = rows.get(i).copied() else { continue };
         let name = agent.workspace_name();
-        let installed = agent.on_path();
+        // Asked of the drawer's own probe and not of `Agent::on_path`: the answer decides whether
+        // a click starts the agent or offers to install it, so it has to be able to change while
+        // this panel is up. See `drawer::installed`.
+        let installed = crate::drawer::installed(agent);
         // Three states, one colour each: here and chosen, here, not here. The dim one is the
         // honest half of showing a name you cannot start.
         let colour = if !installed {
@@ -5244,23 +5290,15 @@ fn draw_drawer_launcher(
         let marker = Style::default().fg(pal.accent);
         let mut lines: Vec<Line> = Vec::new();
         if big {
-            // A name the alphabet cannot spell falls back to itself rather than to a word with
-            // holes in it — see `drawer::wordmark`.
-            match crate::drawer::wordmark(name) {
-                Some(art) => {
-                    for (row, art_row) in art.into_iter().enumerate() {
-                        let head = if i == selected && row == 1 { "▸ " } else { "  " };
-                        lines.push(Line::from(vec![
-                            Span::styled(head, marker),
-                            Span::styled(art_row, style),
-                        ]));
-                    }
-                }
-                None => {
-                    for _ in 0..crate::drawer::WORDMARK_ROWS {
-                        lines.push(Line::from(""));
-                    }
-                }
+            for (row, cells) in crate::drawer::art(agent).into_iter().enumerate() {
+                let head = if i == selected && row == crate::drawer::ART_ROWS / 2 {
+                    "▸ "
+                } else {
+                    "  "
+                };
+                let mut spans = vec![Span::styled(head, marker)];
+                spans.extend(art_spans(&cells, installed));
+                lines.push(Line::from(spans));
             }
         }
         let head = if !big && i == selected { "▸ " } else { "  " };
@@ -6269,15 +6307,20 @@ mod tests {
     #[test]
     fn the_launcher_rows_stay_inside_the_frame_and_apart_from_each_other() {
         let count = crate::session::Agent::all().len();
-        for width in [12u16, 24, 34, 60] {
-            for height in [3u16, 7, 12, 20, 40] {
+        let needed = crate::drawer::widest_art() + 2;
+        for width in [12u16, 24, 26, 27, 34, 60] {
+            for height in [3u16, 7, 12, 20, 23, 24, 26, 27, 40] {
                 let inner = Rect::new(1, 1, width, height);
                 let (big, rows) = drawer_launcher_rows(inner);
                 if rows.is_empty() {
                     continue;
                 }
                 assert_eq!(rows.len(), count, "every agent gets a row or none of them does");
-                assert!(!big || width >= 33, "the wordmarks need room for the widest name");
+                assert!(!big || width >= needed, "the marks need room for the widest of them");
+                assert!(
+                    !big || rows[0].height == crate::drawer::ART_ROWS as u16 + 1,
+                    "a big row is the mark and its caption"
+                );
                 for pair in rows.windows(2) {
                     assert!(
                         pair[0].y + pair[0].height <= pair[1].y,
@@ -6292,6 +6335,40 @@ mod tests {
                 assert!(rows[0].y >= inner.y);
             }
         }
+    }
+
+    /// The ladder, rung by rung: the blank row between entries is given up before the marks are,
+    /// and the marks before the captions. Written as a sweep down the heights, because what has
+    /// to hold is that each rung is reached in turn and none is skipped — a column one row short
+    /// of the marks falling all the way to bare captions would throw away the panel's whole point
+    /// for the sake of a blank line.
+    #[test]
+    fn the_launcher_gives_up_the_spacing_before_it_gives_up_the_marks() {
+        let count = crate::session::Agent::all().len() as u16;
+        let tall = crate::drawer::ART_ROWS as u16 + 1;
+        let wide = Rect::new(0, 0, crate::drawer::widest_art() + 2, 0);
+        let rung = |height: u16| {
+            let (big, rows) = drawer_launcher_rows(Rect { height, ..wide });
+            if rows.is_empty() {
+                return "nothing";
+            }
+            let spaced = rows.windows(2).all(|p| p[1].y > p[0].y + p[0].height);
+            match (big, spaced) {
+                (true, true) => "marks, spaced",
+                (true, false) => "marks",
+                (false, true) => "captions, spaced",
+                (false, false) => "captions",
+            }
+        };
+        assert_eq!(rung(count * tall + count - 1), "marks, spaced");
+        assert_eq!(rung(count * tall), "marks", "the blank rows go first");
+        assert_eq!(rung(count * tall - 1), "captions, spaced", "then the marks");
+        assert_eq!(rung(count), "captions");
+        assert_eq!(rung(count - 1), "nothing", "and below that it says nothing rather than half");
+        // Too narrow for the widest mark is the caption rung whatever the height: four marks in a
+        // column are as wide as the widest, and half a mark is not a mark.
+        let narrow = Rect::new(0, 0, crate::drawer::widest_art() + 1, 40);
+        assert!(!drawer_launcher_rows(narrow).0);
     }
 
     /// menu again — and `Ctrl+Shift+B` is documented as reaching the menus while it is hidden.
