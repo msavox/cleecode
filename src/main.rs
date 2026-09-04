@@ -663,6 +663,9 @@ fn run(
             app.poll_lsp();
             app.poll_figures();
             app.poll_animations();
+            // After the draw above, which is the only thing that knows how big a pane is now: a
+            // picture whose pane changed under it is re-fitted to the one it is actually in.
+            app.refit_previews();
             app.poll_run_watch();
             app.poll_inspector();
             app.poll_autosave();

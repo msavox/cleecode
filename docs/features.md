@@ -127,6 +127,37 @@ because an error on this line is news and a type is not.
 `Ctrl+Shift+J` goes to the definition of what is under the cursor and `Ctrl+Shift+L` comes back.
 A stack of them, so following a name into a name into a name still leads home.
 
+**What can be done here** — in the **Edit** menu and on a right-click in the editor — asks the
+server about the spot the cursor is on: the import it would add, the compiler's own suggestion,
+the rewrite it knows how to do. The diagnostic you are sitting in travels with the question, which
+is what makes the answer a fix for *that* error rather than a list about the file in general; with
+a selection, the question is about the selection. The answer is a list you narrow by typing, and
+picking a row carries it out: all inside one open buffer it lands as a single edit that one
+`Ctrl+Z` takes back, and anything wider comes up in the rename's diff first, with the rename's
+refusals — including the count of files it wants that no tab holds. Some servers name an action
+and work out what it would change only once it is chosen, so a row can take a moment. On demand
+only, like the rename and the format, and with no chord of its own: every `Ctrl+Shift` letter is
+already spoken for.
+
+`Ctrl+Super+↑` widens the selection to whatever encloses it — the name to the expression it sits
+in, that to the statement, the statement to the function — and `Ctrl+Super+↓` walks back in again.
+The server is asked once and answers with the whole ladder, so every press after the first is
+instant; anything else that moves the cursor ends the walk, and the next widening starts from
+where you now are. Both are in the **Edit** menu as well, beside Select all.
+
+That modifier is the one thing in CleeCode your terminal has to be able to send: it is `Cmd` on
+macOS and `Super` elsewhere, and only the kitty keyboard protocol reports it with the keypress —
+Ghostty, kitty, WezTerm, iTerm2 and foot do, Terminal.app does not, and neither does a window
+manager that keeps that key for itself. Where it never arrives the two menu rows do exactly the
+same thing, and `[keys]` in `settings.toml` moves either onto a chord your terminal does deliver.
+
+The same server also decides where `Ctrl+Shift+F` folds, when it has been asked: the block it
+names beats the brace counting, which is how an import group or a Python body with no braces in it
+becomes foldable at all. It is asked when a file opens and again when it is saved — the two moments
+the buffer and the server are looking at the same text — so a buffer with unsaved changes folds by
+the braces until the next save, because a line number written down before an edit is a line number
+about a file that no longer exists.
+
 It speaks LSP over stdio directly rather than through a framework, and is told about an edit once
 you stop typing rather than on every key. Names are known for rust-analyzer, pyright, tsserver,
 gopls, clangd, lua-language-server, zls, solargraph, bash-language-server, texlab and a couple
@@ -229,14 +260,43 @@ inherits it and the `clee --mcp` it spawns inherits it in turn. Neither end sear
 other, which is what stops two open CleeCodes being mistaken for each other; an agent started
 anywhere else gets a tool that says so rather than a wrong answer.
 
-Four tools: `open_files` (the files open in tabs, and which is active), `selection` (the active
-file, the cursor's line and column, and the selected text), `diagnostics` (what the language
-server currently says, whole or for one file) and `open_file` (show a file, optionally at a
-line). `open_file` opens it **beside** your work and does not take the keyboard, the same rule
-the Octave and Python figures follow. Nothing writes to a buffer: reading has no risk and is
-offered generously, writing needs your consent, and the way to ask for it is not built yet.
+Seven tools. Four read: `open_files` (the files open in tabs, which is active, and which have
+unsaved changes), `selection` (the active file, the cursor's line and column, and the selected
+text) and `diagnostics` (what the language server currently says, whole or for one file). Three
+make the editor move: `open_file` (show a file, optionally at a line, optionally highlighting a
+range of them), `preview` (render a file in the preview pane — markdown as a document, images and
+PDFs as pictures) and `say` (one line in the status bar, marked as the agent's). All three open
+**beside** your work and none takes the keyboard, the same rule the Octave and Python figures
+follow; a highlighted range is an ordinary selection, and it goes the moment you touch that pane.
 
-One line of configuration per agent. Claude Code:
+The seventh writes. `edit_buffer` changes text in a buffer that has **unsaved** changes in it —
+the ones `open_files` lists as dirty, where an agent cannot simply edit the file because your work
+is in the buffer and nowhere else. It asks first, on the status line: `Y` once, `A` for the whole
+session, `N` or Esc to refuse, and the agent's call waits up to two minutes for the answer. The
+change lands in the buffer as one step of undo and is *not* saved — the file on disk stays yours
+to write. The settings panel decides whether it asks at all, and `agent_edits = "ask"` /
+`"allow"` / `"deny"` in `settings.toml` is the same switch. Clean files need none of this: an
+agent edits those on disk as it edits anything, and CleeCode reloads the tab by itself.
+
+**An agent started from the drawer needs no configuration at all.** `Ctrl+Shift+A`, Enter, and it
+comes up with `clee --mcp` already registered — by whichever mechanism that agent has: claude is
+handed `--mcp-config`, codex two `-c` overrides on its command line, opencode `$OPENCODE_CONFIG`
+and gemini `$GEMINI_CLI_SYSTEM_SETTINGS_PATH`. The files those name are written into the session
+directory, which goes when this CleeCode does, and the binary they name is the CleeCode that is
+running — so a development build registers itself rather than whatever `clee` is on the `PATH`.
+Nothing is ever written into `~/.claude.json`, `~/.codex/`, `~/.config/opencode/` or `~/.gemini/`:
+each of the four *merges* what CleeCode passes with the servers you registered yourself, and your
+own model, provider and keys are exactly where you left them.
+
+The two that take it on the command line are asked first whether they understand the flag — their
+own `--help` is read for it — and one whose version does not is started bare instead. The drawer
+`exec`s the agent, so a rejected flag would be a usage message and a pane that vanished. Set
+`agent_mcp = false` in `settings.toml` if you would rather the drawer start the agent exactly as
+you would yourself.
+
+An agent you start anywhere else — a terminal pane, another window, another editor — is your
+program run your way, and CleeCode leaves it alone. It still reaches this session by descent, and
+one line of configuration is what gives it the tools. Claude Code:
 
 ```
 claude mcp add clee -- clee --mcp
@@ -262,8 +322,10 @@ gemini, in `~/.gemini/settings.json`:
 { "mcpServers": { "clee": { "command": "clee", "args": ["--mcp"] } } }
 ```
 
-The Claude Code line is the one to trust. The other three are written from those projects'
-documented shapes and have not been checked here against a running codex, opencode or gemini.
+All four are the shapes CleeCode now writes for itself in the drawer, checked against the running
+CLIs rather than taken from documentation. What no check can cover is a version that has moved on
+— which is why the drawer asks before it passes a flag, and why these four lines are here to fall
+back on if it ever stops.
 
 ### Workspaces
 
@@ -389,6 +451,7 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 | `Ctrl+Shift+Y` | Everywhere the name under the cursor is used, as a filterable list |
 | `Ctrl+Shift+V` | The symbols of this file, in document order — Enter jumps to one |
 | `Ctrl+Shift+C` | Rename the symbol under the cursor: a diff-shaped preview first, one undo step per file |
+| `Ctrl+Super+↑` / `↓` | Widen / narrow the selection by the language's own structure (`Cmd` on macOS; needs a terminal that reports that key — see above) |
 | `Ctrl+L` | Toggle split editor (`Ctrl+Alt+←`/`→` moves between the panes) |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / save all (an unnamed buffer asks for a name; Save As is in the File menu) |
 | `Ctrl+Shift+A` | Send where you are — selection, diagnostic, or cursor line — to the prompt of an agent running in one of the terminals. Nothing is submitted: Enter is yours |

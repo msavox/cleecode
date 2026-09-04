@@ -66,6 +66,8 @@ pub enum Action {
     DocumentSymbols,
     RenameSymbol,
     FormatDocument,
+    ExpandSelection,
+    ShrinkSelection,
     GitPanel,
     FindInProject,
     NextTab,
@@ -96,6 +98,11 @@ fn build_table() -> Vec<(Action, &'static str, Chord)> {
     let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
     let chord = |code| Chord { mods: cs, code };
     let letter = |c| chord(KeyCode::Char(c));
+    // The second layer, and so far the only two defaults on it. What declaring Super costs and
+    // buys is written at [`RELEVANT`]; the two rules anything added here has to obey are written
+    // into `the_defaults_stay_inside_the_projects_own_rules`, which is where somebody adding a
+    // third one will be sent by a failing test rather than by a comment they never read.
+    let structural = |code| Chord { mods: KeyModifiers::CONTROL | KeyModifiers::SUPER, code };
     vec![
         (Action::Manual, "manual", letter('m')),
         (Action::Settings, "settings", letter('o')),
@@ -124,6 +131,13 @@ fn build_table() -> Vec<(Action, &'static str, Chord)> {
         // arrived at by accident is one Ctrl+Z from never having happened. A chord that could
         // silently destroy something would not have been allowed to sit there.
         (Action::FormatDocument, "format-document", letter('q')),
+        // The arrows, and they are the reason the Super layer exists at all: an expanding
+        // selection is a thing you press four times in a row, so it has to be a chord and not a
+        // menu row — and the two Ctrl+Shift arrows point at tabs and terminal windows already.
+        // Up is outwards and down is back in, which is the direction the selection itself moves
+        // on screen: outwards grows past the line you are on, inwards falls back towards it.
+        (Action::ExpandSelection, "expand-selection", structural(KeyCode::Up)),
+        (Action::ShrinkSelection, "shrink-selection", structural(KeyCode::Down)),
         (Action::GitPanel, "git-panel", letter('d')),
         (Action::FindInProject, "find-in-project", letter('h')),
         (Action::NextTab, "next-tab", chord(KeyCode::Right)),
@@ -165,11 +179,40 @@ impl Action {
     }
 }
 
-/// The modifiers a chord can carry. `SUPER` is masked out rather than compared: the Command key
-/// reaches a terminal application only by accident, and a chord that stopped working because
-/// something else was also held down would be a chord that works on one machine.
+/// The modifiers every chord is compared on, whether or not it names them.
+///
+/// `SUPER` is not one of them, and the reason it is not is the one it has always been: the Command
+/// key reaches a terminal application only by accident — a window manager that lets one through, an
+/// emulator that reports it on a key that has no business carrying it — and a `Ctrl+Shift` chord
+/// that stopped working because Command happened to be down as well would be a chord that works on
+/// one machine. Masking it out is what makes those chords survive the accident.
+///
+/// What 0.21 added is the other half of that sentence: a chord may now *ask* to be compared on
+/// Command, and one that does is — see [`Chord::mask`]. The structural selection needed a second
+/// layer and there was none left to take: every `Ctrl+Shift` letter is spoken for and both
+/// `Ctrl+Shift` arrows already move between tabs and terminal windows. So the two rules live side
+/// by side, and neither weakens the other. A chord that never mentions Command still cannot be
+/// broken by one arriving, because it is still compared on these three alone; a chord that names
+/// Command is a chord somebody meant to hold Command for, and comparing it on anything less would
+/// make it fire on the `Ctrl`+arrow nobody pressed.
+///
+/// The layer's honest limit is written where users read it rather than hidden here: it only exists
+/// under the kitty keyboard protocol, and `the_defaults_stay_inside_the_projects_own_rules` says so
+/// in the place a new default gets added.
 const RELEVANT: KeyModifiers =
     KeyModifiers::CONTROL.union(KeyModifiers::ALT).union(KeyModifiers::SHIFT);
+
+/// What the Command key is called on the reader's keyboard: `Cmd` on macOS, `Super` everywhere
+/// else. Both spellings — and `Win` — are read back by [`Chord::parse`], so this decides only
+/// which one is shown, and that is worth deciding: `Super` on a Mac names a key no Mac keyboard
+/// has ever had printed on it, and `Cmd` on Linux names one nobody there calls that.
+fn super_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Super"
+    }
+}
 
 /// One key press: modifiers, and the key they are held with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -203,6 +246,11 @@ impl Chord {
                 "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
                 "shift" => mods |= KeyModifiers::SHIFT,
                 "alt" | "option" | "meta" => mods |= KeyModifiers::ALT,
+                // One key with three names, because it has three names: the Mac calls it Command,
+                // Linux calls it Super, and the keycap on most keyboards has a Windows logo on it.
+                // All three are accepted for the same reason both `←` and `left` are — the reader
+                // writes what is on their own keyboard, not what this source happens to prefer.
+                "super" | "cmd" | "command" | "win" => mods |= KeyModifiers::SUPER,
                 _ => key = Some(parse_key(part)?),
             }
         }
@@ -212,15 +260,34 @@ impl Chord {
         }
     }
 
-    /// The chord as the manual and the menus write it: `Ctrl+Shift+M`, `Ctrl+Alt+←`.
+    /// The chord as the manual and the menus write it: `Ctrl+Shift+M`, `Ctrl+Alt+←`, `Ctrl+Cmd+↑`.
     ///
-    /// Modifier order is Ctrl, Alt, Shift, which is the order every string already written in
-    /// this source uses. Getting it wrong would be invisible in a test and obvious in a menu
-    /// sitting next to a hard-coded neighbour.
+    /// Modifier order is Ctrl, Super, Alt, Shift, which is the order every string already written
+    /// in this source uses — Super went in after Ctrl because that is where every other editor
+    /// writes it and because `Ctrl+Cmd` is how a Mac user says it out loud. Getting the order wrong
+    /// would be invisible in a test and obvious in a menu sitting next to a hard-coded neighbour.
     pub fn display(&self) -> String {
+        self.spelled(super_name())
+    }
+
+    /// The same chord with the Command key called `Super` whatever machine this is.
+    ///
+    /// This is the spelling the hand-written prose uses — the manual, the menu hints, the docs —
+    /// because that prose is one set of static strings compiled for every platform and the key's
+    /// name is not one thing. [`Keymap::build_relabels`] turns it into the reader's own word on the
+    /// way to the screen, through the funnel that already rewrites a chord somebody has moved.
+    fn spelled_neutrally(&self) -> String {
+        self.spelled("Super")
+    }
+
+    fn spelled(&self, super_word: &str) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
             out.push_str("Ctrl+");
+        }
+        if self.mods.contains(KeyModifiers::SUPER) {
+            out.push_str(super_word);
+            out.push('+');
         }
         if self.mods.contains(KeyModifiers::ALT) {
             out.push_str("Alt+");
@@ -232,13 +299,21 @@ impl Chord {
         out
     }
 
+    /// The modifiers this chord is judged on: [`RELEVANT`] always, and Command as well for a chord
+    /// that names it. The whole of the Super layer's matching rule is this one line, and the whole
+    /// of why it is a mask rather than a plain comparison is written where `RELEVANT` is.
+    fn mask(&self) -> KeyModifiers {
+        RELEVANT | (self.mods & KeyModifiers::SUPER)
+    }
+
     /// Whether a key press is this chord.
     ///
     /// Letters are compared without case, because that is how they arrive: a terminal sends
     /// `Ctrl+Shift+M` as `M` with both modifiers on some emulators and as `m` on others, and the
     /// dispatch this replaces spelled out both spellings in every single arm for that reason.
     pub fn matches(&self, key: KeyEvent) -> bool {
-        if (key.modifiers & RELEVANT) != (self.mods & RELEVANT) {
+        let mask = self.mask();
+        if (key.modifiers & mask) != (self.mods & mask) {
             return false;
         }
         match (self.code, key.code) {
@@ -312,7 +387,13 @@ pub struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
-        Keymap { chords: table().iter().map(|(_, _, chord)| *chord).collect(), relabels: Vec::new() }
+        // The relabels are built even here, where nothing has been remapped, because on the Super
+        // layer there is something to rewrite before anybody has moved anything: the prose spells
+        // that key `Super` on every platform and a Mac calls it `Cmd`. See [`Self::build_relabels`].
+        let mut map =
+            Keymap { chords: table().iter().map(|(_, _, chord)| *chord).collect(), relabels: Vec::new() };
+        map.relabels = map.build_relabels();
+        map
     }
 }
 
@@ -353,13 +434,27 @@ impl Keymap {
         (map, warnings)
     }
 
+    /// The rewrites this keymap owes the prose: how a chord's default is *written down* in the
+    /// source, against how it is bound now.
+    ///
+    /// Two spellings of each default are offered rather than one, and that is what the Super layer
+    /// added here. The hand-written text — the manual, the menu hints — is a set of static strings
+    /// compiled once for every platform, so it spells the Command key `Super` everywhere, while
+    /// [`Chord::display`] spells it `Cmd` on a Mac. A chord on that layer therefore needs rewriting
+    /// on a Mac even though nobody has moved it, which no chord on the `Ctrl+Shift` layer ever
+    /// does. For every one of those the two spellings are the same string, the duplicate is
+    /// dropped, and a pair appears only when the chord really did move — so the common case is
+    /// still an empty list and [`Keymap::relabel`] still costs nothing.
     fn build_relabels(&self) -> Vec<(String, String)> {
-        let mut pairs: Vec<(String, String)> = table()
-            .iter()
-            .enumerate()
-            .filter(|(index, (_, _, default))| self.chords[*index] != *default)
-            .map(|(index, (_, _, default))| (default.display(), self.chords[index].display()))
-            .collect();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (index, (_, _, default)) in table().iter().enumerate() {
+            let now = self.chords[index].display();
+            for written in [default.display(), default.spelled_neutrally()] {
+                if written != now && !pairs.iter().any(|(old, _)| *old == written) {
+                    pairs.push((written, now.clone()));
+                }
+            }
+        }
         // Longest first, so a chord whose spelling starts with another's is matched whole.
         pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         pairs
@@ -479,28 +574,115 @@ mod tests {
     }
 
     /// The defaults are exactly what CleeCode has always shipped, and this is the file that says
-    /// so. Every one of them is `Ctrl+Shift` and a letter or an arrow — no function key, no
+    /// so. Almost every one of them is `Ctrl+Shift` and a letter or an arrow — no function key, no
     /// `Alt+<letter>`, no bare `Ctrl+<arrow>` — for the reasons written beside the dispatch.
+    ///
+    /// The exception is the layer 0.21 opened, and it is allowed exactly one shape: `Ctrl+Super`
+    /// and an *arrow*. Two real constraints decide that, and both of them are the reason this test
+    /// says the rule instead of a comment nobody reads:
+    ///
+    /// * a letter on this layer is not ours to give. macOS keeps several `Ctrl+Cmd` letters for
+    ///   itself at a level no application is consulted about — `Ctrl+Cmd+Q` locks the screen and
+    ///   `Ctrl+Cmd+F` toggles fullscreen — so a default put on one of them would be a key that
+    ///   works for whoever wrote it and does something else entirely for a Mac user. Arrows are
+    ///   not spoken for that way;
+    /// * the layer only exists at all under the kitty keyboard protocol. Ghostty, kitty, WezTerm,
+    ///   iTerm2 and foot report the Command key with the press; Terminal.app and any window
+    ///   manager that grabs Super for itself never deliver it, so nothing on this layer arrives
+    ///   there at all. `main.rs` pushes the flags where they are supported and that is the whole of
+    ///   what can be done about it — the limit is declared, in the manual and in `docs/features`,
+    ///   and `[keys]` moves either of these onto a chord that does arrive.
     #[test]
     fn the_defaults_stay_inside_the_projects_own_rules() {
+        let arrow =
+            |code| matches!(code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down);
         for action in Action::all() {
             let chord = action.default_chord();
+            if chord.mods == KeyModifiers::CONTROL | KeyModifiers::SUPER {
+                assert!(
+                    arrow(chord.code),
+                    "{action:?} puts a default on a Ctrl+Super key that is not an arrow"
+                );
+                continue;
+            }
             assert_eq!(
                 chord.mods,
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                "{action:?} is not on the Ctrl+Shift layer"
+                "{action:?} is on neither of the two layers this project puts defaults on"
             );
             assert!(
                 matches!(
                     chord.code,
                     KeyCode::Char(c) if c.is_ascii_lowercase()
-                ) || matches!(
-                    chord.code,
-                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-                ),
+                ) || arrow(chord.code),
                 "{action:?} is on a key this project does not put defaults on"
             );
         }
+    }
+
+    /// The Command key by each of its names, and back out again in the reader's own.
+    #[test]
+    fn the_super_layer_is_written_down_and_read_back() {
+        let expected = Chord {
+            mods: KeyModifiers::CONTROL | KeyModifiers::SUPER,
+            code: KeyCode::Up,
+        };
+        for text in ["Ctrl+Super+↑", "ctrl+cmd+up", "Ctrl+Command+↑", "CTRL+WIN+UP"] {
+            assert_eq!(Chord::parse(text), Ok(expected), "{text} is the same chord");
+        }
+        // Written back in the word this machine's keyboard uses, and that spelling reads back as
+        // the chord it came from — which is what lets a remapped chord land in settings.toml.
+        let written = expected.display();
+        assert_eq!(written, format!("Ctrl+{}+↑", super_name()));
+        assert_eq!(Chord::parse(&written), Ok(expected));
+        // Order is Ctrl, Super, Alt, Shift, and the whole of it round-trips too.
+        let all = Chord {
+            mods: KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT | KeyModifiers::SHIFT,
+            code: KeyCode::Char('k'),
+        };
+        assert_eq!(all.display(), format!("Ctrl+{}+Alt+Shift+K", super_name()));
+        assert_eq!(Chord::parse(&all.display()), Ok(all));
+    }
+
+    /// The two halves of the masking rule, which is the one thing about this layer that could
+    /// break the chords that were here before it.
+    #[test]
+    fn command_by_accident_is_ignored_and_command_on_purpose_is_required() {
+        let map = Keymap::default();
+        // A `Ctrl+Shift` chord goes on working with Command held: it never named Command, so
+        // Command arriving is an accident and is masked out, exactly as it always was.
+        let with_command = KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::SUPER,
+        );
+        assert_eq!(map.action_for(with_command), Some(Action::Manual));
+        // And a chord that *did* name it does not fire without it — otherwise it would answer the
+        // bare `Ctrl`+arrow that nobody on this layer pressed.
+        let expand = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        assert_eq!(map.action_for(expand), Some(Action::ExpandSelection));
+        let without = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(map.action_for(without), None);
+        // Nor does it steal the terminal-window chord that sits on the same arrow one layer over.
+        let terminals = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(map.action_for(terminals), Some(Action::PrevTerminal));
+    }
+
+    /// The prose says `Super` on every platform because it is compiled on every platform; the
+    /// screen says what this keyboard calls it. That translation is `relabel`'s, not the writer's.
+    #[test]
+    fn the_prose_spelling_of_the_super_layer_reaches_the_screen_as_this_keyboards_word() {
+        let map = Keymap::default();
+        let line = "Ctrl+Super+↑ widens the selection, Ctrl+Super+↓ takes it back.";
+        assert_eq!(
+            map.relabel(line),
+            format!(
+                "Ctrl+{super_word}+↑ widens the selection, Ctrl+{super_word}+↓ takes it back.",
+                super_word = super_name()
+            )
+        );
+        // And a reader who moved it sees where they moved it to, from the same prose.
+        let (moved, _) = Keymap::build(&keys(&[("expand-selection", "Ctrl+Alt+I")]), Lang::En);
+        assert!(moved.relabel(line).starts_with("Ctrl+Alt+I widens"), "{}", moved.relabel(line));
     }
 
     #[test]

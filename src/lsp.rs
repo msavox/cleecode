@@ -22,10 +22,25 @@
 //! and refused whole where it cannot be shown honestly. A format is shown to nobody first, and
 //! the difference is the scope: a rename reaches files nobody is looking at, a format rewrites
 //! the one buffer on screen and lands as a single edit that one Ctrl+Z takes back.
+//!
+//! Code actions are the third, and they invent nothing: what a server offers to do about the
+//! diagnostic under the cursor arrives as a [`CodeAction`] whose edit is a [`RenamePlan`], read by
+//! the same [`rename_plan`] that reads a rename's, and the application routes it down the roads
+//! those two already built. The only new thing on the wire is that a server is entitled to name an
+//! action without saying yet what it would change — see [`Client::resolve_code_action`].
+//!
+//! `selectionRange` and `foldingRange` are the two that ask about neither facts nor edits but about
+//! the *shape* of the file: what encloses the caret, and where each block begins and ends. They are
+//! the answer to a question the roadmap asked for two releases — structural selection and semantic
+//! folding without tree-sitter — and they are that answer because the server has already parsed the
+//! file. Nothing here keeps a second model of the text: a chain of enclosing ranges is walked once
+//! and thrown away, and a file's fold boundaries are a list of line numbers that stops being true
+//! the moment somebody types.
 
 use lsp_types::{
-    ClientCapabilities, CompletionClientCapabilities, CompletionItem, CompletionItemCapability,
-    Diagnostic, DiagnosticSeverity, GeneralClientCapabilities, InitializeParams, InsertTextFormat,
+    ClientCapabilities, CodeActionCapabilityResolveSupport, CodeActionClientCapabilities,
+    CompletionClientCapabilities, CompletionItem, CompletionItemCapability, Diagnostic,
+    DiagnosticSeverity, GeneralClientCapabilities, InitializeParams, InsertTextFormat,
     PositionEncodingKind, PublishDiagnosticsParams, RenameClientCapabilities,
     TextDocumentClientCapabilities, Uri, WindowClientCapabilities,
 };
@@ -45,7 +60,12 @@ pub enum Event {
     /// The server answered the handshake. `utf16` is how it wants positions counted: servers may
     /// offer to count in UTF-8 instead, which spares a conversion and the drift that comes with
     /// getting it wrong.
-    Ready { utf16: bool },
+    ///
+    /// `offered` is the handful of capabilities read off that reply rather than assumed, and they
+    /// are read because the features they gate have to be *offered* or not: everything else here
+    /// degrades to an empty answer, while a menu row that asks a server for something it never
+    /// claimed to do would spend a round trip to say so. See [`Offered`].
+    Ready { utf16: bool, offered: Offered },
     /// A file's diagnostics, replacing whatever was held for it. An empty list means "clean" and
     /// must be delivered, not skipped — it is how errors disappear once they are fixed.
     ///
@@ -98,6 +118,39 @@ pub enum Event {
     /// is already laid out the way I would lay it out" — so reporting a refusal as one would be
     /// the editor telling the user the opposite of what the server said.
     Formatting { id: i64, edits: Result<Vec<SpanEdit>, String> },
+    /// What the server offers to do about the range the question named, or what it said instead.
+    ///
+    /// A list to choose from rather than something to carry out: an action is a title and a plan,
+    /// and nothing here decides which of them anybody wants. An empty list is delivered rather
+    /// than dropped, as everywhere else in this file — "there is nothing I can do here" is an
+    /// answer, and the commonest one in the middle of a line that is not wrong.
+    ///
+    /// Carries an error for the reason [`Self::Rename`] and [`Self::Formatting`] do: it was asked
+    /// for on purpose and waited for, and an empty list already means something else.
+    CodeActions { id: i64, actions: Result<Vec<CodeAction>, String> },
+    /// What one action the server had only named would actually change.
+    ///
+    /// `None` is a server that answered the resolve without filling the edit in — which is a thing
+    /// that happens, and is not an error: it is an action that turns out to have nothing to say.
+    CodeActionEdit { id: i64, plan: Result<Option<RenamePlan>, String> },
+    /// The chain of ever-wider ranges around one position, innermost first.
+    ///
+    /// A chain rather than a range, which is the whole shape of this feature: the server is asked
+    /// once and answers with the identifier, the expression it sits in, the statement that holds
+    /// that, and so on outwards — so every later press of the key is walked in the editor without
+    /// another round trip. In the server's own units, like every other position that arrives here.
+    ///
+    /// Carries an error for the reason [`Self::Rename`] does: it was asked for by a keypress and
+    /// waited for, and an empty chain already means something else — "there is nothing around the
+    /// caret I can name".
+    SelectionRange { id: i64, chain: Result<Vec<Span>, String> },
+    /// Where the server says this file's foldable blocks begin and end, as line numbers.
+    ///
+    /// The one answer in this list with no columns in it at all, and so the one that needs no unit
+    /// conversion — see [`folding_ranges`]. Not carried as an error: nothing asked for this, it is
+    /// asked on the editor's own account when a file is opened and when it is saved, and a server
+    /// that refuses simply leaves the editor folding by braces as it did before any of this.
+    FoldingRanges { id: i64, ranges: Vec<(usize, usize)> },
     /// A reply the server is owed, already written and waiting to be put on the wire.
     ///
     /// It travels this way round because the reader thread has no writer: the pipe into the
@@ -492,6 +545,14 @@ pub enum Ask {
     Hover,
     Rename,
     Formatting,
+    /// `resolves` travels with the question because it decides how the *answer* is read: an action
+    /// with no edit in it is one to ask again about when the server can be asked again, and one to
+    /// drop when it cannot. The reader thread never sees a handshake reply, so what the server
+    /// said it could do is written down here, at the moment the question goes out.
+    CodeActions { resolves: bool },
+    CodeActionResolve,
+    SelectionRange,
+    FoldingRanges,
 }
 
 /// Where a definition is, before the file it names has been opened.
@@ -833,6 +894,281 @@ pub fn format_edits(result: Option<&Value>) -> Vec<SpanEdit> {
         .unwrap_or_default()
 }
 
+// ---- What the server offers to do about it ---------------------------------------------------
+//
+// The third question whose answer is a set of edits, and the only one that is a *list* of them:
+// a rename and a format each come back as the one thing the server would do, and a code action
+// answer comes back as several things it could, of which somebody picks one. Everything below
+// reads that list; what one of them would change is a `WorkspaceEdit` like any other, and is read
+// by `rename_plan` rather than by a second parser that would have to be kept in step with it.
+
+/// What the server said it can do about the code under a cursor, read off its handshake reply.
+///
+/// Two flags rather than one, because they are two different promises. `offered` is whether
+/// `textDocument/codeAction` is answered at all — a server that never claimed it is not asked, so
+/// the menu row says so instantly instead of spending a round trip on a refusal. `resolves` is
+/// whether an action named without its edit can be filled in later, which is how rust-analyzer
+/// sends most of its assists: the titles arrive at once and the edits are computed for the one
+/// that gets picked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionSupport {
+    pub offered: bool,
+    pub resolves: bool,
+}
+
+/// The two flags above, out of the `capabilities` object of a handshake reply.
+///
+/// `codeActionProvider` is a boolean or an options object in the specification, and both are read:
+/// a server that answers `true` is offering the request and nothing more, and one that answers an
+/// object may also be saying it can resolve. Anything else — an absent member, a shape from a
+/// later version of the protocol — is read as "not offered", which is the reading that costs a
+/// menu row rather than a request nobody can answer.
+pub fn action_support(capabilities: Option<&Value>) -> ActionSupport {
+    match capabilities.and_then(|c| c.get("codeActionProvider")) {
+        Some(Value::Bool(offered)) => ActionSupport { offered: *offered, resolves: false },
+        Some(Value::Object(options)) => ActionSupport {
+            offered: true,
+            resolves: options.get("resolveProvider").and_then(Value::as_bool).unwrap_or(false),
+        },
+        _ => ActionSupport::default(),
+    }
+}
+
+/// One thing a server offers to do about a range of a file.
+///
+/// `edit` is the whole of what it would change, in the same [`RenamePlan`] a rename comes back as
+/// — which is the point: a `WorkspaceEdit` is a `WorkspaceEdit` whichever question produced it,
+/// and reading it a second way here would be a second chance to read it wrong.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeAction {
+    /// What the server calls it: "Import `HashMap`", "Convert to guarded return".
+    pub title: String,
+    /// `quickfix`, `refactor.extract`, `source.organizeImports` — or empty where the server did
+    /// not say, which it is entitled not to.
+    pub kind: String,
+    /// What it would change, when the answer carried it. `None` is an action the server has so far
+    /// only named; see [`Client::resolve_code_action`].
+    pub edit: Option<RenamePlan>,
+    /// The item exactly as it arrived, because that is what `codeAction/resolve` takes back: the
+    /// action's `data` is the server's own bookkeeping and means nothing to anybody here, so it is
+    /// carried whole rather than picked apart and reassembled.
+    pub raw: Value,
+}
+
+/// Every action one `textDocument/codeAction` answer offers, in the order the server listed them.
+///
+/// `resolves` is what the server said about `codeAction/resolve` in its handshake — see
+/// [`ActionSupport`] — and it decides the fate of an action that arrived without an edit.
+///
+/// Three things are dropped here, and each of them honestly:
+///
+/// * a bare `Command`, which the protocol allows in this list beside the actions proper. Carrying
+///   one out means `workspace/executeCommand` and then obeying the workspace edits the server
+///   pushes back on its own initiative — which is the one thing [`reply_to`] refuses, for reasons
+///   written there. That is a different release, not a line of code;
+/// * an action that carries a `command` *as well as* an edit, for the same reason: applying the
+///   edit and dropping the command would do half of what the server asked and report it as all of
+///   it, which is exactly what [`RenamePlan::file_ops`] exists to stop;
+/// * an action with no edit at all on a server that cannot resolve one, because there would be
+///   nothing to do if it were picked.
+///
+/// A `disabled` action is dropped too. The server has said in so many words that it cannot be
+/// applied here, and a row that answers a keypress with the server's excuse is a row that should
+/// not have been in the list.
+pub fn offered_actions(result: Option<&Value>, resolves: bool) -> Vec<CodeAction> {
+    let Some(items) = result.and_then(Value::as_array) else { return Vec::new() };
+    let mut out = Vec::new();
+    for item in items {
+        // A `Command` and a `CodeAction` are told apart by this member: on the first it is the
+        // command's name, on the second it is an object hanging off an action that also has a
+        // title. Either way this client cannot run it, so either way the row goes.
+        if item.get("command").is_some() || item.get("disabled").is_some() {
+            continue;
+        }
+        let Some(title) = item.get("title").and_then(Value::as_str) else { continue };
+        let edit = item.get("edit").map(|edit| rename_plan(Some(edit)));
+        if edit.is_none() && !resolves {
+            continue;
+        }
+        out.push(CodeAction {
+            title: title.to_string(),
+            kind: item.get("kind").and_then(Value::as_str).unwrap_or_default().to_string(),
+            edit,
+            raw: item.clone(),
+        });
+    }
+    out
+}
+
+/// The edit a `codeAction/resolve` answer filled in, or `None` when it filled in nothing.
+///
+/// The answer is the same action back with more of it written out, so only the one member is read.
+/// A server that returns the action unchanged has said it has nothing to change, which is an
+/// answer and not a failure — and the caller says so rather than applying an empty plan in silence.
+pub fn resolved_edit(result: Option<&Value>) -> Option<RenamePlan> {
+    result?.get("edit").map(|edit| rename_plan(Some(edit)))
+}
+
+/// The diagnostics that touch a range, in the server's own units.
+///
+/// This is what makes a quick fix a quick fix: a server matches its fixes against the diagnostics
+/// the client hands back in `context`, and one asked with an empty context answers with the
+/// refactorings that apply anywhere and none of the fixes for the error you are sitting on.
+///
+/// Touching, not containing, and inclusive at both ends. A caret resting on the last character of
+/// a squiggle — or on the empty range a "expected something here" points at — is somebody asking
+/// about *that* error, and a half-open comparison would answer about the line instead.
+pub fn diagnostics_in_range(
+    diagnostics: &[Diagnostic],
+    start: (usize, usize),
+    end: (usize, usize),
+) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| {
+            let from = (d.range.start.line as usize, d.range.start.character as usize);
+            let to = (d.range.end.line as usize, d.range.end.character as usize);
+            from <= end && to >= start
+        })
+        .cloned()
+        .collect()
+}
+
+// ---- The shape of the file, as the server sees it ---------------------------------------------
+//
+// The two questions of 0.21, and the only two here whose answers are neither facts to read nor
+// edits to apply: they are the *structure* of the text. `selectionRange` says what encloses a
+// position — the identifier, then the expression, then the statement — and `foldingRange` says
+// where each block of the file begins and ends. Both are things a syntax tree would answer, and
+// asking the server for them is how this editor has one without keeping a second model of the text
+// in step with the rope. See the roadmap entry for why that trade decided against tree-sitter.
+
+/// One range of a file, in the server's own units.
+///
+/// The columns stay that way for the reason [`Jump`]'s does: turning one into a character offset
+/// needs the file's text, and this is parsed on a thread that has never read it. Deliberately not
+/// a [`SpanEdit`] with an empty `new_text` — this describes a piece of the file, not a change to
+/// it, and a struct with a field that is always empty is a struct that invites somebody to fill it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+}
+
+/// One `Range` off the wire, by the four names the protocol gives its corners.
+fn one_span(range: Option<&Value>) -> Option<Span> {
+    let range = range?;
+    let at = |which: &str, field: &str| {
+        range.pointer(&format!("/{which}/{field}")).and_then(Value::as_u64).map(|n| n as usize)
+    };
+    Some(Span {
+        start_line: at("start", "line")?,
+        start_col: at("start", "character")?,
+        end_line: at("end", "line")?,
+        end_col: at("end", "character")?,
+    })
+}
+
+/// The chain one `textDocument/selectionRange` answer describes, innermost first.
+///
+/// The answer is an array with one entry *per position asked about*, not per level — this client
+/// asks about one — and each entry is a linked list: a range, and a `parent` that encloses it. So
+/// the array is indexed once and the links are walked, which is what turns one request into every
+/// press of the key: the whole ladder from the identifier to the item that holds it arrives at
+/// once, and the editor climbs it on its own afterwards.
+///
+/// Two things are refused on the way out. A level identical to the one below it is dropped, because
+/// on screen it is a keypress that appears to do nothing — servers do send them, an expression and
+/// the statement that is only that expression being the ordinary case. And the walk is bounded:
+/// `parent` is a link the server writes, nothing on this side can prove it is not a ring, and a
+/// hundred levels is deeper than any real syntax tree and free to refuse.
+pub fn selection_chain(result: Option<&Value>) -> Vec<Span> {
+    let Some(value) = result else { return Vec::new() };
+    // The bare object is read as well as the array. What a server sends is the server's decision,
+    // which is the lesson the three spellings of a definition answer taught.
+    let mut node = if value.is_array() { value.get(0) } else { Some(value) };
+    let mut out: Vec<Span> = Vec::new();
+    while let Some(current) = node {
+        let Some(span) = one_span(current.get("range")) else { break };
+        if out.last() != Some(&span) {
+            out.push(span);
+        }
+        if out.len() >= 100 {
+            break;
+        }
+        node = current.get("parent");
+    }
+    out
+}
+
+/// Where the server says each foldable block of a file begins and ends, as line numbers.
+///
+/// The one answer in this whole file with no column arithmetic anywhere near it, and that is worth
+/// saying out loud rather than looking like an omission: `FoldingRange` carries `startCharacter`
+/// and `endCharacter` and CleeCode reads neither, because a fold in this editor hides whole lines
+/// — see `Editor::is_hidden`. Lines are counted from zero by the protocol and by the editor alike,
+/// so the numbers cross over untouched. There is no UTF-16 to undo here because no character
+/// column is read.
+///
+/// A range that ends where it starts is dropped: it would hide nothing, and a fold marker in the
+/// gutter that collapses zero lines is a marker that looks broken.
+pub fn folding_ranges(result: Option<&Value>) -> Vec<(usize, usize)> {
+    let Some(items) = result.and_then(Value::as_array) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| {
+            let start = item.get("startLine").and_then(Value::as_u64)? as usize;
+            let end = item.get("endLine").and_then(Value::as_u64)? as usize;
+            (end > start).then_some((start, end))
+        })
+        .collect()
+}
+
+/// What a server said it can do, read off its handshake reply rather than assumed.
+///
+/// All three gate a *surface*: a menu row, a chord, or a question the editor asks on its own
+/// account when a file opens. Everything else in this client degrades to an empty answer and needs
+/// no capability at all, and that is the rule for which of them are read here — a feature that has
+/// to be offered or refused in words has to know, and a feature that can shrug does not ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Offered {
+    pub actions: ActionSupport,
+    /// Whether `textDocument/selectionRange` is answered. Its own sentence when it is not: the
+    /// chord is on the keyboard whatever the file is, and "this server does not do that" is the
+    /// only honest thing to say to somebody pressing it in a language whose server does not.
+    pub selection_ranges: bool,
+    /// Whether `textDocument/foldingRange` is answered. Nothing is said when it is not — folding
+    /// goes on working off the braces, which is where it started — and the flag exists only so the
+    /// question is not asked of every file a server that never answers it serves.
+    pub folding_ranges: bool,
+}
+
+/// Everything read off the `capabilities` object of a handshake reply, in one place.
+pub fn offered_by(capabilities: Option<&Value>) -> Offered {
+    Offered {
+        actions: action_support(capabilities),
+        selection_ranges: provides(capabilities, "selectionRangeProvider"),
+        folding_ranges: provides(capabilities, "foldingRangeProvider"),
+    }
+}
+
+/// Whether one plain capability member says yes.
+///
+/// The protocol spells most of them three ways — a boolean, an options object, or a registration
+/// object with a document selector in it — and all three mean the server answers the request. Only
+/// an explicit `false`, an absent member, or a shape from a version of the specification this
+/// predates read as no, which is the reading that costs a feature rather than a request nobody can
+/// answer.
+fn provides(capabilities: Option<&Value>, member: &str) -> bool {
+    match capabilities.and_then(|c| c.get(member)) {
+        Some(Value::Bool(yes)) => *yes,
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
+}
+
 /// What a server said went wrong, as the one sentence a status line has room for.
 ///
 /// Its own words, not ours. "The server refused" would be true of every possible failure here and
@@ -862,6 +1198,10 @@ pub struct Client {
     /// Whether the handshake is finished. Until it is, the server is entitled to ignore every
     /// notification and request sent to it, and the ones worth using do.
     ready: bool,
+    /// What it said it can do. Settled during the handshake and remembered for the reason
+    /// [`Self::utf16`] is: it decides both which questions are worth asking and how the answers are
+    /// read.
+    offered: Offered,
     /// What each request still out was asking, shared with the reader thread. See [`Ask`].
     pending: Arc<Mutex<HashMap<i64, Ask>>>,
 }
@@ -896,6 +1236,7 @@ impl Client {
             open: Vec::new(),
             utf16: true,
             ready: false,
+            offered: Offered::default(),
             pending,
         };
         client.initialize(root)?;
@@ -939,6 +1280,28 @@ impl Client {
                     // other shape too, because what a server sends is the server's decision.
                     rename: Some(RenameClientCapabilities {
                         prepare_support: Some(false),
+                        ..Default::default()
+                    }),
+                    // The two halves of "you may name an action now and tell me what it changes
+                    // later". Without them a server is entitled to compute every edit up front —
+                    // rust-analyzer's assists are expensive enough that it does not, and answers
+                    // with titles and nothing else — so a client that reads unresolved actions
+                    // and never said it could would be reading a list it asked to be sent full.
+                    //
+                    // `data_support` is the other half of the same sentence: the `data` member is
+                    // the server's own bookkeeping, and it is what makes a resolve request name
+                    // the same action back rather than a title we happened to keep.
+                    //
+                    // Nothing is said about `codeActionLiteralSupport`, and that is deliberate
+                    // too: the specification reads its absence as a client that can only be sent
+                    // bare `Command`s. [`offered_actions`] reads the action literals anyway, for
+                    // the reason every other shape here is read — what a server sends is the
+                    // server's decision — and drops the commands it cannot carry out.
+                    code_action: Some(CodeActionClientCapabilities {
+                        data_support: Some(true),
+                        resolve_support: Some(CodeActionCapabilityResolveSupport {
+                            properties: vec!["edit".to_string()],
+                        }),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -990,8 +1353,9 @@ impl Client {
     /// Answers the handshake reply. Sending `initialized` before it arrives is the one ordering
     /// rule servers actually enforce, so this waits for [`Event::Ready`] rather than firing it
     /// off after `initialize`.
-    pub fn confirm_ready(&mut self, utf16: bool) {
+    pub fn confirm_ready(&mut self, utf16: bool, offered: Offered) {
         self.utf16 = utf16;
+        self.offered = offered;
         let _ = self.notify("initialized", json!({}));
         self.ready = true;
     }
@@ -1007,6 +1371,16 @@ impl Client {
 
     pub fn utf16(&self) -> bool {
         self.utf16
+    }
+
+    /// What this server said it can do about code actions.
+    pub fn actions(&self) -> ActionSupport {
+        self.offered.actions
+    }
+
+    /// What this server said it can do, whole.
+    pub fn offered(&self) -> Offered {
+        self.offered
     }
 
     /// Whether the handshake is finished and the server will act on what it is told.
@@ -1250,6 +1624,107 @@ impl Client {
             path,
             json!({ "options": { "tabSize": tab_size, "insertSpaces": insert_spaces } }),
         )
+    }
+
+    /// Asks what could be done about a range of a file.
+    ///
+    /// Neither a position request nor a document one, which is why it is written out rather than
+    /// pushed through either: the question carries a *range*, and both of its ends are columns
+    /// that have to be converted against the line each actually sits on. `start` and `end` are
+    /// each a line, that line's text, and the column in characters, exactly as
+    /// [`Self::position_request`] takes one of them — and they are the same triple twice when
+    /// there is no selection, which is how the protocol spells "here, at the caret".
+    ///
+    /// `diagnostics` is what CleeCode holds about this file, in the server's own units, and the
+    /// ones that touch the range travel with the question. That is what turns this into "fix
+    /// this error" rather than "what can be done in this file at all": see
+    /// [`diagnostics_in_range`].
+    ///
+    /// `triggerKind: 1` is Invoked — a person pressed something. The other value is for the
+    /// editor asking on its own account as the cursor moves, which nothing here does: this is on
+    /// demand, and a request that claimed otherwise would be a claim about a feature that is not
+    /// in this release.
+    pub fn code_actions(
+        &mut self,
+        path: &Path,
+        start: (usize, &str, usize),
+        end: (usize, &str, usize),
+        diagnostics: &[Diagnostic],
+    ) -> Option<i64> {
+        let uri = uri_for(path)?;
+        let from = (start.0, self.column_for(start.1, start.2));
+        let to = (end.0, self.column_for(end.1, end.2));
+        let touching = diagnostics_in_range(diagnostics, from, to);
+        let params = json!({
+            "textDocument": { "uri": uri.as_str() },
+            "range": {
+                "start": { "line": from.0, "character": from.1 },
+                "end": { "line": to.0, "character": to.1 },
+            },
+            "context": { "diagnostics": touching, "triggerKind": 1 },
+        });
+        let id = self.request("textDocument/codeAction", params).ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, Ask::CodeActions { resolves: self.offered.actions.resolves });
+        }
+        Some(id)
+    }
+
+    /// Asks the server to fill in the edit of an action it has so far only named.
+    ///
+    /// The action goes back exactly as it arrived, which is the whole protocol here: the server
+    /// put its own bookkeeping in `data` and reads it back out, and an action reassembled from
+    /// the parts this client happens to care about would be an action it does not recognise.
+    ///
+    /// Sent when one is *picked*, not when the list is drawn. Resolving every row up front would
+    /// be a dozen requests for the eleven nobody chose, and the specification puts this request
+    /// exactly where the choice is.
+    pub fn resolve_code_action(&mut self, action: &Value) -> Option<i64> {
+        let id = self.request("codeAction/resolve", action.clone()).ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, Ask::CodeActionResolve);
+        }
+        Some(id)
+    }
+
+    /// Asks what encloses one place in the file, and everything that encloses that.
+    ///
+    /// Written out rather than pushed through [`Self::position_request`] for one reason: the
+    /// protocol takes `positions`, plural — a client may ask about several carets at once and get a
+    /// chain for each. This one asks about one, because there is one cursor; the member is still an
+    /// array of one, because that is what the request is.
+    ///
+    /// `line_text` and `col` are the editor's own, in characters, and the conversion happens here
+    /// at the one place that knows what this server counts in — the same arithmetic every other
+    /// question that carries a position does, and for the same reason.
+    pub fn selection_range(
+        &mut self,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+    ) -> Option<i64> {
+        let uri = uri_for(path)?;
+        let character = self.column_for(line_text, col);
+        let params = json!({
+            "textDocument": { "uri": uri.as_str() },
+            "positions": [{ "line": line, "character": character }],
+        });
+        let id = self.request("textDocument/selectionRange", params).ok()?;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(id, Ask::SelectionRange);
+        }
+        Some(id)
+    }
+
+    /// Asks where this file's blocks begin and end.
+    ///
+    /// A question about a whole file like the outline and the format, so it goes out the same way.
+    /// The only one of the three nobody presses a key for: it is asked when a file is opened and
+    /// again when it is saved — the two moments the buffer and the server are looking at the same
+    /// text — and the answer is cached until an edit makes its line numbers lies.
+    pub fn folding_ranges(&mut self, path: &Path) -> Option<i64> {
+        self.document_request("textDocument/foldingRange", Ask::FoldingRanges, path, Value::Null)
     }
 
     /// The shape a question about a whole file takes: no position, so no column to convert.
@@ -1520,6 +1995,41 @@ fn read_loop(
                                 None => Ok(format_edits(result)),
                             },
                         },
+                        // And the third and fourth, for the same reason again: both were asked
+                        // for by a keypress, and both have an empty answer that already means
+                        // something — "there is nothing to do here", "this action changes
+                        // nothing" — so a refusal read as one would say the wrong thing.
+                        Ask::CodeActions { resolves } => Event::CodeActions {
+                            id,
+                            actions: match value.get("error") {
+                                Some(error) => Err(complaint(error)),
+                                None => Ok(offered_actions(result, resolves)),
+                            },
+                        },
+                        Ask::CodeActionResolve => Event::CodeActionEdit {
+                            id,
+                            plan: match value.get("error") {
+                                Some(error) => Err(complaint(error)),
+                                None => Ok(resolved_edit(result)),
+                            },
+                        },
+                        // The fifth, and the last of the ones a keypress waits for. An empty chain
+                        // means "there is nothing around the caret I can name", which is a real
+                        // answer on a blank line — so a refusal read as one would say the wrong
+                        // thing about the file instead of what the server said about the request.
+                        Ask::SelectionRange => Event::SelectionRange {
+                            id,
+                            chain: match value.get("error") {
+                                Some(error) => Err(complaint(error)),
+                                None => Ok(selection_chain(result)),
+                            },
+                        },
+                        // And the one nobody waited for, which is why it is back to the plain
+                        // reading: an error and an empty answer mean the same thing here — no
+                        // boundaries from the server — and the editor folds by braces either way.
+                        Ask::FoldingRanges => {
+                            Event::FoldingRanges { id, ranges: folding_ranges(result) }
+                        }
                     });
                     continue;
                 }
@@ -1527,10 +2037,14 @@ fn read_loop(
                 // this point. It carries how the server wants positions counted.
                 if !handshook && value.get("id").is_some() && value.get("result").is_some() {
                     handshook = true;
-                    let encoding = value
-                        .pointer("/result/capabilities/positionEncoding")
+                    let capabilities = value.pointer("/result/capabilities");
+                    let encoding = capabilities
+                        .and_then(|c| c.get("positionEncoding"))
                         .and_then(Value::as_str);
-                    let _ = tx.send(Event::Ready { utf16: negotiated_utf16(encoding) });
+                    let _ = tx.send(Event::Ready {
+                        utf16: negotiated_utf16(encoding),
+                        offered: offered_by(capabilities),
+                    });
                 }
             }
         }
@@ -1627,6 +2141,128 @@ mod tests {
         // that is only fourteen long — which is what the old arithmetic did.
         let utf16 = marks_from(&[diag(0, 4, 10, "unused variable")], &lines, true);
         assert_eq!((utf16[0].start, utf16[0].end), (4, 10));
+    }
+
+    /// The ladder is read whole, in the order it has to be walked, and the levels that would be a
+    /// keypress doing nothing are not in it.
+    #[test]
+    fn a_selection_range_answer_is_read_as_a_ladder_from_the_inside_out() {
+        // `foo` inside `foo.bar()` inside the statement, as a server sends it: an array of one
+        // entry per position asked about, and each entry a chain of `parent` links outwards.
+        let answer = json!([{
+            "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 11}},
+            "parent": {
+                "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 17}},
+                // The statement is exactly the expression, which servers do send — and which would
+                // be a press of the key that appeared to do nothing, so it is dropped.
+                "parent": {
+                    "range": {"start": {"line": 3, "character": 8}, "end": {"line": 3, "character": 17}},
+                    "parent": {
+                        "range": {"start": {"line": 2, "character": 0}, "end": {"line": 5, "character": 1}}
+                    }
+                }
+            }
+        }]);
+        let chain = selection_chain(Some(&answer));
+        assert_eq!(
+            chain,
+            vec![
+                Span { start_line: 3, start_col: 8, end_line: 3, end_col: 11 },
+                Span { start_line: 3, start_col: 8, end_line: 3, end_col: 17 },
+                Span { start_line: 2, start_col: 0, end_line: 5, end_col: 1 },
+            ]
+        );
+        // The bare object is read too, for the reason every other shape here is.
+        let bare = json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}}
+        });
+        assert_eq!(selection_chain(Some(&bare)).len(), 1);
+        // Nothing, in each of the ways a server says it.
+        assert!(selection_chain(Some(&json!([]))).is_empty());
+        assert!(selection_chain(Some(&Value::Null)).is_empty());
+        assert!(selection_chain(None).is_empty());
+        // A ring is refused rather than followed. `parent` is a link the server writes and this
+        // side cannot prove it ends; a hundred levels is deeper than any real syntax tree.
+        let mut ring = json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+        });
+        for n in 1..300u64 {
+            ring = json!({
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": n + 1}},
+                "parent": ring
+            });
+        }
+        assert_eq!(selection_chain(Some(&ring)).len(), 100);
+    }
+
+    /// The ladder arrives in the server's units and is the editor's business to convert — both
+    /// ends, each against the line it is actually on. Checked here on the two conversions this
+    /// file owns, because a chain whose ends were converted against the wrong line selects the
+    /// right number of characters in the wrong place.
+    #[test]
+    fn both_ends_of_a_chain_convert_in_whichever_unit_the_server_counts_in() {
+        let answer = json!([{
+            "range": {"start": {"line": 0, "character": 4}, "end": {"line": 1, "character": 6}}
+        }]);
+        let span = selection_chain(Some(&answer))[0];
+        // `let città = 1;` and `    x = "è";` — each end measured against its own line.
+        let first = "let città = 1;";
+        let second = "    x = \"è\";";
+        assert_eq!(utf16_to_chars(first, span.start_col), 4);
+        assert_eq!(utf16_to_chars(second, span.end_col), 6, "UTF-16 and characters agree up to the accent");
+        // The same numbers from a server counting bytes are two different places.
+        assert_eq!(utf8_to_chars(first, span.start_col), 4);
+        assert_eq!(utf8_to_chars(second, span.end_col), 6);
+        // And past the accent the two units part company, which is the whole reason both exist:
+        // the `è` is one character and two bytes, so the closing quote is column 10 to the editor
+        // and column 11 to a server counting bytes.
+        assert_eq!(utf8_to_chars(second, 11), 10);
+        assert_eq!(utf16_to_chars(second, 11), 11);
+    }
+
+    /// The one answer with no columns in it: line numbers straight across, in the same
+    /// `(start, end)` pair the editor's own folds are held as.
+    #[test]
+    fn a_folding_answer_becomes_the_pairs_the_editor_already_folds_by() {
+        let answer = json!([
+            {"startLine": 0, "endLine": 4, "kind": "region"},
+            {"startLine": 1, "endLine": 3, "startCharacter": 12, "endCharacter": 1},
+            // Ends where it starts: it would hide nothing, and a marker that collapses no lines
+            // looks broken.
+            {"startLine": 7, "endLine": 7},
+            // Missing half a range is one range lost, not the answer.
+            {"startLine": 9}
+        ]);
+        assert_eq!(folding_ranges(Some(&answer)), vec![(0, 4), (1, 3)]);
+        assert!(folding_ranges(Some(&Value::Null)).is_empty());
+        assert!(folding_ranges(None).is_empty());
+    }
+
+    /// What a server said it can do, in each of the shapes it is entitled to say it in.
+    #[test]
+    fn the_two_new_capabilities_are_read_in_every_shape_a_server_sends_them() {
+        let plain = json!({"selectionRangeProvider": true, "foldingRangeProvider": true});
+        let offered = offered_by(Some(&plain));
+        assert!(offered.selection_ranges && offered.folding_ranges);
+        // An options object, or a registration object with a document selector in it: both mean
+        // the request is answered.
+        let objects = json!({
+            "selectionRangeProvider": {"workDoneProgress": false},
+            "foldingRangeProvider": {"documentSelector": [{"language": "rust"}], "id": "fold"}
+        });
+        let offered = offered_by(Some(&objects));
+        assert!(offered.selection_ranges && offered.folding_ranges);
+        // Said no, said nothing, and said something from a protocol this predates.
+        let refused = json!({"selectionRangeProvider": false, "foldingRangeProvider": "someday"});
+        let offered = offered_by(Some(&refused));
+        assert!(!offered.selection_ranges && !offered.folding_ranges);
+        assert_eq!(offered_by(None), Offered::default());
+        // And the code action flags still come off the same reply, unchanged.
+        let with_actions = json!({"codeActionProvider": {"resolveProvider": true}});
+        assert_eq!(
+            offered_by(Some(&with_actions)).actions,
+            ActionSupport { offered: true, resolves: true }
+        );
     }
 
     /// Only two answers are possible, because only two were offered. Everything else is a server
@@ -1981,7 +2617,7 @@ mod tests {
         assert_eq!(events.len(), 3, "ready, diagnostics, and the end of the stream");
 
         match &events[0] {
-            Event::Ready { utf16 } => assert!(!utf16, "the server asked for UTF-8"),
+            Event::Ready { utf16, .. } => assert!(!utf16, "the server asked for UTF-8"),
             _ => panic!("the first thing out has to be the handshake"),
         }
         match &events[1] {
@@ -2296,9 +2932,9 @@ mod tests {
             Err(e) => panic!("the stub server would not start: {e}"),
         };
         let ready = wait_for(&client, |e| matches!(e, Event::Ready { .. }));
-        let Some(Event::Ready { utf16 }) = ready else { panic!("no handshake reply") };
+        let Some(Event::Ready { utf16, offered }) = ready else { panic!("no handshake reply") };
         assert!(!utf16, "the stub asks to be counted in UTF-8");
-        client.confirm_ready(utf16);
+        client.confirm_ready(utf16, offered);
 
         client.did_open(&file, "fn main() {\n    let dummy = 1;\n    let y = nope;\n}\n");
         let got = wait_for(&client, |e| matches!(e, Event::Diagnostics { .. }));
@@ -2555,6 +3191,193 @@ mod tests {
         let edits = format_edits(Some(&answer));
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "kept");
+    }
+
+    /// The capability that decides whether the question is asked at all, in both of the shapes a
+    /// server may answer it in. A server that never named it is one this feature stays quiet
+    /// about, which is the difference between a menu row that says so and a round trip that ends
+    /// in a refusal.
+    #[test]
+    fn what_a_server_can_do_about_code_is_read_off_the_handshake() {
+        // The bare form: it answers the request and cannot resolve.
+        let plain = json!({ "codeActionProvider": true });
+        assert_eq!(
+            action_support(Some(&plain)),
+            ActionSupport { offered: true, resolves: false }
+        );
+        // The options form, which is where the second flag lives. rust-analyzer answers this way.
+        let full = json!({
+            "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true }
+        });
+        assert_eq!(action_support(Some(&full)), ActionSupport { offered: true, resolves: true });
+        // An options object that says nothing about resolving has said it cannot.
+        let kinds = json!({ "codeActionProvider": { "codeActionKinds": ["quickfix"] } });
+        assert_eq!(
+            action_support(Some(&kinds)),
+            ActionSupport { offered: true, resolves: false }
+        );
+        // Said no, said nothing, or said something out of a protocol this predates: all of them
+        // are "do not ask", which is the reading that costs nobody a request.
+        assert_eq!(action_support(Some(&json!({ "codeActionProvider": false }))), ActionSupport::default());
+        assert_eq!(action_support(Some(&json!({ "hoverProvider": true }))), ActionSupport::default());
+        assert_eq!(action_support(Some(&json!({ "codeActionProvider": "yes" }))), ActionSupport::default());
+        assert_eq!(action_support(None), ActionSupport::default());
+    }
+
+    /// The ordinary quick fix: a title, a kind, and the edit that carries it out, in the same
+    /// `WorkspaceEdit` a rename answers with — read by the same function, which is the whole
+    /// point of it being that shape here.
+    #[test]
+    fn an_action_that_carries_its_edit_is_read_whole() {
+        let answer = json!([{
+            "title": "Import `HashMap`",
+            "kind": "quickfix",
+            "diagnostics": [{"range": {"start": {"line": 3, "character": 8},
+                                       "end": {"line": 3, "character": 15}},
+                             "message": "cannot find type `HashMap`"}],
+            "edit": {"changes": {uri("/p/src/main.rs"): [
+                {"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 0}},
+                 "newText": "use std::collections::HashMap;\n"},
+            ]}},
+        }]);
+        let actions = offered_actions(Some(&answer), false);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Import `HashMap`");
+        assert_eq!(actions[0].kind, "quickfix");
+        let plan = actions[0].edit.as_ref().expect("the edit arrived with it");
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, PathBuf::from("/p/src/main.rs"));
+        assert_eq!(plan.files[0].edits[0].new_text, "use std::collections::HashMap;\n");
+        // And the item is kept whole, because that is what a resolve request takes back.
+        assert_eq!(actions[0].raw["title"], json!("Import `HashMap`"));
+    }
+
+    /// An action the server has only named. Kept where it can be asked about again and dropped
+    /// where it cannot — a row that answered a keypress with nothing at all would be a row that
+    /// should not have been offered.
+    #[test]
+    fn an_action_without_its_edit_waits_for_a_resolve_or_is_dropped() {
+        let answer = json!([{
+            "title": "Convert to guarded return",
+            "kind": "refactor.rewrite",
+            "data": {"id": "convert_to_guarded_return", "version": 7},
+        }]);
+        let resolvable = offered_actions(Some(&answer), true);
+        assert_eq!(resolvable.len(), 1);
+        assert!(resolvable[0].edit.is_none(), "the server has not said yet what it would change");
+        assert_eq!(resolvable[0].raw["data"]["id"], json!("convert_to_guarded_return"));
+        assert!(
+            offered_actions(Some(&answer), false).is_empty(),
+            "a server that cannot resolve has offered a row with nothing behind it"
+        );
+
+        // And the answer to the resolve, which is the same action back with the edit filled in.
+        let resolved = json!({
+            "title": "Convert to guarded return",
+            "edit": {"documentChanges": [
+                {"textDocument": {"uri": uri("/p/a.rs"), "version": 4},
+                 "edits": [{"range": {"start": {"line": 2, "character": 4},
+                                      "end": {"line": 6, "character": 5}},
+                            "newText": "let Some(x) = x else { return };"}]},
+            ]},
+        });
+        let plan = resolved_edit(Some(&resolved)).expect("the resolve filled it in");
+        assert_eq!(plan.files[0].path, PathBuf::from("/p/a.rs"));
+        // A server that answered without filling anything in has said it has nothing to change,
+        // which the caller reports rather than applying an empty plan in silence.
+        assert_eq!(resolved_edit(Some(&json!({"title": "Nothing to do"}))), None);
+        assert_eq!(resolved_edit(None), None);
+    }
+
+    /// The three the list drops, and each of them for a reason worth writing down: this client
+    /// has no `workspace/executeCommand` and refuses the workspace edits a server would push back
+    /// through one, so an action that needs either is an action it cannot carry out.
+    #[test]
+    fn an_action_this_client_cannot_carry_out_is_dropped() {
+        let edit = json!({"changes": {uri("/p/a.rs"): [
+            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+             "newText": "x"},
+        ]}});
+        let answer = json!([
+            // A bare `Command`, which the protocol allows in this list.
+            {"title": "Run the fixer", "command": "rust-analyzer.runFlycheck", "arguments": []},
+            // An action whose work is a command, with no edit at all.
+            {"title": "Regenerate", "kind": "source",
+             "command": {"title": "Regenerate", "command": "gopls.generate"}},
+            // And one with both: applying the edit alone would do half of what it asked.
+            {"title": "Add import and reload", "kind": "quickfix", "edit": edit,
+             "command": {"title": "Reload", "command": "ts.reload"}},
+            // The server has said in so many words that this one cannot be applied here.
+            {"title": "Extract into function", "kind": "refactor.extract",
+             "disabled": {"reason": "Selection is not a valid expression"}, "edit": edit},
+            // The one that survives.
+            {"title": "Add import", "kind": "quickfix", "edit": edit},
+        ]);
+        let actions = offered_actions(Some(&answer), true);
+        assert_eq!(actions.len(), 1, "only the one this client can actually do");
+        assert_eq!(actions[0].title, "Add import");
+
+        // Nothing offered, said in each of the ways a server says it.
+        assert!(offered_actions(Some(&json!([])), true).is_empty());
+        assert!(offered_actions(Some(&Value::Null), true).is_empty());
+        assert!(offered_actions(None, true).is_empty());
+        // A row with no title is a row with nothing to draw, and costs only itself.
+        let untitled = json!([{"kind": "quickfix", "edit": edit}, {"title": "Kept", "edit": edit}]);
+        let actions = offered_actions(Some(&untitled), true);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Kept");
+    }
+
+    /// The context is what makes a quick fix a quick fix: a server matches its fixes against the
+    /// diagnostics it is handed back, and one asked with an empty context answers about the file
+    /// in general and not about the error under the caret.
+    #[test]
+    fn the_context_carries_the_diagnostics_the_range_touches() {
+        let held = [
+            diag(3, 8, 15, "cannot find type `HashMap`"),
+            diag(3, 20, 24, "unused variable"),
+            diag(9, 0, 4, "somewhere else entirely"),
+        ];
+        // The caret inside the first one, as an empty range — which is how "here" is spelled.
+        let touching = diagnostics_in_range(&held, (3, 10), (3, 10));
+        assert_eq!(touching.len(), 1);
+        assert_eq!(touching[0].message, "cannot find type `HashMap`");
+        // Resting on the last character of it still counts: that is somebody asking about that
+        // error, and a half-open comparison would answer about the line instead.
+        assert_eq!(diagnostics_in_range(&held, (3, 15), (3, 15)).len(), 1);
+        // A selection across both of the first line's, which is two questions at once.
+        assert_eq!(diagnostics_in_range(&held, (3, 0), (3, 30)).len(), 2);
+        // A line neither of them is on.
+        assert!(diagnostics_in_range(&held, (5, 0), (5, 0)).is_empty());
+        // And a selection that reaches the third one takes it and everything between.
+        assert_eq!(diagnostics_in_range(&held, (3, 22), (9, 2)).len(), 2);
+    }
+
+    /// The third answer whose error is carried rather than read as "nothing to do". An empty list
+    /// here already means "there is nothing I can do about that", which is the commonest answer
+    /// of all — so a server's refusal read as one would be the editor inventing an answer.
+    #[test]
+    fn a_refused_code_action_question_arrives_with_what_the_server_said() {
+        let wire = frame(
+            r#"{"jsonrpc":"2.0","id":21,
+                "error":{"code":-32603,"message":"content modified"}}"#,
+        );
+        let (tx, rx) = mpsc::channel();
+        read_loop(
+            BufReader::new(&wire[..]),
+            tx,
+            "stub".to_string(),
+            pending_asks(&[(21, Ask::CodeActions { resolves: true })]),
+        );
+        let events: Vec<Event> = rx.into_iter().collect();
+        match &events[0] {
+            Event::CodeActions { id, actions } => {
+                assert_eq!(*id, 21);
+                assert_eq!(actions.as_ref().err().map(String::as_str), Some("content modified"));
+            }
+            _ => panic!("the error did not come back as the answer to the question"),
+        }
     }
 
     /// The second answer whose error is carried rather than read as "nothing to do", and the one

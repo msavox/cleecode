@@ -18,6 +18,11 @@ pub enum PickAction {
     /// path it was read from: the text is already in hand by the time the list is built, and
     /// re-reading the file at Enter would be a second chance for it to have gone.
     Recover(Box<crate::recovery::Entry>),
+    /// One thing the language server offered to do about the code, carried whole for the reason
+    /// the recovered copy is: what it would change — or the bookkeeping needed to ask what it
+    /// would change — is in hand by the time the list is drawn, and asking the server again at
+    /// Enter would be asking about a list it has already answered.
+    CodeAction(Box<crate::lsp::CodeAction>),
 }
 
 pub struct PickItem {
@@ -55,6 +60,14 @@ pub enum PickerKind {
     Symbols,
     /// Everything the servers have said is wrong, across the files that are open.
     Diagnostics,
+    /// What the language server offers to do about the code under the cursor. A fixed list like
+    /// the references, narrowed by typing the same way — which is what makes an answer twenty
+    /// assists long usable: type the word in the fix you meant.
+    ///
+    /// The one list here whose rows *write*. Nothing about the chooser knows that — a row is a
+    /// label and an action, as everywhere else — and everything that follows from it is the
+    /// application's business: a preview, or a single step of undo.
+    CodeActions,
     /// What an earlier session was in the middle of when it stopped being a process. Opened
     /// unasked at startup, which no other picker is — so it says what it is in its title, and
     /// Esc costs nothing: the copies it lists stay on disk and are offered again next time.
