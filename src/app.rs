@@ -2919,6 +2919,11 @@ pub struct DebugSession {
     awaiting_place: Option<i64>,
     /// The `threads` asked for when a stop named no thread at all, which the protocol allows.
     awaiting_thread: Option<i64>,
+    /// The `threads` asked for because somebody wants the program caught where it is: DAP's
+    /// `pause` names a thread, and a *running* program is precisely the one that has not told us
+    /// about one. Held by seq, like the two above, so that this question and the one above cannot
+    /// be answered by each other's reply — they arrive as the same event.
+    awaiting_pause: Option<i64>,
     /// What the debuggee and the adapter have printed, oldest first, capped at
     /// [`DEBUG_OUTPUT_LINES`]. The category — `stdout`, `stderr`, `console` — travels with each
     /// line rather than being reduced to a flag here: which of them is worth showing is a
@@ -2937,6 +2942,7 @@ impl DebugSession {
             published: std::collections::BTreeSet::new(),
             awaiting_place: None,
             awaiting_thread: None,
+            awaiting_pause: None,
             output: std::collections::VecDeque::new(),
         }
     }
@@ -5502,6 +5508,26 @@ impl App {
             }
             crate::dap::Event::Threads { id, threads } => {
                 let Some(session) = self.debug.as_mut() else { return };
+                // Two questions come back as this one event, and which was asked is the difference
+                // between reading the answer and acting on it: a stop that named no thread wants
+                // to know where it is, and a pause wants a thread to catch. Told apart by the seq
+                // each was asked under, which is why both are held rather than counted.
+                if session.awaiting_pause == Some(id) {
+                    session.awaiting_pause = None;
+                    // The first thread, for the same reason the stop below takes it: choosing
+                    // among them is the panel's own work and nothing offers that choice yet. A
+                    // program with no threads left has already finished, whatever the adapter has
+                    // got round to saying about it.
+                    let Some(thread) = threads.first().map(|t| t.id) else {
+                        self.status_message = i18n::msg_debugger_no_thread(lang);
+                        return;
+                    };
+                    // The stop that follows is the news, and it arrives as an ordinary `stopped`
+                    // event with `pause` for its reason — so nothing else here has to know that
+                    // this particular stop was asked for.
+                    let _ = session.client.pause(thread);
+                    return;
+                }
                 if session.awaiting_thread != Some(id) {
                     return;
                 }
@@ -5606,8 +5632,40 @@ impl App {
         // which is the project root — the same root a relative path in the file tree is read
         // against, so resolving it here is not a guess.
         let path = if path.is_absolute() { path } else { self.root.join(path) };
+        let path = self.as_the_editor_spells_it(path);
         self.stopped_at = Some((path.clone(), line));
+        // Following the program does not get to change what the status line says. Showing a file
+        // announces itself — "Opened: twice.c" — and for every adapter that leaves the place out
+        // of its `stopped` event, and so is followed a `stackTrace` later, that announcement
+        // lands *after* the sentence saying why the program stopped and wipes it out. The reader
+        // is then told the one thing they can already see, instead of the one thing they cannot.
+        let said = std::mem::take(&mut self.status_message);
         self.show_beside_without_focus(path, Some(line), None);
+        self.status_message = said;
+    }
+
+    /// The name this editor already has for a file the adapter has just named.
+    ///
+    /// One file, two spellings, and they have to be reconciled somewhere. The adapter is told a
+    /// path with the symlinks followed — see [`crate::dap`]'s `as_the_adapter_reads_it` for why it
+    /// has to be — and it answers with that one; the editor holds whatever the project was opened
+    /// as, which on a Mac is a `/var/folders/…` where the adapter says `/private/var/folders/…`.
+    /// Taken as it comes, that answer would open a *second* tab of a file that is already on
+    /// screen, mark the stopped line in the copy without the breakpoints, and leave the gutter mark
+    /// in the copy without the stop.
+    ///
+    /// So an open tab that is the same file wins, by identity rather than by spelling. Nothing
+    /// open means nothing to reconcile, and the adapter's own answer is then the best name there
+    /// is.
+    fn as_the_editor_spells_it(&self, path: PathBuf) -> PathBuf {
+        if self.editors.iter().any(|e| e.path.as_deref() == Some(path.as_path())) {
+            return path;
+        }
+        self.editors
+            .iter()
+            .filter_map(|editor| editor.path.clone())
+            .find(|held| same_file(held, &path))
+            .unwrap_or(path)
     }
 
     /// The program is running again, so the mark on the line stops being true.
@@ -5745,7 +5803,7 @@ impl App {
     /// how a machine collects debuggees nobody can see.
     fn debug_stop(&mut self) {
         let lang = self.settings.lang;
-        let Some(session) = self.debug.as_mut() else {
+        let Some(session) = self.live_session() else {
             self.status_message = i18n::msg_debugger_no_session(lang);
             return;
         };
@@ -5765,7 +5823,7 @@ impl App {
     /// refusal in the adapter's words rather than in an answer they can act on.
     fn debug_step(&mut self, verb: DebugVerb) {
         let lang = self.settings.lang;
-        let Some(session) = self.debug.as_mut() else {
+        let Some(session) = self.live_session() else {
             self.status_message = i18n::msg_debugger_no_session(lang);
             return;
         };
@@ -5782,6 +5840,51 @@ impl App {
             DebugVerb::StepIn => session.client.step_in(thread),
             DebugVerb::StepOut => session.client.step_out(thread),
         };
+    }
+
+    /// The session, when there is one and it is still answering.
+    ///
+    /// The three verbs around it ask through this rather than for `self.debug` directly,
+    /// because a client whose adapter has died drops every request on the floor and returns
+    /// `None`: without the second half of the question, a *Continue* pressed in the moment between
+    /// an adapter dying and the next frame noticing would do nothing and say nothing. The session
+    /// is left standing — the poll that surfaces the death is the thing that clears it, and the
+    /// sentence it prints is the one that explains what happened.
+    fn live_session(&mut self) -> Option<&mut DebugSession> {
+        self.debug.as_mut().filter(|session| !session.client.is_dead())
+    }
+
+    /// Catches a running program where it happens to be.
+    ///
+    /// The odd one out of the verbs, and the whole design of it follows from that: every other row
+    /// in the menu needs the program stopped, and this one needs it running. So the two refusals
+    /// are the two the others give, turned around — no session at all, and a program that is
+    /// already stopped, which is the state where *Continue* is what was meant.
+    ///
+    /// The thread is asked for rather than remembered. DAP's `pause` names one, a running program
+    /// is exactly the one that has not stopped to tell us which it is on, and the thread it was
+    /// last stopped on may since have ended — so the adapter is asked what threads there are now
+    /// and the answer picks the one to catch. See the `Threads` arm of [`Self::apply_debug_event`],
+    /// where the two questions that come back as that one event are told apart.
+    fn debug_pause(&mut self) {
+        let lang = self.settings.lang;
+        let Some(session) = self.live_session() else {
+            self.status_message = i18n::msg_debugger_no_session(lang);
+            return;
+        };
+        if session.thread.is_some() {
+            self.status_message = i18n::msg_debugger_already_stopped(lang);
+            return;
+        }
+        // A session whose adapter has not yet said it is ready to be configured has not started
+        // the program either: there is nothing running to be caught, and saying so is more use
+        // than the adapter's own complaint about a request it was not ready for.
+        if !session.client.announced() {
+            self.status_message = i18n::msg_debugger_still_starting(lang);
+            return;
+        }
+        session.awaiting_pause = session.client.threads();
+        self.status_message = i18n::msg_debugger_pausing(lang);
     }
 
     // ---- The debug panel ----------------------------------------------------------------------
@@ -6001,6 +6104,9 @@ impl App {
             .and_then(|f| f.path.clone().map(|path| (path, f.line)));
         if let Some((path, line)) = place {
             let path = if path.is_absolute() { path } else { self.root.join(path) };
+            // Under the name the editor already has for it, for the same reason the stopped line
+            // is. See [`Self::as_the_editor_spells_it`].
+            let path = self.as_the_editor_spells_it(path);
             self.show_beside_without_focus(path, Some(line), None);
         }
         self.refresh_debug_frame();
@@ -14272,6 +14378,7 @@ impl App {
             MenuAction::DebugStart => self.open_debug_start(),
             MenuAction::DebugPanel => self.toggle_debug_panel(),
             MenuAction::DebugStop => self.debug_stop(),
+            MenuAction::DebugPause => self.debug_pause(),
             MenuAction::DebugContinue => self.debug_step(DebugVerb::Continue),
             MenuAction::DebugStepOver => self.debug_step(DebugVerb::StepOver),
             MenuAction::DebugStepIn => self.debug_step(DebugVerb::StepIn),
