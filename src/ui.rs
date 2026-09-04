@@ -47,6 +47,16 @@ pub struct Areas {
     /// drawn and not clickable then — see [`drawer_ribbon_rect`], which is what the drawing and
     /// the mouse both ask.
     pub drawer_ribbon: Option<Rect>,
+    /// The debug panel's column, while a session has one. Carved off the right of the main area
+    /// immediately after the drawer's own carve, so the two are siblings: the drawer stays the
+    /// rightmost thing in the window, this sits just inside it, and everything else divides what
+    /// the pair of them left.
+    ///
+    /// One field and no overlay twin, unlike the drawer. The drawer has two because it has two
+    /// modes; this has one, and the reason is what the panel is for — you read it while stepping
+    /// through code you are also reading, so a column painted over the buffer would be covering
+    /// the thing it is about.
+    pub debug: Option<Rect>,
     pub status: Rect,
 }
 
@@ -94,6 +104,8 @@ pub struct LayoutParams {
     /// Whether it is part of the layout (pinned) or painted over it (autocollapse). See
     /// `settings::drawer_pinned` for why the mode and the compositing are one setting.
     pub drawer_pinned: bool,
+    /// Whether the debug panel has a column right now.
+    pub debug_panel: bool,
 }
 
 impl LayoutParams {
@@ -110,8 +122,37 @@ impl LayoutParams {
             drawer_open: app.drawer.as_ref().is_some_and(|d| d.open),
             drawer_pct: app.settings.drawer_pct,
             drawer_pinned: app.settings.drawer_pinned,
+            debug_panel: app.debug_panel_is_open(),
         }
     }
+}
+
+/// The debug panel's column, and what is left for everybody else.
+///
+/// A share of the window rather than a saved percentage, unlike the drawer and the terminal panel:
+/// this is a column you open at a breakpoint and close again when the program is right, so a width
+/// to remember for it would be a preference nobody has a reason to set twice. A third of the main
+/// area, held between the narrowest a name-and-value row is readable in and the widest it is worth
+/// giving to something you are reading beside your code.
+///
+/// `None` where taking it would leave the frames less room than they need to be frames. The panel
+/// is then open and not on screen, which is the honest outcome: a window that cannot hold both is
+/// a window where the editor is what you came for.
+fn debug_split(main: Rect) -> (Rect, Option<Rect>) {
+    const LEAST: u16 = 24;
+    const MOST: u16 = 40;
+    /// What has to be left over before the column is taken at all.
+    const KEEP: u16 = 32;
+    if main.height == 0 {
+        return (main, None);
+    }
+    let width = (main.width / 3).clamp(LEAST, MOST);
+    if main.width < width.saturating_add(KEEP) {
+        return (main, None);
+    }
+    let rest = Rect { width: main.width - width, ..main };
+    let column = Rect { x: main.x + main.width - width, width, ..main };
+    (rest, Some(column))
 }
 
 /// Tiles the terminal region into one pane per window, sized by relative weight so a dragged seam
@@ -320,6 +361,18 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         (rest, None, None, ribbon)
     };
 
+    // And the debug panel, off the same edge and immediately after: the drawer is the rightmost
+    // column of the window and this is the one inside it. Taken here, before either arrangement
+    // below, for exactly the reason the drawer's carve is — the right-docked terminal panel is
+    // also a column off this edge, and two carves worked out independently would each take their
+    // share of the same cells and land on top of each other.
+    //
+    // Always a column of the layout and never an overlay: the panel is read while stepping through
+    // the code it is about, and a column painted over the buffer would be covering the thing it is
+    // there to explain.
+    let (main_area, debug) =
+        if p.debug_panel { debug_split(main_area) } else { (main_area, None) };
+
     if p.terminal_on_right {
         let (sidebar, rest) = if p.show_sidebar {
             let h = Layout::default()
@@ -339,7 +392,17 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         } else {
             (rest, None)
         };
-        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, drawer_ribbon, status }
+        Areas {
+            menu_bar,
+            sidebar,
+            editor,
+            terminals,
+            drawer,
+            drawer_overlay,
+            drawer_ribbon,
+            debug,
+            status,
+        }
     } else {
         let (main_top, terminals) = if p.show_terminal {
             let v = Layout::default()
@@ -361,7 +424,17 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
             (None, main_top)
         };
 
-        Areas { menu_bar, sidebar, editor, terminals, drawer, drawer_overlay, drawer_ribbon, status }
+        Areas {
+            menu_bar,
+            sidebar,
+            editor,
+            terminals,
+            drawer,
+            drawer_overlay,
+            drawer_ribbon,
+            debug,
+            status,
+        }
     }
 }
 
@@ -1275,6 +1348,19 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
         draw_terminals(f, app, &term_areas);
     }
 
+    // Beside them and before the drawer, which is the order the columns are in on screen.
+    if let Some(debug_area) = areas.debug {
+        draw_debug_panel(f, app, debug_area);
+    } else if app.focus == Focus::Debug {
+        // The panel is open and there was no room to draw it — see `debug_split`, which refuses
+        // the column rather than starving the frames. The keyboard cannot stay in a frame nobody
+        // can see: single letters that stepped a program from an invisible panel would be the
+        // worst version of this feature. Put back here, where the layout is known, for the same
+        // reason `App::settle_drawer` is applied after every event rather than at each of the
+        // places focus is assigned.
+        app.focus = Focus::Editor;
+    }
+
     // A frame of the layout, so it is drawn with the frames and not over them: in pin mode the
     // drawer took its column out of the main area before anything else was placed, and nothing
     // it covers is anything else's.
@@ -1368,6 +1454,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     }
     if app.show_goto {
         draw_goto_modal(f, app, f.area());
+    }
+    if app.debug_prompt.is_some() {
+        draw_debug_prompt(f, app, f.area());
     }
     if app.show_search {
         draw_search_modal(f, app, f.area());
@@ -2093,6 +2182,23 @@ fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
         i18n::msg_goto_prompt(lang, pages),
         &app.goto_input,
     );
+}
+
+/// The debugger's own single-line box: which program to debug, or which expression to watch.
+///
+/// The Go-to-line box, in every particular. That is the point: this editor asks its single-line
+/// questions one way, and a debugger that invented a second shape for "type one line here" would
+/// be a second thing to learn for no gain at all.
+fn draw_debug_prompt(f: &mut Frame, app: &App, full: Rect) {
+    let Some(prompt) = app.debug_prompt.as_ref() else { return };
+    let lang = app.settings.lang;
+    let (title, question) = match prompt.ask {
+        crate::app::DebugAsk::Debuggee => {
+            (i18n::debuggee_title(lang), i18n::msg_debuggee_prompt(lang))
+        }
+        crate::app::DebugAsk::Watch => (i18n::watch_title(lang), i18n::msg_watch_prompt(lang)),
+    };
+    draw_input_modal(app.palette(), f, full, title, question, &prompt.typed);
 }
 
 /// Where the git panel sits: nearly the whole window, since a diff is wide and a line that wraps
@@ -5250,6 +5356,250 @@ fn draw_single_terminal(
     }
 }
 
+/// How many of the debuggee's own printed lines the strip along the bottom of the panel keeps.
+///
+/// Three, and no scrolling machinery behind them: this is not a transcript — the session's whole
+/// ring is five hundred lines and the terminal panel is where output is read at length. What the
+/// strip is for is that a program which printed something just before it stopped should not have
+/// done it invisibly.
+const DEBUG_OUTPUT_ROWS: usize = 3;
+
+/// The shortest panel that still gets an output strip. Below it the rows are what there is room
+/// for, and a strip that pushed the stack off the screen would be trading the panel's subject for
+/// its footnote.
+const DEBUG_OUTPUT_LEAST: u16 = 12;
+
+/// The debug panel: the stack, the frame's variables, the watches, and the tail of what the
+/// program has printed.
+///
+/// A column of the layout drawn among the frames rather than a box over them, because it is one:
+/// see `compute_layout`, where its cells are taken out of the main area before anything else is
+/// placed. Everything it shows is an answer about one stop, and while the program is moving it
+/// says so in one line instead — see `app::debug_panel_rows`.
+pub fn draw_debug_panel(f: &mut Frame, app: &App, area: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let focused = app.focus == Focus::Debug;
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(lang, Key::PanelDebug)))
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let areas = debug_panel_areas(inner);
+    // The letters, along the bottom, where the git panel writes its own. They only do anything
+    // while this frame has the keyboard, which is why the frame is the only honest place to
+    // advertise them — and why they are drawn whether or not it has it, since finding out that a
+    // panel has keys is the reason to focus it.
+    if let Some(keys) = areas.keys {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                i18n::msg_debug_panel_keys(lang),
+                Style::default().fg(pal.text_dim),
+            ))),
+            keys,
+        );
+    }
+    if let Some(strip) = areas.output {
+        let lines = app.debug_output_tail(DEBUG_OUTPUT_ROWS);
+        draw_debug_output(f, pal, lang, strip, &lines);
+    }
+    draw_debug_rows(f, pal, areas.rows, &app.debug_rows(), app.debug_panel.selected, focused);
+}
+
+/// The three strips the panel's inside is divided into, top to bottom.
+pub struct DebugPanelAreas {
+    /// The stack, the variables and the watches — everything the arrows walk.
+    pub rows: Rect,
+    /// The tail of what the program printed, with its heading. Absent on a short panel, where the
+    /// rows are what there is room for.
+    pub output: Option<Rect>,
+    /// The row of letters. Absent on a panel too short for a row that is not a row of data.
+    pub keys: Option<Rect>,
+}
+
+/// How the panel divides its inside.
+///
+/// One function, used by the drawing and by the click alike, for the same reason every other
+/// hit-test in this file shares its geometry: a click that worked the layout out its own way is a
+/// click that will one day land on the row above the one under the pointer, and nothing says so.
+pub fn debug_panel_areas(inner: Rect) -> DebugPanelAreas {
+    let mut left = inner.height;
+    let keys = (left >= 3).then(|| {
+        left -= 1;
+        Rect { y: inner.y + left, height: 1, ..inner }
+    });
+    let tall = DEBUG_OUTPUT_ROWS as u16 + 1;
+    let output = (left >= DEBUG_OUTPUT_LEAST).then(|| {
+        left -= tall;
+        Rect { y: inner.y + left, height: tall, ..inner }
+    });
+    DebugPanelAreas { rows: Rect { height: left, ..inner }, output, keys }
+}
+
+/// The strip: the heading, then the last few lines the program printed, dim.
+fn draw_debug_output(f: &mut Frame, pal: Palette, lang: Lang, area: Rect, lines: &[String]) {
+    let mut rows = vec![Line::from(Span::styled(
+        i18n::t(lang, Key::DebugOutput),
+        Style::default().fg(pal.text_muted).add_modifier(Modifier::BOLD),
+    ))];
+    rows.extend(lines.iter().map(|line| {
+        Line::from(Span::styled(clip_to(line, area.width as usize), Style::default().fg(pal.text_dim)))
+    }));
+    f.render_widget(Paragraph::new(rows), area);
+}
+
+/// Which row the body starts at, so that the cursor is always on screen.
+///
+/// Pure, and the whole of the panel's scrolling: there is no scrollbar and no wheel here, because
+/// the list is walked with the arrows and a list walked with the arrows only has to keep up with
+/// them. Clamped at the end rather than allowed to run past it, so the last screenful is a full
+/// one instead of a screen with blank rows under the last watch.
+pub fn debug_scroll(rows: usize, height: usize, selected: usize) -> usize {
+    if height == 0 || rows <= height {
+        return 0;
+    }
+    let furthest = rows - height;
+    selected.saturating_sub(height - 1).min(furthest)
+}
+
+/// The rows themselves, from the top of `area` down.
+///
+/// Takes the rows rather than the `App`, so what the panel puts on screen for a given state is a
+/// question that can be asked with a test backend and no editor at all.
+pub fn draw_debug_rows(
+    f: &mut Frame,
+    pal: Palette,
+    area: Rect,
+    rows: &[crate::app::DebugRow],
+    selected: usize,
+    focused: bool,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let height = area.height as usize;
+    let scroll = debug_scroll(rows.len(), height, selected);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(height)
+        .map(|(i, row)| debug_row_line(pal, row, i == selected && focused, area.width as usize))
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// One row, as spans.
+///
+/// The marker column is the row's whole left edge and is never empty: `▶` for the frame the panel
+/// is reading in, `▾`/`▸` for something that opens, a space for everything else. A column that
+/// only appears on some rows would shift every name beside it by one cell depending on what the
+/// program happened to be doing.
+fn debug_row_line(
+    pal: Palette,
+    row: &crate::app::DebugRow,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    use crate::app::DebugRowKind;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let ground = if selected { Some(pal.selection) } else { None };
+    let style = |fg: Color| match ground {
+        Some(bg) => Style::default().fg(fg).bg(bg),
+        None => Style::default().fg(fg),
+    };
+    match &row.kind {
+        DebugRowKind::Heading => {
+            spans.push(Span::styled(
+                clip_to(&row.label, width),
+                style(pal.text_muted).add_modifier(Modifier::BOLD),
+            ));
+            return Line::from(spans);
+        }
+        DebugRowKind::Note => {
+            spans.push(Span::styled(format!("  {}", clip_to(&row.label, width.saturating_sub(2))), style(pal.text_dim)));
+            return Line::from(spans);
+        }
+        DebugRowKind::Frame { current, .. } => {
+            spans.push(Span::styled(
+                if *current { "\u{25b6} " } else { "  " }.to_string(),
+                style(pal.accent),
+            ));
+            spans.push(Span::styled(row.label.clone(), style(pal.text)));
+            if !row.value.is_empty() {
+                spans.push(Span::styled(format!("  {}", row.value), style(pal.text_dim)));
+            }
+        }
+        DebugRowKind::Variable { reference, expanded } => {
+            let mark = match (*reference != 0, *expanded) {
+                (false, _) => "  ",
+                (true, true) => "\u{25be} ",
+                (true, false) => "\u{25b8} ",
+            };
+            spans.push(Span::styled(format!("{}{mark}", "  ".repeat(row.depth)), style(pal.text_dim)));
+            spans.push(Span::styled(row.label.clone(), style(pal.info)));
+            if !row.value.is_empty() {
+                spans.push(Span::styled(" = ".to_string(), style(pal.text_dim)));
+                spans.push(Span::styled(row.value.clone(), style(pal.text)));
+            }
+            if let Some(type_name) = row.type_name.as_ref() {
+                spans.push(Span::styled(format!("  {type_name}"), style(pal.text_dim)));
+            }
+        }
+        DebugRowKind::Watch { .. } => {
+            spans.push(Span::styled("  ".to_string(), style(pal.text_dim)));
+            spans.push(Span::styled(row.label.clone(), style(pal.special)));
+            spans.push(Span::styled(" = ".to_string(), style(pal.text_dim)));
+            // A refusal is dim and not red: the adapter saying it cannot read an expression in
+            // this frame is the ordinary answer for a local that is not in scope here, and a
+            // panel that painted it as an error would be shouting about the normal case.
+            let colour = if row.failed { pal.text_dim } else { pal.text };
+            spans.push(Span::styled(row.value.clone(), style(colour)));
+        }
+    }
+    Line::from(clip_spans_to(spans, width))
+}
+
+/// Cuts a run of spans to the column it has, counting characters and not bytes.
+///
+/// The panel is the narrowest frame in the window, so this is not a rare path: a struct's value
+/// is routinely longer than the column, and a line wider than its frame does not get cut by
+/// ratatui — it is simply not drawn past the edge, which is fine, but the selection's ground has
+/// to stop at the edge with it or the highlight runs on into the border.
+fn clip_spans_to(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut left = width;
+    for span in spans {
+        if left == 0 {
+            break;
+        }
+        let count = span.content.chars().count();
+        if count <= left {
+            left -= count;
+            out.push(span);
+            continue;
+        }
+        let cut: String = span.content.chars().take(left).collect();
+        left = 0;
+        out.push(Span::styled(cut, span.style));
+    }
+    out
+}
+
+/// One string, cut to a width. The panel's own, because the file's other clipper works on the
+/// editor's spans rather than on a line of prose.
+fn clip_to(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars().take(width).collect()
+}
+
 /// The agent drawer's column: the agent's pane when one is running, the launcher when the drawer
 /// is open with nobody in it.
 ///
@@ -6067,6 +6417,158 @@ mod tests {
         assert!(art_row.is_some(), "the drawing should have painted a row above the tagline");
     }
 
+    /// The panel is a column of the layout off the right, inside the drawer and outside
+    /// everything else — and the frames make room for it, which is what makes it a column rather
+    /// than something painted over the buffer it is about.
+    #[test]
+    fn the_debug_panel_takes_a_column_and_the_frames_make_room() {
+        let full = Rect::new(0, 0, 200, 40);
+        let params = |debug_panel, drawer_open| LayoutParams {
+            show_sidebar: true,
+            show_terminal: true,
+            show_menubar: true,
+            menu_active: false,
+            terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
+            sidebar_width: 30,
+            terminal_pct: 35,
+            terminal_on_right: false,
+            drawer_open,
+            drawer_pct: 40,
+            drawer_pinned: true,
+            debug_panel,
+        };
+
+        let closed = compute_layout(full, &params(false, false));
+        assert!(closed.debug.is_none());
+        let open = compute_layout(full, &params(true, false));
+        let panel = open.debug.expect("a column");
+        // Flush against the drawer's ribbon, which is the one cell that is always off this edge
+        // while the drawer is away — so the panel is the outermost *frame* either way.
+        assert_eq!(panel.right(), open.drawer_ribbon.expect("the ribbon's cell").x);
+        assert!(open.editor.right() <= panel.x, "the editor was not moved out of its way");
+        assert!(
+            open.terminals.as_ref().unwrap().iter().all(|r| r.right() <= panel.x),
+            "the terminal strip runs under the panel"
+        );
+        assert!(open.editor.width < closed.editor.width, "nothing gave up any room");
+
+        // With the drawer open the drawer is still the last column and the panel is the one
+        // inside it: siblings off the same edge, in the order they are carved.
+        let both = compute_layout(full, &params(true, true));
+        let panel = both.debug.expect("a column");
+        let drawer = both.drawer.expect("the drawer's column");
+        assert_eq!(drawer.right(), full.right());
+        assert_eq!(panel.right(), drawer.x, "the two columns touch and neither overlaps");
+    }
+
+    /// A window that cannot hold both keeps the frames. The panel is then open and not on
+    /// screen, which is the honest outcome — and `draw_frame` moves the keyboard out of it, so
+    /// nothing is left typing into a frame nobody can see.
+    #[test]
+    fn a_window_too_narrow_for_both_keeps_the_editor() {
+        for width in 0..56u16 {
+            let (rest, column) = debug_split(Rect::new(0, 0, width, 20));
+            assert!(column.is_none(), "{width} columns is not enough for both");
+            assert_eq!(rest.width, width, "and nothing was taken from the frames");
+        }
+        // From there up it is a share of the window, held between what a name-and-value row needs
+        // and what is worth giving to something read beside your code.
+        for width in 56..400u16 {
+            let (rest, column) = debug_split(Rect::new(0, 0, width, 20));
+            let column = column.expect("wide enough");
+            assert!((24..=40).contains(&column.width), "{width} gave the panel {}", column.width);
+            assert_eq!(rest.width + column.width, width, "a column nobody owns twice");
+        }
+        // A window with no height has no column either, whatever its width.
+        assert!(debug_split(Rect::new(0, 0, 200, 0)).1.is_none());
+    }
+
+    /// How the panel divides its inside, and what it gives up first on a short one: the output
+    /// strip, then the row of letters — the rows are the panel's subject and are the last thing
+    /// to go.
+    #[test]
+    fn a_short_panel_drops_the_output_before_it_drops_the_rows() {
+        let tall = debug_panel_areas(Rect::new(1, 1, 30, 24));
+        let output = tall.output.expect("room for the strip");
+        let keys = tall.keys.expect("room for the letters");
+        assert_eq!(tall.rows.y, 1, "the rows start at the top");
+        assert_eq!(tall.rows.bottom(), output.y, "and run up to the strip");
+        assert_eq!(output.bottom(), keys.y, "which runs up to the letters");
+        assert_eq!(keys.bottom(), 25, "which is the last row of the panel");
+
+        let squeezed = debug_panel_areas(Rect::new(1, 1, 30, 8));
+        assert!(squeezed.output.is_none(), "no room for a footnote on a short panel");
+        assert!(squeezed.keys.is_some());
+        assert_eq!(squeezed.rows.height, 7);
+
+        // And on a panel too short even for the letters, every row there is goes to the rows.
+        let tiny = debug_panel_areas(Rect::new(1, 1, 30, 2));
+        assert!(tiny.keys.is_none() && tiny.output.is_none());
+        assert_eq!(tiny.rows.height, 2);
+    }
+
+    /// The panel's whole scrolling: the cursor is always on screen, and the last screenful is a
+    /// full one rather than a screen with blank rows under the last watch.
+    #[test]
+    fn the_panel_scrolls_only_as_far_as_it_has_to() {
+        assert_eq!(debug_scroll(4, 10, 3), 0, "everything fits: nothing scrolls");
+        assert_eq!(debug_scroll(40, 10, 0), 0);
+        assert_eq!(debug_scroll(40, 10, 9), 0, "the last row that still fits");
+        assert_eq!(debug_scroll(40, 10, 10), 1, "one past it, and the list moves by one");
+        assert_eq!(debug_scroll(40, 10, 39), 30, "the end, with the screen full");
+        assert_eq!(debug_scroll(40, 10, 99), 30, "a cursor past the end never scrolls past it");
+        assert_eq!(debug_scroll(40, 0, 5), 0, "a panel with no rows to give");
+    }
+
+    /// The three sections land on the screen, in order, with the current frame marked and the
+    /// cursor's row on it.
+    #[test]
+    fn the_debug_panel_draws_its_frames_variables_and_watches() {
+        use crate::app::{DebugRow, DebugRowKind};
+        let row = |kind, depth, label: &str, value: &str| DebugRow {
+            kind,
+            depth,
+            label: label.to_string(),
+            value: value.to_string(),
+            type_name: None,
+            failed: false,
+        };
+        let rows = vec![
+            row(DebugRowKind::Heading, 0, "Frames", ""),
+            row(DebugRowKind::Frame { index: 0, current: true }, 0, "inner", "main.rs:12"),
+            row(DebugRowKind::Frame { index: 1, current: false }, 0, "outer", "main.rs:40"),
+            row(DebugRowKind::Heading, 0, "Variables", ""),
+            row(DebugRowKind::Variable { reference: 100, expanded: true }, 0, "Locals", ""),
+            row(DebugRowKind::Variable { reference: 0, expanded: false }, 1, "total", "7"),
+            row(DebugRowKind::Heading, 0, "Watches", ""),
+            row(DebugRowKind::Watch { index: 0 }, 0, "total * 2", "14"),
+        ];
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let area = Rect::new(0, 0, 34, 10);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .unwrap();
+        terminal.draw(|f| draw_debug_rows(f, pal, area, &rows, 1, true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect();
+        let text = screen.join("\n");
+        for word in ["Frames", "inner", "main.rs:12", "Variables", "Locals", "total", "Watches"] {
+            assert!(text.contains(word), "{word} is missing:\n{text}");
+        }
+        // The frame the panel is reading in is marked, and the one beside it is not.
+        assert!(screen[1].contains('\u{25b6}'), "the current frame is unmarked:\n{text}");
+        assert!(!screen[2].contains('\u{25b6}'));
+        // An open reference says it is open; a leaf carries no chevron at all.
+        assert!(screen[4].contains('\u{25be}'), "{text}");
+        assert!(!screen[5].contains('\u{25be}') && !screen[5].contains('\u{25b8}'));
+        // The cursor's row is the one on a ground of its own, and only it.
+        let ground = |y: usize| buffer[(2u16, y as u16)].bg;
+        assert_eq!(ground(1), pal.selection, "the selected row is not marked:\n{text}");
+        assert_ne!(ground(2), pal.selection);
+    }
+
     #[test]
     fn the_completion_list_draws_the_words_it_was_given() {
         let pal = crate::theme::Theme::CleeCode.palette();
@@ -6316,6 +6818,7 @@ mod tests {
             drawer_open,
             drawer_pct: 40,
             drawer_pinned,
+            debug_panel: false,
         };
 
         for on_right in [false, true] {
@@ -6365,6 +6868,7 @@ mod tests {
             drawer_open,
             drawer_pct: 40,
             drawer_pinned,
+            debug_panel: false,
         };
 
         for on_right in [false, true] {
@@ -6416,6 +6920,7 @@ mod tests {
             drawer_open,
             drawer_pct: 40,
             drawer_pinned,
+            debug_panel: false,
         };
 
         for on_right in [false, true] {
@@ -6564,6 +7069,7 @@ mod tests {
             drawer_open,
             drawer_pct: 40,
             drawer_pinned,
+            debug_panel: false,
         };
 
         for on_right in [false, true] {
@@ -6679,6 +7185,7 @@ mod tests {
             drawer_open: false,
             drawer_pct: crate::settings::DRAWER_PCT_DEFAULT,
             drawer_pinned: true,
+            debug_panel: false,
         };
 
         assert_eq!(compute_layout(full, &params(false, false)).menu_bar.height, 0, "hidden and idle");

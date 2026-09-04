@@ -393,12 +393,8 @@ enum Incoming {
 /// thread the way `lsp.rs` shares its map, because here it is only ever read in one place: the
 /// thread forwards, and [`Client::poll`] matches.
 ///
-/// Three of its variants and one of its fields belong to questions only wave 3's panel asks —
-/// scopes, variables and watches — so the compiler cannot see them constructed yet. Marked here,
-/// on the enum, rather than by putting the whole file back under an `allow`: this says which
-/// silence is expected and why, where a file-wide one said only that somebody had stopped
-/// listening.
-#[allow(dead_code, reason = "scopes, variables and evaluate are asked by wave 3's debug panel")]
+/// Every variant is constructed: the panel asks for scopes, for the contents of a reference and
+/// for a watch's value, which were the three that had nothing asking them in wave 2.
 enum Ask {
     Initialize,
     Launch,
@@ -413,7 +409,15 @@ enum Ask {
     /// A request whose success says nothing worth reporting — a step, a pause, a disconnect. Its
     /// *failure* still is, which is why it is tracked at all: the alternative is a step key that
     /// does nothing and never says why.
-    Acknowledged { command: String },
+    ///
+    /// The name is written down here and read nowhere, because a refusal carries the command back
+    /// in the response itself and that copy is the one [`Client::digest`] reports. Kept anyway:
+    /// it is what makes a pending request legible in a debugger or a log, and the alternative is
+    /// a variant that says only "something is out".
+    Acknowledged {
+        #[allow(dead_code, reason = "the wire's own copy of the command is what a refusal reports")]
+        command: String,
+    },
 }
 
 /// A debug session: one adapter process, one wire, one lifecycle.
@@ -780,14 +784,12 @@ impl Client {
     }
 
     /// Asks what groups of variables one frame has. Answered by [`Event::Scopes`].
-    #[allow(dead_code, reason = "wave 3's debug panel reads a frame's scopes")]
     pub fn scopes(&mut self, frame: i64) -> Option<i64> {
         self.request("scopes", json!({"frameId": frame}), Ask::Scopes)
     }
 
     /// Asks what is inside one reference — a scope's contents, or a struct's fields. Answered by
     /// [`Event::Variables`].
-    #[allow(dead_code, reason = "wave 3's debug panel expands a scope")]
     pub fn variables(&mut self, reference: i64) -> Option<i64> {
         self.request("variables", json!({"variablesReference": reference}), Ask::Variables)
     }
@@ -798,7 +800,6 @@ impl Client {
     ///
     /// `frame` is optional because the protocol allows the question without one, and a global
     /// expression asked before anything has stopped is a fair question.
-    #[allow(dead_code, reason = "wave 3's debug panel evaluates the watches")]
     pub fn evaluate(&mut self, expression: &str, frame: Option<i64>) -> Option<i64> {
         let mut arguments = json!({"expression": expression, "context": "watch"});
         if let (Some(object), Some(frame)) = (arguments.as_object_mut(), frame) {

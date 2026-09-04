@@ -427,12 +427,13 @@ two and what is not built yet.
 
 ### Debugging a compiled program
 
-The same breakpoints work on C, C++ and Rust. **Debug ▸ Start debugging** runs this project's
-executable under whichever debug adapter the machine has — `lldb-dap`, or a `gdb` 14 or newer,
-which speaks DAP natively — and where there is neither, one status line names what to install for
-your platform. For a Cargo project the executable is guessed from `Cargo.toml`
-(`target/debug/<package>`); the answer is remembered in the workspace file, and
-`debug_adapter` in `settings.toml` points at an adapter of your own.
+The same breakpoints work on C, C++ and Rust. **Debug ▸ Start debugging** asks which program to
+run, with the guess already in the box — for a Cargo project, `target/debug/<package>`, read out
+of `Cargo.toml` — so accepting it is one keystroke and correcting it is typing. It runs under
+whichever debug adapter the machine has — `lldb-dap`, or a `gdb` 14 or newer, which speaks DAP
+natively — and where there is neither, one status line names what to install for your platform.
+The answer is remembered in the workspace file, and `debug_adapter` in `settings.toml` points at
+an adapter of your own.
 
 There is one set of breakpoints: `Ctrl+Shift+P` in any file, told to whichever debugger is
 running, including the moment you take the last one off a file. Stopping moves the editor to the
@@ -440,6 +441,15 @@ line and marks it without taking the keyboard, exactly as the interpreter debugg
 step over, step into and step out are rows in the Debug menu and entries in the palette — no new
 chords, because a debugger you could not step over `ssh` in Terminal.app would not be worth the
 key it was bound to.
+
+A panel opens beside the editor with the session and closes with it: the stack at the top with the
+current frame marked, the frame's variables under it opened one level, your watch expressions
+under those, and the tail of whatever the program has printed along the bottom. The arrows walk
+it; `Enter` on a frame shows that frame's line — beside what you were reading, without taking the
+keyboard — and reads the variables there; `Enter` on anything with a `▸` opens it. While the panel
+has the focus, single letters do the work the way `gdb` spells them: `c` continue, `n` step over,
+`s` step into, `o` step out, `w` add a watch, `d` drop the one under the cursor, `x` stop. They
+only ever reach the panel, so nothing you type anywhere else changes meaning.
 
 ### It does not close on you
 

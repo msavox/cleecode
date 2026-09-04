@@ -116,6 +116,15 @@ pub enum Key {
     ItemDebugStepOver,
     ItemDebugStepIn,
     ItemDebugStepOut,
+    ItemDebugPanel,
+    PanelDebug,
+    DebugFrames,
+    DebugVariables,
+    DebugWatches,
+    DebugOutput,
+    DebugRunning,
+    DebugAsking,
+    DebugNoWatches,
     ItemShowWorkspacePanel,
     ItemInspectVariable,
     ItemRunTarget,
@@ -504,6 +513,40 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         // `finish`, and a menu that used the second would be naming a command nobody types here.
         (Lang::En, ItemDebugStepOut) => "Step out",
         (Lang::It, ItemDebugStepOut) => "Passo fuori",
+        // The one row of the menu that is about the screen rather than about the program: the
+        // panel opens by itself when a session starts, and this is how somebody who put it away
+        // gets it back without stopping what they were debugging.
+        (Lang::En, ItemDebugPanel) => "Debug panel",
+        (Lang::It, ItemDebugPanel) => "Pannello di debug",
+
+        // The panel's own frame title and its four headings. Headings and not columns: the panel
+        // is a narrow column beside the editor, and four sections stacked read where four columns
+        // side by side would not fit at all.
+        (Lang::En, PanelDebug) => "Debug",
+        (Lang::It, PanelDebug) => "Debug",
+        (Lang::En, DebugFrames) => "Frames",
+        (Lang::It, DebugFrames) => "Frame",
+        (Lang::En, DebugVariables) => "Variables",
+        (Lang::It, DebugVariables) => "Variabili",
+        // "Watches" is the debugger's word in English and has no settled Italian one; the phrase
+        // Italian debuggers do use is "espressioni", so that is what it says rather than an
+        // invented calque nobody would recognise.
+        (Lang::En, DebugWatches) => "Watches",
+        (Lang::It, DebugWatches) => "Espressioni",
+        (Lang::En, DebugOutput) => "Output",
+        (Lang::It, DebugOutput) => "Output",
+        // What stands where the rows would be while the program is moving. One dim line, because
+        // frames, variables and watches are all answers about a place the program is no longer
+        // at, and leaving the old ones on screen would be the panel lying quietly.
+        (Lang::En, DebugRunning) => "running…",
+        (Lang::It, DebugRunning) => "in esecuzione…",
+        // And the moment in between: stopped, but the adapter has not answered yet.
+        (Lang::En, DebugAsking) => "asking the adapter…",
+        (Lang::It, DebugAsking) => "sto chiedendo all'adapter…",
+        // Doubles as the instruction, because an empty list with no hint under it is a section
+        // nobody ever finds out how to fill.
+        (Lang::En, DebugNoWatches) => "w adds one",
+        (Lang::It, DebugNoWatches) => "w ne aggiunge una",
         (Lang::En, ItemInspectVariable) => "Look inside a variable...",
         (Lang::It, ItemInspectVariable) => "Guarda dentro una variabile...",
 
@@ -2047,6 +2090,81 @@ pub fn msg_debugger_not_stopped(lang: Lang) -> String {
         Lang::It => "Il programma sta girando — si avanza quando si ferma a un breakpoint",
     }
     .to_string()
+}
+
+/// The title on the box *Debug ▸ Start debugging* now opens, and the line inside it.
+///
+/// Two pieces of text rather than one because that is the shape every other single-line box in
+/// this editor has — a title saying which question this is, and the question itself over the
+/// answer. The title repeats the menu row's own words so that the box is visibly the thing the
+/// row opened, and the prompt says *program*, which is the word for what a debugger is pointed at.
+pub fn debuggee_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Start debugging",
+        Lang::It => "Avvia il debug",
+    }
+}
+
+/// Says what emptying the box does, for the same reason [`msg_run_command_prompt`] does: the
+/// answer is prefilled, so the only way to find out what an empty one means is to be told.
+pub fn msg_debuggee_prompt(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Program to debug (empty to go back to the guess):",
+        Lang::It => "Programma da debuggare (vuoto per tornare alla proposta):",
+    }
+}
+
+/// The other box the panel opens: one watch expression, in the debuggee's own language.
+pub fn watch_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Watch",
+        Lang::It => "Espressione",
+    }
+}
+
+pub fn msg_watch_prompt(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Expression to watch:",
+        Lang::It => "Espressione da sorvegliare:",
+    }
+}
+
+/// The row of letters along the bottom of the panel.
+///
+/// Written out where the hands are, the way the git panel writes its own keys along the bottom of
+/// itself: these letters only do anything while this frame has the focus, so the frame is the only
+/// place they can honestly be advertised. The verbs are gdb's own spellings, which is the whole
+/// reason they were chosen — see the design's "Keys" section.
+pub fn msg_debug_panel_keys(lang: Lang) -> String {
+    match lang {
+        Lang::En => "c run  n over  s into  o out  w watch  d drop  x stop",
+        Lang::It => "c va  n sopra  s dentro  o fuori  w espr  d togli  x ferma",
+    }
+    .to_string()
+}
+
+pub fn msg_debug_panel_toggled(lang: Lang, open: bool) -> String {
+    match (lang, open) {
+        (Lang::En, true) => "Debug panel shown",
+        (Lang::En, false) => "Debug panel hidden",
+        (Lang::It, true) => "Pannello di debug mostrato",
+        (Lang::It, false) => "Pannello di debug nascosto",
+    }
+    .to_string()
+}
+
+pub fn msg_watch_added(lang: Lang, expression: &str) -> String {
+    match lang {
+        Lang::En => format!("Watching {expression}"),
+        Lang::It => format!("Sorveglio {expression}"),
+    }
+}
+
+pub fn msg_watch_removed(lang: Lang, expression: &str) -> String {
+    match lang {
+        Lang::En => format!("Stopped watching {expression}"),
+        Lang::It => format!("Non sorveglio più {expression}"),
+    }
 }
 
 /// One session at a time. See [`crate::app::DebugSession`] for why that is a decision.
