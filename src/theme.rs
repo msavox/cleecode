@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 /// lifetimes, the same way the language is passed to everything that writes a word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
-    /// The surface the editor paints when it will not trust the terminal's own background. Also
-    /// what the opaque-background pass fills every unclaimed cell with.
+    /// The surface the editor paints under everything — every unclaimed cell ends the frame
+    /// filled with it, unless the user asked for a transparent background and the theme can
+    /// afford one.
     pub background: Color,
     /// Ordinary text — the colour a cell nothing else has claimed ends up with. `Reset` means
     /// "whatever the terminal draws text in", which is right for a theme that means to sit on the

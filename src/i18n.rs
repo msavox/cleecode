@@ -117,7 +117,7 @@ pub enum Key {
     VenvBrowseItem,
     ItemToggleSplitView,
     ItemToggleHiddenFiles,
-    ItemOpaqueBackground,
+    ItemTransparentBackground,
     ItemThemes,
     ItemPlotsInTabs,
     MenuValuePlotsTabs,
@@ -495,8 +495,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemToggleHiddenFiles) => "Hidden files",
         (Lang::It, ItemToggleHiddenFiles) => "File nascosti",
 
-        (Lang::En, ItemOpaqueBackground) => "Solid background",
-        (Lang::It, ItemOpaqueBackground) => "Sfondo pieno",
+        // Named for what pressing it asks for, not for what the screen is doing: every theme
+        // paints its own surface now, so the thing the user reaches for here is seeing through
+        // it.
+        (Lang::En, ItemTransparentBackground) => "Transparent background",
+        (Lang::It, ItemTransparentBackground) => "Sfondo trasparente",
 
         (Lang::En, ItemThemes) => "Theme\u{2026}",
         (Lang::It, ItemThemes) => "Tema\u{2026}",
@@ -2901,15 +2904,19 @@ pub fn msg_line_endings_converted(lang: Lang, to_crlf: bool) -> String {
     }
 }
 
-/// Said when the background is taken over, and when it is handed back. Worth a line: the change
-/// is a whole screen repainting, and it should be obvious that it was a setting rather than a
-/// glitch — and obvious that the same button undoes it.
-pub fn msg_opaque_background(lang: Lang, on: bool) -> String {
+/// Said when the background is handed back to the terminal, and when it is taken again. Worth a
+/// line: the change is a whole screen repainting, and it should be obvious that it was a setting
+/// rather than a glitch — and obvious that the same button undoes it.
+///
+/// Renamed with the setting it reports. `on` here means transparency, not fill: a message saying
+/// "solid background off" about a flag called transparent would have to be read backwards every
+/// time somebody checked which way the two agreed.
+pub fn msg_transparent_background(lang: Lang, on: bool) -> String {
     match (lang, on) {
-        (Lang::En, true) => "Solid background on — the terminal no longer shows through".to_string(),
-        (Lang::En, false) => "Solid background off — the terminal's own background is back".to_string(),
-        (Lang::It, true) => "Sfondo pieno attivo — il terminale non traspare più".to_string(),
-        (Lang::It, false) => "Sfondo pieno disattivato — torna lo sfondo del terminale".to_string(),
+        (Lang::En, true) => "Transparent background on — the terminal shows through again".to_string(),
+        (Lang::En, false) => "Transparent background off — the theme paints its own surface".to_string(),
+        (Lang::It, true) => "Sfondo trasparente attivo — il terminale torna a trasparire".to_string(),
+        (Lang::It, false) => "Sfondo trasparente disattivato — il tema dipinge la propria superficie".to_string(),
     }
 }
 

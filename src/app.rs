@@ -10393,22 +10393,24 @@ impl App {
         };
     }
 
-    /// Takes the background over, or hands it back. Written out at once rather than at exit:
-    /// this is reached for when the screen has become unreadable, and having to do it again
-    /// after every session would be its own small misery.
-    fn toggle_opaque_background(&mut self) {
+    /// Hands the background back to the terminal, or takes it again. Written out at once rather
+    /// than at exit: this is reached for when the screen has become unreadable, and having to do
+    /// it again after every session would be its own small misery.
+    ///
+    /// The only way back to a translucent editor, now that every theme arrives with its own
+    /// surface — and the next theme chosen takes it back, which is what `set_theme` is for.
+    fn toggle_transparent_background(&mut self) {
         // A theme that paints its own surface is painting it either way, so the switch has
-        // nothing to turn off. Refused out loud rather than silently ignored: a control that
-        // moves and changes nothing is worse than one that explains itself.
-        if self.theme.paints_its_own_background() {
+        // nothing to turn. Refused out loud rather than silently ignored: a control that moves
+        // and changes nothing is worse than one that explains itself.
+        let Some(next) = self.settings.next_transparent_background(self.theme) else {
             self.status_message =
                 i18n::msg_background_owned_by_theme(self.settings.lang, self.theme.name());
             return;
-        }
-        self.settings.opaque_background = !self.settings.opaque_background;
+        };
+        self.settings.transparent_background = next;
         self.settings.save();
-        self.status_message =
-            i18n::msg_opaque_background(self.settings.lang, self.settings.opaque_background);
+        self.status_message = i18n::msg_transparent_background(self.settings.lang, next);
     }
 
     /// Plots as tabs, or plots in the interpreter's own windows.
@@ -11948,7 +11950,20 @@ impl App {
     /// nothing was asked, and choosing `Auto` gives the dark theme now and the right one from the
     /// next launch on. Said out loud rather than silently, which is what the status line is for.
     pub fn set_theme(&mut self, choice: crate::theme::ThemeChoice) {
+        // A chosen theme owns its background. Whatever transparency was in force is handed back
+        // here, so the incoming theme arrives whole instead of as its colours over the terminal's
+        // surface — which was the bug: the switch stayed where the last theme had left it, the
+        // frame repainted nothing, and a theme picked to fix an unreadable screen fixed nothing.
+        // Answered ahead of the guard below because choosing the theme already in use is still a
+        // choice, and it is the natural way to ask for the surface back.
+        let reclaimed = self.settings.reclaim_background_for_the_theme();
         if self.settings.theme == choice {
+            // Nothing else to change, but a background just reclaimed still has to be written
+            // out and drawn.
+            if reclaimed {
+                self.settings.save();
+                self.redraw = true;
+            }
             return;
         }
         self.settings.theme = choice;
@@ -12840,7 +12855,7 @@ impl App {
             MenuAction::MdLink => self.md_format(ui::MdTool::Link),
             MenuAction::MdQuote => self.md_format(ui::MdTool::Quote),
             MenuAction::MdFence => self.md_format(ui::MdTool::Fence),
-            MenuAction::ToggleOpaqueBackground => self.toggle_opaque_background(),
+            MenuAction::ToggleTransparentBackground => self.toggle_transparent_background(),
             MenuAction::ShowThemes => self.open_theme_menu(),
             MenuAction::TogglePlotsInTabs => self.toggle_plots_in_tabs(),
             MenuAction::OpenSettings => self.show_settings = true,
@@ -15492,7 +15507,7 @@ impl App {
         // columns outright; the range is empty when the bar is too narrow to show it.
         let button = ui::menu_bar_button_range(self, width);
         if !button.is_empty() && button.contains(&col) {
-            self.toggle_opaque_background();
+            self.toggle_transparent_background();
             return;
         }
         let themes = ui::menu_bar_theme_range(self, width);

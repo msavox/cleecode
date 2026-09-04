@@ -239,12 +239,23 @@ pub struct Settings {
     // decision made once instead of per invocation.
     #[serde(default = "default_true")]
     pub show_splash: bool,
-    // Whether the editor paints its own background instead of letting the terminal's show
-    // through. Off by default, because a terminal's background is the user's choice and taking
-    // it over uninvited is rude — but a translucent one with a bright window behind it turns
-    // the text unreadable, and then this is the only way back.
+    // Whether the terminal's own background is left showing through instead of the editor
+    // painting its own. Off by default, because a theme is a set of colours *and* the surface
+    // they were chosen against: handing it only the colours is how the text ends up on somebody
+    // else's paper. Asking for it back is one press of the button on the menu bar, and a
+    // translucent window with the desktop behind it is a good enough reason to.
+    //
+    // It used to read the other way round — `opaque_background`, off by default, with the dark
+    // themes leaning on whatever the terminal happened to be. That default cost the switch its
+    // meaning the moment the theme changed: `set_theme` repainted nothing, so a theme chosen to
+    // fix an unreadable screen arrived without the surface it was drawn against and fixed
+    // nothing, and the way out was a setting nobody thinks to look for. Inverting it puts the
+    // choice where it belongs — transparency is the thing you ask for, and the next theme you
+    // choose takes it back. An older settings.toml carrying `opaque_background` still loads:
+    // the struct has no `deny_unknown_fields`, so the key it no longer knows is read as nothing
+    // at all, this field takes its default, and the dead key goes on the next write out.
     #[serde(default)]
-    pub opaque_background: bool,
+    pub transparent_background: bool,
     // Which set of colours the interface is drawn in. Defaults to the one the editor has always
     // used, so an existing settings.toml — which has no such key — loads into exactly the editor
     // it was written by.
@@ -516,7 +527,7 @@ impl Default for Settings {
             follow_agent_edits: false,
             autosave_recovery: true,
             show_splash: true,
-            opaque_background: false,
+            transparent_background: false,
             theme: crate::theme::ThemeChoice::default(),
             last_root: None,
             last_open_files: Vec::new(),
@@ -695,6 +706,31 @@ impl Settings {
         if let Ok(text) = toml::to_string_pretty(self) {
             let _ = write_atomic(&path, text.as_bytes());
         }
+    }
+
+    /// Which way the transparency switch goes from here, or `None` when it has nothing to move.
+    ///
+    /// Split out from the app so the rule can be read — and tested — without a running editor. A
+    /// theme with dark text has no terminal colours left to reveal: handing the background back
+    /// would not make it translucent, it would leave the text on whatever the terminal happens
+    /// to be, which for most people is dark on dark. Those themes refuse the switch instead of
+    /// accepting it and changing nothing.
+    pub fn next_transparent_background(&self, theme: crate::theme::Theme) -> Option<bool> {
+        if theme.paints_its_own_background() {
+            return None;
+        }
+        Some(!self.transparent_background)
+    }
+
+    /// A chosen theme owns its background: choosing one gives back whatever transparency was in
+    /// force, so the theme arrives with the surface it was drawn against rather than with the
+    /// last one's. Answers whether there was any to give back, which is what tells the caller
+    /// the file has to be written even when nothing else about the choice changed.
+    ///
+    /// Here rather than inside `set_theme` so the rule can be tested without a running editor,
+    /// which is the only way an App-level method gets to be read by a test at all.
+    pub fn reclaim_background_for_the_theme(&mut self) -> bool {
+        std::mem::take(&mut self.transparent_background)
     }
 
     pub fn clamp_layout(&mut self) {
@@ -983,6 +1019,81 @@ mod tests {
         assert!(back.preview_dark, "a PDF read dark stays dark");
         assert!(back.preview_markdown_text, "markdown left as text opens as text");
         assert!(!back.preview_dark_markdown, "markdown keeps its own answer, untouched by the PDF one");
+    }
+
+    /// The switch that hands the background back, and the one theme that will not take it: a
+    /// dark theme flips, a light one answers `None` so the caller can say why rather than moving
+    /// a control that changes nothing.
+    #[test]
+    fn the_transparency_switch_flips_on_a_dark_theme_and_is_refused_by_a_light_one() {
+        use crate::theme::Theme;
+        let mut settings = Settings::default();
+        assert!(!settings.transparent_background, "every theme paints its own surface by default");
+
+        // On a dark theme it goes both ways, from wherever it is.
+        assert_eq!(settings.next_transparent_background(Theme::CleeCode), Some(true));
+        settings.transparent_background = true;
+        assert_eq!(settings.next_transparent_background(Theme::CleeCode), Some(false));
+
+        // A light theme refuses either way round: its dark text has no terminal colours left to
+        // reveal, so there is nothing for the switch to turn.
+        for asked in [true, false] {
+            settings.transparent_background = asked;
+            assert_eq!(settings.next_transparent_background(Theme::CleeCodeLight), None);
+        }
+
+        // And what the switch writes survives the file it is written to, which is the whole
+        // reason it is saved at once rather than at exit.
+        settings.transparent_background = true;
+        let text = toml::to_string_pretty(&settings).expect("settings serialise");
+        let back: Settings = toml::from_str(&text).expect("and parse again");
+        assert!(back.transparent_background, "the choice comes back next session");
+    }
+
+    /// The bug the inversion was decided by, as a rule: choosing a theme takes the background
+    /// back, so the theme that arrives is the one that was chosen and not its colours over the
+    /// last theme's surface. The answer tells `set_theme` whether the file has to be written
+    /// even when the theme itself did not change, which is what a user re-choosing the theme
+    /// they are already on is asking for.
+    #[test]
+    fn choosing_a_theme_takes_its_background_back() {
+        let mut settings = Settings::default();
+        assert!(!settings.transparent_background, "which is where a session starts");
+        // The switch has been pressed since: the terminal is showing through the editor.
+        settings.transparent_background = true;
+        assert!(settings.reclaim_background_for_the_theme(), "there was transparency to give back");
+        assert!(!settings.transparent_background, "and the theme arrives with its own surface");
+
+        // Nothing to reclaim the second time, and nothing for the caller to write out.
+        assert!(!settings.reclaim_background_for_the_theme());
+        assert!(!settings.transparent_background);
+
+        // What that leaves the switch meaning: whichever dark theme was chosen, the next press
+        // is a request for transparency rather than the one that hands it back.
+        for theme in [crate::theme::Theme::CleeCode, crate::theme::Theme::Turbo] {
+            assert_eq!(settings.next_transparent_background(theme), Some(true), "{}", theme.name());
+        }
+    }
+
+    /// A settings.toml written before the inversion carries `opaque_background`, which no longer
+    /// exists. It has to load as the file it is rather than be set aside as broken — the struct
+    /// takes unknown keys as nothing at all — and the editor it loads into is the new default:
+    /// the theme paints its own surface, whichever way the dead key was set.
+    #[test]
+    fn a_file_naming_the_old_opaque_key_still_loads_and_gets_the_new_default() {
+        let older: Settings = toml::from_str("opaque_background = true\ntab_size = 3\n")
+            .expect("a file with the retired key loads");
+        assert!(!older.transparent_background, "the retired key decides nothing");
+        assert_eq!(older.tab_size, 3, "and the keys beside it are still read");
+
+        // Off in the old file meant a dark theme leaning on the terminal; it reads the same way,
+        // because the answer now comes from the theme rather than from this key.
+        let off: Settings = toml::from_str("opaque_background = false").expect("either way round");
+        assert!(!off.transparent_background);
+
+        // Written back out, the dead key is simply gone.
+        let text = toml::to_string_pretty(&older).expect("settings serialise");
+        assert!(!text.contains("opaque_background"), "the retired key is not written again:\n{text}");
     }
 
     /// Both hand-written forms must parse. A parse failure is silent (`load()` falls back to

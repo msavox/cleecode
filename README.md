@@ -260,7 +260,8 @@ read, and having to make it again next session would be its own small misery.
 *Turbo is the blue screen, for anyone who learned to program on one: a light bar over a dark
 field, and the initial of each menu entry in red. The four light ones paint their own surface —
 they have to, or their dark text lands on whatever your terminal's background is. The dark ones
-do not have to, so on a translucent terminal they stay translucent unless you ask otherwise.*
+paint theirs too, so the theme you chose is the theme you get; a translucent terminal comes
+back with one switch, View → Transparent background.*
 
 **It does not close on you.** CleeCode hosts long-running shells, so an internal failure is
 contained and reported in the status line rather than ending the process. A broken terminal
