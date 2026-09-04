@@ -2524,6 +2524,93 @@ riscritti con la strada temp+rename.
   > ancora sensato oltre al layout di default è quello minimale; ogni altra composizione la
   > copre il cassetto, e non serve un preset per programma quando il programma è un agente.
 
+## 0.19 — L'agente che indica (2026-09-04) ← *in costruzione*
+
+La 0.18 ha messo l'agente in casa e gli ha dato gli occhi; la 0.19 gli dà l'indice. Il ciclo
+dell'edit dal disco c'era già — l'agente scrive il file, il frame loop ricarica il buffer
+pulito — ma tutto quello che l'agente sapeva *mostrare* era il risultato a cose fatte. Questa
+release è il gesto: fare vedere dove sta lavorando, cosa ha prodotto e cosa sta per toccare,
+mentre l'utente guarda. Sul ponte MCP i tool diventano sette; i nuovi, dal più economico:
+
+- **`open_file` impara l'intervallo.** Con `line` e `end_line` l'editor apre di fianco e
+  accende la selezione sulle righe indicate — la macchina è quella di find, nessun renderer
+  nuovo — e il segno si spegne al primo tocco dell'utente su quel pane, che è esattamente il
+  momento in cui il gesto è stato visto.
+- **`preview`.** Markdown come documento, immagini e PDF come figure, nel pannello che sa già
+  farlo, senza prendere la tastiera: l'agente che genera un grafico ora può mostrartelo
+  renderizzato invece di dirti il nome del file.
+- **`say`.** Una riga nella status line, marcata come voce dell'agente — una riga sola,
+  ripulita e con un tetto, perché la status line è una riga e la narrazione non è un log.
+- **`dirty_files` nello stato**, cioè la divisione dei mondi detta all'agente: un buffer
+  pulito si edita su disco e l'auto-reload lo mostra; uno sporco porta lavoro non salvato
+  dell'utente, e toccarlo su disco lo butterebbe via. Per quelli c'è lo strumento dopo.
+- **`edit_buffer` — la prima scrittura, col consenso.** old/new a occorrenza unica, applicato
+  al buffer come un solo passo di undo, mai salvato: il salvataggio resta dell'utente. La
+  chiamata aspetta la risposta — fino a due minuti — su un canale `replies/` accanto a
+  `requests/`, e la risposta la dà l'utente da una domanda nella status line: S una volta,
+  A per tutta la sessione, N no. Sotto, l'impostazione `agent_edits` (ask, allow, deny)
+  accanto ad `agent_mcp`, col default che chiede.
+- E ogni richiesta applicata lascia una nota nella status line, perché un editor che si muove
+  senza dire perché è uno spavento, non una funzionalità.
+
+Della 0.17 arriva qui il pezzo rimasto, perché è la stessa frase detta a un altro tempo: il
+**fondo tenue e persistente sulle righe arrivate da fuori** (`changed_line_bg`, annotato il
+2026-09-02). I tool sono il gesto dell'agente mentre guardi; il fondo è la traccia che trovi
+quando torni.
+
+## 0.20 — Le code actions (2026-09-04)
+
+L'ultimo pezzo dell'LSP che si usa ogni ora e che oggi manca del tutto:
+`textDocument/codeAction` sul diagnostico sotto il cursore — "aggiungi l'import", "applica il
+suggerimento del compilatore" — offerto in un picker come le references. La disciplina di
+applicazione è già stata pagata dal rename e dal format: anteprima di cosa cambia, scritture
+atomiche, un solo passo di undo, rifiuto onesto per i file fuori dai buffer. Qui si riusa, non
+si reinventa. On demand e non on-save, per la regola già scritta: prima i meccanismi, poi le
+politiche. Gli inlay hints restano candidati, non promessa — entrano solo se stanno nella
+griglia senza sporcarla, e la prova è visiva prima che tecnica.
+
+## 0.21 — La selezione strutturale, senza tree-sitter (2026-09-04)
+
+"Cosa resta fuori" diceva: tree-sitter se ne riparla solo se il folding semantico o la
+selezione strutturale diventano priorità. Lo sono diventati — è metà della distanza da Zed che
+si sente ogni ora — ma la risposta non è tree-sitter: è l'LSP che c'è già.
+`textDocument/selectionRange` dà l'espandi/restringi selezione semantico (dall'identificatore
+all'espressione alla funzione, una corda per direzione), `foldingRange` dà il folding coi
+confini che li conosce il server. Due richieste in più sulla macchina esistente: zero
+dipendenze C, zero secondo modello del testo da tenere in pari con la rope. Il vincolo del
+progetto resta intatto e l'invidia si spegne.
+
+> **Le corde, e uno strato nuovo (2026-09-04, decisione utente).** Le lettere Ctrl+Shift
+> sono finite e anche le quattro frecce sono occupate, quindi la selezione strutturale non
+> aveva dove stare — e la risposta dell'utente apre uno strato di tastiera intero:
+> **Ctrl+Super** (Cmd su macOS). Espandi su Ctrl+Super+↑, restringi su Ctrl+Super+↓. La
+> scelta rovescia consapevolmente il mascheramento di `SUPER` scritto in `keymap.rs` — "il
+> Command raggiunge un terminale solo per accidente" — perché il presupposto è cambiato:
+> l'editor spinge già i flag del protocollo kitty, e su Ghostty, kitty, WezTerm, iTerm2 e
+> foot il modificatore arriva davvero, anche via ssh, dove conta il terminale locale. Il
+> mascheramento resta per le corde che Super non lo dichiarano: la ragione vecchia resta
+> vera per loro. I confini, dichiarati e non aggirati: niente lettere di sistema su macOS
+> (Ctrl+Cmd+Q blocca lo schermo, Ctrl+Cmd+F fa il fullscreen — si usano le frecce), e dove
+> il protocollo non c'è — Terminal.app, i WM che si mangiano Super — la corda non esiste:
+> lo dice il manuale, l'azione resta nel menu e si ribinda in `[keys]`. Il folding invece
+> non chiede corde: `Ctrl+Shift+F` resta il gesto, cambia solo chi conosce i confini.
+
+## 0.22 — Il debugger (deciso il 2026-09-04: prima della 1.0)
+
+La promozione più pesante, per decisione dell'utente: DAP esce da "cosa resta fuori" ed entra
+nei numeri, *prima* della 1.0 — perché è l'unica rinuncia dichiarata che fa male sul terreno
+di CleeCode. Chi vive via ssh debugga comunque, e "il debugger gira nel terminale accanto" è
+onesto ma non pareggia breakpoint nel gutter e frame nel pannello. Una 1.0 che dichiara "una
+giornata di lavoro senza limiti non dichiarati" è più vera se la giornata col debugger dentro
+c'è già stata.
+
+Il perimetro resta quello che la voce in fondo aveva già disegnato: una release intera a sé,
+perché un debugger fatto a metà è la cosa peggiore — un debugger che sembra esserci. gdb e
+lldb via DAP per C e Rust come primo pubblico, breakpoint nel gutter, frame e watch nel
+pannello — il precedente da seguire è il workspace numerico, la forma c'è già. Le corde si
+decidono sulla tavola dei vincoli esistente: niente F-key per regola del progetto, quindi il
+riflesso F5/F10/F11 va ripensato in Ctrl+Shift, e la scelta va scritta prima del codice.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
@@ -2567,6 +2654,19 @@ Tre pezzi, in ordine di dipendenza:
   > personale su una macchina condivisa non ce la si vuole lasciare. Lì clee oggi si
   > aggiorna col tarball di release: una GET, verificata col checksum. Un pacchetto che si
   > installa con una GET è esattamente quella strada, resa ufficiale.
+
+- **Windows: un brew anche lì (2026-09-04, su indicazione dell'utente).** La release
+  costruisce già lo zip `windows-x86_64`; quello che manca è la strada per installarlo con
+  due comandi. Il primo canale è **Scoop**, perché è il gemello del tap: un bucket
+  `scoop-clee` di proprietà nostra, un manifest `clee.json` che punta allo zip di release
+  col suo checksum (la CI lo stampa già per Homebrew — si stampa anche questo), campo
+  `autoupdate` così l'aggiornamento a una release nuova è un giro di `checkver`, niente
+  amministratore e niente moderazione altrui: `scoop bucket add` e `scoop install clee`.
+  **winget** viene dopo, come canale ufficiale: manifest di tipo portable sulla stessa zip,
+  ma ogni versione è una PR moderata su `microsoft/winget-pkgs` — una promessa di
+  manutenzione più impegnativa, e le promesse si fanno una alla volta, come per i formati
+  Linux. Chocolatey non si fa: installazioni da amministratore e moderazione, per lo stesso
+  pubblico che Scoop serve meglio.
 
 ## 1.0 — la definizione, non una data
 
@@ -2614,10 +2714,20 @@ finito, nei formati che macOS e Windows vogliono.
   sé — protocollo, UI dei frame, watch — e farla a metà produrrebbe la cosa peggiore: un
   debugger che sembra esserci. Il giorno che si fa, il pannello del workspace numerico è il
   precedente da seguire (breakpoint nel gutter, frame nel pannello — la forma c'è già).
+
+  > **Promosso (2026-09-04, decisione utente).** Il giorno che si fa ha un numero: la 0.22,
+  > prima della 1.0. Le ragioni e il perimetro stanno nella sua sezione; questa voce resta
+  > qui come testimonianza che l'omissione era una decisione, e che la sua revoca lo è
+  > altrettanto.
 - **Tree-sitter.** syntect con la scala di stati incrementale della 0.13 basta per
   l'evidenziazione; tree-sitter porterebbe una dipendenza C per grammatica e un secondo
   modello del testo da tenere in pari con la rope. Se ne riparla solo se il folding semantico
   o la selezione strutturale diventano priorità — non prima.
+
+  > **Diventate priorità (2026-09-04) — e tree-sitter resta fuori lo stesso.** La 0.21 le
+  > copre con `selectionRange` e `foldingRange`, due richieste LSP sulla macchina che c'è
+  > già: la condizione si è avverata, la conclusione no, perché nel frattempo la strada
+  > senza dipendenza C si è rivelata sufficiente.
 - **Un sistema di plugin.** Le due tabelle (`run_commands`, `language_servers`) più il
   contratto file del workspace (versionato, documentato in `docs/design/`) sono già
   un'estensibilità in embrione. Formalizzarla è lavoro da dopo-1.0: un'API si può aggiungere,
