@@ -155,6 +155,20 @@ pub struct Settings {
     pub run_in_session: bool,
     #[serde(default)]
     pub language_servers: std::collections::BTreeMap<String, String>,
+    // The debug adapter to run, as a command line — empty means "find one", which is what
+    // `dap::find_adapter` does with lldb-dap, xcrun and a gdb new enough to speak DAP.
+    //
+    // Here for the same reason `language_servers` above it is: the built-in search is a
+    // convenience, and a release should not be the way to reach `codelldb`, a gdb built in
+    // somebody's home directory, or an adapter nobody here has heard of. Split on spaces rather
+    // than parsed as a shell would, exactly as a language server's command line is — a path with
+    // a space in it wants a quoting dialect, and half of one is worse than none.
+    //
+    // settings.toml only for now: which adapter debugs is a property of the machine far more
+    // often than of the project, and a per-project key would be a second place to look before
+    // anybody had asked for one.
+    #[serde(default)]
+    pub debug_adapter: String,
     #[serde(default)]
     pub show_hidden_files: bool,
     // Lines of scrolled-off output each shell keeps, for scrolling back through. Costs
@@ -515,6 +529,7 @@ impl Default for Settings {
             interpreter_paths: std::collections::HashMap::new(),
             run_in_session: true,
             language_servers: std::collections::BTreeMap::new(),
+            debug_adapter: String::new(),
             show_hidden_files: false,
             preview_dark: false,
             preview_dark_markdown: false,

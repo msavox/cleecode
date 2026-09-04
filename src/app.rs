@@ -865,7 +865,21 @@ pub struct App {
     pub breakpoints: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
     /// Where the session was last seen stopped, so the editor can stop marking the line once it
     /// runs on.
+    ///
+    /// One field for both debuggers. The interpreter one sets it from a snapshot and the debug
+    /// adapter sets it from a `stopped` event, and they mean exactly the same thing to the
+    /// renderer: this is the line the program is on. A second field would be a second highlight
+    /// to keep in step with the first.
     pub stopped_at: Option<(PathBuf, usize)>,
+    /// The debug adapter session, while there is one. See [`DebugSession`].
+    pub debug: Option<DebugSession>,
+    /// What this project's *Debug ▸ Start* runs, once somebody has started one.
+    ///
+    /// Remembered here and written into the workspace file at exit, beside the active venv and
+    /// the other per-project choices — so the guess is filled in once and the answer outlives the
+    /// session. A project opened without a named workspace has nowhere to write it and asks its
+    /// guess again next time, which is the same bargain every other workspace field makes.
+    debuggee: Option<PathBuf>,
     /// Go-to-line prompt state.
     pub show_goto: bool,
     pub goto_input: String,
@@ -2818,6 +2832,168 @@ pub struct Inspector {
     pub asked: bool,
 }
 
+/// How many lines of a debug session's output are kept.
+///
+/// A ring and not a transcript, and capped here rather than wherever it happens to be drawn: a
+/// debuggee is free to print a megabyte a second, and a session left running overnight must not
+/// grow until the editor is the thing that dies. Five hundred is about ten screenfuls — enough to
+/// scroll back through what the program said before it stopped, which is what anybody looks for.
+const DEBUG_OUTPUT_LINES: usize = 500;
+
+/// One debug session: an adapter, what it was pointed at, and what it has said since.
+///
+/// At most one exists at a time. That is a decision and not a limitation of the wire: a second
+/// session would need a second stopped line, and the editor has exactly one idea of where a
+/// program is stopped — the same [`App::stopped_at`] the interpreter debugger has always used.
+pub struct DebugSession {
+    client: crate::dap::Client,
+    /// What is being debugged. Kept because nothing else remembers it once the launch has gone
+    /// out, and the sentence said when the session ends names it.
+    program: PathBuf,
+    /// The arguments it was launched with — none, until something can ask for them — and the
+    /// directory it runs in, which is the project root.
+    ///
+    /// Both are held rather than dropped after the launch because they are what the session *is*:
+    /// wave 3's panel says what is being debugged, and a restart is the same three answers sent
+    /// again. Nothing reads them yet, which is why the compiler is told so here rather than left
+    /// to warn about a field somebody would then be tempted to delete.
+    #[allow(dead_code, reason = "the panel names them, and a restart re-sends them")]
+    args: Vec<String>,
+    #[allow(dead_code, reason = "the panel names them, and a restart re-sends them")]
+    cwd: PathBuf,
+    /// The thread the debuggee is stopped on, which is the thread every step names. `None` while
+    /// it runs — which is also what makes "not stopped" a question this can answer honestly
+    /// rather than a step sent into a running program.
+    thread: Option<i64>,
+    /// Which files the adapter has been told about.
+    ///
+    /// Kept because `setBreakpoints` replaces one file's whole list: a file whose last breakpoint
+    /// is taken off leaves [`App::breakpoints`] entirely, and an adapter never told about the
+    /// empty list would go on stopping at a breakpoint the editor no longer draws.
+    published: std::collections::BTreeSet<PathBuf>,
+    /// The `stackTrace` this session is waiting on to learn where it stopped, when the stopped
+    /// event did not say. Held by seq so that an answer to some older question is ignored rather
+    /// than read as this one's.
+    awaiting_place: Option<i64>,
+    /// The `threads` asked for when a stop named no thread at all, which the protocol allows.
+    awaiting_thread: Option<i64>,
+    /// What the debuggee and the adapter have printed, oldest first, capped at
+    /// [`DEBUG_OUTPUT_LINES`]. The category — `stdout`, `stderr`, `console` — travels with each
+    /// line rather than being reduced to a flag here: which of them is worth showing is a
+    /// decision about the panel, and the panel is wave 3.
+    output: std::collections::VecDeque<(String, String)>,
+}
+
+impl DebugSession {
+    fn new(client: crate::dap::Client, program: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
+        DebugSession {
+            client,
+            program,
+            args,
+            cwd,
+            thread: None,
+            published: std::collections::BTreeSet::new(),
+            awaiting_place: None,
+            awaiting_thread: None,
+            output: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Remembers one line the session printed, dropping the oldest once the ring is full.
+    fn remember_output(&mut self, category: String, text: String) {
+        // Split, because an adapter is entitled to hand over a whole paragraph in one event and a
+        // ring of "lines" that holds twelve of them at once is not a ring of lines.
+        for line in text.lines() {
+            if self.output.len() >= DEBUG_OUTPUT_LINES {
+                self.output.pop_front();
+            }
+            self.output.push_back((category.clone(), line.to_string()));
+        }
+    }
+}
+
+/// Which of the five things a running session can be asked to do. Menu rows and palette entries
+/// come in as [`MenuAction`]s; this is the same five with everything that is not about the
+/// debugger taken off, so the one place that checks "is there a session, and is it stopped"
+/// answers for all of them at once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DebugVerb {
+    Continue,
+    StepOver,
+    StepIn,
+    StepOut,
+}
+
+/// The `[package] name` out of a `Cargo.toml`, when there is one.
+///
+/// Parsed with the `toml` crate the settings already depend on rather than scanned for a line
+/// starting with `name` — a workspace root has a `[workspace] members` list with names all over
+/// it, and the hand-rolled version of this reads the wrong one on the first real project it meets.
+fn cargo_package_name(text: &str) -> Option<String> {
+    // A `Table` and not a `Value`: since toml 1.0 a bare `Value` parses one *value* and refuses a
+    // whole document, so the obvious spelling of this line reads every manifest ever written as
+    // broken — silently, since a manifest that will not parse and a manifest with no package in
+    // it are the same "no guess" from out here.
+    let parsed: toml::Table = text.parse().ok()?;
+    parsed.get("package")?.get("name")?.as_str().map(str::to_string)
+}
+
+/// What *Debug ▸ Start* runs, in the order the design lays out.
+///
+/// The remembered answer first, because it is an answer somebody gave; then the Cargo guess,
+/// which is right for the projects this editor is written in and written for; then the project
+/// root, which is not an executable and is not meant to be — it is the honest "I do not know",
+/// and the refusal that follows names it rather than starting something at random.
+fn debuggee_for(root: &Path, remembered: Option<&Path>) -> PathBuf {
+    if let Some(remembered) = remembered {
+        return if remembered.is_absolute() { remembered.to_path_buf() } else { root.join(remembered) };
+    }
+    if let Some(name) = std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .as_deref()
+        .and_then(cargo_package_name)
+    {
+        // The debug profile, because this is a debugger: a release binary is compiled without
+        // the line tables every breakpoint here is expressed in.
+        return root.join("target").join("debug").join(name);
+    }
+    root.to_path_buf()
+}
+
+/// The adapter a settings line asks for, or `None` where the line is empty and discovery should
+/// have its turn.
+///
+/// Split on spaces rather than parsed as a shell would, exactly as a language server's command
+/// line is split in `lsp::server_for`: a path with a space in it wants the quoting dialect this
+/// codebase has decided not to invent, and half a quoting dialect is worse than none.
+fn configured_adapter(setting: &str) -> Option<crate::dap::AdapterCommand> {
+    let argv: Vec<String> = setting.split_whitespace().map(str::to_string).collect();
+    crate::dap::AdapterCommand::from_argv(&argv)
+}
+
+/// What to tell the adapter about, given what it has already been told and where the breakpoints
+/// are now.
+///
+/// Every file with breakpoints in it, and — the half that is easy to leave out — every file it
+/// was told about that has none any more, with an empty list. `setBreakpoints` replaces one
+/// file's whole set, so a file that simply stops being mentioned keeps the breakpoints it had:
+/// the user takes the last one off, the gutter clears, and the program still stops there.
+fn breakpoints_to_publish(
+    published: &std::collections::BTreeSet<PathBuf>,
+    current: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+) -> Vec<(PathBuf, Vec<usize>)> {
+    // Ordered, because two runs of the same state have to send the same thing in the same order —
+    // a HashMap's order is not a fact about the breakpoints.
+    let mut out: std::collections::BTreeMap<PathBuf, Vec<usize>> = current
+        .iter()
+        .map(|(path, lines)| (path.clone(), lines.iter().copied().collect()))
+        .collect();
+    for path in published {
+        out.entry(path.clone()).or_default();
+    }
+    out.into_iter().collect()
+}
+
 pub const PRESET_CLASSIC: LayoutPreset = LayoutPreset {
     show_sidebar: true,
     show_terminal: true,
@@ -3196,6 +3372,8 @@ impl App {
             inspector: None,
             breakpoints: std::collections::HashMap::new(),
             stopped_at: None,
+            debug: None,
+            debuggee: None,
             show_goto: false,
             goto_input: String::new(),
             show_new_entry: false,
@@ -4667,9 +4845,18 @@ impl App {
 
     /// Puts a breakpoint on the cursor's line, or takes it off.
     ///
-    /// Written to a file for the session's hook to apply, never typed at the prompt: `dbstop`
-    /// works through `evalin` from inside the hook — measured — so setting a breakpoint leaves
-    /// no line in the transcript that the user did not write.
+    /// For the interpreter debuggers this is written to a file for the session's hook to apply,
+    /// never typed at the prompt: `dbstop` works through `evalin` from inside the hook —
+    /// measured — so setting a breakpoint leaves no line in the transcript that the user did not
+    /// write. For a debug adapter it goes straight down the wire. Either way the map here is the
+    /// one set of breakpoints the editor has, and both backends are told about all of it.
+    ///
+    /// It used to refuse every file that was not `.m` or `.py`, which was the truth while Octave
+    /// and Python were the only debuggers there were. A breakpoint in a `.c` or a `.rs` is now
+    /// exactly what *Debug ▸ Start* stops on, and a gate on the extension would have made the
+    /// compiled debugger a debugger with nowhere to stop. What is still refused is a buffer with
+    /// no file: a breakpoint is a place in a file, and neither backend can be told about one that
+    /// does not exist yet.
     fn toggle_breakpoint(&mut self) {
         let lang = self.settings.lang;
         let editor = self.editor();
@@ -4677,10 +4864,6 @@ impl App {
             self.status_message = i18n::msg_break_unsaved(lang);
             return;
         };
-        if crate::session::Language::of_path(&path).is_none() {
-            self.status_message = i18n::msg_break_no_language(lang, &file_ext(&path));
-            return;
-        }
         let line = editor.cursor_line + 1;
         let lines = self.breakpoints.entry(path.clone()).or_default();
         let on = if lines.remove(&line) {
@@ -4700,14 +4883,25 @@ impl App {
     /// Leaves the whole set where the hook will find it. The whole set rather than a change,
     /// because the hook clears and re-applies: a session that missed one message would otherwise
     /// disagree with the editor about where the breakpoints are, silently and forever.
+    ///
+    /// The debug adapter is told from here too, and from here on purpose: this is the moment the
+    /// breakpoints change, and hanging the second backend off the same moment is what makes a
+    /// breakpoint toggled while a program is stopped reach the adapter without anybody having to
+    /// remember a second call.
     fn publish_breakpoints(&mut self) {
+        self.publish_breakpoints_to_adapter();
         let Some(watch) = self.figures.as_ref() else { return };
         let path = break_path_beside(&watch.path);
         // By function name, which is what `dbstop` takes and what a `.m` file is known by, and
         // by path, which is what pdb takes. Each language reads the field it can use.
+        //
+        // Only the files an interpreter could stop in. The map is wider than it was — a
+        // breakpoint in a `.c` is a real breakpoint now — and handing pdb a path it has never
+        // heard of is an error raised inside somebody's hook, in a session that was doing fine.
         let wanted: Vec<serde_json::Value> = self
             .breakpoints
             .iter()
+            .filter(|(file, _)| crate::session::Language::of_path(file).is_some())
             .flat_map(|(file, lines)| {
                 let name = file
                     .file_stem()
@@ -4768,6 +4962,297 @@ impl App {
     /// The breakpoints on a file, for the renderer.
     pub fn breakpoints_in(&self, path: Option<&Path>) -> Option<&std::collections::BTreeSet<usize>> {
         self.breakpoints.get(path?)
+    }
+
+    /// Tells the running adapter, if there is one, where the breakpoints are now.
+    ///
+    /// Nothing at all when no session is running, which is the common case and costs a branch.
+    /// Everything when there is one — including the files whose last breakpoint has just been
+    /// taken off; see [`breakpoints_to_publish`] for why those are the ones that bite.
+    fn publish_breakpoints_to_adapter(&mut self) {
+        let Some(session) = self.debug.as_mut() else { return };
+        for (path, lines) in breakpoints_to_publish(&session.published, &self.breakpoints) {
+            session.client.set_breakpoints(&path, &lines);
+            if lines.is_empty() {
+                session.published.remove(&path);
+            } else {
+                session.published.insert(path);
+            }
+        }
+    }
+
+    // ---- The debugger -------------------------------------------------------------------------
+
+    /// Everything the adapter has said since the last frame.
+    ///
+    /// Beside `poll_mcp` and `poll_lsp` in the frame loop, and shaped like them: drained whole,
+    /// acted on one event at a time, and never waited for. The events are taken out of the client
+    /// before they are applied because applying one may end the session — an `exited` drops the
+    /// whole [`DebugSession`], and a loop still holding a borrow of it could not.
+    pub fn poll_debug(&mut self) {
+        let Some(session) = self.debug.as_mut() else { return };
+        let events = session.client.poll();
+        for event in events {
+            self.apply_debug_event(event);
+        }
+    }
+
+    /// What one event from the adapter means to the editor.
+    fn apply_debug_event(&mut self, event: crate::dap::Event) {
+        let lang = self.settings.lang;
+        // Nothing here came from a keypress, so nothing else has marked the screen out of date,
+        // and nearly every event below changes something a person can see — a status line at the
+        // very least. A line of output is the exception and is excluded on purpose: a program
+        // printing in a loop must not cost a frame each time while nothing is drawn from it.
+        if !matches!(event, crate::dap::Event::Output { .. }) {
+            self.mark_dirty();
+        }
+        match event {
+            // The client answers this one itself: the breakpoints and `configurationDone` go out
+            // from inside `dap::Client::poll` the moment it arrives. There is nothing for a person
+            // to see, and a status line saying "initialized" would be the editor reading its own
+            // protocol out loud.
+            crate::dap::Event::Initialized => {}
+            // What the adapter made of one file's breakpoints. Drawn differently by wave 3's
+            // panel; here the gutter already shows where they were asked for, and a line saying
+            // so on every start would talk over the reason the session was started.
+            crate::dap::Event::Breakpoints { .. } => {}
+            crate::dap::Event::Stopped { thread, reason, description, path, line } => {
+                // A stop that named no thread leaves whatever was there: the protocol allows the
+                // omission and means "everything stopped", and forgetting the thread over it
+                // would turn the next step into a refusal.
+                if let (Some(session), Some(thread)) = (self.debug.as_mut(), thread) {
+                    session.thread = Some(thread);
+                }
+                match (path, line) {
+                    // The adapter volunteered the place, which several do, and then there is
+                    // nothing to ask for.
+                    (Some(path), Some(line)) => self.jump_to_stopped_line(path, line),
+                    // And where it did not, the place is a question — asked here, answered a
+                    // frame or two later by `StackTrace` below.
+                    _ => self.ask_where_it_stopped(),
+                }
+                // The adapter's own sentence when it wrote one, and the protocol's word for the
+                // reason when it did not: "breakpoint", "step", "exception". Both are more use
+                // than a fixed "stopped", which is the one thing the reader can already see.
+                let why = description.unwrap_or(reason);
+                self.status_message = i18n::msg_debugger_stopped(lang, &why);
+            }
+            crate::dap::Event::Continued { .. } => {
+                self.clear_stopped_line();
+                self.status_message = i18n::msg_debug_running(lang);
+            }
+            crate::dap::Event::Exited { code } => {
+                self.end_debug_session();
+                self.status_message = i18n::msg_debugger_exited(lang, code);
+            }
+            crate::dap::Event::Terminated => {
+                self.end_debug_session();
+                self.status_message = i18n::msg_debugger_over(lang);
+            }
+            crate::dap::Event::Output { category, text } => {
+                if let Some(session) = self.debug.as_mut() {
+                    session.remember_output(category, text);
+                }
+            }
+            crate::dap::Event::Threads { id, threads } => {
+                let Some(session) = self.debug.as_mut() else { return };
+                if session.awaiting_thread != Some(id) {
+                    return;
+                }
+                session.awaiting_thread = None;
+                // The first thread, because a stop that named none is a stop where every thread
+                // is stopped, and the panel that lets somebody choose another one is wave 3.
+                session.thread = threads.first().map(|t| t.id);
+                self.ask_where_it_stopped();
+            }
+            crate::dap::Event::StackTrace { id, frames } => {
+                let Some(session) = self.debug.as_mut() else { return };
+                if session.awaiting_place != Some(id) {
+                    return;
+                }
+                session.awaiting_place = None;
+                // The innermost frame that has a file. A stop inside a library with no symbols
+                // has frames and nowhere to point at, and the first frame that does is where the
+                // reader's own code is — which is what they wanted to look at.
+                let Some((path, line)) =
+                    frames.iter().find_map(|f| f.path.clone().map(|path| (path, f.line)))
+                else {
+                    return;
+                };
+                self.jump_to_stopped_line(path, line);
+            }
+            // The three questions nothing here asks yet: they are the panel's, and the panel is
+            // wave 3. Named rather than swept up in a `_`, so that the day one of them is asked
+            // the compiler is the thing that notices nobody reads the answer.
+            crate::dap::Event::Scopes { .. }
+            | crate::dap::Event::Variables { .. }
+            | crate::dap::Event::Evaluated { .. } => {}
+            crate::dap::Event::Failed { command, message, .. } => {
+                self.status_message = i18n::msg_debugger_refused(lang, &command, &message);
+            }
+            crate::dap::Event::Dead { reason } => {
+                self.end_debug_session();
+                self.status_message = i18n::msg_debugger_dead(lang, &reason);
+            }
+        }
+    }
+
+    /// Asks the adapter where the program is, because the stop did not say.
+    fn ask_where_it_stopped(&mut self) {
+        let Some(session) = self.debug.as_mut() else { return };
+        match session.thread {
+            Some(thread) => session.awaiting_place = session.client.stack_trace(thread),
+            // A stop attributed to no thread is allowed by the protocol and means every thread
+            // stopped. Asking which threads exist is the honest next question; inventing a thread
+            // id to step with would be the editor telling the adapter something it never said.
+            None => session.awaiting_thread = session.client.threads(),
+        }
+    }
+
+    /// Follows the adapter into the file the program stopped in.
+    ///
+    /// The same two things the interpreter debugger does, in the same order and through the same
+    /// machinery: the line is remembered in [`Self::stopped_at`], which is what the renderer marks
+    /// in the gutter and highlights across the row, and the file is *shown* rather than opened —
+    /// the keyboard stays exactly where it was, because a session that stole the cursor mid-word
+    /// would put the next thing typed into the file being debugged.
+    fn jump_to_stopped_line(&mut self, path: PathBuf, line: usize) {
+        // Adapters are allowed to answer with a path relative to the cwd they were started in,
+        // which is the project root — the same root a relative path in the file tree is read
+        // against, so resolving it here is not a guess.
+        let path = if path.is_absolute() { path } else { self.root.join(path) };
+        self.stopped_at = Some((path.clone(), line));
+        self.show_beside_without_focus(path, Some(line), None);
+    }
+
+    /// The program is running again, so the mark on the line stops being true.
+    fn clear_stopped_line(&mut self) {
+        self.stopped_at = None;
+        if let Some(session) = self.debug.as_mut() {
+            session.thread = None;
+        }
+        self.mark_dirty();
+    }
+
+    /// Drops the session and everything drawn on its behalf.
+    ///
+    /// Dropping the [`dap::Client`] is what ends the adapter: its `Drop` disconnects and then
+    /// makes sure the process is gone, which is the same bargain the language server client
+    /// makes — an orphaned `lldb-dap` still holding a stopped process would be a far worse
+    /// outcome than an impolite exit.
+    fn end_debug_session(&mut self) {
+        self.clear_stopped_line();
+        self.debug = None;
+    }
+
+    /// What this project's *Debug ▸ Start* would run. See [`debuggee_for`].
+    fn debuggee_to_run(&self) -> PathBuf {
+        debuggee_for(&self.root, self.debuggee.as_deref())
+    }
+
+    /// What to call the debuggee in a sentence: its path inside the project, or the whole of it
+    /// where that comes to nothing — which is what the project root itself does, and the root is
+    /// exactly what the guess falls back to when it has nothing better.
+    fn debuggee_name(&self, program: &Path) -> String {
+        let short = self.mcp_short(program);
+        if short.is_empty() { program.to_string_lossy().into_owned() } else { short }
+    }
+
+    /// Starts a debug session on this project's executable.
+    ///
+    /// There is no prompt in front of this yet, and that is a gap rather than a decision: the
+    /// design asks for the guess to be offered in a single-line box with the answer editable, and
+    /// every such box in this editor is drawn by `ui.rs`, which this wave does not open. So the
+    /// guess is used as it stands and the status line names exactly what was started, the
+    /// workspace file remembers it, and a project whose executable is somewhere else is one line
+    /// of that file away from being right. The prompt arrives with the panel.
+    fn debug_start(&mut self) {
+        let lang = self.settings.lang;
+        if self.debug.is_some() {
+            self.status_message = i18n::msg_debugger_already_running(lang);
+            return;
+        }
+        // The setting first, then the search. A machine with `lldb-dap` on its `PATH` and a line
+        // in settings.toml pointing at something else means the line: discovery is the
+        // convenience, and a configured adapter that lost to a discovered one would be a setting
+        // that does nothing on exactly the machines it was written for.
+        let Some(adapter) =
+            configured_adapter(&self.settings.debug_adapter).or_else(crate::dap::find_adapter)
+        else {
+            self.status_message = i18n::msg_debugger_no_adapter(lang, std::env::consts::OS);
+            return;
+        };
+        let program = self.debuggee_to_run();
+        if !program.is_file() {
+            self.status_message = i18n::msg_debugger_no_debuggee(lang, &self.debuggee_name(&program));
+            return;
+        }
+        let cwd = self.root.clone();
+        let mut client = match crate::dap::Client::start(&adapter, &cwd) {
+            Ok(client) => client,
+            Err(e) => {
+                self.status_message = i18n::msg_debugger_adapter_failed(lang, &e);
+                return;
+            }
+        };
+        // Arguments are none and the working directory is the project root. Both are what the
+        // prompt above would have carried, and both are what the design says the prompt should
+        // ask for — so they are written down here as the answer given on the user's behalf,
+        // rather than as fields nobody ever filled in.
+        client.launch(&program, &[], &cwd);
+        self.debug = Some(DebugSession::new(client, program.clone(), Vec::new(), cwd));
+        // Every breakpoint in the editor, at once. The client holds them until the adapter says
+        // it is ready to be configured, so this is early rather than too early.
+        self.publish_breakpoints_to_adapter();
+        self.debuggee = Some(program.clone());
+        self.status_message = i18n::msg_debugger_started(lang, &adapter.name(), &self.debuggee_name(&program));
+    }
+
+    /// Ends the session, taking the debuggee with it.
+    ///
+    /// `terminateDebuggee: true`, because the program was started by this editor for this
+    /// session: leaving a stopped process behind when the thing that could resume it has gone is
+    /// how a machine collects debuggees nobody can see.
+    fn debug_stop(&mut self) {
+        let lang = self.settings.lang;
+        let Some(session) = self.debug.as_mut() else {
+            self.status_message = i18n::msg_debugger_no_session(lang);
+            return;
+        };
+        session.client.stop();
+        // Named while it is still here to name: `end_debug_session` drops it.
+        let program = session.program.clone();
+        let program = self.debuggee_name(&program);
+        self.end_debug_session();
+        self.status_message = i18n::msg_debugger_ended(lang, &program);
+    }
+
+    /// Continues, or takes one step of whichever size was asked for.
+    ///
+    /// One place for all four, because the two refusals in front of them are the same two
+    /// whichever was asked for: there has to be a session, and it has to be stopped. A step sent
+    /// into a running program is a step the adapter fails, which the user then hears about as a
+    /// refusal in the adapter's words rather than in an answer they can act on.
+    fn debug_step(&mut self, verb: DebugVerb) {
+        let lang = self.settings.lang;
+        let Some(session) = self.debug.as_mut() else {
+            self.status_message = i18n::msg_debugger_no_session(lang);
+            return;
+        };
+        let Some(thread) = session.thread else {
+            self.status_message = i18n::msg_debugger_not_stopped(lang);
+            return;
+        };
+        // The seq each of these returns is the handle for its answer, and none of them has an
+        // answer worth showing: a step that worked is announced by the `stopped` event that
+        // follows it, and one that did not arrives as `Failed`.
+        let _ = match verb {
+            DebugVerb::Continue => session.client.continue_(thread),
+            DebugVerb::StepOver => session.client.next(thread),
+            DebugVerb::StepIn => session.client.step_in(thread),
+            DebugVerb::StepOut => session.client.step_out(thread),
+        };
     }
 
     // ---- Looking inside a variable ----------------------------------------------------------
@@ -10367,6 +10852,10 @@ impl App {
         self.root = new_root;
         self.available_venvs = available_venvs(&self.root, &self.settings.registered_venvs);
         self.project_settings = settings::ProjectSettings::load(&self.root);
+        // The executable belonged to the project that was open, so it is left with it. A guess
+        // carried into another folder would offer to debug a binary from somewhere else entirely,
+        // which is the one wrong answer a filled-in guess can give.
+        self.debuggee = None;
         // The sweep that lands next belongs to another repository, and comparing it with this
         // one's would read as "everything in the new project has just been written". Forgotten
         // rather than replaced: the first sweep of a folder has nothing to be a difference from.
@@ -10709,6 +11198,7 @@ impl App {
             open_files: self.editors.iter().filter_map(|e| e.path.as_ref()).map(canonical).collect(),
             active_file: self.editors.get(self.active_editor).and_then(|e| e.path.as_ref()).map(canonical),
             active_venv: self.settings.active_venv.clone(),
+            debuggee: self.debuggee.clone(),
             active_terminal: self.active_terminal,
             layout: crate::workspace::WorkspaceLayout {
                 show_sidebar: self.settings.show_sidebar,
@@ -10771,6 +11261,10 @@ impl App {
         self.settings.clamp_layout();
         self.split_view = ws.layout.split_view;
         self.settings.active_venv = ws.active_venv.clone();
+        // Before the files are opened and before anything is run: the workspace is where this
+        // project's answer to "what do I debug" lives, and a session started right after opening
+        // one should find it already filled in.
+        self.debuggee = ws.debuggee.clone();
 
         // Unsaved work outlives a workspace switch: dirty buffers stay open alongside the
         // workspace's own files. Everything else makes way.
@@ -12921,6 +13415,12 @@ impl App {
             MenuAction::RunSelection => self.run_selection(),
             MenuAction::SendToAgent => self.send_context_to_agent(),
             MenuAction::ToggleBreakpoint => self.toggle_breakpoint(),
+            MenuAction::DebugStart => self.debug_start(),
+            MenuAction::DebugStop => self.debug_stop(),
+            MenuAction::DebugContinue => self.debug_step(DebugVerb::Continue),
+            MenuAction::DebugStepOver => self.debug_step(DebugVerb::StepOver),
+            MenuAction::DebugStepIn => self.debug_step(DebugVerb::StepIn),
+            MenuAction::DebugStepOut => self.debug_step(DebugVerb::StepOut),
             MenuAction::ShowWorkspacePanel => self.show_workspace_panel(),
             MenuAction::InspectVariable => self.open_inspector_picker(),
             MenuAction::ToggleSplitView => self.toggle_split_view(),
@@ -15865,6 +16365,104 @@ mod tests {
         assert_eq!(empty_state_focus(false, true), Focus::Terminal, "then a terminal that is up");
         // Nothing else on screen: keys go to the empty frame, which does nothing with them.
         assert_eq!(empty_state_focus(false, false), Focus::Editor);
+    }
+
+    /// The guess *Debug ▸ Start* fills in, from the sources the design names and in its order.
+    ///
+    /// The Cargo half is read with the `toml` crate rather than scanned for a line beginning with
+    /// `name`, and this fixture is why: a workspace root lists its members by name, and the first
+    /// `name =` in the file belongs to one of them. The naive reader debugs the wrong crate on
+    /// the first real project it meets.
+    #[test]
+    fn the_debuggee_guess_reads_cargo_before_it_gives_up() {
+        let dir = setup_dir("debuggee_guess");
+        // No Cargo.toml at all: the root itself, which is not an executable and is not pretending
+        // to be one — it is the "I do not know" the refusal then names.
+        assert_eq!(debuggee_for(&dir, None), dir);
+
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/other\"]\n\n[package]\nname = \"clee\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            debuggee_for(&dir, None),
+            dir.join("target").join("debug").join("clee"),
+            "the package's own name, not the first name in the file"
+        );
+
+        // An answer somebody gave wins over any guess, and a relative one is read against the
+        // project root — which is where they were standing when they wrote it.
+        let elsewhere = PathBuf::from("/opt/build/thing");
+        assert_eq!(debuggee_for(&dir, Some(&elsewhere)), elsewhere);
+        assert_eq!(
+            debuggee_for(&dir, Some(Path::new("build/thing"))),
+            dir.join("build").join("thing")
+        );
+
+        // A Cargo.toml with no package section is a workspace manifest and names nothing to run.
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(debuggee_for(&dir, None), dir);
+        // And a broken one is not a reason to guess at the text: it is a reason to have no guess.
+        std::fs::write(dir.join("Cargo.toml"), "[package\nname = ").unwrap();
+        assert_eq!(debuggee_for(&dir, None), dir);
+    }
+
+    /// What a running adapter is told when the breakpoints change, and the half that bites.
+    ///
+    /// `setBreakpoints` replaces one file's whole list, so a file that simply stops being
+    /// mentioned keeps every breakpoint it had. Taking the last one off a file empties the entry
+    /// out of `App::breakpoints` entirely — so without the published set, the gutter clears and
+    /// the program still stops there, which is the worst kind of wrong: invisible.
+    #[test]
+    fn taking_the_last_breakpoint_off_a_file_is_still_news_for_the_adapter() {
+        let one = PathBuf::from("/p/src/main.rs");
+        let two = PathBuf::from("/p/src/lib.rs");
+        let mut current: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> =
+            std::collections::HashMap::new();
+        current.insert(one.clone(), [12usize, 4].into_iter().collect());
+
+        // Nothing published yet: one file, and its lines in order rather than in whatever order
+        // they were typed.
+        let published = std::collections::BTreeSet::new();
+        assert_eq!(
+            breakpoints_to_publish(&published, &current),
+            vec![(one.clone(), vec![4, 12])]
+        );
+
+        // Both files known to the adapter, and one of them now empty: it is named with an empty
+        // list, which is how the adapter is told to forget it.
+        let published: std::collections::BTreeSet<PathBuf> =
+            [one.clone(), two.clone()].into_iter().collect();
+        assert_eq!(
+            breakpoints_to_publish(&published, &current),
+            vec![(two.clone(), Vec::new()), (one.clone(), vec![4, 12])],
+            "sorted by path, so two runs of the same state send the same thing"
+        );
+
+        // And with nothing left anywhere, every file the adapter knows is cleared rather than
+        // left behind.
+        assert_eq!(
+            breakpoints_to_publish(&published, &std::collections::HashMap::new()),
+            vec![(two, Vec::new()), (one, Vec::new())]
+        );
+    }
+
+    /// The settings override is a command line, and an empty one is not an adapter — it is the
+    /// absence of an answer, which is what lets discovery have its turn.
+    #[test]
+    fn the_configured_adapter_is_a_command_line_or_it_is_nothing() {
+        assert_eq!(configured_adapter(""), None);
+        assert_eq!(configured_adapter("   "), None, "whitespace is not a program name");
+        let gdb = configured_adapter("gdb -i=dap").expect("a program and its argument");
+        assert_eq!(gdb.program, "gdb");
+        assert_eq!(gdb.args, vec!["-i=dap".to_string()]);
+        assert_eq!(gdb.name(), "gdb");
+        // A full path is what somebody with an adapter outside PATH writes, and the name in a
+        // sentence is the program rather than the path it was found at.
+        let mine = configured_adapter("/opt/llvm/bin/lldb-dap").expect("just a program");
+        assert!(mine.args.is_empty());
+        assert_eq!(mine.name(), "lldb-dap");
     }
 
     fn make_venv(root: &std::path::Path, name: &str) -> PathBuf {

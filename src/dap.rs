@@ -29,13 +29,10 @@
 //! optional; the session going away while a pane is open is the ordinary end of every debug
 //! session there has ever been.
 
-// Wave 1 is the protocol module alone: the application does not call any of this until wave 2
-// wires the Debug menu, the panel and the breakpoint sync to it. Every method below is reached
-// by the tests at the bottom of this file and by nothing else yet, which is exactly what
-// `dead_code` is for and exactly why it is wrong here — the alternative would be to leave the
-// warning standing for a release and teach everybody to ignore the one place the compiler is
-// still allowed to speak.
-#![allow(dead_code)]
+// The module-level `allow(dead_code)` wave 1 carried is gone: the Debug menu, the breakpoint sync
+// and the stopped-line jump now call this file, so the compiler can be trusted with it again. The
+// few things still unreached are marked one at a time, each saying which wave reaches them —
+// which is the difference between a silence with a reason and a silence over the whole file.
 
 use crate::lsp::{frame, read_message};
 use serde_json::{json, Value};
@@ -395,6 +392,13 @@ enum Incoming {
 /// What one request still out was asking. Kept on the client rather than shared with the reader
 /// thread the way `lsp.rs` shares its map, because here it is only ever read in one place: the
 /// thread forwards, and [`Client::poll`] matches.
+///
+/// Three of its variants and one of its fields belong to questions only wave 3's panel asks —
+/// scopes, variables and watches — so the compiler cannot see them constructed yet. Marked here,
+/// on the enum, rather than by putting the whole file back under an `allow`: this says which
+/// silence is expected and why, where a file-wide one said only that somebody had stopped
+/// listening.
+#[allow(dead_code, reason = "scopes, variables and evaluate are asked by wave 3's debug panel")]
 enum Ask {
     Initialize,
     Launch,
@@ -753,6 +757,7 @@ impl Client {
     }
 
     /// Stops a running debuggee where it happens to be.
+    #[allow(dead_code, reason = "part of the protocol vocabulary; no verb offers it yet")]
     pub fn pause(&mut self, thread: i64) -> Option<i64> {
         self.step("pause", thread)
     }
@@ -775,12 +780,14 @@ impl Client {
     }
 
     /// Asks what groups of variables one frame has. Answered by [`Event::Scopes`].
+    #[allow(dead_code, reason = "wave 3's debug panel reads a frame's scopes")]
     pub fn scopes(&mut self, frame: i64) -> Option<i64> {
         self.request("scopes", json!({"frameId": frame}), Ask::Scopes)
     }
 
     /// Asks what is inside one reference — a scope's contents, or a struct's fields. Answered by
     /// [`Event::Variables`].
+    #[allow(dead_code, reason = "wave 3's debug panel expands a scope")]
     pub fn variables(&mut self, reference: i64) -> Option<i64> {
         self.request("variables", json!({"variablesReference": reference}), Ask::Variables)
     }
@@ -791,6 +798,7 @@ impl Client {
     ///
     /// `frame` is optional because the protocol allows the question without one, and a global
     /// expression asked before anything has stopped is a fair question.
+    #[allow(dead_code, reason = "wave 3's debug panel evaluates the watches")]
     pub fn evaluate(&mut self, expression: &str, frame: Option<i64>) -> Option<i64> {
         let mut arguments = json!({"expression": expression, "context": "watch"});
         if let (Some(object), Some(frame)) = (arguments.as_object_mut(), frame) {
@@ -1013,21 +1021,25 @@ impl Client {
 
     /// What the adapter said it can do. Settled during the handshake and remembered, because it
     /// decides which questions are worth asking.
+    #[allow(dead_code, reason = "wave 3's panel asks what the adapter can do before offering it")]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
     }
 
     /// Whether the handshake has landed.
+    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
     pub fn handshook(&self) -> bool {
         self.handshook
     }
 
     /// Whether the adapter has said it is ready to be configured.
+    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
     pub fn announced(&self) -> bool {
         self.announced
     }
 
     /// Whether this session is over, one way or another.
+    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
     pub fn is_dead(&self) -> bool {
         self.dead
     }

@@ -109,6 +109,13 @@ pub enum Key {
     ItemRunSelection,
     ItemSendToAgent,
     ItemToggleBreakpoint,
+    MenuDebug,
+    ItemDebugStart,
+    ItemDebugStop,
+    ItemDebugContinue,
+    ItemDebugStepOver,
+    ItemDebugStepIn,
+    ItemDebugStepOut,
     ItemShowWorkspacePanel,
     ItemInspectVariable,
     ItemRunTarget,
@@ -475,6 +482,28 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemShowWorkspacePanel) => "Mostra le variabili della sessione",
         (Lang::En, ItemToggleBreakpoint) => "Breakpoint on this line",
         (Lang::It, ItemToggleBreakpoint) => "Breakpoint su questa riga",
+
+        // Its own menu, beside Run rather than inside it: running a file and debugging a compiled
+        // program are two errands, and the six rows below would have doubled the Run menu to say
+        // so. Not one of them has a chord — see the comment on the menu itself.
+        (Lang::En, MenuDebug) => "Debug",
+        (Lang::It, MenuDebug) => "Debug",
+        // "Start" and not "Run": what it starts is a debugger attached to this project's
+        // executable, and Run already means handing a file to an interpreter.
+        (Lang::En, ItemDebugStart) => "Start debugging",
+        (Lang::It, ItemDebugStart) => "Avvia il debug",
+        (Lang::En, ItemDebugStop) => "Stop debugging",
+        (Lang::It, ItemDebugStop) => "Ferma il debug",
+        (Lang::En, ItemDebugContinue) => "Continue",
+        (Lang::It, ItemDebugContinue) => "Continua",
+        (Lang::En, ItemDebugStepOver) => "Step over",
+        (Lang::It, ItemDebugStepOver) => "Passo sopra",
+        (Lang::En, ItemDebugStepIn) => "Step into",
+        (Lang::It, ItemDebugStepIn) => "Passo dentro",
+        // "Step out", and not "finish": the word on the wire is `stepOut` and the word in gdb is
+        // `finish`, and a menu that used the second would be naming a command nobody types here.
+        (Lang::En, ItemDebugStepOut) => "Step out",
+        (Lang::It, ItemDebugStepOut) => "Passo fuori",
         (Lang::En, ItemInspectVariable) => "Look inside a variable...",
         (Lang::It, ItemInspectVariable) => "Guarda dentro una variabile...",
 
@@ -1856,13 +1885,6 @@ pub fn msg_workspace_panel(lang: Lang) -> String {
     }
 }
 
-pub fn msg_break_no_language(lang: Lang, ext: &str) -> String {
-    match lang {
-        Lang::En => format!("No debugger for .{ext} — this works in Octave and Python"),
-        Lang::It => format!("Nessun debugger per .{ext} — funziona con Octave e Python"),
-    }
-}
-
 /// Says where, and what to type next. The stepping commands are the one part of this the
 /// editor does not drive — `dbstep` from inside Octave's hook returns without an error and
 /// without moving, measured, and Python's stepping belongs to pdb's own prompt — so the
@@ -1881,6 +1903,157 @@ pub fn msg_debug_running(lang: Lang) -> String {
     match lang {
         Lang::En => "Running again",
         Lang::It => "Riparte",
+    }
+    .to_string()
+}
+
+// ---- The debug adapter ---------------------------------------------------------------------
+//
+// Separate from the four sentences above, which belong to the interpreter debuggers, because
+// they are said about a different kind of session — a compiled program under lldb-dap or gdb.
+// `msg_debug_running` is the one they share, and shared on purpose: a program that has started
+// moving again is the same news whichever debugger is watching it.
+
+/// What to install, in the words of the platform the reader is on.
+///
+/// `os` is `std::env::consts::OS` at the call site rather than read here, so all three sentences
+/// can be tested on one machine — a message that is only ever seen on the platform nobody
+/// building this has is exactly the message that goes wrong.
+///
+/// The list of adapters comes from [`crate::dap::ADAPTERS_WANTED`], which is the list
+/// `find_adapter` actually looks for: two lists would drift, and the one that drifted would be
+/// this one.
+pub fn msg_debugger_no_adapter(lang: Lang, os: &str) -> String {
+    let wanted = crate::dap::ADAPTERS_WANTED.join(", ");
+    match (lang, os) {
+        (Lang::En, "macos") => format!(
+            "No debug adapter ({wanted}): lldb-dap comes with the Xcode command-line tools, xcode-select --install"
+        ),
+        (Lang::En, "linux") => format!(
+            "No debug adapter ({wanted}): install lldb-dap from your LLVM packages, or a gdb 14 or newer"
+        ),
+        (Lang::En, "windows") => format!(
+            "No debug adapter ({wanted}): gdb from MSYS2 for GNU-toolchain binaries, lldb-dap from the LLVM installer for MSVC ones"
+        ),
+        // Anything else is a machine nobody here has held. It gets the honest version: the names
+        // to look for, and where to write down whatever it is called there.
+        (Lang::En, _) => format!(
+            "No debug adapter ({wanted}): put one on PATH, or name yours as debug_adapter in settings.toml"
+        ),
+        (Lang::It, "macos") => format!(
+            "Nessun debug adapter ({wanted}): lldb-dap arriva con gli strumenti da riga di comando di Xcode, xcode-select --install"
+        ),
+        (Lang::It, "linux") => format!(
+            "Nessun debug adapter ({wanted}): installa lldb-dap dai pacchetti LLVM, oppure un gdb 14 o piu recente"
+        ),
+        (Lang::It, "windows") => format!(
+            "Nessun debug adapter ({wanted}): gdb da MSYS2 per i binari GNU, lldb-dap dall'installer LLVM per quelli MSVC"
+        ),
+        (Lang::It, _) => format!(
+            "Nessun debug adapter ({wanted}): mettine uno nel PATH, o scrivi il tuo come debug_adapter in settings.toml"
+        ),
+    }
+}
+
+/// The guess pointed at something that is not a file. Names it, because the whole point of a
+/// filled-in guess is that the reader can see what it guessed.
+pub fn msg_debugger_no_debuggee(lang: Lang, program: &str) -> String {
+    match lang {
+        Lang::En => format!("Nothing to debug at {program} — build it first, or set debuggee in the workspace file"),
+        Lang::It => format!("Niente da debuggare in {program} — compilalo, o scrivi debuggee nel file di workspace"),
+    }
+}
+
+/// The adapter would not start at all: it is not where it was said to be, or it died on the
+/// handshake. Whatever it said comes through unedited.
+pub fn msg_debugger_adapter_failed(lang: Lang, reason: &str) -> String {
+    match lang {
+        Lang::En => format!("The debug adapter would not start: {reason}"),
+        Lang::It => format!("Il debug adapter non parte: {reason}"),
+    }
+}
+
+pub fn msg_debugger_started(lang: Lang, adapter: &str, program: &str) -> String {
+    match lang {
+        Lang::En => format!("Debugging {program} with {adapter}"),
+        Lang::It => format!("Debug di {program} con {adapter}"),
+    }
+}
+
+/// Why it stopped, in the adapter's own word — "breakpoint", "step", "exception" — or in its own
+/// sentence where it wrote one.
+pub fn msg_debugger_stopped(lang: Lang, why: &str) -> String {
+    match lang {
+        Lang::En => format!("Stopped: {why}"),
+        Lang::It => format!("Fermo: {why}"),
+    }
+}
+
+pub fn msg_debugger_exited(lang: Lang, code: i64) -> String {
+    match lang {
+        Lang::En => format!("The program exited with {code}"),
+        Lang::It => format!("Il programma è uscito con {code}"),
+    }
+}
+
+/// The session ended without the program having reported a status of its own — which is what a
+/// `terminated` with no `exited` in front of it means.
+pub fn msg_debugger_over(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The debug session is over",
+        Lang::It => "La sessione di debug è finita",
+    }
+    .to_string()
+}
+
+pub fn msg_debugger_ended(lang: Lang, program: &str) -> String {
+    match lang {
+        Lang::En => format!("Stopped debugging {program}"),
+        Lang::It => format!("Debug di {program} fermato"),
+    }
+}
+
+/// A request the adapter refused, named with the request so that "not available" is attached to
+/// the thing that is not available.
+pub fn msg_debugger_refused(lang: Lang, command: &str, message: &str) -> String {
+    match lang {
+        Lang::En => format!("The adapter refused {command}: {message}"),
+        Lang::It => format!("L'adapter ha rifiutato {command}: {message}"),
+    }
+}
+
+/// The adapter stopped talking. Not a failure of the editor and not phrased as one: a debug
+/// session ending is the ordinary end of every debug session there has ever been.
+pub fn msg_debugger_dead(lang: Lang, reason: &str) -> String {
+    match lang {
+        Lang::En => format!("The debug session ended: {reason}"),
+        Lang::It => format!("La sessione di debug è finita: {reason}"),
+    }
+}
+
+pub fn msg_debugger_no_session(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Nothing is being debugged — Debug ▸ Start debugging first",
+        Lang::It => "Non c'è niente in debug — prima Debug ▸ Avvia il debug",
+    }
+    .to_string()
+}
+
+/// Asked to step a program that is running. The refusal says what would make it work, because
+/// "not stopped" on its own reads as a fault rather than as a state.
+pub fn msg_debugger_not_stopped(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The program is running — it steps once it stops at a breakpoint",
+        Lang::It => "Il programma sta girando — si avanza quando si ferma a un breakpoint",
+    }
+    .to_string()
+}
+
+/// One session at a time. See [`crate::app::DebugSession`] for why that is a decision.
+pub fn msg_debugger_already_running(lang: Lang) -> String {
+    match lang {
+        Lang::En => "A debug session is already running — stop it first",
+        Lang::It => "C'è già una sessione di debug — fermala prima",
     }
     .to_string()
 }
@@ -3424,6 +3597,71 @@ pub fn msg_run_started(lang: Lang, terminal_index: usize, command: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one sentence somebody with no debugger installed ever sees, on all three platforms and
+    /// in both languages.
+    ///
+    /// Tested for every operating system rather than for this one, because a message that can
+    /// only be read on a machine nobody here has is exactly the message that goes wrong: the
+    /// Windows wording would be checked by a Windows user, once, after it had shipped.
+    ///
+    /// What it must carry is what to look for — the adapters `find_adapter` actually looks for,
+    /// taken from the same list — and one sentence about where they come from here. The unknown
+    /// platform is the one that has to mention the setting: there is no package to name, so the
+    /// escape has to be.
+    #[test]
+    fn the_missing_adapter_sentence_names_what_to_install_on_every_platform() {
+        for lang in [Lang::En, Lang::It] {
+            for os in ["macos", "linux", "windows", "freebsd"] {
+                let said = msg_debugger_no_adapter(lang, os);
+                for wanted in crate::dap::ADAPTERS_WANTED {
+                    assert!(said.contains(wanted), "{lang:?}/{os}: {said:?} never names {wanted}");
+                }
+            }
+            assert!(msg_debugger_no_adapter(lang, "macos").contains("xcode-select"), "{lang:?}");
+            assert!(msg_debugger_no_adapter(lang, "linux").contains("LLVM"), "{lang:?}");
+            assert!(msg_debugger_no_adapter(lang, "windows").contains("MSYS2"), "{lang:?}");
+            assert!(
+                msg_debugger_no_adapter(lang, "plan9").contains("debug_adapter"),
+                "{lang:?}: with no package to name, the setting is the whole answer"
+            );
+            // And no two of them are the same sentence, which is the failure this would have:
+            // one arm written and three copies of it.
+            let all = ["macos", "linux", "windows", "plan9"].map(|os| msg_debugger_no_adapter(lang, os));
+            for (i, one) in all.iter().enumerate() {
+                for other in &all[i + 1..] {
+                    assert_ne!(one, other, "{lang:?}: two platforms are told the same thing");
+                }
+            }
+        }
+    }
+
+    /// The four refusals a debug verb can give have to be four different sentences.
+    ///
+    /// They are the whole of what somebody gets back from a menu row that did nothing, and two of
+    /// them reading alike is two states nobody can tell apart: "there is no session" and "the
+    /// program is running" want opposite next moves.
+    #[test]
+    fn every_debug_refusal_says_something_of_its_own() {
+        for lang in [Lang::En, Lang::It] {
+            let said = [
+                msg_debugger_no_session(lang),
+                msg_debugger_not_stopped(lang),
+                msg_debugger_already_running(lang),
+                msg_debugger_no_debuggee(lang, "target/debug/clee"),
+            ];
+            for (i, one) in said.iter().enumerate() {
+                assert!(!one.is_empty(), "{lang:?}: a refusal that says nothing");
+                for other in &said[i + 1..] {
+                    assert_ne!(one, other, "{lang:?}: two refusals read the same");
+                }
+            }
+            assert!(
+                said[3].contains("target/debug/clee"),
+                "{lang:?}: the guess that failed has to be named, or nobody can correct it"
+            );
+        }
+    }
 
     /// The question and the key that answers it are two pieces of text a long way apart, and
     /// nothing else would notice them drifting: a box reading "S / N" that only answers to `y`
