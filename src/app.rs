@@ -12550,10 +12550,16 @@ impl App {
         preview.set_text_only(self.settings.preview_markdown_text);
         let idx = self.adopt_editor(Editor::preview(source, preview));
         self.place_in_pane(pane, idx);
-        // Says which of the two renderings you got: a document and styled text look very
-        // different, and knowing which is which is the difference between "my machine cannot do
-        // better" and "something is wrong".
-        self.status_message = i18n::msg_markdown_preview(lang, crate::preview::markdown_as_document());
+        // Says which of the two renderings you got — the tab's own answer, not the machine's
+        // ability: with `preview_markdown_text` on, the machine may well be able to typeset a
+        // document while the tab was asked for styled text, and a sentence built from ability
+        // alone claims a document over text (the demo recording caught it doing exactly that).
+        let text_asked = self.settings.preview_markdown_text;
+        self.status_message = i18n::msg_markdown_preview(
+            lang,
+            crate::preview::markdown_as_document() && !text_asked,
+            text_asked,
+        );
     }
 
     /// How long the text must sit still before a document preview is made from it. Long enough
