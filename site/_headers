@@ -1,0 +1,23 @@
+# Cache policy, read by Cloudflare Pages from the root of the deployed directory.
+#
+# The page keeps its name across deploys, so it must never be held: max-age=0
+# with must-revalidate makes the browser ask every time, and the ETag turns
+# almost every ask into a 304 with no body — one round trip, not one download.
+#
+# Everything else here is named after its own contents or never changes, so it
+# gets the opposite treatment. The stylesheet goes out as style.<hash>.css (see
+# build.sh): a new stylesheet is a new URL, which is what makes a year of cache
+# safe. Note that this zone's Browser Cache TTL raises short max-ages to four
+# hours no matter what is written here — it cannot lower long ones, which is why
+# the hashed name, and not this file, is what actually keeps the site fresh.
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/style.*.css
+  Cache-Control: public, max-age=31536000, immutable
+
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
