@@ -114,6 +114,10 @@ jobs:
       # and on a runner where none of the four is, its "not installed" checks run rather than
       # skip, which is the half a developer's laptop usually cannot exercise.
       - run: python3 scripts/drive_drawer.py target/debug/clee
+      # Debugs a C program it compiles itself, through the real adapter: it skips with a sentence
+      # on ubuntu-22.04, whose gdb is 12 and has no DAP in it, and runs for real on macos-14, where
+      # Xcode's lldb-dap answers.
+      - run: python3 scripts/drive_dap.py target/debug/clee
 
   # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
   # Adopting either is a repo-wide change, so it stays a deliberate decision.

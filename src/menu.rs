@@ -45,6 +45,7 @@ pub enum MenuAction {
     ToggleBreakpoint,
     DebugStart,
     DebugStop,
+    DebugPause,
     DebugContinue,
     DebugStepOver,
     DebugStepIn,
@@ -173,6 +174,7 @@ impl MenuAction {
         MenuAction::ToggleBreakpoint,
         MenuAction::DebugStart,
         MenuAction::DebugStop,
+        MenuAction::DebugPause,
         MenuAction::DebugContinue,
         MenuAction::DebugStepOver,
         MenuAction::DebugStepIn,
@@ -605,8 +607,15 @@ pub fn menu_defs() -> Vec<MenuDef> {
             items: vec![
                 item(Key::ItemDebugStart, MenuAction::DebugStart, None),
                 item(Key::ItemDebugStop, MenuAction::DebugStop, None),
+                // Above the line with those two rather than below it with the four, and that is
+                // the grouping stated: pause is the only row here that means something exactly
+                // when the others do not, while the program is running. It belongs beside the
+                // rows that are about the session's own state, not among the ones you press at a
+                // stop.
+                item(Key::ItemDebugPause, MenuAction::DebugPause, None),
                 // Below the line because these four are the ones that only mean anything while a
-                // program is stopped, where the two above are how a session begins and ends.
+                // program is stopped, where the three above are how a session begins, ends, and
+                // is caught in the middle.
                 group(Key::ItemDebugContinue, MenuAction::DebugContinue, None),
                 item(Key::ItemDebugStepOver, MenuAction::DebugStepOver, None),
                 item(Key::ItemDebugStepIn, MenuAction::DebugStepIn, None),

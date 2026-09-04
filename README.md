@@ -250,6 +250,13 @@ the theme around it rather than glowing in the middle of it.*
 *Stopped inside `calcola`: the line is marked, and the panel shows `a` and `n` — the function's
 own locals, not the session's variables.*
 
+**And a debugger for compiled programs.** C, C++, Rust — anything your machine builds with symbols
+in it. *Debug ▸ Start debugging* asks which program to run, with the guess already in the box, and
+runs it under whichever debug adapter you have: `lldb-dap`, or a `gdb` 14 or newer, which speaks
+the protocol natively. There is one set of breakpoints — the same `Ctrl+Shift+P` in the same
+gutter, in any file now — and stopping marks the line and opens a panel with the stack, the
+frame's variables and your watch expressions.
+
 **Nine themes, five dark and four light.** The button beside the background toggle on the menu
 bar opens the list, or *View → Theme…* if your hands are on the keyboard. The choice is written
 out at once, because the reason to reach for it is usually that the screen has become hard to

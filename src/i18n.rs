@@ -112,6 +112,7 @@ pub enum Key {
     MenuDebug,
     ItemDebugStart,
     ItemDebugStop,
+    ItemDebugPause,
     ItemDebugContinue,
     ItemDebugStepOver,
     ItemDebugStepIn,
@@ -493,7 +494,7 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemToggleBreakpoint) => "Breakpoint su questa riga",
 
         // Its own menu, beside Run rather than inside it: running a file and debugging a compiled
-        // program are two errands, and the six rows below would have doubled the Run menu to say
+        // program are two errands, and the seven rows below would have doubled the Run menu to say
         // so. Not one of them has a chord — see the comment on the menu itself.
         (Lang::En, MenuDebug) => "Debug",
         (Lang::It, MenuDebug) => "Debug",
@@ -503,6 +504,11 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemDebugStart) => "Avvia il debug",
         (Lang::En, ItemDebugStop) => "Stop debugging",
         (Lang::It, ItemDebugStop) => "Ferma il debug",
+        // "Pause" and not "Break": it stops the program where it happens to be, which is the one
+        // verb here that is only any use while the program is *running* — and "break" in a
+        // debugger already means the thing `Ctrl+Shift+P` puts in the gutter.
+        (Lang::En, ItemDebugPause) => "Pause",
+        (Lang::It, ItemDebugPause) => "Metti in pausa",
         (Lang::En, ItemDebugContinue) => "Continue",
         (Lang::It, ItemDebugContinue) => "Continua",
         (Lang::En, ItemDebugStepOver) => "Step over",
@@ -2078,6 +2084,49 @@ pub fn msg_debugger_no_session(lang: Lang) -> String {
     match lang {
         Lang::En => "Nothing is being debugged — Debug ▸ Start debugging first",
         Lang::It => "Non c'è niente in debug — prima Debug ▸ Avvia il debug",
+    }
+    .to_string()
+}
+
+/// The other half of [`msg_debugger_not_stopped`]: asked to pause a program that is already
+/// stopped. Says what the useful key is instead, for the same reason — a refusal that only says
+/// "no" leaves the reader to guess which of the two states they are in.
+pub fn msg_debugger_already_stopped(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The program is already stopped — Continue runs it on",
+        Lang::It => "Il programma è già fermo — Continua lo fa ripartire",
+    }
+    .to_string()
+}
+
+/// Asked to pause a session whose adapter has not finished starting. Not a refusal of the verb:
+/// there is nothing running yet to be caught, and saying so is more use than the adapter's own
+/// complaint about a request it was not ready for.
+pub fn msg_debugger_still_starting(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The session is still starting — nothing is running to pause yet",
+        Lang::It => "La sessione sta ancora partendo — non c'è ancora niente da fermare",
+    }
+    .to_string()
+}
+
+/// Said while the pause is on its way. Worth a line of its own because a pause is the one verb
+/// whose effect arrives late: the adapter has to catch the program, and a key that looked as
+/// though it did nothing is a key somebody presses again.
+pub fn msg_debugger_pausing(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Stopping the program where it is…",
+        Lang::It => "Fermo il programma dov'è…",
+    }
+    .to_string()
+}
+
+/// The adapter answered the question "which threads are there" with none at all, which is the
+/// honest end of a pause: there is nothing left to catch.
+pub fn msg_debugger_no_thread(lang: Lang) -> String {
+    match lang {
+        Lang::En => "The program has no thread left to stop",
+        Lang::It => "Il programma non ha più nessun thread da fermare",
     }
     .to_string()
 }

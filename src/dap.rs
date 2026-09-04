@@ -31,8 +31,11 @@
 
 // The module-level `allow(dead_code)` wave 1 carried is gone: the Debug menu, the breakpoint sync
 // and the stopped-line jump now call this file, so the compiler can be trusted with it again. The
-// few things still unreached are marked one at a time, each saying which wave reaches them —
-// which is the difference between a silence with a reason and a silence over the whole file.
+// few things still unreached are marked one at a time, each saying why — which is the difference
+// between a silence with a reason and a silence over the whole file. There is one such mark left,
+// on [`Client::capabilities`]; `pause`, `announced` and `is_dead` had one until the Pause verb and
+// the guards in front of the others gave them a caller, and `handshook` is simply gone, because
+// the two-step handshake is this module's own bookkeeping and no pane ever needed to see it.
 
 use crate::lsp::{frame, read_message};
 use serde_json::{json, Value};
@@ -420,6 +423,45 @@ enum Ask {
     },
 }
 
+/// The name for a source file that an adapter can match against its debug information.
+///
+/// Which is the file's path with every symlink followed, and this is not tidiness — it is the
+/// difference between a breakpoint that stops the program and one that is silently never hit. An
+/// adapter looks the source up by comparing the path it is given with the path the *compiler*
+/// wrote into the debug information, and a compiler writes down the directory the operating system
+/// handed it, which always comes back resolved. So a project reached through a symlink names the
+/// same file by a spelling nothing in the binary contains: on a Mac every `/tmp` and every
+/// `/var/folders` path is one of those, and `lldb-dap` answers such a `setBreakpoints` with a
+/// breakpoint that is accepted, reported unverified, and never reached — the program runs straight
+/// past the line the gutter is marking, and the session ends looking as though the editor never
+/// asked for anything.
+///
+/// Only what goes on the wire is resolved. The editor keeps its own spelling for the same file —
+/// the one the project was opened as — and `App::as_the_editor_spells_it` is the way back, so a
+/// stop reported under the resolved name still lands on the tab that is already open.
+///
+/// A path that cannot be resolved is sent as it stands: a file that does not exist yet is a fair
+/// thing to have a breakpoint in, and an adapter refusing it is a better answer than this function
+/// refusing to name it.
+fn as_the_adapter_reads_it(path: &Path) -> PathBuf {
+    let Ok(resolved) = path.canonicalize() else { return path.to_path_buf() };
+    // Windows' canonical form is the extended-length one, `\\?\C:\…`. It names the same file and
+    // is a perfectly real path, but it is not the spelling a compiler records, so trimming it back
+    // is the same decision as resolving the symlink: say the name the other program can match.
+    //
+    // The text is owned before it is trimmed rather than borrowed from a temporary: since the 2024
+    // edition a temporary made in an `if let` scrutinee is dropped before the body runs, so the
+    // shorter spelling of this would not compile on the one platform that compiles it.
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy().into_owned();
+        if let Some(plain) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(plain);
+        }
+    }
+    resolved
+}
+
 /// A debug session: one adapter process, one wire, one lifecycle.
 pub struct Client {
     /// What to call it in a sentence shown to the user.
@@ -689,8 +731,12 @@ impl Client {
 
     fn send_breakpoints(&mut self, path: &Path, lines: &[usize]) {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        // Resolved before it goes out — see [`as_the_adapter_reads_it`], which is where the whole
+        // reason is written down. The caller's own spelling is kept in the `Ask` below, because
+        // that is the file it asked about and the answer has to come back under the name it used.
+        let wire = as_the_adapter_reads_it(path);
         let arguments = json!({
-            "source": {"path": path.to_string_lossy(), "name": name},
+            "source": {"path": wire.to_string_lossy(), "name": name},
             "breakpoints": lines.iter().map(|line| json!({"line": line})).collect::<Vec<_>>(),
             // The protocol also has a bare `lines` array carrying the same numbers. It is
             // deprecated, and sending both would mean two statements of the same fact that can
@@ -760,8 +806,8 @@ impl Client {
         self.step("stepOut", thread)
     }
 
-    /// Stops a running debuggee where it happens to be.
-    #[allow(dead_code, reason = "part of the protocol vocabulary; no verb offers it yet")]
+    /// Stops a running debuggee where it happens to be. *Debug ▸ Pause* is this, once it has asked
+    /// the adapter which thread there is to catch.
     pub fn pause(&mut self, thread: i64) -> Option<i64> {
         self.step("pause", thread)
     }
@@ -1022,25 +1068,26 @@ impl Client {
 
     /// What the adapter said it can do. Settled during the handshake and remembered, because it
     /// decides which questions are worth asking.
-    #[allow(dead_code, reason = "wave 3's panel asks what the adapter can do before offering it")]
+    ///
+    /// `configuration_done` is acted on in this file and needs no reader outside it. The other two
+    /// are answers to questions this editor has not learned to ask — a polite `terminate` instead
+    /// of a `disconnect`, and an `evaluate` of whatever is under the pointer — and this is the only
+    /// place they can be read from at all, which is why it is kept rather than deleted with them.
+    #[allow(dead_code, reason = "the only reader of the two flags nothing acts on yet")]
     pub fn capabilities(&self) -> Capabilities {
         self.capabilities
     }
 
-    /// Whether the handshake has landed.
-    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
-    pub fn handshook(&self) -> bool {
-        self.handshook
-    }
-
-    /// Whether the adapter has said it is ready to be configured.
-    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
+    /// Whether the adapter has said it is ready to be configured — which, for every adapter that
+    /// waits for a launch before saying it, is also the moment the debuggee starts running.
+    /// *Debug ▸ Pause* asks, because a session that has not got this far has nothing to catch.
     pub fn announced(&self) -> bool {
         self.announced
     }
 
-    /// Whether this session is over, one way or another.
-    #[allow(dead_code, reason = "wave 3's panel says whether the session is up yet")]
+    /// Whether this session is over, one way or another. The verbs ask before they send: a request
+    /// made of a dead client is dropped and answered by nothing, and a key that does nothing and
+    /// says nothing is the one failure a debugger cannot afford.
     pub fn is_dead(&self) -> bool {
         self.dead
     }
@@ -1439,6 +1486,71 @@ mod tests {
             .expect("the breakpoints came back");
         assert_eq!(found.0, PathBuf::from("/tmp/main.rs"), "keyed by the file it was asked about");
         assert_eq!(found.1, vec![Breakpoint { verified: true, line: Some(12), message: None }]);
+    }
+
+    /// A project reached through a symlink still has its breakpoints placed.
+    ///
+    /// Measured against a real `lldb-dap` before it was written down here: told
+    /// `/var/folders/…/twice.c` for a file whose debug information says
+    /// `/private/var/folders/…/twice.c`, it accepts the request, answers `verified: false`, and
+    /// never stops — the program runs to the end past a line the gutter is marking in red. Every
+    /// `/tmp` and every `mkdtemp` on a Mac is such a path, so this is the ordinary case and not
+    /// the exotic one. Unix-only, because making the symlink is what the test is about.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_reached_through_a_symlink_is_named_the_way_the_adapter_can_match_it() {
+        let base = std::env::temp_dir().join(format!("clee_dap_link_{}", std::process::id()));
+        let real = base.join("project");
+        std::fs::create_dir_all(&real).expect("a directory to be the project");
+        std::fs::write(real.join("main.c"), "int main(void) { return 0; }\n").expect("a source");
+        let link = base.join("through");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("a symlink onto it");
+
+        let (mut client, seen) = scripted(|message, answer| {
+            let seq = seq_of(message);
+            match command_of(message).as_str() {
+                "initialize" => {
+                    answer(response(seq, "initialize", json!({})));
+                    answer(adapter_event("initialized", Value::Null));
+                }
+                "setBreakpoints" => answer(response(
+                    seq,
+                    "setBreakpoints",
+                    json!({"breakpoints": [{"verified": true, "line": 1}]}),
+                )),
+                _ => {}
+            }
+            true
+        });
+        let _ = pump_until(&mut client, |e| matches!(e, Event::Initialized));
+        let asked = link.join("main.c");
+        client.set_breakpoints(&asked, &[1]);
+        let events = pump_until(&mut client, |e| matches!(e, Event::Breakpoints { .. }));
+
+        let sent = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| command_of(m) == "setBreakpoints")
+            .filter_map(|m| m.pointer("/arguments/source/path").and_then(Value::as_str))
+            .map(PathBuf::from)
+            .next()
+            .expect("the request went out");
+        assert_eq!(
+            sent,
+            real.canonicalize().expect("the project resolves").join("main.c"),
+            "the adapter is told the name its debug information will contain"
+        );
+        // And the answer comes back under the name the caller used, because that is the file it
+        // asked about: the editor's map of breakpoints is keyed the way the editor spells things.
+        let Some(Event::Breakpoints { path, .. }) =
+            events.iter().find(|e| matches!(e, Event::Breakpoints { .. }))
+        else {
+            panic!("no answer for the breakpoints: {events:?}")
+        };
+        assert_eq!(path, &asked, "keyed by the file it was asked about, not by the resolved one");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A breakpoint the adapter would not place says so, and says why. Drawing it the same as a

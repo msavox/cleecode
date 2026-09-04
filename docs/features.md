@@ -440,7 +440,8 @@ running, including the moment you take the last one off a file. Stopping moves t
 line and marks it without taking the keyboard, exactly as the interpreter debugger does. Continue,
 step over, step into and step out are rows in the Debug menu and entries in the palette — no new
 chords, because a debugger you could not step over `ssh` in Terminal.app would not be worth the
-key it was bound to.
+key it was bound to. **Pause** is a row beside Start and Stop rather than among those four: it is
+the one verb for a program that is *running*, and it catches it wherever it has got to.
 
 A panel opens beside the editor with the session and closes with it: the stack at the top with the
 current frame marked, the frame's variables under it opened one level, your watch expressions
