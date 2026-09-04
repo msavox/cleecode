@@ -631,7 +631,8 @@ kbd {
 /* ---- Features ---- */
 
 .feature {
-  padding: 4rem 0;
+  /* Each section is a slide: it gets the air of one, and the type of one. */
+  padding: 5.5rem 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -650,8 +651,9 @@ kbd {
 .install h2 {
   margin: 0 0 1.4rem;
   font-family: var(--house-face);
-  font-size: clamp(1.35rem, 3.6vw, 1.78rem);
-  line-height: 1.32;
+  /* Keynote-sized: the heading is the sentence, not the label above one. */
+  font-size: clamp(1.7rem, 5vw, 2.5rem);
+  line-height: 1.22;
   font-weight: 700;
   letter-spacing: -0.005em;
 }
@@ -812,4 +814,10 @@ footer p { margin: 0 0 0.5rem; }
   .install { padding: 3rem 0 3.4rem; }
   .cta .button { flex: 1 1 100%; text-align: center; }
   pre { font-size: 0.84rem; padding: 0.85rem 0.9rem; }
+}
+
+/* The single line under a slide's heading: the punch's follow-through. */
+.feature h2 + p {
+  font-size: 1.16rem;
+  line-height: 1.55;
 }
