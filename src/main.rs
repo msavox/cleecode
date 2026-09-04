@@ -3,6 +3,7 @@ mod assets;
 mod app_install;
 mod clipboard;
 mod complete;
+mod dap;
 mod dnd;
 mod drawer;
 mod editor;
