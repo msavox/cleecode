@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CleeCode - il tuo IDE nel terminale</title>
+<meta name="description" content="Il tuo IDE nel terminale: albero dei file, schede, terminali, integrazione LLM e documenti renderizzati in una finestra. Scritto in Rust, guidato da mouse e tastiera — col tuo agente di coding dentro, sull'abbonamento che già paghi.">
+<meta name="author" content="msavox">
+<meta property="og:title" content="CleeCode - il tuo IDE nel terminale">
+<meta property="og:description" content="Il tuo IDE nel terminale: albero dei file, schede, terminali, integrazione LLM e documenti renderizzati in una finestra. Scritto in Rust — col tuo agente di coding dentro, sull'abbonamento che già paghi.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cleecode.marunja.com/it/">
+<meta property="og:image" content="https://cleecode.marunja.com/icon-512.png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<meta name="twitter:card" content="summary">
+<link rel="alternate" hreflang="en" href="https://cleecode.marunja.com/">
+<link rel="alternate" hreflang="it" href="https://cleecode.marunja.com/it/">
+<link rel="icon" href="/icon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/icon-512.png" type="image/png" sizes="512x512">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<a class="skip" href="#install">Salta all'installazione</a>
+
+<div class="topbar">
+  <div class="wrap-wide topbar-inner">
+    <p class="brand">
+      <a class="house-mark" href="https://marunja.com"><img class="house-logo" src="/assets/marunja_logo_512.png" alt="" width="28" height="28">Marunja</a>
+      <span class="sep" aria-hidden="true">/</span>
+      <a class="product-mark" href="#top"><img class="product-logo" src="/icon-180.png" alt="" width="24" height="24">CleeCode</a>
+    </p>
+    <nav class="topnav" aria-label="Sezioni">
+      <a href="#agent">Agente</a>
+      <a href="#previews">Anteprime</a>
+      <a href="#numeric">Octave &amp; Python</a>
+      <a href="#install">Installa</a>
+      <a href="https://github.com/msavox/cleecode">GitHub</a>
+      <a href="/" lang="en" hreflang="en">EN</a>
+    </nav>
+  </div>
+</div>
+
+<header class="hero" id="top">
+  <div class="wrap">
+   <div class="term">
+    <div class="term-bar">
+      <span class="term-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="term-title">clee — ~/progetto</span>
+      <span class="term-pad" aria-hidden="true"></span>
+    </div>
+    <div class="term-body">
+      <pre class="term-ghost" aria-hidden="true"> ██████╗██╗     ███████╗███████╗ ██████╗ ██████╗ ██████╗ ███████╗
+██╔════╝██║     ██╔════╝██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║     ██║     █████╗  █████╗  ██║     ██║   ██║██║  ██║█████╗
+██║     ██║     ██╔══╝  ██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝
+╚██████╗███████╗███████╗███████╗╚██████╗╚██████╔╝██████╔╝███████╗
+ ╚═════╝╚══════╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝</pre>
+     <div class="term-content">
+    <p class="wordmark"><img class="emblem" src="/icon-180.png" alt="" aria-hidden="true">CleeCode</p>
+    <p class="tagline">il tuo IDE nel terminale</p>
+
+    <div class="pitch">
+      <h1>Il tuo agente. Il tuo abbonamento.<br>Dentro il tuo editor.</h1>
+      <p class="pitch-tail">claude · codex · opencode · gemini — vivi nei tuoi buffer. Niente chiavi API. Nessun editor grafico può dirlo.</p>
+    </div>
+
+    <p class="quiet">Funzionano sia il login con abbonamento sia le chiavi API. L'agente è la CLI vera e si autentica da sé. CleeCode non vede mai una credenziale.</p>
+
+    <p class="cta">
+      <a class="button primary" href="#install">Installa</a>
+      <a class="button" href="https://github.com/msavox/cleecode">GitHub</a>
+    </p>
+
+    <p class="version">macOS, Linux e Windows · <a href="https://github.com/msavox/cleecode/blob/master/LICENSE">MIT</a> · <a href="https://github.com/msavox/cleecode/releases">note di release</a></p>
+     </div>
+    </div>
+   </div>
+  </div>
+</header>
+
+<section class="demo" aria-label="CleeCode in azione">
+  <div class="wrap-wide">
+    <img src="/assets/demo.gif" alt="CleeCode in azione: un file aperto con l'albero a sinistra e i terminali sotto" width="1800" height="1000">
+  </div>
+</section>
+
+<main>
+
+<section id="agent" class="feature">
+  <div class="wrap">
+    <p class="kicker">L'agente dentro</p>
+    <h2>Un tasto. Zero configurazione.</h2>
+    <p><kbd>Ctrl+Shift+A</kbd>. L'agente si apre accanto al tuo lavoro — la CLI vera, in un terminale vero. Vede il tuo cursore. I suoi edit atterrano vivi nei buffer. Chiede prima di scrivere.</p>
+    <p class="note">Sette strumenti MCP, le regole del consenso, la riga di configurazione per gli agenti fuori dal cassetto: il <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour su GitHub</a>.</p>
+    <figure>
+      <img src="/assets/agent.gif" alt="Il cassetto agente si apre sul launcher — claude, opencode, codex, gemini — poi claude ci gira dentro, e l'edit che fa atterra nel main.py aperto con le righe cambiate accese" width="1800" height="1000" loading="lazy">
+    </figure>
+  </div>
+</section>
+
+<section id="previews" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">Immagini, PDF, Markdown</p>
+    <h2>Un terminale che ti mostra l'immagine.</h2>
+    <p>Pixel veri. Anche via ssh.</p>
+    <figure>
+      <img src="/assets/preview-image.jpg" alt="Due fotografie aperte come schede in CleeCode, e la stessa immagine resa da chafa in un pannello terminale sotto" width="2000" height="1280" loading="lazy">
+      <figcaption>Lo stesso file due volte: pixel nella scheda, blocchi nel pannello. La differenza è il punto.</figcaption>
+    </figure>
+    <p class="note">Al meglio in <a href="https://ghostty.org">Ghostty</a>, kitty, WezTerm o iTerm2; ripiego onesto ovunque. I dettagli nel <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour</a>.</p>
+  </div>
+</section>
+
+<section id="documents" class="feature">
+  <div class="wrap">
+    <p class="kicker">Markdown &amp; LaTeX</p>
+    <h2>I tuoi documenti, renderizzati.</h2>
+    <p>Il Markdown diventa un documento vivo accanto al sorgente — scrivi, e si muovono insieme. Il LaTeX si ricompone in pagina col Run.</p>
+    <figure>
+      <img src="/assets/preview-md.png" alt="Sorgente Markdown a sinistra e documento renderizzato a destra, due schede su un solo file" width="2000" height="1272" loading="lazy">
+      <figcaption>Un file, due schede: sorgente e documento. Senza salvare.</figcaption>
+    </figure>
+    <figure>
+      <img src="/assets/preview-pdf.png" alt="Un sorgente LaTeX a sinistra e la sua pagina PDF composta a destra, dentro CleeCode" width="2000" height="1278" loading="lazy">
+      <figcaption>Modifica il <code>.tex</code>, premi Run. La pagina si ricompone sul posto.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="numeric" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">Octave &amp; Python</p>
+    <h2>Il tuo interprete, col pannello che nessun terminale ha.</h2>
+    <p>Ogni variabile, dal vivo. I grafici come schede. Il transcript resta tuo.</p>
+    <figure>
+      <img src="/assets/octave-ide.png" alt="Il workspace Octave: lo script a sinistra, una figura come scheda, il prompt sotto e il pannello delle variabili accanto" width="1600" height="1071" loading="lazy">
+      <figcaption><code>clee -w octave</code>: script, figura, prompt, e ogni variabile elencata senza chiedere.</figcaption>
+    </figure>
+    <figure>
+      <img src="/assets/pylab-ide.png" alt="Il workspace pylab: una figura matplotlib come scheda, la sessione sotto e le sue variabili accanto" width="1600" height="1084" loading="lazy">
+      <figcaption><code>clee -w pylab</code>: lo stesso, in Python. Il Run alimenta la sessione che c'è già.</figcaption>
+    </figure>
+    <p class="note">Celle, breakpoint, variabili del frame: la <a href="https://github.com/msavox/cleecode/blob/master/docs/numeric.md">guida completa</a>.</p>
+  </div>
+</section>
+
+<section id="editing" class="feature">
+  <div class="wrap">
+    <p class="kicker">Il lavoro di ogni giorno</p>
+    <h2>Rename. References. Format. Code actions.</h2>
+    <p>La potenza del language server, con la disciplina di git: ogni riscrittura ti mostra prima il diff, poi si applica come un solo undo. E <kbd>Ctrl+Shift+D</kbd> è un pannello git completo — la storia a grafo, gli hook che girano, i commit firmati.</p>
+    <p class="note">200 linguaggi, replace su tutto il progetto, selezione a colonna, folding: la <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">lista completa</a>.</p>
+  </div>
+</section>
+
+<section id="safety" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">A prova di crash</p>
+    <h2>Non ti si chiude addosso.</h2>
+    <p><code>kill -9</code> all'editor. Il tuo testo non salvato torna. Provato sul binario vero, ucciso davvero.</p>
+  </div>
+</section>
+
+<section id="themes" class="feature">
+  <div class="wrap">
+    <p class="kicker">In fondo a un ssh</p>
+    <h2>Niente da installare dall'altra parte.</h2>
+    <p>Un binario. Il mouse funziona. L'output del compilatore si clicca. Nove temi, inglese e italiano.</p>
+    <figure>
+      <img src="/assets/themes.png" alt="I nove temi: CleeCode, Turbo, Solarized Dark, Eighties, Mocha, CleeCode Light, Solarized Light, Ocean Light e GitHub" width="1420" height="919" loading="lazy">
+      <figcaption>Cinque scuri, quattro chiari. Il tema che scegli è il tema che hai.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="install" class="install">
+  <div class="wrap">
+    <p class="kicker">Installa</p>
+    <h2>Tre righe su macOS e Linux.</h2>
+    <pre><code>brew tap msavox/clee
+brew trust msavox/clee
+brew install clee</code></pre>
+    <p class="note">Un Homebrew più vecchio non ha <code>brew trust</code> e non ne ha bisogno — saltalo.</p>
+
+    <h3>Due su Windows.</h3>
+    <pre><code>scoop bucket add clee https://github.com/msavox/scoop-clee
+scoop install clee</code></pre>
+
+    <h3>Binari precompilati</h3>
+    <p>Allegati a ogni <a href="https://github.com/msavox/cleecode/releases">release</a>.</p>
+    <ul class="downloads">
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">macOS <span>arm64</span></a>
+        <p>Apple silicon. La piattaforma di casa.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">macOS <span>x86_64</span></a>
+        <p>I Mac Intel.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Linux <span>x86_64</span></a>
+        <p>Servono glibc e libxcb.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Linux <span>arm64</span></a>
+        <p>Server, e Raspberry Pi OS a 64 bit.</p>
+      </li>
+      <li>
+        <a href="https://github.com/msavox/cleecode/releases">Windows <span>x86_64</span></a>
+        <p>Sperimentale — le segnalazioni sono benvenute.</p>
+      </li>
+    </ul>
+
+    <h3>Da sorgente</h3>
+    <pre><code>cargo install --locked --git https://github.com/msavox/cleecode</code></pre>
+    <p class="note">Rust 1.85+. Poi <code>clee --install-font</code> per le icone; su macOS, <code>clee --install-app</code> per il Dock.</p>
+
+    <p class="next"><strong>Tutto in questa pagina è costruito e provato — niente è un piano.</strong> Parte del lavoro è su <code>master</code> oltre l'ultimo tag; le <a href="https://github.com/msavox/cleecode/releases">note di release</a> dicono cosa è dove.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="house">CleeCode è un prodotto Marunja.</p>
+    <p class="links">
+      <a href="https://github.com/msavox/cleecode">GitHub</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://marunja.com">marunja.com</a>
+    </p>
+    <p class="copy">© msavox — Matteo Savoia. Licenza MIT.</p>
+  </div>
+</footer>
+
+</body>
+</html>
