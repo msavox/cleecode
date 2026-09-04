@@ -28,6 +28,7 @@ logo_src="$here/marunja_logo_512.png"
 # The images the page uses: "<path under docs/>  <name under dist/assets/>".
 ASSETS='
 demo.gif                      demo.gif
+agent.gif                     agent.gif
 screenshots/preview-image.jpg preview-image.jpg
 screenshots/preview-pdf.png   preview-pdf.png
 screenshots/preview-md.png    preview-md.png
@@ -70,6 +71,14 @@ cp "$here/style.css" "$dist/$css_name"
 # would then point at a style.css that dist/ does not have.
 sed "s|href=\"style\.css\"|href=\"$css_name\"|" "$here/index.html" > "$dist/index.html"
 echo "  page   index.html, $css_name"
+
+# The Italian page, at /it/. Its references are absolute — from a subdirectory a
+# relative "assets/…" would point at /it/assets/, which does not exist — so the
+# hash substitution matches the absolute spelling, and the reference check below
+# strips the leading slash before asking dist/ whether the file is there.
+mkdir -p "$dist/it"
+sed "s|href=\"/style\.css\"|href=\"/$css_name\"|" "$here/index.it.html" > "$dist/it/index.html"
+echo "  page   it/index.html, $css_name"
 
 # Cache policy for the deploy. Named with a leading underscore because that is
 # what Cloudflare Pages looks for, and it must sit at the root of what is
@@ -133,12 +142,13 @@ echo "  font   fonts/OFL-NOTICE.txt"
 # inside dist/. Absolute URLs and in-page anchors are somebody else's problem;
 # everything else is ours.
 missing=0
-for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" \
+for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" "$dist/it/index.html" \
                 | sed -e 's/^[^"]*"//' -e 's/"$//'; \
                 grep -oE "url\([^)]*\)" "$dist/$css_name" \
                 | sed -e "s/^url(//" -e "s/)$//" -e "s/^['\"]//" -e "s/['\"]$//"; } \
-             | grep -vE '^(https?:|mailto:|data:|#)' | sort -u); do
-  if [ -f "$dist/$ref" ]; then
+             | grep -vE '^(https?:|mailto:|data:|#)' | sed 's|^/||' | sort -u); do
+  # A reference ending in / names a directory page; what must exist is its index.
+  if [ -f "$dist/$ref" ] || [ -f "$dist/${ref}index.html" ]; then
     echo "  ok     $ref"
   else
     echo "  BROKEN $ref" >&2
