@@ -78,6 +78,18 @@ pub struct Palette {
     /// a warning, the cursor's own line) or the accent — so this reads as its own thing without
     /// anybody having to be told which of two similar colours they are looking at.
     pub changed_line: Color,
+    /// The ground under the *text* of those same lines, so an arrival is findable without reading
+    /// the gutter column on purpose. With an agent's edits scattered through a long file the lit
+    /// number alone is a signal you only meet if you happen to scroll past it.
+    ///
+    /// A tint and not a highlight: it has to sit close enough to the theme's own background that
+    /// the syntax colouring on top of it stays as readable as it was, because this mark is
+    /// persistent — the case it exists for is the agent writing while you look elsewhere, and a
+    /// mark that decays is information lost to whoever was not watching. It is drawn under every
+    /// other background the editor has and is overwritten by all of them: the selection, the
+    /// stopped line and the block caret are what you are doing right now, and an arrival is only
+    /// context.
+    pub changed_line_bg: Color,
     /// Folders in the tree. A colour, not an icon colour: it belongs to the tree, not to a type.
     pub folder: Color,
     /// The colour the initial of a menu entry is drawn in, for a theme that wants one — the DOS
@@ -366,6 +378,10 @@ const CLEECODE: Palette = Palette {
     current_line: Color::Rgb(70, 60, 0),
     // The one bright green among the named colours, and the theme is built out of those.
     changed_line: Color::LightGreen,
+    // The same green taken down onto this theme's near-black, which the named colours cannot do:
+    // a background is one of the few places the palette has to state an RGB even here, because
+    // `LightGreen` behind text would be a highlighter pen rather than a tint.
+    changed_line_bg: Color::Rgb(28, 48, 32),
     folder: Color::Rgb(120, 170, 255),
     accelerator: None,
     bold_chrome: false,
@@ -412,6 +428,9 @@ const CLEECODE_LIGHT: Palette = Palette {
     // Darker than the dark theme's green by the same rule as everything else here: on paper a
     // bright one is a haze, and the gutter is small text.
     changed_line: Color::Rgb(20, 132, 70),
+    // The same green washed all the way out onto the paper. On a light theme the tint has to move
+    // towards the background rather than away from it, or the line reads as selected.
+    changed_line_bg: Color::Rgb(224, 242, 228),
     folder: Color::Rgb(38, 96, 168),
     accelerator: None,
     bold_chrome: false,
@@ -460,6 +479,10 @@ const TURBO: Palette = Palette {
     current_line: Color::Rgb(0, 0, 85),
     // EGA bright green. There are sixteen colours and no others, which is the theme.
     changed_line: Color::Rgb(85, 255, 85),
+    // EGA's green at the half-bright level, which is the same step this palette already took to
+    // get `current_line` out of its blue field. The sixteen colours are all foreground colours at
+    // full strength; behind text they need the darker rung, and that rung is 0x55.
+    changed_line_bg: Color::Rgb(0, 85, 0),
     folder: Color::Rgb(255, 255, 85),
     accelerator: Some(Color::Rgb(170, 0, 0)),
     bold_chrome: true,
@@ -504,6 +527,10 @@ const SOLARIZED_DARK: Palette = Palette {
     current_line: Color::Rgb(7, 54, 66),
     // Solarized's own green, which is the only green the scheme has and the same on both grounds.
     changed_line: Color::Rgb(133, 153, 0),
+    // base02, the surface this theme already puts behind the stopped line, pulled towards the
+    // scheme's own green. Solarized publishes accents and two grounds and nothing in between, so a
+    // tint has to be mixed here — and mixing it out of base02 keeps it inside the family.
+    changed_line_bg: Color::Rgb(11, 58, 43),
     folder: Color::Rgb(38, 139, 210),
     accelerator: None,
     bold_chrome: false,
@@ -546,6 +573,10 @@ const SOLARIZED_LIGHT: Palette = Palette {
     selection: Color::Rgb(238, 232, 213),
     current_line: Color::Rgb(245, 239, 220),
     changed_line: Color::Rgb(133, 153, 0),
+    // base3 leaning on the same green, the light half of the move the dark theme makes. The tint
+    // is the one thing Solarized cannot be quoted for on both grounds, since it is a mixture and
+    // not an accent.
+    changed_line_bg: Color::Rgb(226, 239, 202),
     folder: Color::Rgb(38, 139, 210),
     accelerator: None,
     bold_chrome: false,
@@ -590,6 +621,9 @@ const EIGHTIES: Palette = Palette {
     current_line: Color::Rgb(57, 57, 57),
     // base16 Eighties' own green, the one its syntax theme colours strings with.
     changed_line: Color::Rgb(153, 204, 153),
+    // base00 with the scheme's green stirred into it, one rung above the surface base16 already
+    // gives this theme for `current_line` so the two never read as the same mark.
+    changed_line_bg: Color::Rgb(46, 68, 50),
     folder: Color::Rgb(102, 153, 204),
     accelerator: None,
     bold_chrome: false,
@@ -633,6 +667,10 @@ const MOCHA: Palette = Palette {
     // Warm and muted like the rest of it: base16 Mocha has no clean green and inventing one
     // would put the only cold colour in the theme in its smallest text.
     changed_line: Color::Rgb(190, 181, 91),
+    // Mocha's olive banked down into its own brown, red still ahead of green the way the gutter
+    // colour has it. A cool tint here would be the only cold thing in the theme, and it would be
+    // spread across whole lines rather than hidden in a line number.
+    changed_line_bg: Color::Rgb(80, 72, 36),
     folder: Color::Rgb(138, 179, 181),
     accelerator: None,
     bold_chrome: false,
@@ -675,6 +713,9 @@ const OCEAN_LIGHT: Palette = Palette {
     selection: Color::Rgb(208, 214, 228),
     current_line: Color::Rgb(232, 234, 222),
     changed_line: Color::Rgb(86, 124, 62),
+    // The same green lifted onto this theme's paper. Ocean's ground is a cool grey and its
+    // `current_line` a warm one, so the tint is given the green side of the ramp to itself.
+    changed_line_bg: Color::Rgb(217, 234, 210),
     folder: Color::Rgb(76, 105, 140),
     accelerator: None,
     bold_chrome: false,
@@ -720,6 +761,10 @@ const GITHUB: Palette = Palette {
     current_line: Color::Rgb(245, 245, 245),
     // The green GitHub itself draws an added line in.
     changed_line: Color::Rgb(34, 134, 58),
+    // The ground GitHub itself puts behind an added line in a diff, quoted rather than mixed. This
+    // is the one theme that already had an answer for the question, and using anything else would
+    // be redrawing the thing being quoted.
+    changed_line_bg: Color::Rgb(230, 255, 236),
     folder: Color::Rgb(0, 92, 197),
     accelerator: None,
     bold_chrome: false,
@@ -1017,6 +1062,86 @@ mod tests {
                     theme.name()
                 );
             }
+        }
+    }
+
+    /// The RGB behind a colour, for the tests that have arithmetic to do on one. A named colour
+    /// is whatever the terminal decides it is, so a field that has to be measured cannot be one.
+    fn rgb(colour: Color, field: &str, theme: Theme) -> (u8, u8, u8) {
+        match colour {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("{}: {field} has to be a colour, not a name: {other:?}", theme.name()),
+        }
+    }
+
+    /// The twin of the gutter test, for the ground under the text. The editor paints four
+    /// backgrounds into the same cells — the theme's own surface, the selection, the stopped line
+    /// and now the arrival — and two of them the same colour would be a line that reads as
+    /// selected when nothing is, or as untouched when something wrote it.
+    ///
+    /// A floor rather than an inequality, and the same floor the handle's bands are held to: two
+    /// colours a couple of points apart are one colour to anyone reading code on top of them.
+    #[test]
+    fn a_changed_line_background_cannot_be_mistaken_for_the_other_backgrounds() {
+        // The channel distance below which two backgrounds read as one.
+        const APART: i32 = 24;
+        for theme in Theme::ALL {
+            let p = theme.palette();
+            let tint = rgb(p.changed_line_bg, "changed_line_bg", theme);
+            for (name, other) in [
+                ("the theme's own background", p.background),
+                ("the selection", p.selection),
+                ("the current line", p.current_line),
+            ] {
+                let other = rgb(other, name, theme);
+                let apart = (tint.0 as i32 - other.0 as i32).abs()
+                    + (tint.1 as i32 - other.1 as i32).abs()
+                    + (tint.2 as i32 - other.2 as i32).abs();
+                assert!(
+                    apart >= APART,
+                    "{}: a changed line's ground is {name} ({:?} vs {:?})",
+                    theme.name(),
+                    p.changed_line_bg,
+                    other
+                );
+            }
+        }
+    }
+
+    /// The tint has to stay out of the way of what is written on it. Two things are being asked
+    /// at once, and they pull in opposite directions: it must sit near the theme's own ground, or
+    /// it stops being a tint and becomes a highlighter pen over whole lines of code; and it must
+    /// stay far from the theme's text, or the syntax colouring it is drawn under gets harder to
+    /// read — which would make the mark cost more than the arrival it reports is worth.
+    ///
+    /// The default theme leaves its text to the terminal and so has no second half to check. What
+    /// still holds there is the first: a tint close to the theme's surface cannot be far from
+    /// whatever the terminal writes on that surface.
+    #[test]
+    fn a_changed_line_background_stays_out_of_the_way_of_the_text() {
+        // How far from the theme's own ground a tint may drift before it is a highlight.
+        const NEAR_GROUND: f32 = 0.14;
+        // How far from the theme's text it has to stay for the text to keep reading as text.
+        const OFF_THE_TEXT: f32 = 0.35;
+        for theme in Theme::ALL {
+            let p = theme.palette();
+            let tint = luminance(rgb(p.changed_line_bg, "changed_line_bg", theme));
+            let ground = luminance(rgb(p.background, "background", theme));
+            assert!(
+                (tint - ground).abs() <= NEAR_GROUND,
+                "{}: the tint is {:.3} from the theme's own ground and reads as a highlight",
+                theme.name(),
+                (tint - ground).abs()
+            );
+            let Color::Rgb(r, g, b) = p.text else { continue };
+            let text = luminance((r, g, b));
+            assert!(
+                (text - tint).abs() >= OFF_THE_TEXT,
+                "{}: text at {:.3} on a tint at {:.3} is not enough separation",
+                theme.name(),
+                text,
+                tint
+            );
         }
     }
 

@@ -438,10 +438,17 @@ pub struct TabLayout {
     pub label: (u16, u16),
     /// What a click has to hit to close the tab. Wider than the glyph: a one-cell target is one
     /// the mouse misses, which is why the preview bar grew `NAV_MIN_WIDTH` after the same
-    /// complaint. The padding either side of the × belongs to nothing else, so it is given away
+    /// complaint. The padding either side of the □ belongs to nothing else, so it is given away
     /// here — the glyph is still drawn in exactly one cell, and the tab is unchanged to look at.
     pub close: (u16, u16),
 }
+
+/// The close box, System 7's own: an empty square at the top-left of whatever it closes, be it a
+/// tab or a whole pane. One glyph for every close control in the app, because a control that
+/// changes shape from one corner to the next is one that has to be learnt twice. It measures a
+/// single column — U+25A1 is East Asian *ambiguous*, which unicode-width treats as narrow, the
+/// same class the preview tab's `▤` already relies on — so every layout here can count it as one.
+pub const CLOSE_BOX: &str = "\u{25a1}";
 
 /// The arrow glyphs that stand in for tabs scrolled out of view, and the columns they take.
 pub const SCROLL_LEFT_GLYPH: &str = "\u{2039}";
@@ -476,7 +483,7 @@ impl TabStrip {
     }
 }
 
-/// Width each tab occupies: `" title* "` plus the `×` glyph and a trailing space.
+/// Width each tab occupies: `" title* "` plus the `□` glyph and the space before it.
 /// The width of each tab in one pane's strip. Per pane, not per buffer: the two halves of a
 /// split hold different files, so they have different strips.
 pub fn tab_widths(app: &App, pane: EditorPane) -> Vec<u16> {
@@ -487,7 +494,7 @@ pub fn tab_widths(app: &App, pane: EditorPane) -> Vec<u16> {
         .map(|editor| {
             let dirty = if editor.dirty { "*" } else { "" };
             let prefix = format!(" {}{} ", editor.title(lang), dirty);
-            prefix.chars().count() as u16 + 2 // + close glyph + trailing space
+            prefix.chars().count() as u16 + 2 // + leading space + close glyph
         })
         .collect()
 }
@@ -544,18 +551,18 @@ pub fn offset_revealing(widths: &[u16], width: u16, offset: usize, active: usize
     }
 }
 
-/// The narrowest a clipped tab can usefully be: one column of title, the × and its space.
+/// The narrowest a clipped tab can usefully be: the □ and its space, then one column of title.
 const MIN_CLIPPED_TAB: u16 = 3;
 
 /// One tab occupying `x..x + w`, where `w` is either the width the title wants or — for the
 /// clipped case below — all the room there is.
 fn tab_layout_at(x: u16, w: u16, clipped: bool) -> TabLayout {
-    let close_start = x + w - 2; // the × sits before the trailing space
-    // The trailing space is always part of the target. The space *before* the glyph is too, but
-    // only when there is one: a clipped title ends in an ellipsis, and swallowing that column
-    // would close the tab from a cell showing text.
-    let close_from = if clipped { close_start } else { close_start.saturating_sub(1) };
-    TabLayout { full: (x, x + w), label: (x, close_start), close: (close_from, x + w) }
+    let close_start = x + 1; // the □ sits after the leading space, as System 7 kept it
+    // The leading space is always part of the target. The space *after* the glyph is too, but
+    // only when there is one: a title clipped hard enough is a lone ellipsis in that very column,
+    // and swallowing it would close the tab from a cell showing text.
+    let close_end = if clipped { close_start + 1 } else { close_start + 2 };
+    TabLayout { full: (x, x + w), label: (close_start + 1, x + w), close: (x, close_end) }
 }
 
 /// Lays out the visible part of the tab strip, starting at `offset`.
@@ -588,7 +595,7 @@ pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize) -> TabStrip {
 /// ordinary rather than exotic.
 ///
 /// Returning nothing here is what made the whole bar disappear: no name, no dirty marker and no
-/// ×, so the one open file had nothing on screen and no way to be closed with the mouse. A tab
+/// □, so the one open file had nothing on screen and no way to be closed with the mouse. A tab
 /// cut short with an ellipsis says less than a whole one and everything more than an empty row.
 ///
 /// The arrows still come first when there is anything on either side, because a strip you cannot
@@ -973,65 +980,67 @@ pub fn run_menu_rect(app: &App, editor_area: Rect, full: Rect) -> Option<Rect> {
 /// bitmap rather than as characters: one letter per pixel, and two strings per screen row, since
 /// a row is drawn as a half-block with one colour in front and another behind and so holds two
 /// pixels stacked. That is what buys the drawing its resolution — the row grid is half as coarse
-/// as the character grid — and it is why the letters name a colour rather than a glyph.
+/// as the character grid — and it is why the letters name a colour rather than a glyph. The grid
+/// is resampled from the app icon (assets/icon/CleeCode.icns) onto this half-block resolution and
+/// quantized to seven flat colours; the letters run darkest to brightest, so `.` sits at the foot
+/// of the ladder and is left unpainted rather than drawn, letting the box's own background show.
 const ABOUT_ART_WIDE: &[&str] = &[
-    "..............lll..............",
-    ".............lllll.............",
-    ".............lllll.............",
-    ".......eel...lllll...lee.......",
-    ".....ellll...rlllr...lllle.....",
-    "...elllll..rrrsssrrr..llllle...",
-    "..elllll.ersssssssssre.llllle..",
-    ".llllle.rrssmmmmmmmssrr.elllll.",
-    "ellle..ersssmmmmmmmsssre..ellle",
-    ".ee....rsssssmmmmmsssssr....ee.",
-    "......ermssssmmmmmssssmre......",
-    "......rsmmmsssmmmsssmmmsr......",
-    "......rsmmmmmsmmmsmmmmmsr......",
-    "......rsmmmmmmmmmmmmmmmsr......",
-    "......rsmmmmmmmmmmmmmmmsr......",
-    "......rsmmmmmsmmmsmmmmmsr......",
-    "......rsmmmsssmmmsssmmmsr......",
-    "......ermssssmmmmmssssmre......",
-    ".ee....rsssssmmmmmsssssr....ee.",
-    "ellle..ersssmmmmmmmsssre..ellle",
-    ".llllle.rrssmmmmmmmssrr.elllll.",
-    "..elllll.ersssssssssre.llllle..",
-    "...elllll..rrrsssrrr..llllle...",
-    ".....ellll...errre...lllle.....",
-    ".......eel....lll....lee.......",
-    "..............lll..............",
-    "..............ele..............",
-    "...............................",
+    "...........eespppsee...........",
+    "..........eesppppplee..........",
+    "..........empllplspme..........",
+    ".....eeeeemrplllsspseeeeee.....",
+    "...ee.eeemmrlrrrrrlrmmeee.ee...",
+    "..eemlpplmmrllpllllsmmlpplreee.",
+    "eeesppplsslppllllslppssllpplmee",
+    "emlpplsmrpppslllssslppsmrllppme",
+    "esplssmsplsslssssrlsrsplmsllple",
+    "mplrrmrpsslsllsssssmrrmpsmrrlpr",
+    "sprslrplsssrspllslsmrrmrpsllrpl",
+    "rllsrspssrrspeeee.ls.eerplrsllr",
+    "eemmmppsssspmsmmmmelsssrlpmmmee",
+    ".eemmplrrmls.lpmem.rlmmerprmee.",
+    "..emrpsre.rl.sprrr.sr.mmmpre...",
+    "...mmpremeel.lmrll.lmemmrpre...",
+    "...mmpl.m.mlse....rlm.mespmm...",
+    "..emmlprmrserlsmssrerrerplmee..",
+    ".eelprplrr....rlr..e.rrsprplee.",
+    ".erplrrpsmeeee.r..eeemsprmlps..",
+    "eesppsmrpseeee.reeeeespserpplee",
+    ".espllsmsplreemmmeerlpsesllpsee",
+    ".empplsssrlplssrsslplrssrlppre.",
+    ".eerppslsmmrslssslsrmmslrppree.",
+    "..emmlpprmmmmllmslmmmmmlplree..",
+    "...eeemmee.emmpppree.eemmeee...",
+    ".....e.......emsmee......e.....",
 ];
 
 const ABOUT_ART_NARROW: &[&str] = &[
-    "............eee............",
-    "...........ellle...........",
-    "...........lllll...........",
-    ".......ee..lllll..ee.......",
-    "....ellll..ellle..lllle....",
-    "...lllll.errsssrre.lllll...",
-    ".elllle.rsssssssssr.elllle.",
-    "ellll..rssmmmmmmmssr..lllle",
-    "llle..rssssmmmmmssssr..elll",
-    ".....erssssmmmmmssssre.....",
-    ".....rsmmsssmmmsssmmsr.....",
-    ".....rsmmmmsmmmsmmmmsr.....",
-    ".....rsmmmmmmmmmmmmmsr.....",
-    ".....rsmmmmmmmmmmmmmsr.....",
-    ".....rsmmmmsmmmsmmmmsr.....",
-    ".....rsmmsssmmmsssmmsr.....",
-    ".....erssssmmmmmssssre.....",
-    "llle..rssssmmmmmssssr..elll",
-    "ellll..rssmmmmmmmssr..lllle",
-    ".elllle.rsssssssssr.elllle.",
-    "...lllll.errsssrre.lllll...",
-    "....ellll..errre..lllle....",
-    ".......ee...lll...ee.......",
-    "............lll............",
-    ".............e.............",
-    "...........................",
+    ".........mmrpppsmm.........",
+    "........emrppppprme........",
+    "........mmlpspsllmm........",
+    "...emmemmmlplsslprmmemee...",
+    "..emmmrmrrsssssslrrmrrmmm..",
+    ".mmrlpplrslpplpllsrlpplrmme",
+    "mmspplsslppllllspppsslppsmm",
+    "mspplsrlpllslllsllpprslppsm",
+    "mppssrlpssllsssslrsllrssppr",
+    "spsssspslsspllllrssrllrssll",
+    "lpllsplsssslssrlsmrmspsllpl",
+    "rssrsplssspmmmmelsrrsplrssr",
+    "mmmrlpsssprslrrrmpssrllrrme",
+    "eemrllsr.lrrpsmmmlemmsprme.",
+    "..mrllmmesrslslsrserrsprm..",
+    "..mrllmr.slm.rrmss.rmslrm..",
+    ".emmsprmrsslrersssrmrpsmme.",
+    ".mrlsplsse.msssm.errspslre.",
+    "emlpsspsreme.s.emmmspssplee",
+    "mmpplrspremmeremmmrplesppre",
+    "empplsrlpsmemrmeesplmslppme",
+    "emsplssssppssssslpsssslplee",
+    ".mmlpslsrrslllslsrrslsppre.",
+    ".emrlppsrrmslmssmrrrpplrme.",
+    "..emmrrmeemrlpprmeemrrmee..",
+    "....eeee..eersree..eeee....",
 ];
 
 /// Columns given to the text beside the drawing. Wide enough for the two lines that cannot be
@@ -1041,13 +1050,25 @@ const ABOUT_TEXT_COLS: u16 = 36;
 /// Columns of air between the drawing and the text.
 const ABOUT_GUTTER: u16 = 3;
 
+/// Columns of air the drawing keeps from the modal's left border. Without it the artwork sits
+/// flush against the frame while the text on its far side already has the gutter for breathing
+/// room; this gives the drawing the same kind of margin on the side that would otherwise have none.
+const ABOUT_ART_LEFT_PAD: u16 = 2;
+
+/// Blank rows the drawing keeps from the modal's top and bottom borders, one apiece, so it does
+/// not sit flush against the frame the way it did before this padding was added.
+const ABOUT_ART_VPAD: u16 = 1;
+
 /// The drawing this terminal has room for, or `None` when it has room for neither and the box
 /// falls back to the text on its own. The thresholds ask for a margin the modal does not use: a
 /// box that reaches the edge of the screen reads as clipped even when every column of it is there.
+/// Grown by exactly the padding the drawing now keeps from the frame (`ABOUT_ART_LEFT_PAD` on
+/// width, both `ABOUT_ART_VPAD` rows on height), so that margin is still there on top of the
+/// padding rather than the padding eating into it.
 fn about_art(full: Rect) -> Option<&'static [&'static str]> {
-    if full.width >= 76 && full.height >= 18 {
+    if full.width >= 76 + ABOUT_ART_LEFT_PAD && full.height >= 18 + ABOUT_ART_VPAD * 2 {
         Some(ABOUT_ART_WIDE)
-    } else if full.width >= 72 && full.height >= 17 {
+    } else if full.width >= 72 + ABOUT_ART_LEFT_PAD && full.height >= 17 + ABOUT_ART_VPAD * 2 {
         Some(ABOUT_ART_NARROW)
     } else {
         None
@@ -1058,17 +1079,21 @@ fn about_art_width(art: &[&str]) -> u16 {
     art.iter().map(|row| row.chars().count() as u16).max().unwrap_or(0)
 }
 
-/// Screen rows the drawing takes: two pixel rows to each of them.
+/// Screen rows the drawing takes: two pixel rows to each of them, rounded up rather than down so
+/// a trailing pixel row with no partner below it still gets a screen row of its own — drawn with
+/// only its upper half painted, the same as any row's unmatched half already is — instead of being
+/// read past the end of the array or silently dropped.
 fn about_art_height(art: &[&str]) -> u16 {
-    art.len() as u16 / 2
+    (art.len() as u16 + 1) / 2
 }
 
 pub fn about_modal_rect(full: Rect) -> Rect {
     match about_art(full) {
-        // The drawing, the gutter, the text and the two borders.
+        // The drawing, its own left and vertical padding, the gutter, the text and the two
+        // borders.
         Some(art) => centered_rect(
-            about_art_width(art) + ABOUT_GUTTER + ABOUT_TEXT_COLS + 2,
-            about_art_height(art) + 2,
+            about_art_width(art) + ABOUT_ART_LEFT_PAD + ABOUT_GUTTER + ABOUT_TEXT_COLS + 2,
+            about_art_height(art) + ABOUT_ART_VPAD * 2 + 2,
             full,
         ),
         // Tall enough for the version, the wrapped tagline (three lines in Italian, the longer
@@ -1114,8 +1139,13 @@ const SPLASH_BANNER: &[&str] = &[
 ];
 
 fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
-    let pal = app.palette();
-    let lang = app.settings.lang;
+    draw_splash_body(app.palette(), app.settings.lang, app.active_workspace.as_deref(), f, full);
+}
+
+/// Kept apart from `draw_splash` so the drawing's placement above the tagline can be checked
+/// against a rendered buffer without the cost of a real `App` — the terminal panes it would spawn
+/// have nothing to do with what gets painted here.
+fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut Frame, full: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for row in SPLASH_BANNER {
         lines.push(Line::from(Span::styled(*row, Style::default().fg(pal.success))).alignment(ratatui::layout::Alignment::Center));
@@ -1133,7 +1163,7 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
     );
     // Started with a workspace — `clee -w name`, or a resumed one — so say which, while the
     // splash is the only thing on screen and the shells behind it are still starting.
-    if let Some(name) = app.active_workspace.as_deref() {
+    if let Some(name) = workspace {
         lines.push(Line::from(""));
         lines.push(
             Line::from(vec![
@@ -1149,6 +1179,28 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
             .alignment(ratatui::layout::Alignment::Center),
     );
 
+    // The drawing sits in the gap right after the banner, above the tagline, when the screen asks
+    // for it the way `about_art` asks for its own box: past the strict sum of what is already on
+    // screen, the drawing's rows and the blank line that separates it from the tagline, by a
+    // couple more rows so the whole ensemble keeps a blank row top and bottom rather than landing
+    // flush against the screen's edges — which reads as clipped even when nothing actually is.
+    // Short of that margin, the splash is exactly what it has always been.
+    const SPLASH_ART_MARGIN: u16 = 2;
+    let art_rows = about_art_height(ABOUT_ART_NARROW);
+    let tagline_row = SPLASH_BANNER.len() + 1;
+    let art = if full.height >= lines.len() as u16 + art_rows + 1 + SPLASH_ART_MARGIN {
+        // Reserved as blank paragraph rows rather than left out of `lines` entirely, so the
+        // paragraph still owns the vertical rhythm of the tagline and everything under it, and the
+        // whole banner-plus-drawing-plus-text block centers as one piece — the drawing is painted
+        // into the gap the paragraph leaves for it, not laid out against the text by hand.
+        let rest = lines.split_off(tagline_row);
+        lines.extend(std::iter::repeat_with(|| Line::from("")).take(art_rows as usize + 1));
+        lines.extend(rest);
+        Some(ABOUT_ART_NARROW)
+    } else {
+        None
+    };
+
     let content_height = lines.len() as u16;
     let top_pad = full.height.saturating_sub(content_height) / 2;
     let area = Rect {
@@ -1159,6 +1211,20 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
     };
     f.render_widget(Clear, full);
     f.render_widget(Paragraph::new(lines), area);
+
+    if let Some(art) = art {
+        let art_width = about_art_width(art);
+        draw_about_art(
+            f,
+            art,
+            Rect {
+                x: full.x + full.width.saturating_sub(art_width) / 2,
+                y: area.y + tagline_row as u16,
+                width: art_width,
+                height: art_rows,
+            },
+        );
+    }
 }
 
 /// One frame, and then the background under it if the terminal's own is not to be trusted.
@@ -1675,16 +1741,19 @@ fn about_text_lines(lang: Lang, width: usize) -> Vec<Line<'static>> {
 }
 
 /// The colours a pixel of the drawing can be, stated outright rather than taken from `Color::Red`
-/// and `Color::Green`: those are palette entries every terminal theme is free to redefine, and the
-/// themes that make their red a salmon turned the mark in the middle pink. The darkest green is
-/// the one the outline is feathered with, which is what keeps the curves from reading as steps.
+/// and `Color::Green`: those are palette entries every terminal theme is free to redefine, and a
+/// resampled, quantized bitmap needs its six flat steps to land on the same six colours in every
+/// theme. The letters run darkest to brightest, matching the ladder the grid files were quantized
+/// to; `.` is not one of the six — it is the seventh, quantized step nearest the box's own
+/// background, so it is left unpainted rather than drawn over it.
 fn about_ink(pixel: char) -> Option<Color> {
     Some(match pixel {
-        's' => Color::Rgb(94, 148, 82),
-        'l' => Color::Rgb(74, 118, 66),
-        'r' => Color::Rgb(58, 96, 52),
-        'e' => Color::Rgb(42, 70, 38),
-        'm' => Color::Rgb(196, 26, 34),
+        'e' => Color::Rgb(1, 29, 27),
+        'm' => Color::Rgb(4, 49, 36),
+        'r' => Color::Rgb(20, 86, 62),
+        's' => Color::Rgb(33, 122, 88),
+        'l' => Color::Rgb(44, 160, 112),
+        'p' => Color::Rgb(62, 219, 147),
         _ => return None,
     })
 }
@@ -1692,19 +1761,22 @@ fn about_ink(pixel: char) -> Option<Color> {
 /// Draws the bitmap into `area`, a row of it per screen row: the upper half-block takes the top
 /// pixel as its foreground and the bottom one as its background, so both are drawn in full colour
 /// in the one cell they share. A row with a pixel on one side only is drawn as the half that has
-/// it, leaving whatever is behind the modal to show through the other half.
+/// it, leaving whatever is behind the modal to show through the other half — which is also what a
+/// trailing pixel row with no partner below it gets, when the bitmap's row count is odd.
 fn draw_about_art(f: &mut Frame, art: &[&str], area: Rect) {
     for row in 0..about_art_height(art).min(area.height) {
-        let (top, bottom) = (art[row as usize * 2], art[row as usize * 2 + 1]);
-        for (col, (over, under)) in top.chars().zip(bottom.chars()).enumerate() {
+        let top = art[row as usize * 2];
+        let bottom = art.get(row as usize * 2 + 1).copied();
+        for (col, over) in top.chars().enumerate() {
             let col = col as u16;
             if col >= area.width {
                 break;
             }
+            let under = bottom.and_then(|b| b.chars().nth(col as usize));
             let Some(cell) = f.buffer_mut().cell_mut((area.x + col, area.y + row)) else {
                 continue;
             };
-            match (about_ink(over), about_ink(under)) {
+            match (about_ink(over), under.and_then(about_ink)) {
                 (None, None) => {}
                 (Some(fg), None) => {
                     cell.set_symbol("\u{2580}").set_fg(fg);
@@ -1739,7 +1811,8 @@ fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
     };
 
     let art_width = about_art_width(art);
-    let text_width = inner.width.saturating_sub(art_width + ABOUT_GUTTER);
+    let art_height = about_art_height(art);
+    let text_width = inner.width.saturating_sub(ABOUT_ART_LEFT_PAD + art_width + ABOUT_GUTTER);
     let lines = about_text_lines(lang, text_width as usize);
     // The text is shorter than the drawing, so it sits against the middle of it rather than the
     // top. A translation long enough to fill the height simply starts at the top instead.
@@ -1748,7 +1821,7 @@ fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(
         Paragraph::new(lines),
         Rect {
-            x: inner.x + art_width + ABOUT_GUTTER,
+            x: inner.x + ABOUT_ART_LEFT_PAD + art_width + ABOUT_GUTTER,
             y: inner.y + top,
             width: text_width,
             height: inner.height.saturating_sub(top),
@@ -1757,7 +1830,12 @@ fn draw_about_modal(f: &mut Frame, app: &App, full: Rect) {
     draw_about_art(
         f,
         art,
-        Rect { x: inner.x, y: inner.y, width: art_width, height: inner.height },
+        Rect {
+            x: inner.x + ABOUT_ART_LEFT_PAD,
+            y: inner.y + ABOUT_ART_VPAD,
+            width: art_width,
+            height: art_height,
+        },
     );
 }
 
@@ -3590,6 +3668,15 @@ fn highlight_selection(pal: Palette, spans: Vec<(Style, String)>, sel_from: usiz
     restyle_range(spans, sel_from, sel_to, |style| style.bg(pal.selection))
 }
 
+/// The tint under a line that arrived from outside while the file was open.
+///
+/// A background and nothing else: each span keeps the foreground the highlighter gave it, so the
+/// syntax colouring is read on top of the tint instead of being flattened into one colour by it —
+/// a mark that made the code harder to read would cost more than the arrival is worth.
+fn arrival_tint(pal: Palette, spans: Vec<(Style, String)>) -> Vec<(Style, String)> {
+    restyle_range(spans, 0, usize::MAX, |style| style.bg(pal.changed_line_bg))
+}
+
 /// One cell of a line marked as the caret of a column selection that has no width.
 ///
 /// The selection's own colour, because that is what it is: a selection one character wide, on
@@ -3657,7 +3744,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
         let position = strip.first + offset;
         let dirty = if editor.dirty { "*" } else { "" };
         // Drawn into the columns the layout gave this tab rather than into as many as the name
-        // wants: the two have to agree, or the × is clicked where it is not and the strip runs
+        // wants: the two have to agree, or the □ is clicked where it is not and the strip runs
         // off the end of the bar. `fit` cuts with an ellipsis; the padding is for the clipped
         // tab that is the whole strip, so the highlight still fills the row.
         let label_width = layout.label.1.saturating_sub(layout.label.0) as usize;
@@ -3671,9 +3758,11 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
         } else {
             Style::default().fg(pal.text_muted).bg(pal.tab_inactive)
         });
-        spans.push(Span::styled(prefix, style));
-        spans.push(Span::styled("\u{2715}", style));
+        // The box first, in the columns `tab_layout_at` set aside for it at the tab's left edge,
+        // and the title after it — the order the tab is read in and the order it is drawn in.
         spans.push(Span::styled(" ", style));
+        spans.push(Span::styled(CLOSE_BOX, style));
+        spans.push(Span::styled(prefix, style));
     }
     if let Some((start, _)) = strip.right_arrow {
         let pad = start.saturating_sub(used);
@@ -4423,6 +4512,11 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         let mut spans: Vec<Span> = Vec::new();
         let on_line: Vec<&crate::lsp::Mark> = marks.iter().filter(|m| m.line == line_idx).collect();
         let worst = on_line.iter().map(|m| m.severity).max();
+        // A line somebody else wrote while you were looking at the file, from the last reload.
+        // Asked once for the two things drawn from it — the lit line number and the tint under the
+        // text — so a gutter that is switched off cannot leave the text saying something the
+        // number no longer agrees with.
+        let arrived = app.editors[idx].line_arrived(line_idx);
         if gutter > 0 {
             let is_current = line_idx == cursor_line;
             // The number carries the mark rather than a column of its own: a gutter one cell
@@ -4433,11 +4527,9 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
             // there the user put on purpose, and a warning colouring over it would read as the
             // breakpoint having gone away.
             let at_break = breaks.contains(&(line_idx + 1));
-            // A line somebody else wrote while you were looking at the file, from the last
-            // reload. It comes after the diagnostic on purpose: a diagnostic is information —
+            // The arrival comes after the diagnostic on purpose: a diagnostic is information —
             // something is wrong here — and an arrival is only evidence that something moved.
             // Where the two land on one line the reader needs the one that says to act.
-            let arrived = app.editors[idx].line_arrived(line_idx);
             let num_style = if at_break {
                 Style::default().fg(pal.on_accent).bg(pal.danger).add_modifier(Modifier::BOLD)
             } else if stopped == Some(line_idx) {
@@ -4477,6 +4569,15 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         } else {
             raw_spans
         };
+        // The arrival said on the text as well as on the line number, because a number lit in the
+        // gutter of a long file is only found by scrolling the gutter on purpose, and the whole
+        // point of this mark is to be there when you come back rather than while you watch.
+        //
+        // First of the backgrounds, and that is the precedence rule stated once: every background
+        // applied below overwrites this one. The selection, the stopped line and the block caret
+        // all say "you are doing this right now"; an arrival is context, and context painted over
+        // what the user is holding would be the two read the wrong way round.
+        let raw_spans = if arrived { arrival_tint(pal, raw_spans) } else { raw_spans };
         let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(pal, raw_spans, &on_line) };
         // The whole stopped line, marked: where the program *is* is worth more than a colour on
         // one word, and it is what you look for when you glance back at the editor.
@@ -4657,14 +4758,32 @@ fn vt100_color(color: vt100::Color) -> Option<Color> {
     }
 }
 
-/// The cell holding a terminal panel's close button — the right-aligned `✕` on its top border,
-/// one column in from the corner. Shared by the renderer and click handling so both agree on
-/// where it is. `None` when the panel is too narrow to carry a title.
+/// The cell holding a terminal panel's close button — the `□` on its top border, two columns in
+/// from the top-*left* corner, where System 7 put the close box and where every other close
+/// control in this app now sits. The box does not lean on the corner: one cell of border stands
+/// between them (asked for by the user, 2026-09-04), which is the leading pad `with_close_box`
+/// draws. This function is the same arithmetic for click handling, so the two cannot drift
+/// apart. `None` when the panel is too narrow to carry a title.
 pub fn terminal_close_cell(area: Rect) -> Option<(u16, u16)> {
-    if area.width < 3 {
+    if area.width < 5 {
         return None;
     }
-    Some((area.x + area.width - 2, area.y))
+    Some((area.x + 2, area.y))
+}
+
+/// Hangs the close box on a pane's top border. Every pane that can be closed goes through here,
+/// so there is one answer to where the box is drawn rather than one per pane — and that answer is
+/// the first left title of the block, which ratatui starts at the cell after the left border. The
+/// title carries one cell of padding on each side of the box (asked for by the user, 2026-09-04),
+/// so the box breathes instead of leaning on the corner or on what follows it, and lands exactly
+/// where `terminal_close_cell` points the mouse. Call this before adding the pane's own title,
+/// which then follows to the right of the box.
+fn with_close_box<'a>(block: Block<'a>, pal: Palette) -> Block<'a> {
+    block.title_top(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(CLOSE_BOX, Style::default().fg(pal.danger)),
+        Span::raw(" "),
+    ]))
 }
 
 /// The area a terminal window's active tab renders into — the whole pane interior. The tab strip
@@ -4903,21 +5022,22 @@ pub fn terminal_scroll_metrics(
 }
 
 /// The stretch of the top border a multi-tab window shows its tabs on: from just inside the left
-/// corner, stopping short of the window close button on the right when one is present. Shared by
-/// the renderer and click handling.
+/// corner, or one cell further in when the window's own close box has claimed that cell, and
+/// stopping short of the right corner. Shared by the renderer and click handling.
 pub fn terminal_tab_strip_rect(area: Rect, window_close: bool) -> Rect {
-    // One cell reserved on the right for the corner; two when the window also carries its own
-    // close button, so the tabs never sit under it.
-    let reserve = if window_close { 2 } else { 1 };
+    // One cell given up on the left for the corner; four when the window also carries its own
+    // close box, which wears a cell of padding on each side — the tabs must never sit under the
+    // box or its pads, or the strip would paint over the button and take its clicks with it.
+    let skip = if window_close { 4 } else { 1 };
     Rect {
-        x: area.x + 1,
+        x: area.x + skip,
         y: area.y,
-        width: area.width.saturating_sub(1 + reserve),
+        width: area.width.saturating_sub(skip + 1),
         height: 1,
     }
 }
 
-/// One tab in a terminal window's strip: its whole x-range, and the column of its `✕` close
+/// One tab in a terminal window's strip: its whole x-range, and the column of its `□` close
 /// glyph (absent only when the strip is too narrow to fit it).
 pub struct TermTab {
     pub full: (u16, u16),
@@ -4942,8 +5062,8 @@ pub fn terminal_tab_labels(window: &TerminalWindow, window_index: usize, lang: L
         .collect()
 }
 
-/// The tabs laid out along a terminal window's strip, left to right. Each chip is ` {name} ✕ `
-/// (a display name plus a close glyph). Shared by the renderer and click handling, and clipped to
+/// The tabs laid out along a terminal window's strip, left to right. Each chip is ` □ {name} `
+/// (a close glyph plus a display name). Shared by the renderer and click handling, and clipped to
 /// the strip width. Empty when there's a single tab (no strip is shown).
 pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
     if labels.len() <= 1 {
@@ -4957,8 +5077,8 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
             break;
         }
         let lw = label.chars().count() as u16;
-        let right = (x + lw + 4).min(end); // " name ✕ "
-        let close_x = x + lw + 2; // the ✕ sits after "␠name␠"
+        let right = (x + lw + 4).min(end); // " □ name "
+        let close_x = x + 1; // the □ sits after the chip's leading space
         let close = (close_x < right).then_some(close_x);
         tabs.push(TermTab { full: (x, right), close });
         x = right;
@@ -4967,13 +5087,13 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 }
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
-/// never reads as an editor tab (those go cyan). Each tab carries a `✕` to close it.
+/// never reads as an editor tab (those go cyan). Each tab carries a `□` to close it.
 fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[String], active: usize) {
     let tabs = terminal_tab_ranges(area, labels);
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let budget = (tab.full.1 - tab.full.0) as usize;
-        let chip: String = format!(" {} ✕ ", labels[i]).chars().take(budget).collect();
+        let chip: String = format!(" {CLOSE_BOX} {} ", labels[i]).chars().take(budget).collect();
         let style = if i == active {
             Style::default().fg(pal.on_accent).bg(pal.success)
         } else {
@@ -4996,8 +5116,8 @@ struct TerminalChrome {
     /// Whether the layout resize mode is on, which colours the focused border differently.
     resizing: bool,
     focused: bool,
-    /// Whether to offer the window ✕ in the corner. False for the drawer: it is closed from the
-    /// View menu, and a ✕ there would be a promise to kill the agent.
+    /// Whether to offer the window □ in the corner. False for the drawer: it is closed from the
+    /// View menu, and a □ there would be a promise to kill the agent.
     closable: bool,
     /// Whether the pointer is on this pane's scrollbar, or dragging it. Resolved by the caller,
     /// which is the half that knows which `ScrollbarId` this pane answers to — `Terminal(i)` for
@@ -5048,18 +5168,18 @@ fn draw_single_terminal(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(focused_border_style(pal, focused, resizing));
-    // With a single tab the top border carries the (possibly renamed) terminal's name; with
-    // several, the tabs ride the border instead (drawn below) and stand in for the title.
+    // The close box goes on before any other title, because left titles are laid out in the order
+    // they were added: first in means the cell just inside the top-left corner, which is the cell
+    // `terminal_close_cell` hands to the mouse. Offered only when there's another terminal to fall
+    // back to — the last one can't be closed, so the button would only mislead.
+    if window_close {
+        block = with_close_box(block, pal);
+    }
+    // With a single tab the top border carries the (possibly renamed) terminal's name — after the
+    // box, which has already claimed its cell; with several, the tabs ride the border instead
+    // (drawn below) and stand in for the title.
     if tab_count <= 1 {
         block = block.title(format!(" {} ", labels.first().map(String::as_str).unwrap_or("")));
-    }
-    // A close button in the top-right corner, but only when there's another terminal to fall back
-    // to — the last one can't be closed, so offering the button would only mislead. Its cell is
-    // `terminal_close_cell`, kept in step with the right-aligned title here.
-    if window_close {
-        block = block.title_top(
-            Line::from(Span::styled("\u{2715}", Style::default().fg(pal.danger))).right_aligned(),
-        );
     }
     // The tab strip rides the top border, so the content is the whole interior.
     let content = terminal_content_rect(area);
@@ -5145,7 +5265,7 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
                 lang,
                 resizing,
                 focused,
-                // The ✕ in the corner, in the cell every other pane keeps it in. It reads as the
+                // The □ in the corner, in the cell every other pane keeps it in. It reads as the
                 // terminal panel's close button and does something quieter: it takes the column
                 // away and leaves the pty running, which is the View menu's own path and the
                 // only thing closing the drawer has ever meant. `App::click_drawer` claims that
@@ -5257,16 +5377,15 @@ fn draw_drawer_launcher(
     focused: bool,
     resizing: bool,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(pal, focused, resizing))
-        .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)))
-        // The same ✕, in the same cell, as the drawer wears with an agent in it: the empty
-        // drawer is as dismissable as the full one, and a control that came and went with the
-        // contents would be one to hunt for. `terminal_close_cell` is where it is.
-        .title_top(
-            Line::from(Span::styled("\u{2715}", Style::default().fg(pal.danger))).right_aligned(),
-        );
+    // The same □, in the same cell, as the drawer wears with an agent in it: the empty drawer is
+    // as dismissable as the full one, and a control that came and went with the contents would be
+    // one to hunt for. `terminal_close_cell` is where it is — which means it goes on before the
+    // title, so it is the first left title and lands in that cell rather than after the words.
+    let block = with_close_box(
+        Block::default().borders(Borders::ALL).border_style(focused_border_style(pal, focused, resizing)),
+        pal,
+    )
+    .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -5622,6 +5741,39 @@ mod tests {
         assert_eq!(zones[0].1.x, drawn[0].1.x - 1);
     }
 
+    /// The tint under an arrived line keeps every foreground the highlighter handed it, and loses
+    /// its ground to anything the user is doing on top of it.
+    ///
+    /// Both halves are the feature. Flattening the syntax colours would make the mark cost more
+    /// than the arrival is worth, and a tint that survived the selection would leave the user
+    /// unable to see what they had selected — which is why the drawing applies it first, before
+    /// every other background, rather than last.
+    #[test]
+    fn an_arrival_tints_the_ground_and_yields_it_to_the_selection() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let keyword = Style::default().fg(pal.info);
+        let string = Style::default().fg(pal.success);
+        let spans =
+            vec![(keyword, "let ".to_string()), (string, "\"hello\"".to_string())];
+        let tinted = super::arrival_tint(pal, spans);
+        assert_eq!(
+            tinted.iter().map(|(style, _)| style.fg).collect::<Vec<_>>(),
+            vec![Some(pal.info), Some(pal.success)],
+            "the tint repainted the syntax colours it was supposed to sit under"
+        );
+        for (style, text) in &tinted {
+            assert_eq!(style.bg, Some(pal.changed_line_bg), "{text:?} kept no tint");
+        }
+        // The four characters of `let ` are selected; the string beyond them is not.
+        let selected = super::highlight_selection(pal, tinted, 0, 4);
+        let grounds: Vec<Option<Color>> = selected.iter().map(|(style, _)| style.bg).collect();
+        assert_eq!(
+            grounds,
+            vec![Some(pal.selection), Some(pal.changed_line_bg)],
+            "the selection has to win the cells it covers and only those"
+        );
+    }
+
     /// No button is ever three cells wide, whatever its label says.
     #[test]
     fn even_the_shortest_button_is_worth_aiming_at() {
@@ -5810,7 +5962,7 @@ mod tests {
                     );
                     assert_eq!(
                         rect.height,
-                        about_art_height(art) + 2,
+                        about_art_height(art) + ABOUT_ART_VPAD * 2 + 2,
                         "the drawing is cut short"
                     );
                 }
@@ -5841,14 +5993,19 @@ mod tests {
     }
 
     /// Every row of the bitmap is padded to the same width, because the column the text starts at
-    /// is measured from the widest row and a short row would leave the text hanging off it. The
-    /// row count has to be even as well: they are read two at a time, and an odd one left over
-    /// would be read past the end of the array.
+    /// is measured from the widest row and a short row would leave the text hanging off it. Rows
+    /// are read two at a time into one screen row each, and `about_art_height` rounds that count
+    /// up rather than down, so an odd row left over at the bottom still gets a screen row of its
+    /// own instead of being read past the end of the array or silently dropped.
     #[test]
     fn the_about_drawing_is_a_rectangle() {
         for art in [ABOUT_ART_WIDE, ABOUT_ART_NARROW] {
             let width = about_art_width(art);
-            assert_eq!(art.len() % 2, 0, "an odd number of pixel rows: {}", art.len());
+            assert!(
+                about_art_height(art) as usize * 2 >= art.len(),
+                "a pixel row past what about_art_height covers: {}",
+                art.len()
+            );
             for row in art {
                 assert_eq!(row.chars().count() as u16, width, "ragged row: {row:?}");
                 assert!(
@@ -5857,6 +6014,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The splash's own gate on the drawing, exercised through `draw_splash_body` rather than a
+    /// real `App` — a screen too short for the drawing on top of everything else the splash shows
+    /// renders exactly as it always has, tagline included, and a screen with room puts the
+    /// drawing's rows above the tagline's own row rather than beside it or under it.
+    #[test]
+    fn the_splash_drawing_appears_above_the_tagline_when_there_is_room() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let lang = Lang::En;
+        let tagline = i18n::t(lang, Key::SplashTagline);
+        let find_row = |buffer: &ratatui::buffer::Buffer, width: u16, height: u16| -> Option<u16> {
+            (0..height).find(|&y| {
+                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                row.contains(tagline.split_whitespace().last().unwrap())
+            })
+        };
+
+        // Shorter than the drawing would need on top of the splash's usual content: no art, and
+        // the tagline is exactly where it always is.
+        let tiny = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(tiny.width, tiny.height)).unwrap();
+        terminal.draw(|f| draw_splash_body(pal, lang, None, f, tiny)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            find_row(buffer, tiny.width, tiny.height).is_some(),
+            "the splash should still show its tagline with no room for the drawing"
+        );
+
+        // Comfortably tall: the drawing's rows land above the tagline's row.
+        let roomy = Rect { x: 0, y: 0, width: 80, height: 40 };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(roomy.width, roomy.height)).unwrap();
+        terminal.draw(|f| draw_splash_body(pal, lang, None, f, roomy)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let tagline_row = find_row(buffer, roomy.width, roomy.height)
+            .expect("the tagline should still be on screen when there is room to spare");
+        let art_row = (0..tagline_row).find(|&y| {
+            (0..roomy.width).any(|x| matches!(buffer[(x, y)].symbol(), "\u{2580}" | "\u{2584}"))
+        });
+        assert!(art_row.is_some(), "the drawing should have painted a row above the tagline");
     }
 
     #[test]
@@ -6466,30 +6665,86 @@ mod tests {
         assert!(terminal_tab_ranges(area, &["Terminal 1".to_string()]).is_empty());
         assert_eq!(terminal_content_rect(area), inner_rect(area));
 
-        // The strip rides the top border row, starting just inside the left corner. With a window
-        // close button present, it stops two cells short of the right edge.
+        // The strip rides the top border row. With a window close box present it starts three
+        // cells further in — the box wearing its pad on each side — and it stops at the right
+        // corner.
         let strip = terminal_tab_strip_rect(area, true);
-        assert_eq!((strip.x, strip.y), (6, 2));
-        assert_eq!(strip.x + strip.width, area.x + area.width - 2);
+        assert_eq!((strip.x, strip.y), (9, 2));
+        assert_eq!(strip.x + strip.width, area.x + area.width - 1);
+        // Without the box the strip has those three cells inside the corner back, and they are
+        // the whole difference between the two.
+        let bare = terminal_tab_strip_rect(area, false);
+        assert_eq!((bare.x, bare.width), (6, strip.width + 3));
+        assert_eq!(bare.x + bare.width, strip.x + strip.width);
+        // The box's cell is never part of the strip, so the tabs cannot paint over the button.
+        assert!(strip.x > terminal_close_cell(area).unwrap().0);
 
-        // Three tabs: ` Terminal N ✕ ` chips (name = 10 cells, chip = 14) laid left to right, each
-        // with a close glyph after the name.
+        // Three tabs: ` □ Terminal N ` chips (name = 10 cells, chip = 14) laid left to right, each
+        // with a close glyph before the name.
         let labels: Vec<String> = (1..=3).map(|n| format!("Terminal {n}")).collect();
         let tabs = terminal_tab_ranges(strip, &labels);
         assert_eq!(tabs.len(), 3);
-        assert_eq!(tabs[0].full, (6, 20));
-        assert_eq!(tabs[0].close, Some(18));
-        assert_eq!(tabs[1].full, (20, 34));
-        assert_eq!(tabs[1].close, Some(32));
+        assert_eq!(tabs[0].full, (9, 23));
+        assert_eq!(tabs[0].close, Some(10));
+        assert_eq!(tabs[1].full, (23, 37));
+        assert_eq!(tabs[1].close, Some(24));
     }
 
     #[test]
-    fn terminal_close_cell_sits_top_right_inside_the_corner() {
+    fn terminal_close_cell_sits_top_left_inside_the_corner() {
         let area = Rect { x: 10, y: 4, width: 20, height: 8 };
-        // One column in from the top-right corner (x+width-1), on the top border row.
-        assert_eq!(terminal_close_cell(area), Some((28, 4)));
+        // Two columns in from the top-left corner — one cell of padding, then the box — on the
+        // top border row.
+        assert_eq!(terminal_close_cell(area), Some((12, 4)));
         // Too narrow to carry a title: no button.
-        assert_eq!(terminal_close_cell(Rect { x: 0, y: 0, width: 2, height: 5 }), None);
+        assert_eq!(terminal_close_cell(Rect { x: 0, y: 0, width: 3, height: 5 }), None);
+    }
+
+    /// The one thing that can silently go wrong about the close box: the mouse being told a cell
+    /// the renderer does not draw it in. `terminal_close_cell` is arithmetic and `with_close_box`
+    /// is ratatui's title layout, so nothing but a rendered frame can say the two agree.
+    #[test]
+    fn the_close_box_is_drawn_in_the_cell_the_mouse_is_given() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let area = Rect { x: 2, y: 1, width: 20, height: 5 };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 6)).unwrap();
+        terminal
+            .draw(|f| {
+                // Built exactly as `draw_single_terminal` builds it: box first, name after.
+                let block = with_close_box(Block::default().borders(Borders::ALL), pal)
+                    .title(" Terminal 1 ");
+                f.render_widget(block, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (cx, cy) = terminal_close_cell(area).unwrap();
+        assert_eq!(buffer[(cx, cy)].symbol(), CLOSE_BOX, "the box is not in the cell it is clicked in");
+        // And nowhere else on that border, so there is one box and one meaning to a click.
+        let boxes: Vec<u16> =
+            (area.x..area.x + area.width).filter(|&x| buffer[(x, area.y)].symbol() == CLOSE_BOX).collect();
+        assert_eq!(boxes, vec![cx]);
+        // The title follows the box rather than being pushed off the border by it.
+        let top: String = (area.x..area.x + area.width).map(|x| buffer[(x, area.y)].symbol()).collect();
+        assert!(top.contains("Terminal 1"), "the name lost its place on the border: {top:?}");
+    }
+
+    /// The same agreement one level down: a tab chip's own box, drawn where `TermTab::close` says
+    /// the click for it lands. Chips are cut to the room left on the strip, so this is arithmetic
+    /// against a truncated string rather than against the name's own length.
+    #[test]
+    fn every_chip_draws_its_box_in_the_column_it_is_closed_from() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let strip = Rect { x: 1, y: 0, width: 30, height: 1 };
+        let labels: Vec<String> = (1..=3).map(|n| format!("Term {n}")).collect();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(32, 1)).unwrap();
+        terminal.draw(|f| draw_terminal_tab_strip(pal, f, strip, &labels, 0)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for (i, tab) in terminal_tab_ranges(strip, &labels).iter().enumerate() {
+            let Some(close_x) = tab.close else { continue };
+            assert_eq!(buffer[(close_x, strip.y)].symbol(), CLOSE_BOX, "chip {i}");
+        }
     }
 
     #[test]
@@ -6499,27 +6754,27 @@ mod tests {
         assert_eq!(strip.tabs.len(), 5);
         assert_eq!(strip.tabs[0].full, (0, 10));
         assert_eq!(strip.tabs[4].full, (40, 50));
-        // The × is drawn one cell before the tab's trailing space, and the label stops there.
-        assert_eq!(strip.tabs[0].label, (0, 8));
+        // The □ is drawn one cell after the tab's leading space, and the label starts after it.
+        assert_eq!(strip.tabs[0].label, (2, 10));
         // The click target is the glyph plus the padding either side of it: three cells, so the
         // close is aimed at rather than hunted for.
-        assert_eq!(strip.tabs[0].close, (7, 10));
-        assert_eq!(strip.tabs[4].close, (47, 50));
+        assert_eq!(strip.tabs[0].close, (0, 3));
+        assert_eq!(strip.tabs[4].close, (40, 43));
         assert!(strip.left_arrow.is_none() && strip.right_arrow.is_none());
     }
 
-    /// The close target may never reach into the tab next door: one cell to the left of it is
-    /// still the tab it belongs to, and one cell to the right is the neighbour's own title.
+    /// The close target may never reach into the tab next door: it starts on this tab's own first
+    /// column, and the one cell it reaches past the box is this tab's padding, not its title.
     #[test]
     fn the_close_target_stays_inside_its_own_tab() {
         let strip = tab_strip_layout(&W, 50, 0);
         for (i, tab) in strip.tabs.iter().enumerate() {
             assert!(tab.close.0 >= tab.full.0 && tab.close.1 <= tab.full.1, "tab {i}");
-            assert!(tab.close.0 >= tab.label.1 - 1, "tab {i} eats its own title");
+            assert!(tab.close.1 <= tab.label.0 + 1, "tab {i} eats its own title");
         }
         // And the hit-test maps every one of those cells to the tab that drew them.
-        assert_eq!(strip.tab_at(7).map(|(i, _)| i), Some(0));
-        assert_eq!(strip.tab_at(9).map(|(i, _)| i), Some(0));
+        assert_eq!(strip.tab_at(0).map(|(i, _)| i), Some(0));
+        assert_eq!(strip.tab_at(2).map(|(i, _)| i), Some(0));
         assert_eq!(strip.tab_at(10).map(|(i, _)| i), Some(1));
     }
 
@@ -6578,7 +6833,7 @@ mod tests {
     }
 
     /// A tab wider than the whole strip used to take the bar down with it: the layout answered
-    /// "nothing fits" and the row went blank — no file name, no dirty marker, no ×, and no way
+    /// "nothing fits" and the row went blank — no file name, no dirty marker, no □, and no way
     /// to close the file with the mouse. One tab cut short is the answer; an empty bar is not.
     #[test]
     fn a_tab_wider_than_the_strip_is_clipped_rather_than_dropped() {
@@ -6588,9 +6843,10 @@ mod tests {
         // The whole strip, bar the › that says the other four are still there.
         assert_eq!(strip.right_arrow, Some((6, 7)));
         assert_eq!(strip.tabs[0].full, (0, 6));
-        assert_eq!(strip.tabs[0].label, (0, 4));
-        // No padding to give away on the left: that cell is the ellipsis, and it is text.
-        assert_eq!(strip.tabs[0].close, (4, 6));
+        assert_eq!(strip.tabs[0].label, (2, 6));
+        // No padding to give away on the right: a title clipped this hard can be a lone ellipsis
+        // in that cell, and an ellipsis is text.
+        assert_eq!(strip.tabs[0].close, (0, 2));
         assert_eq!(strip.tab_at(0).map(|(i, _)| i), Some(0));
 
         // Scrolled to the last tab there is nothing to the right, so it keeps that column.
@@ -6604,7 +6860,7 @@ mod tests {
     #[test]
     fn tab_strip_degrades_without_panicking_when_too_narrow() {
         assert!(tab_strip_layout(&W, 0, 0).tabs.is_empty());
-        // Under three columns there is no room for a letter, the × and its space, so nothing is
+        // Under three columns there is no room for the □, its space and a letter, so nothing is
         // drawn rather than a close button with no tab attached to it.
         assert!(tab_strip_layout(&W, 2, 0).tabs.is_empty());
         assert!(tab_strip_layout(&[], 50, 0).tabs.is_empty());

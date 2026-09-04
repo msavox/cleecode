@@ -478,6 +478,24 @@ impl TerminalPanel {
     /// produce. The command goes through `pending_command` like every other injected line, typed
     /// once the shell is genuinely at a prompt. See `flush_pending`.
     pub fn with_startup(rows: u16, cols: u16, cwd: &Path, startup: Option<&str>) -> Result<Self> {
+        Self::with_startup_env(rows, cols, cwd, startup, &[])
+    }
+
+    /// The same, plus names exported on this one shell and no other.
+    ///
+    /// The drawer is the only caller that passes any, and the narrowness is the point: two of the
+    /// four agents are handed CleeCode's MCP server through an environment variable that names
+    /// one of *their own* configuration files, and doing that to every shell would mean an
+    /// `opencode` somebody typed in an ordinary pane silently reading a config CleeCode wrote
+    /// instead of their own. `CLEE_SESSION` below is set everywhere precisely because it is the
+    /// opposite kind of name — ours, unknown to anything that did not come looking for it.
+    pub fn with_startup_env(
+        rows: u16,
+        cols: u16,
+        cwd: &Path,
+        startup: Option<&str>,
+        env: &[(&str, std::path::PathBuf)],
+    ) -> Result<Self> {
         let (rows, cols) = buildable_size(rows, cols);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -535,6 +553,11 @@ impl TerminalPanel {
             &crate::assets::octave_lib(),
             &crate::assets::python_lib(),
         ) {
+            cmd.env(key, value);
+        }
+        // Last, so a pane that was given a name of its own means it: nothing above is one of
+        // these, and a future collision should end with the caller's answer rather than ours.
+        for (key, value) in env {
             cmd.env(key, value);
         }
         let child = pair.slave.spawn_command(cmd)?;

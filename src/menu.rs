@@ -80,6 +80,9 @@ pub enum MenuAction {
     DocumentSymbols,
     RenameSymbol,
     FormatDocument,
+    CodeActions,
+    ExpandSelection,
+    ShrinkSelection,
     ShowDiagnostics,
     NewFile,
     NewFolder,
@@ -198,6 +201,9 @@ impl MenuAction {
         MenuAction::DocumentSymbols,
         MenuAction::RenameSymbol,
         MenuAction::FormatDocument,
+        MenuAction::CodeActions,
+        MenuAction::ExpandSelection,
+        MenuAction::ShrinkSelection,
         MenuAction::ShowDiagnostics,
         MenuAction::NewFile,
         MenuAction::NewFolder,
@@ -388,6 +394,18 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
                 item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
                 item(Key::ItemSelectAll, MenuAction::SelectAll, Some("Ctrl+A")),
+                // Beside Select all, because from where the reader is sitting these are the three
+                // ways of selecting something without dragging — and the language server behind
+                // two of them is an implementation detail, not a place to file them under.
+                //
+                // The chords are written with `Super`, which is not what a Mac shows: the hints in
+                // this file are static strings compiled for every platform and that key has a
+                // different name on each, so `Keymap::relabel` writes the reader's own word on the
+                // way to the screen. That layer needs a terminal that reports the Command key with
+                // the press — Ghostty, kitty, WezTerm, iTerm2, foot — and where it does not arrive
+                // these two rows are still here, which is half of why they are rows at all.
+                item(Key::ItemExpandSelection, MenuAction::ExpandSelection, Some("Ctrl+Super+↑")),
+                item(Key::ItemShrinkSelection, MenuAction::ShrinkSelection, Some("Ctrl+Super+↓")),
                 group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
                 item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
                 item(Key::ItemSearchProject, MenuAction::SearchProject, Some("Ctrl+Shift+H")),
@@ -425,6 +443,19 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // menu tells you which of them work by which file you have open, and splitting
                 // them across two menus would make that one honest rule two.
                 item(Key::ItemFormatDocument, MenuAction::FormatDocument, Some("Ctrl+Shift+Q")),
+                // The third that writes, and beside the other two because it is the same errand
+                // asked a third way: the rename asks the server about a name, the format about
+                // the file, and this about the place the cursor is standing — "what can be done
+                // about *this*". It answers with a list rather than a preview or a silence,
+                // because more than one thing usually can be.
+                //
+                // No chord, and not for want of looking: every Ctrl+Shift letter is spoken for,
+                // and the ones this would want — the reflexes people bring from elsewhere — are
+                // taken by keys that have been there for releases. Moving one to make room would
+                // cost everybody a key they know to save a keystroke here, so this is a menu row,
+                // a right-click and a palette entry, and `[keys]` in settings.toml cannot bind it
+                // until the table can hold an action with no default.
+                item(Key::ItemCodeActions, MenuAction::CodeActions, None),
                 // No chord: the comfortable ones are spent, and this is the one of the three
                 // nobody reaches for mid-keystroke — it is looked at after a build, not while
                 // typing a name.
@@ -754,6 +785,11 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
             group(Key::ItemToggleComment, MenuAction::ToggleComment, Some("Ctrl+K")),
             group(Key::ItemFind, MenuAction::Find, Some("Ctrl+F")),
             item(Key::ItemGotoLine, MenuAction::GotoLine, Some("Ctrl+G")),
+            // The one language-server row that belongs on a right-click, because it is the one
+            // that is *about the spot you are pointing at*: the others are asked of a name or of
+            // the whole file and are reached by a chord, and this one has none. A pop-up over the
+            // error you just noticed is the gesture people arrive with.
+            group(Key::ItemCodeActions, MenuAction::CodeActions, None),
         ],
         ContextTarget::Terminal => vec![
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),

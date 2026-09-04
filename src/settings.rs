@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 16;
+pub const SETTINGS_COUNT: usize = 17;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -81,6 +81,34 @@ pub struct Settings {
     /// asked for.
     #[serde(default = "default_drawer_pinned")]
     pub drawer_pinned: bool,
+    /// Whether an agent started from the drawer is handed CleeCode's own MCP server already
+    /// registered — a flag for claude and codex, a name in the environment for opencode and
+    /// gemini. See `mcp.rs`, where all four mechanisms and their failure modes are written down.
+    ///
+    /// On, because the alternative is what the drawer used to do: start an agent that cannot see
+    /// the editor it is sitting in until the user has gone and configured it by hand. Off is
+    /// still a real answer and is the reason this key exists — nothing here touches the user's own
+    /// configuration, but somebody who wants the agent in the drawer to be exactly the agent they
+    /// get in a terminal, argument for argument, should be able to say so in one line. Agents
+    /// typed by hand into an ordinary pane are unaffected either way; this only ever describes
+    /// the one the drawer starts.
+    #[serde(default = "default_true")]
+    pub agent_mcp: bool,
+    /// Whether an agent may change a buffer that has unsaved work in it: `"ask"`, `"allow"` or
+    /// `"deny"`. See [`AgentEdits`], which is this string as the three answers it means.
+    ///
+    /// `"ask"` by default, because the thing being decided is whether a program may write into
+    /// text the user has typed and not yet saved — the one place in this editor where something
+    /// can be lost that no undo of theirs would bring back, since they did not make the change and
+    /// may not have been looking at the pane. `"allow"` is for somebody who has decided to watch
+    /// an agent work and would rather not be asked every time; `"deny"` turns the door off without
+    /// turning off everything else the MCP server does, which is all reading.
+    ///
+    /// A string rather than a bool because there are three answers and a bool would have had to be
+    /// two settings. Anything else written here reads as `"ask"`: an unrecognised value in a
+    /// hand-edited file must not be the way to end up more permissive than the default.
+    #[serde(default = "default_agent_edits")]
+    pub agent_edits: String,
     // Menu bar visibility. On by default so newcomers keep the discoverable drop-down bar;
     // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
@@ -323,6 +351,61 @@ fn default_drawer_pinned() -> bool {
     true
 }
 
+fn default_agent_edits() -> String {
+    AgentEdits::Ask.word().to_string()
+}
+
+/// What an agent is allowed to do to a buffer with unsaved work in it.
+///
+/// The three answers `agent_edits` can be, kept as a type so that the decision is made in one
+/// place: the string is what the file holds and what a person hand-edits, and every reader of it
+/// goes through [`AgentEdits::of`] — which answers `Ask` to anything it does not recognise, so a
+/// typo in a settings file is never the reason an agent is allowed to write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentEdits {
+    Ask,
+    Allow,
+    Deny,
+}
+
+impl AgentEdits {
+    pub fn of(text: &str) -> AgentEdits {
+        match text {
+            "allow" => AgentEdits::Allow,
+            "deny" => AgentEdits::Deny,
+            _ => AgentEdits::Ask,
+        }
+    }
+
+    /// How it is spelled in settings.toml.
+    pub fn word(self) -> &'static str {
+        match self {
+            AgentEdits::Ask => "ask",
+            AgentEdits::Allow => "allow",
+            AgentEdits::Deny => "deny",
+        }
+    }
+
+    /// The next one round, which is what picking the settings row does. Ordered from the most
+    /// cautious answer outwards, so the first press of Enter on the default row is the one that
+    /// asks for *less* interruption rather than for less care.
+    pub fn next(self) -> AgentEdits {
+        match self {
+            AgentEdits::Ask => AgentEdits::Allow,
+            AgentEdits::Allow => AgentEdits::Deny,
+            AgentEdits::Deny => AgentEdits::Ask,
+        }
+    }
+
+    fn label(self) -> Key {
+        match self {
+            AgentEdits::Ask => Key::SettingAgentEditsAsk,
+            AgentEdits::Allow => Key::SettingAgentEditsAllow,
+            AgentEdits::Deny => Key::SettingAgentEditsDeny,
+        }
+    }
+}
+
 fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
@@ -411,6 +494,8 @@ impl Default for Settings {
             drawer_pct: default_drawer_pct(),
             drawer_agent: String::new(),
             drawer_pinned: default_drawer_pinned(),
+            agent_mcp: true,
+            agent_edits: default_agent_edits(),
             show_menubar: true,
             show_md_toolbar: true,
             run_commands: default_run_commands(),
@@ -1145,6 +1230,10 @@ impl Settings {
                 value: b(self.follow_agent_edits),
             },
             SettingRow {
+                label: i18n::t(lang, Key::SettingAgentEdits),
+                value: i18n::t(lang, AgentEdits::of(&self.agent_edits).label()).to_string(),
+            },
+            SettingRow {
                 label: i18n::t(lang, Key::SettingAutosaveRecovery),
                 value: b(self.autosave_recovery),
             },
@@ -1175,12 +1264,14 @@ impl Settings {
             7 => self.completion = !self.completion,
             8 => self.language_server = !self.language_server,
             9 => self.follow_agent_edits = !self.follow_agent_edits,
-            10 => self.autosave_recovery = !self.autosave_recovery,
+            // Three states, so picking the row is walking round them. See `AgentEdits::next`.
+            10 => self.agent_edits = AgentEdits::of(&self.agent_edits).next().word().to_string(),
+            11 => self.autosave_recovery = !self.autosave_recovery,
             // Refused where it would mean nothing: see `plots_value`. The row still moves under
             // the cursor and still reads out the state — it is disabled, not hidden, because
             // "why can I not turn this off" is a question the value answers and an absence
             // does not.
-            11 => {
+            12 => {
                 if crate::wsnap::can_open_a_window() {
                     self.plots_in_tabs = !self.plots_in_tabs;
                 }
@@ -1188,10 +1279,10 @@ impl Settings {
             // Two states, so picking the row is cycling the pair. Nothing is touched but the
             // flag: the mode changes what the next frame is laid out as, and the pty in the
             // drawer never hears about it.
-            12 => self.drawer_pinned = !self.drawer_pinned,
-            13 => self.show_splash = !self.show_splash,
-            14 => self.mouse_enabled = !self.mouse_enabled,
-            15 => self.lang = self.lang.next(),
+            13 => self.drawer_pinned = !self.drawer_pinned,
+            14 => self.show_splash = !self.show_splash,
+            15 => self.mouse_enabled = !self.mouse_enabled,
+            16 => self.lang = self.lang.next(),
             _ => {}
         }
     }

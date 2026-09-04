@@ -122,6 +122,19 @@ pub struct Editor {
     pub selection_block: bool,
     /// Active (collapsed) fold regions as (start_line, end_line), inclusive, sorted by start.
     pub folds: Vec<(usize, usize)>,
+    /// Where the language server says this file's blocks begin and end, when one has been asked
+    /// and has answered. The same `(start_line, end_line)` pair as `folds` above, which is not a
+    /// coincidence: the protocol's `foldingRange` hides `startLine + 1 ..= endLine`, and so does
+    /// `is_hidden`, so the numbers cross over without arithmetic.
+    ///
+    /// Reaches a buffer the way diagnostics do — the app holds the answer against the file's path
+    /// and hands it to the tab that has that file open — because it belongs to the file rather than
+    /// to this struct, and a buffer that outlives its server has no business inventing boundaries.
+    ///
+    /// Only ever read while `dirty` is false, and that rule is the whole of the cache's honesty:
+    /// these are line numbers, an edit moves lines, and a list of them taken before the edit
+    /// describes a file that no longer exists. See `foldable_range_at`.
+    pub server_folds: Vec<(usize, usize)>,
     /// The lines the last reload from disk brought in: what somebody else — an agent, a
     /// formatter, a branch switched underneath — wrote while the file was open. Ascending, so
     /// the gutter can ask about one line with a binary search rather than a scan.
@@ -200,6 +213,7 @@ impl Editor {
             selection_anchor: None,
             selection_block: false,
             folds: Vec::new(),
+            server_folds: Vec::new(),
             changed_lines: Vec::new(),
             line_ending: LineEnding::Lf,
             final_newline: false,
@@ -397,6 +411,11 @@ impl Editor {
         self.syntax_dirty = true;
         self.revision = self.revision.wrapping_add(1);
         self.folds.clear();
+        // And the server's boundaries with them, for the same reason: somebody else wrote this
+        // file — an agent, a formatter, a branch switched underneath — and the block that started
+        // on line forty may now start somewhere else. The buffer is clean, so nothing else would
+        // stop them being believed; the revision has moved, so they are asked for again at once.
+        self.server_folds.clear();
         // A silent reload starts a fresh edit timeline; the old history refers to gone text.
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -1133,13 +1152,40 @@ impl Editor {
         }
     }
 
-    /// Determines the foldable range starting at `line`, if any: either a brace block
-    /// (`{` ... matching `}`) or, failing that, an indentation-based block (Python-style:
-    /// the following more-indented lines).
+    /// Determines the foldable range starting at `line`, if any.
+    ///
+    /// The server is asked first, in the sense that its answer is already in hand: `server_folds`
+    /// holds what `textDocument/foldingRange` said about this file, and a range that begins on this
+    /// very line is a boundary drawn by something that has parsed the language — the `impl` block
+    /// whose brace is three lines down, the Python `def` whose body ends before the decorator, the
+    /// import group no counting of braces would ever find. Where several begin here, the widest
+    /// wins: that is the block the reader means by "this one", the way a fold marker on a function
+    /// signature means the function and not its first statement.
+    ///
+    /// Where the server says nothing about this line — because it never answered, because it does
+    /// not offer the request, or simply because nothing starts here — the rule this editor has
+    /// always used stands unchanged underneath: a brace block (`{` ... matching `}`), or failing
+    /// that an indentation block (Python-style: the following more-indented lines).
+    ///
+    /// And a *dirty* buffer never consults the server at all. The cached ranges are line numbers
+    /// taken when the buffer and the server last agreed, and one typed newline makes every number
+    /// below it a lie — so an edited file folds by the heuristic until the next save refreshes the
+    /// cache. Falling back is the honest failure here: the braces are computed from the text on
+    /// screen and cannot be stale.
     pub fn foldable_range_at(&self, line: usize) -> Option<(usize, usize)> {
         let total = self.rope.len_lines();
         if line >= total {
             return None;
+        }
+        if !self.dirty {
+            let widest = self
+                .server_folds
+                .iter()
+                .filter(|(start, end)| *start == line && *end < total)
+                .max_by_key(|(_, end)| *end);
+            if let Some(&range) = widest {
+                return Some(range);
+            }
         }
         let text = self.rope.line(line).to_string();
         if text.trim().is_empty() {
@@ -2868,6 +2914,65 @@ mod tests {
         ed.toggle_fold();
         assert!(ed.folds.is_empty());
         assert_eq!(ed.visible_rows_from(0, 10), vec![0, 1, 2]);
+    }
+
+    /// Where a server has said where a block is, its boundary wins — and where it has said nothing
+    /// about the line, the braces the editor has always counted still decide.
+    #[test]
+    fn a_servers_boundary_beats_the_braces_and_the_braces_survive_where_it_says_nothing() {
+        let mut ed = Editor::empty();
+        for line in ["use std::io;", "use std::fmt;", "", "fn main() {", "    let x = 1;", "}"] {
+            ed.insert_str(line);
+            ed.insert_newline(false);
+        }
+        // Fresh from disk as far as the fold cache is concerned; typing it in is what made it
+        // dirty, and the rule below is the subject of its own test.
+        ed.dirty = false;
+        // Nothing at line 0 counts braces: it is a `use` line, and the heuristic sees no block.
+        assert_eq!(ed.foldable_range_at(0), None);
+        // The server sees the import group, and one range that starts where the braces do.
+        ed.server_folds = vec![(0, 1), (3, 5)];
+        assert_eq!(ed.foldable_range_at(0), Some((0, 1)), "the import group is only the server's");
+        ed.cursor_line = 0;
+        ed.toggle_fold();
+        assert_eq!(ed.folds, vec![(0, 1)]);
+        assert_eq!(ed.visible_rows_from(0, 10), vec![0, 2, 3, 4, 5, 6]);
+        // Where several begin on one line the widest wins: that is the block a reader means by
+        // "this one", the way a marker on a signature means the function and not its first line.
+        ed.server_folds = vec![(3, 4), (3, 5)];
+        assert_eq!(ed.foldable_range_at(3), Some((3, 5)));
+        // And with the server saying nothing about that line, the braces answer as they always did.
+        ed.server_folds = vec![(0, 1)];
+        assert_eq!(ed.foldable_range_at(3), Some((3, 5)));
+    }
+
+    /// The cache's moment of truth. These are line numbers taken when the buffer and the server
+    /// last agreed, and one typed newline makes every number below it a lie — so an edited buffer
+    /// folds by the braces until the next save puts the two back in step.
+    #[test]
+    fn an_edited_buffer_stops_believing_the_servers_fold_boundaries() {
+        let mut ed = Editor::empty();
+        for line in ["use std::io;", "use std::fmt;", "", "fn main() {", "    let x = 1;", "}"] {
+            ed.insert_str(line);
+            ed.insert_newline(false);
+        }
+        ed.dirty = false;
+        ed.server_folds = vec![(0, 1), (3, 5)];
+        assert_eq!(ed.foldable_range_at(0), Some((0, 1)));
+
+        // One character typed anywhere, and the import group the server named is no longer a
+        // thing this buffer will fold on: the braces are computed from the text on screen and
+        // cannot be stale, so they are what is left.
+        ed.cursor_line = 0;
+        ed.cursor_col = 0;
+        ed.insert_str("// ");
+        assert!(ed.dirty);
+        assert_eq!(ed.foldable_range_at(0), None, "a dirty buffer folds by the braces alone");
+        // The brace block is still found, because that answer never came from the server.
+        assert_eq!(ed.foldable_range_at(3), Some((3, 5)));
+        // And a save puts the cache back in force without anything having to re-announce it.
+        ed.dirty = false;
+        assert_eq!(ed.foldable_range_at(0), Some((0, 1)));
     }
 
     #[test]

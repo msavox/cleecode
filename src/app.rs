@@ -274,6 +274,95 @@ pub struct PendingUpload {
     pub paths: Vec<PathBuf>,
 }
 
+/// An agent's `edit_buffer`, waiting for the user to say yes or no to it.
+///
+/// Held rather than applied, and that hesitation is the whole reason the MCP bridge grew a reply
+/// channel. Every other thing an agent can ask this editor for is a thing it can see afterwards;
+/// this one writes into a buffer that has unsaved work in it, and the tool call on the other side
+/// is blocked meanwhile precisely so that the answer can be a person's.
+pub struct PendingAgentEdit {
+    /// The number the answer goes back under. See [`crate::mcp::Reply`].
+    pub id: u128,
+    pub path: PathBuf,
+    pub old: String,
+    pub new: String,
+}
+
+/// How many consent questions are kept waiting.
+///
+/// An agent working through a file can file several before the user has looked up once, and each
+/// of them is holding one of its tool calls open. Past a handful the honest answer is to refuse
+/// the rest and say why: a queue longer than this is a queue whose tail will time out unanswered
+/// anyway, and an agent told "not now" can ask again.
+const AGENT_EDIT_QUEUE: usize = 8;
+
+/// The most lines an agent's highlighted range may cover.
+///
+/// A span is a way of pointing at something. Past a few hundred lines it stops being a gesture and
+/// becomes a file with its colours inverted, which points at nothing at all.
+const AGENT_SPAN_LINES: usize = 400;
+
+/// The 1-based lines an agent's `line`/`end_line` pair really names.
+///
+/// Clamped both ways, because both mistakes are ones a model makes: an end before the start is a
+/// transposition, and a span the length of a module is a range it did not think about.
+fn agent_span_lines(line: usize, end_line: usize) -> (usize, usize) {
+    let start = line.max(1);
+    let end = end_line.max(start).min(start + AGENT_SPAN_LINES - 1);
+    (start, end)
+}
+
+/// That range as the absolute char span [`Editor::select_char_range`] takes, clamped to the file.
+///
+/// Through the *end* of the last line rather than to its first character: a range that stopped
+/// where the text of the last line begins would leave that line looking half-marked, and the line
+/// an agent named is the line it meant to point at.
+fn agent_span(editor: &Editor, line: usize, end_line: usize) -> (usize, usize) {
+    let (from, to) = agent_span_lines(line, end_line);
+    let last = editor.rope.len_lines().saturating_sub(1);
+    let from = (from - 1).min(last);
+    let to = (to - 1).min(last);
+    let start = editor.rope.line_to_char(from);
+    let end =
+        if to < last { editor.rope.line_to_char(to + 1) } else { editor.rope.len_chars() };
+    (start, end)
+}
+
+/// How big an edit is, in the two numbers a diff would print: lines arriving, lines going.
+///
+/// Not a diff — what an agent sends is two pieces of text, not a patch — but the shape a reader
+/// takes in at a glance, and the difference between "change one word" and "replace the whole
+/// function" being two questions rather than the same sentence twice.
+fn agent_edit_size(old: &str, new: &str) -> (usize, usize) {
+    let count = |text: &str| if text.is_empty() { 0 } else { text.lines().count() };
+    (count(new), count(old))
+}
+
+/// Where `old` sits in `text`, as absolute char indices, when it sits there exactly once.
+///
+/// `Err(n)` is how many times it was found instead, and that number is the only useful thing to
+/// tell an agent about a failed match: none means the buffer has moved on since it read it, and
+/// several mean it did not say enough to be unambiguous. Char indices rather than byte offsets
+/// because that is what [`Editor::replace_char_range`] takes, and the difference between the two
+/// is every file with an accent in it.
+///
+/// An empty `old` is counted as no match rather than as the infinity of matches it really is. The
+/// server refuses that argument before it gets here; this is what keeps a hand-written request
+/// file from being a way to insert text at position zero without saying so.
+fn only_match(text: &str, old: &str) -> Result<(usize, usize), usize> {
+    if old.is_empty() {
+        return Err(0);
+    }
+    let mut found = text.match_indices(old);
+    let Some((at, _)) = found.next() else { return Err(0) };
+    let extra = found.count();
+    if extra > 0 {
+        return Err(extra + 1);
+    }
+    let start = text[..at].chars().count();
+    Ok((start, start + old.chars().count()))
+}
+
 /// The turtle from the splash tagline, out for a walk along the status line. Clicking the logo
 /// in the menu bar sets it off; clicking again while it walks hurries it, which is the joke —
 /// the tagline has been saying "chi va piano va lontano" since the first launch, and this is
@@ -596,6 +685,18 @@ pub struct App {
     pub unsaved_prompt: Option<UnsavedPrompt>,
     /// When set, an upload is waiting on a yes from the status line. See [`PendingUpload`].
     pub pending_upload: Option<PendingUpload>,
+    /// The agent's edit currently being asked about on the status line. See [`PendingAgentEdit`].
+    pub agent_edit_ask: Option<PendingAgentEdit>,
+    /// The ones behind it, oldest first. A question is only put up when nothing else owns the
+    /// keyboard, so an agent that asks while the find box is open waits for the box to close
+    /// rather than talking over it.
+    agent_edit_queue: std::collections::VecDeque<PendingAgentEdit>,
+    /// Set by answering a consent question with `A`: every further edit this session goes through
+    /// without asking. Deliberately not persisted — "yes, while I am watching you" is a statement
+    /// about this afternoon, and a setting that outlived the session would be a different promise
+    /// from the one that was made. `agent_edits = "allow"` in settings.toml is how somebody says
+    /// the permanent version of it on purpose.
+    agent_edits_this_session: bool,
     /// In-file find / find-and-replace overlay state, when open.
     pub find: Option<crate::find::FindState>,
     /// The buffer the Find box is scanning, flattened into a string, kept between keystrokes.
@@ -634,6 +735,15 @@ pub struct App {
     /// What the server says about each file. Replaced wholesale per file, because that is what
     /// the protocol sends: a list, not a diff.
     pub diagnostics: std::collections::HashMap<PathBuf, Vec<crate::lsp::Mark>>,
+    /// The same diagnostics as they arrived, before anything was measured against a buffer.
+    ///
+    /// A second copy, and not a duplicate: a [`crate::lsp::Mark`] is what a squiggle needs — a
+    /// line, two character columns, a sentence — and a code action question needs what a *server*
+    /// needs, which is the diagnostic whole. The `code`, the `source` and the opaque `data` a
+    /// server hangs off its own diagnostics are exactly what it matches its quick fixes against,
+    /// and they do not survive the conversion. Kept and dropped in step with the marks, so the two
+    /// can never describe different files.
+    lsp_raw: std::collections::HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
     /// The buffer revision last sent for each file, and the revision seen with the moment it
     /// appeared — together they are "has it changed, and has the typing stopped".
     lsp_sent: std::collections::HashMap<PathBuf, u64>,
@@ -682,6 +792,44 @@ pub struct App {
     /// afterwards. Nothing else in it is read: a format is about the whole file, so there is no
     /// position for the answer to be checked against.
     lsp_formatting: Option<PendingAsk>,
+    /// The one question about what can be done here still out.
+    ///
+    /// A fifth slot, for the reasons the third and fourth exist: its answer opens a list that a
+    /// hover must not displace, and it is neither of the other two — a code action asked for while
+    /// a format is still out would otherwise cancel it, and the file the user was laying out would
+    /// quietly stay as it was.
+    lsp_acting: Option<PendingAsk>,
+    /// The one action whose edit has been asked for and not come back.
+    ///
+    /// Its own slot rather than a share of the one above, because the two are out at once: the
+    /// list is asked for, answered, and then one row of it is asked about again. The title travels
+    /// with it for the reason [`PendingRename`]'s names do — by the time the edit lands the picker
+    /// is gone, and a status line assembled from whatever is on screen then would name the wrong
+    /// action.
+    lsp_action_edit: Option<PendingAction>,
+    /// The one question about what encloses the cursor still out.
+    ///
+    /// A sixth slot, for the reason the fifth exists: it is asked by a chord that people press
+    /// several times in a row, and a hover arriving between two of those presses must not be able
+    /// to cancel the walk half way out of an expression.
+    lsp_widening: Option<PendingAsk>,
+    /// The ladder of ever-wider ranges the last expand asked for, while it is still the truth.
+    /// See [`SelectionWalk`], which is also where the rule for when it stops being the truth is.
+    selection_walk: Option<SelectionWalk>,
+    /// Which requests for a file's fold boundaries are out, and which file each is about.
+    ///
+    /// A map rather than a slot, because these are not asked by anybody: several files can be
+    /// opened in the same frame and each is asked about on its own account, so there is no "the
+    /// current one" to keep and no newer question that should cancel an older.
+    lsp_folding: std::collections::HashMap<i64, PathBuf>,
+    /// The buffer revision each file's cached fold boundaries were asked for at.
+    ///
+    /// This one number is the whole of the "ask on open, ask again on save" rule, and it is derived
+    /// rather than hooked into the three places a save can happen: a clean buffer whose revision is
+    /// not the one written down here is a file the server has not been asked about in its current
+    /// state — which is true exactly once when it is opened, and once more each time a save leaves
+    /// it clean at a revision the edits moved it to.
+    lsp_folds_asked: std::collections::HashMap<PathBuf, u64>,
     /// Where the cursor was when the last hover was asked, so the same question is not asked
     /// again every frame while nothing moves.
     lsp_hovered: Option<(PathBuf, usize, usize)>,
@@ -1055,6 +1203,103 @@ pub struct PendingRename {
     pub new_name: String,
 }
 
+/// One code action whose edit has been asked for and not come back.
+///
+/// The parallel of [`PendingRename`] for the other question that writes: `from` is the buffer and
+/// place the list was opened from — where the cursor goes back to — and `title` is what the server
+/// called the action, kept because the answer carries no name of its own.
+pub struct PendingAction {
+    pub id: i64,
+    pub from: (PathBuf, usize, usize),
+    pub title: String,
+}
+
+/// The ladder one expansion is climbing, and the proof that it is still the reader's ladder.
+///
+/// The chain comes back from the server once and every later press walks it here — which is what
+/// makes the second Expand instant and Shrink possible at all, since going back inwards is a step
+/// down a list rather than a question anybody can ask a server.
+///
+/// The last three fields are the whole of how it dies. A walk is only good for the buffer it was
+/// asked about (`path`), for the text it was asked about (`revision`), and for as long as the
+/// selection on screen is still the one this walk put there (`selected`). Any other hand — an arrow
+/// key, a click, a typed character, a file switched under it — leaves the selection or the revision
+/// somewhere this cannot recognise, and the walk is dropped and asked again from wherever the
+/// cursor now is. That is deliberately a check rather than a hook: hooking it would mean every one
+/// of the several hundred places that move a cursor remembering to clear a field, and the one that
+/// forgot would expand from a range nobody is looking at.
+struct SelectionWalk {
+    path: PathBuf,
+    revision: u64,
+    /// The chain innermost first, as absolute char ranges in this buffer — already converted out
+    /// of the server's units, because that conversion needs the text and this is where the text is.
+    spans: Vec<(usize, usize)>,
+    /// Which rung is selected right now.
+    at: usize,
+    /// What that rung selects, so a selection made by anything else can be told from this one.
+    selected: (usize, usize),
+}
+
+/// What one press of Expand or Shrink did to a live walk.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// It moved, and this is what is selected now.
+    Moved(usize, usize),
+    /// There is nothing wider in the ladder.
+    Widest,
+    /// There is nothing narrower: this is where the widening started.
+    Narrowest,
+}
+
+impl SelectionWalk {
+    /// Stands the walk on the first rung wider than what is already selected.
+    ///
+    /// "Wider than what is selected" and not "the outermost": the ladder starts at the token under
+    /// the caret, and after a press or two of Expand the selection is already several rungs up one
+    /// like it. The rung to stand on is the innermost that *strictly* contains what is on screen —
+    /// with nothing selected, the innermost that contains the caret and is not itself empty.
+    ///
+    /// The rungs below it are kept rather than dropped, and that is what lets Shrink go further in
+    /// than the selection this expansion started from: they are all real levels of the same ladder,
+    /// and every one of them contains the position the question was asked about.
+    fn starting_at(
+        path: PathBuf,
+        revision: u64,
+        spans: Vec<(usize, usize)>,
+        here: (usize, usize),
+    ) -> Option<SelectionWalk> {
+        let at = spans
+            .iter()
+            .position(|&(start, end)| start <= here.0 && end >= here.1 && (start, end) != here && end > start)?;
+        let selected = spans[at];
+        Some(SelectionWalk { path, revision, spans, at, selected })
+    }
+
+    /// Whether this walk is still about what is on screen — the three questions of the doc comment
+    /// above, asked in one place so Expand and Shrink cannot answer them differently.
+    fn still_true(&self, editor: &Editor) -> bool {
+        editor.path.as_deref() == Some(self.path.as_path())
+            && editor.revision() == self.revision
+            && selected_char_range(editor) == Some(self.selected)
+    }
+
+    /// One rung outwards (`1`) or inwards (`-1`), or which end of the ladder stopped it.
+    ///
+    /// Running out of ladder is an answer here rather than a failure: the walk is perfectly alive,
+    /// there is simply nothing beyond this rung, and the caller says so instead of sending the
+    /// server a question it has already answered.
+    fn step(&mut self, direction: isize) -> Step {
+        let next = self.at as isize + direction;
+        if next < 0 {
+            return Step::Narrowest;
+        }
+        let Some(&(start, end)) = self.spans.get(next as usize) else { return Step::Widest };
+        self.at = next as usize;
+        self.selected = (start, end);
+        Step::Moved(start, end)
+    }
+}
+
 /// The box that asks what to call it instead.
 pub struct SymbolRename {
     /// The identifier under the cursor when the box opened. Shown in the prompt and compared
@@ -1104,6 +1349,14 @@ pub struct RenameFile {
 /// recomputed: the rows on screen and the offsets that get written are two views of the same
 /// list, so what is applied is what was shown or nothing is.
 pub struct RenamePreview {
+    /// What is being renamed, and — when it is empty — the mark that this preview is not a rename
+    /// at all.
+    ///
+    /// A code action reaching more than one buffer comes up in this same box, with these same
+    /// refusals and this same Enter, and it has no old name: what it has is the server's own title
+    /// for what it would do, which goes in `new_name` and is the whole caption. One field carrying
+    /// that distinction rather than a second box carrying a second copy of the machinery — see
+    /// [`i18n::msg_rename_preview_title`], which is where it is read.
     pub old_name: String,
     pub new_name: String,
     /// Where the key was pressed — the buffer whose cursor is put back afterwards, and its
@@ -1666,6 +1919,48 @@ fn format_spans(
 /// exist.
 ///
 /// `edits` must be ascending and non-overlapping, which is what the caller has just checked.
+/// The rows one code action answer becomes.
+///
+/// A free function so the list can be built from a plan and read back without an application
+/// around it, which is the only part of this feature that has a shape worth checking on its own:
+/// what a row says, and that the action it carries is the action that was on it.
+///
+/// The kind goes in the right-hand column the palette uses for chords, exactly as the outline puts
+/// the kind of a symbol there — it is the same job, the part of the row you read second, and it is
+/// what tells a quick fix for the error under the caret from a refactoring that would apply
+/// anywhere. Left off entirely where the server did not say, rather than filled with a word of
+/// ours: an empty column is honest and `action` would be a label we invented.
+/// What is selected, as absolute char offsets, or `None` for nothing.
+///
+/// A free function because the expansion walk asks it of the buffer twice for different reasons —
+/// once to know what to grow out of, once to know whether the selection on screen is still its own
+/// — and the two must be the same measurement or the walk would decide it had been overtaken by
+/// its own last move. A column selection answers `None`: a rectangle is not a run of text, and the
+/// thing that encloses it is not a question a language server has been asked.
+fn selected_char_range(editor: &Editor) -> Option<(usize, usize)> {
+    if editor.selection_block {
+        return None;
+    }
+    let ((start_line, start_col), (end_line, end_col)) = editor.selection_range()?;
+    let at = |line: usize, col: usize| {
+        editor.rope.line_to_char(line) + col.min(editor.line_char_len(line))
+    };
+    Some((at(start_line, start_col), at(end_line, end_col)))
+}
+
+fn code_action_items(actions: Vec<crate::lsp::CodeAction>) -> Vec<crate::picker::PickItem> {
+    actions
+        .into_iter()
+        .map(|action| crate::picker::PickItem {
+            // A title is one line as far as a server is concerned and several as far as a list is:
+            // the breaks become spaces, as a diagnostic's do in the list beside this one.
+            label: action.title.replace('\n', " "),
+            shortcut: (!action.kind.is_empty()).then(|| action.kind.clone()),
+            action: crate::picker::PickAction::CodeAction(Box::new(action)),
+        })
+        .collect()
+}
+
 fn preview_rows(editor: &Editor, lines: &[String], edits: &[BufferEdit]) -> Vec<String> {
     diff_rows(lines, edits, |line| editor.rope.line_to_char(line))
 }
@@ -2864,6 +3159,9 @@ impl App {
             save_as_then: None,
             unsaved_prompt: None,
             pending_upload: None,
+            agent_edit_ask: None,
+            agent_edit_queue: std::collections::VecDeque::new(),
+            agent_edits_this_session: false,
             find: None,
             find_text: None,
             picker: None,
@@ -2873,6 +3171,7 @@ impl App {
             lsp: std::collections::HashMap::new(),
             lsp_error: std::collections::HashMap::new(),
             diagnostics: std::collections::HashMap::new(),
+            lsp_raw: std::collections::HashMap::new(),
             lsp_sent: std::collections::HashMap::new(),
             lsp_seen: std::collections::HashMap::new(),
             lsp_paths: std::collections::HashMap::new(),
@@ -2881,6 +3180,12 @@ impl App {
             lsp_listing: None,
             lsp_editing: None,
             lsp_formatting: None,
+            lsp_acting: None,
+            lsp_action_edit: None,
+            lsp_widening: None,
+            selection_walk: None,
+            lsp_folding: std::collections::HashMap::new(),
+            lsp_folds_asked: std::collections::HashMap::new(),
             lsp_hovered: None,
             lsp_what_it_is: None,
             jumps: Vec::new(),
@@ -3095,14 +3400,14 @@ impl App {
                     // The whole page is kept and only the window being looked at is handed to
                     // the terminal. That is what makes zoom and scrolling cost a crop instead
                     // of a rasteriser — and what makes zoom visible at all, since the widget
-                    // would otherwise shrink a larger page straight back to the pane.
-                    let window = crate::preview::visible_window(
-                        &image,
-                        cols,
-                        rows,
-                        preview.scroll_x,
-                        preview.scroll_px,
-                    );
+                    // would otherwise shrink a larger page straight back to the pane. A picture
+                    // nobody has zoomed has no window: it is the whole of itself. See
+                    // `Preview::window_of`.
+                    let window = preview.window_of(&image);
+                    // Which pane this was made for, recorded beside it. A picture asked for
+                    // before its tab was ever drawn is fitted to nothing here, and the first
+                    // frame that measures the pane is what notices. See `Preview::needs_refit`.
+                    preview.fitted_for = (cols, rows);
                     preview.full = Some(image);
                     preview.show(window);
                 }
@@ -3356,9 +3661,14 @@ impl App {
     /// menu or a yes/no, which has no field to put text in — the two must be changed together,
     /// and a box added to one and not the other takes keys but not pastes.
     fn modal_text_field(&self) -> Option<ModalTextField> {
-        // These three are in front of everything and none of them is a text box: a menu, a
-        // question about unsaved work, and a question about sending files to another machine.
-        if self.context_menu.is_some() || self.unsaved_prompt.is_some() || self.pending_upload.is_some() {
+        // These four are in front of everything and none of them is a text box: a menu, a question
+        // about unsaved work, a question about sending files to another machine, and a question
+        // about letting an agent change a buffer.
+        if self.context_menu.is_some()
+            || self.unsaved_prompt.is_some()
+            || self.pending_upload.is_some()
+            || self.agent_edit_ask.is_some()
+        {
             return None;
         }
         if self.show_save_as {
@@ -4807,15 +5117,59 @@ impl App {
             return;
         }
         let (box_px, fit) = (preview.picture_box(), preview.fit);
-        let (scroll_x, scroll_y) = (preview.scroll_x, preview.scroll_px);
         let Some(frame) = preview.animation.as_ref().and_then(|a| a.current()) else { return };
         let image = crate::preview::scale_frame(frame.clone(), box_px, fit);
-        let window = crate::preview::visible_window(&image, cols, rows, scroll_x, scroll_y);
+        let window = preview.window_of(&image);
+        preview.fitted_for = (cols, rows);
         preview.full = Some(image);
         preview.show(window);
         // Nothing else knows a frame changed, and a frame put up in a buffer nobody draws is a
         // frame nobody sees.
         self.redraw = true;
+    }
+
+    /// Fits every untouched picture on screen to the pane it is actually in.
+    ///
+    /// A picture is sized for its pane exactly once, where the decoder's answer arrives, against
+    /// whatever the pane measured at that instant. Everything that changes the pane afterwards —
+    /// a window resized, a seam dragged, the split opened or closed — leaves the picture sized
+    /// for a pane that is gone, and the one place that would have noticed is the renderer, which
+    /// only writes the new size down. Worse, a figure from a running script arrives *before* its
+    /// pane has ever been drawn: it is fitted to nothing, and what reaches the screen is a
+    /// pane-sized cut of the top-left corner of a full-size figure. A reader cannot tell a
+    /// picture opened cropped from a script that plotted rubbish, so an opened figure has to be
+    /// the whole figure — which means the pane, not the moment of arrival, has to be what
+    /// decides the size.
+    ///
+    /// Only what is on screen and only what nobody has aimed by hand: a zoom or a pan is a
+    /// decision about one picture, and a resize is no reason to overrule it.
+    pub fn refit_previews(&mut self) {
+        for idx in self.on_screen_editors().into_iter().flatten() {
+            let stale =
+                self.editors.get(idx).and_then(|e| e.preview.as_ref()).is_some_and(|p| p.needs_refit());
+            if !stale {
+                continue;
+            }
+            // Written down before the work starts, so a seam being dragged asks for one re-fit
+            // per size it passes through rather than one per frame — and so a read that comes
+            // back a failure is not asked for again and again at the same size.
+            if let Some(preview) = self.editors[idx].preview.as_mut() {
+                preview.fitted_for = (preview.area_cols, preview.area_rows);
+            }
+            // A picture that moves has every frame already in hand at its own size, so it is
+            // re-fitted here and now. Re-reading the file would work too, and would also put the
+            // animation back to its first frame — a visible jump for a change that is not about
+            // the file at all. `rerender_preview` refuses it for the same reason.
+            if self.editors[idx].preview.as_ref().is_some_and(|p| p.animation.is_some()) {
+                self.show_frame(idx);
+                continue;
+            }
+            // A still is read again at the new size rather than resampled from the copy in hand:
+            // the copy was shrunk to the old pane, and enlarging that is how a figure ends up
+            // soft in a pane that just got bigger. This is the same road a zoom takes, and it
+            // keeps the picture on screen while the new one is decoded.
+            self.reread_preview(idx, None);
+        }
     }
 
     /// Watches a file handed to a live session until its prompt comes back, remembering which
@@ -5059,6 +5413,10 @@ impl App {
         for request in requests {
             self.apply_mcp_request(request);
         }
+        // Asked every frame and not only after a request arrived: a question that could not be
+        // put up because a box was open has to go up when the box closes, and nothing else in the
+        // program knows to tell it so.
+        self.offer_next_agent_edit();
     }
 
     /// Everything published about this editor, as of now.
@@ -5068,8 +5426,17 @@ impl App {
     /// where it happens to have been started, not where the editor is. The language server client
     /// keeps its own translation table for exactly this reason.
     fn mcp_state(&self) -> crate::mcp::State {
-        let open_files =
+        let open_files: Vec<String> =
             self.editors.iter().filter_map(|e| e.path.as_deref()).map(|p| self.mcp_path(p)).collect();
+        // The same paths, formatted the same way, in the same order — a subset an agent can
+        // compare against the list above rather than a second list it has to reconcile with it.
+        let dirty_files = self
+            .editors
+            .iter()
+            .filter(|e| e.dirty)
+            .filter_map(|e| e.path.as_deref())
+            .map(|p| self.mcp_path(p))
+            .collect();
         let editor = self.editor();
         let active = editor.path.as_deref().map(|path| crate::mcp::Active {
             path: self.mcp_path(path),
@@ -5097,6 +5464,7 @@ impl App {
         crate::mcp::State {
             root: self.mcp_path(&self.root),
             open_files,
+            dirty_files,
             active,
             diagnostics: crate::mcp::tidy_diagnostics(diagnostics),
         }
@@ -5113,18 +5481,126 @@ impl App {
 
     /// Carries out one request from the MCP server.
     ///
-    /// Only `open` exists, and deliberately so: reading has no blast radius, writing needs the
-    /// user's consent, and there is no UI yet to ask for it. An action nobody recognises is
-    /// dropped rather than guessed at.
+    /// Three of the four happen the moment they are read, because none of them can lose anybody
+    /// any work: showing a file, rendering one, and putting a sentence on the status line. The
+    /// fourth writes into a buffer with unsaved changes in it, so it goes to
+    /// [`Self::ask_or_apply_agent_edit`] and may end up as a question rather than as an edit.
+    ///
+    /// An action a version does not recognise never arrives here at all: `take_requests` cannot
+    /// parse it and deletes the file, which is the behaviour a new tool talking to an old editor
+    /// needs — nothing, rather than a guess.
     fn apply_mcp_request(&mut self, request: crate::mcp::Request) {
-        if request.action != "open" {
-            return;
+        let lang = self.settings.lang;
+        match request {
+            crate::mcp::Request::Open { path, line, end_line } => {
+                let path = self.mcp_resolve(&path);
+                self.show_beside_without_focus(path.clone(), line, end_line);
+                if path.is_file() {
+                    self.status_message = i18n::msg_agent_opened(lang, &self.mcp_short(&path), line);
+                }
+            }
+            crate::mcp::Request::Preview { path } => {
+                let path = self.mcp_resolve(&path);
+                if self.preview_beside_without_focus(path.clone()) {
+                    self.status_message = i18n::msg_agent_previewed(lang, &self.mcp_short(&path));
+                }
+            }
+            crate::mcp::Request::Say { text } => {
+                // Sanitised again, having already been cut by the server: this is a file on disk
+                // that anything could have written, and what it says goes straight into a real
+                // terminal's status bar.
+                let text = crate::mcp::say_line(&text);
+                if !text.is_empty() {
+                    self.status_message = i18n::msg_agent_says(lang, &text);
+                    self.mark_dirty();
+                }
+            }
+            crate::mcp::Request::Edit { id, path, old, new } => {
+                let edit = PendingAgentEdit { id, path: self.mcp_resolve(&path), old, new };
+                self.ask_or_apply_agent_edit(edit);
+            }
         }
-        let path = PathBuf::from(&request.path);
-        // A relative path means "in this project", which is the only root the agent was told
-        // about — see the `root` field of the published state.
-        let path = if path.is_absolute() { path } else { self.root.join(path) };
-        self.show_beside_without_focus(path, request.line);
+    }
+
+    /// A path as an agent named it, as a path this editor can use.
+    ///
+    /// A relative one means "in this project", which is the only root the agent was told about —
+    /// see the `root` field of the published state.
+    fn mcp_resolve(&self, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.is_absolute() { path } else { self.root.join(path) }
+    }
+
+    /// How a file an agent touched is named on the status line: relative to the project when it
+    /// is inside it, and whole when it is not. A status line is one line, and forty characters of
+    /// `/Users/…/target/debug` in front of the name is the part nobody is reading.
+    fn mcp_short(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
+    }
+
+    /// Renders a file in the pane the user is *not* typing in, and gives the keyboard back.
+    ///
+    /// `false` when there was nothing to show, so the caller can stay quiet: as with
+    /// [`Self::show_beside_without_focus`], a path an agent guessed wrong is not worth a line in
+    /// the middle of somebody else's work.
+    ///
+    /// A file the preview pane has nothing to say about falls back to simply opening it. Showing
+    /// somebody the source of the thing they were promised beats showing them nothing, and the
+    /// agent asked for this file to be in front of the user either way.
+    fn preview_beside_without_focus(&mut self, path: PathBuf) -> bool {
+        if !path.is_file() {
+            return false;
+        }
+        let ext = file_ext(&path);
+        let picture = crate::preview::is_previewable(&ext) || crate::preview::is_document(&ext);
+        if !picture && !crate::preview::is_renderable(&ext) {
+            self.show_beside_without_focus(path, None, None);
+            return true;
+        }
+        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
+            self.toggle_split_view();
+        }
+        if self.split_view {
+            self.editor_pane_focus = match was.1 {
+                EditorPane::Left => EditorPane::Right,
+                EditorPane::Right => EditorPane::Left,
+            };
+        }
+        let rendered = self
+            .editors
+            .iter()
+            .position(|e| e.preview.is_some() && e.path.as_deref() == Some(path.as_path()));
+        if picture {
+            self.open_preview_tab(path, crate::preview::is_document(&ext));
+        } else if let Some(idx) = rendered {
+            // Asking twice for the same file is an agent pointing at it again, not a request for
+            // a second copy of the tab.
+            self.focus_existing_tab(idx);
+        } else {
+            // A rendered markdown tab is a *view of a buffer*, not a second copy of the file, so
+            // the source has to be open for anything to appear in it — see
+            // `refresh_rendered_previews`, which looks the source up among the open editors. Both
+            // land in the pane beside the user's work, the preview in front of the source.
+            //
+            // The pane is remembered before the source is opened, because opening a file that
+            // already has a tab goes to *that* tab wherever it is, and takes `editor_pane_focus`
+            // with it.
+            let beside = self.editor_pane_focus;
+            self.open_file_in_tab(path.clone());
+            self.place_rendered_preview(path, beside);
+        }
+        // Everything about where the keyboard was, put back.
+        self.focus = was.0;
+        self.editor_pane_focus = was.1;
+        if self.split_view {
+            match was.1 {
+                EditorPane::Left => self.active_editor = was.2,
+                EditorPane::Right => self.active_editor_right = was.3,
+            }
+        }
+        self.mark_dirty();
+        true
     }
 
     /// Opens a file in the pane that is *not* being typed in, and gives the keyboard straight
@@ -5133,7 +5609,19 @@ impl App {
     /// A file that is not there is passed over in silence. The request came from a program, not
     /// from a key somebody pressed, and an error banner for a path an agent guessed wrong is
     /// noise in the middle of somebody else's work.
-    fn show_beside_without_focus(&mut self, path: PathBuf, line: Option<usize>) {
+    ///
+    /// With `end_line` the span is *selected* rather than merely scrolled to, which is what makes
+    /// it visible in a pane nobody is focused on: the renderer paints a selection wherever it
+    /// finds one, focused or not, so an agent saying "these twelve lines" lands as twelve
+    /// highlighted lines the user did not have to press anything to see. Selection semantics also
+    /// give the other half of the rule for nothing — the moment the user clicks or types in that
+    /// pane, the mark is gone.
+    fn show_beside_without_focus(
+        &mut self,
+        path: PathBuf,
+        line: Option<usize>,
+        end_line: Option<usize>,
+    ) {
         if !path.is_file() {
             return;
         }
@@ -5152,6 +5640,14 @@ impl App {
             let idx = self.pane_editor_index(self.editor_pane_focus);
             if let Some(editor) = self.editors.get_mut(idx) {
                 editor.goto_line(line);
+                if let Some(end) = end_line {
+                    let (from, to) = agent_span(editor, line, end);
+                    // Backwards on purpose. `select_char_range` leaves the cursor at its second
+                    // argument, and the cursor is what the renderer scrolls the pane to: named
+                    // the other way round, a range longer than the pane would arrive showing its
+                    // last line, which is not where anybody starts reading.
+                    editor.select_char_range(to, from);
+                }
             }
         }
         // Everything about where the keyboard was, put back.
@@ -5165,6 +5661,160 @@ impl App {
         }
         // Nothing here came from an event, so nothing has marked the screen out of date.
         self.mark_dirty();
+    }
+
+    /// What happens to an `edit_buffer` before anything is written: the setting decides, and where
+    /// the setting says "ask", the user does.
+    ///
+    /// Whatever the outcome, the server is answered. A tool call is blocked on the other side of
+    /// this, and the one thing worse than refusing an agent's edit is leaving it holding a call
+    /// open for two minutes to find out that it was refused.
+    fn ask_or_apply_agent_edit(&mut self, edit: PendingAgentEdit) {
+        match crate::settings::AgentEdits::of(&self.settings.agent_edits) {
+            crate::settings::AgentEdits::Deny => {
+                self.refuse_agent_edit(&edit, crate::mcp::edit_refused_by_setting());
+            }
+            crate::settings::AgentEdits::Allow => self.carry_out_agent_edit(edit),
+            // Answered once, for the rest of the session. See `agent_edits_this_session`.
+            crate::settings::AgentEdits::Ask if self.agent_edits_this_session => {
+                self.carry_out_agent_edit(edit)
+            }
+            crate::settings::AgentEdits::Ask => {
+                if self.agent_edit_queue.len() >= AGENT_EDIT_QUEUE {
+                    let waiting = self.agent_edit_queue.len();
+                    self.refuse_agent_edit(&edit, crate::mcp::edit_too_many(waiting));
+                    return;
+                }
+                // The question itself goes up in `offer_next_agent_edit`, once the frame loop has
+                // established that nothing else is holding the keyboard.
+                self.agent_edit_queue.push_back(edit);
+            }
+        }
+    }
+
+    /// Puts the next waiting consent question on the status line, when there is room for it.
+    ///
+    /// Called once a frame from [`Self::poll_mcp`] rather than at the moment the request arrives,
+    /// because "nothing else owns the keyboard" is a fact about *now*: an agent that asks while
+    /// the user is in the find box gets its question the moment they close it, rather than never
+    /// or on top of it.
+    fn offer_next_agent_edit(&mut self) {
+        if self.agent_edit_queue.is_empty() || self.a_modal_owns_the_keyboard() {
+            return;
+        }
+        let Some(edit) = self.agent_edit_queue.pop_front() else { return };
+        let (added, removed) = agent_edit_size(&edit.old, &edit.new);
+        self.status_message = i18n::msg_agent_edit_confirm(
+            self.settings.lang,
+            &self.mcp_short(&edit.path),
+            added,
+            removed,
+        );
+        self.agent_edit_ask = Some(edit);
+        self.mark_dirty();
+    }
+
+    /// The three answers to that question, in the language it was asked in.
+    ///
+    /// `A` is the one that is not a yes or a no: it says yes to this edit and to every other one
+    /// this session, which is the shape of the promise somebody makes when they decide to watch an
+    /// agent work rather than to vet each keystroke of it. Everything else is no, including the
+    /// keys that would do something in the pane underneath — which is the whole point of asking
+    /// before anything is written.
+    fn handle_agent_edit_prompt_key(&mut self, key: KeyEvent) {
+        let lang = self.settings.lang;
+        let Some(edit) = self.agent_edit_ask.take() else { return };
+        let yes = key.code == KeyCode::Char(i18n::yes_key(lang))
+            || key.code == KeyCode::Char(i18n::yes_key(lang).to_ascii_uppercase());
+        let always = matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'));
+        if always {
+            self.agent_edits_this_session = true;
+        }
+        if yes || always {
+            self.carry_out_agent_edit(edit);
+            // "Stop asking me" has to mean the ones already queued too. Asking three more times
+            // straight after being told not to would read as the key not having worked.
+            if always {
+                while let Some(waiting) = self.agent_edit_queue.pop_front() {
+                    self.carry_out_agent_edit(waiting);
+                }
+            }
+        } else {
+            let said = i18n::msg_agent_edit_declined(lang, &self.mcp_short(&edit.path));
+            self.refuse_agent_edit(&edit, crate::mcp::edit_declined());
+            self.status_message = said;
+        }
+        self.mark_dirty();
+    }
+
+    /// Applies an edit and tells the server how it went.
+    fn carry_out_agent_edit(&mut self, edit: PendingAgentEdit) {
+        let reply = self.apply_agent_edit(&edit);
+        self.answer_agent_edit(reply);
+    }
+
+    /// Says no to an edit, in a sentence the agent can relay to the person who asked for it.
+    fn refuse_agent_edit(&mut self, edit: &PendingAgentEdit, message: String) {
+        self.answer_agent_edit(crate::mcp::Reply { id: edit.id, ok: false, message });
+    }
+
+    /// Writes the answer into the session directory, where the tool call is waiting for it.
+    ///
+    /// Silent without a session, which is a state this cannot really be in — the request came
+    /// through one — but is the honest thing to do with an `Option` rather than unwrapping it on a
+    /// path that runs in the frame loop.
+    fn answer_agent_edit(&mut self, reply: crate::mcp::Reply) {
+        if let Some(session) = self.mcp.as_ref() {
+            session.reply(&reply);
+        }
+    }
+
+    /// Carries out one agreed edit, on the buffer and not on the file.
+    ///
+    /// Every refusal here is a sentence rather than a code, and each says what to do next: the
+    /// four ways this can fail are four different mistakes, and an agent told only "no" would
+    /// retry the one that will never work.
+    ///
+    /// One [`Editor::replace_char_range`], so it is one step of undo — the same discipline the
+    /// rename and the project sweep follow, and the reason a change somebody regrets agreeing to
+    /// costs them one Ctrl+Z rather than a hunt through the file. The buffer is left *modified*
+    /// and unsaved on purpose: saving is the user's, and an agent that could write to disk through
+    /// this door would have made the consent question meaningless.
+    fn apply_agent_edit(&mut self, edit: &PendingAgentEdit) -> crate::mcp::Reply {
+        let lang = self.settings.lang;
+        let short = self.mcp_short(&edit.path);
+        let refuse = |message: String| crate::mcp::Reply { id: edit.id, ok: false, message };
+        // Compared as resolved paths, the way they were published: an agent that read
+        // `open_files` is holding the canonical name, and a buffer opened as `./src/main.rs` is
+        // the same file under a different spelling.
+        let wanted = self.mcp_path(&edit.path);
+        let found = self.editors.iter().position(|e| {
+            e.preview.is_none() && e.path.as_deref().is_some_and(|p| self.mcp_path(p) == wanted)
+        });
+        let Some(idx) = found else {
+            return refuse(crate::mcp::edit_not_open(&short));
+        };
+        if self.editors[idx].is_read_only() {
+            return refuse(crate::mcp::edit_read_only(&short));
+        }
+        let text = self.editors[idx].rope.to_string();
+        let (start, end) = match only_match(&text, &edit.old) {
+            Ok(span) => span,
+            Err(0) => return refuse(crate::mcp::edit_no_match(&short)),
+            Err(n) => return refuse(crate::mcp::edit_many_matches(&short, n)),
+        };
+        let editor = &mut self.editors[idx];
+        editor.replace_char_range(start, end, &edit.new);
+        // Marked the way an `open_file` range is, and for the same reason: the pane holding this
+        // buffer may not be the one the user is typing in, and a change they cannot see is a
+        // change that happened behind their back even though they agreed to it. Backwards for the
+        // same reason as there — the cursor is what the pane scrolls to, and the line worth
+        // scrolling to is the one the change begins on.
+        editor.select_char_range(start + edit.new.chars().count(), start);
+        let line = editor.rope.char_to_line(start) + 1;
+        self.status_message = i18n::msg_agent_edited(lang, &short, line);
+        self.mark_dirty();
+        crate::mcp::Reply { id: edit.id, ok: true, message: crate::mcp::edit_applied(&short, line) }
     }
 
     // ---- Language server -----------------------------------------------------------------
@@ -5275,9 +5925,9 @@ impl App {
         }
         for (program, event) in arrived {
             match event {
-                crate::lsp::Event::Ready { utf16 } => {
+                crate::lsp::Event::Ready { utf16, offered } => {
                     let Some(client) = self.lsp.get_mut(&program) else { continue };
-                    client.confirm_ready(utf16);
+                    client.confirm_ready(utf16, offered);
                     let name = client.name.clone();
                     self.status_message = i18n::msg_lsp_ready(lang, &name);
                 }
@@ -5295,6 +5945,7 @@ impl App {
                         self.editors.iter().find(|e| e.path.as_deref() == Some(path.as_path()))
                     else {
                         self.diagnostics.remove(&path);
+                        self.lsp_raw.remove(&path);
                         continue;
                     };
                     let lines: Vec<String> = editor
@@ -5305,7 +5956,11 @@ impl App {
                     let marks = crate::lsp::marks_from(&raw, &lines, utf16);
                     // An empty list is not nothing to do: it is how a fixed error stops being
                     // drawn, so it replaces the old list rather than being skipped.
-                    self.diagnostics.insert(path, marks);
+                    self.diagnostics.insert(path.clone(), marks);
+                    // And the same list unconverted, for the one question that needs a diagnostic
+                    // rather than a squiggle — see [`Self::lsp_raw`]. Written here, beside the
+                    // marks, so neither can outlive the other.
+                    self.lsp_raw.insert(path, raw);
                 }
                 crate::lsp::Event::Completion { id, words } => {
                     self.absorb_lsp_completion(id, words);
@@ -5317,6 +5972,18 @@ impl App {
                 crate::lsp::Event::Symbols { id, symbols } => self.lsp_list_symbols(id, symbols),
                 crate::lsp::Event::Rename { id, plan } => self.lsp_rename_answer(id, plan),
                 crate::lsp::Event::Formatting { id, edits } => self.lsp_format_answer(id, edits),
+                crate::lsp::Event::CodeActions { id, actions } => {
+                    self.lsp_offer_code_actions(id, actions)
+                }
+                crate::lsp::Event::CodeActionEdit { id, plan } => {
+                    self.lsp_code_action_edit(id, plan)
+                }
+                crate::lsp::Event::SelectionRange { id, chain } => {
+                    self.lsp_widen_selection(id, chain)
+                }
+                crate::lsp::Event::FoldingRanges { id, ranges } => {
+                    self.lsp_remember_folds(id, ranges)
+                }
                 crate::lsp::Event::Hover { id, text } => self.lsp_show_what_it_is(id, text),
                 crate::lsp::Event::Answer { message } => {
                     // Straight back to the server that asked, on the thread that owns the pipe.
@@ -5352,6 +6019,14 @@ impl App {
                     // buffers this editor owns and needs nothing from the server to apply them.
                     self.lsp_editing = None;
                     self.lsp_formatting = None;
+                    self.lsp_acting = None;
+                    self.lsp_action_edit = None;
+                    self.lsp_widening = None;
+                    self.lsp_folding.clear();
+                    // The walk goes with them, and so do the fold boundaries: both are the dead
+                    // server's reading of files it is no longer reading. The selection on screen
+                    // stays exactly as it is — it is text, and nothing about it stopped being true.
+                    self.selection_walk = None;
                     // The files it was serving are forgotten too, so the ones still open are
                     // announced again from scratch to whatever takes its place.
                     self.lsp_forget(&program);
@@ -5377,6 +6052,12 @@ impl App {
             self.lsp_sent.remove(&path);
             self.lsp_seen.remove(&path);
             self.diagnostics.remove(&path);
+            self.lsp_raw.remove(&path);
+            // Asked again from scratch by whatever takes its place, which is what forgetting the
+            // revision means here. The boundaries already handed to a buffer are left where they
+            // are: they describe text nobody has touched, and dropping them would collapse the
+            // fold markers of every open file the moment a server hiccuped.
+            self.lsp_folds_asked.remove(&path);
         }
     }
 
@@ -5588,7 +6269,10 @@ impl App {
             self.lsp_sent.remove(&path);
             self.lsp_seen.remove(&path);
             self.diagnostics.remove(&path);
+            self.lsp_folds_asked.remove(&path);
         }
+        // Last, because it only asks about files that have just been announced above.
+        self.lsp_refresh_folds();
     }
 
     /// Asks the server where the thing under the cursor is defined.
@@ -5964,7 +6648,7 @@ impl App {
                 return;
             }
         };
-        match self.rename_preview_from(&asked, plan) {
+        match self.edit_preview_from(&asked.from, &asked.old_name, &asked.new_name, plan) {
             Ok(preview) => {
                 self.rename_preview = Some(preview);
                 // The preview is the answer, so the line that said the question had gone out has
@@ -5979,13 +6663,20 @@ impl App {
     /// Turns a plan into a preview, or into the one sentence saying why there is not going to be
     /// one.
     ///
-    /// Every `Err` here is a refusal of the *whole* rename, and the order they are asked in is
-    /// the order of what the reader can do about them: a file operation is not something any
-    /// amount of opening tabs would fix, a file with no tab is fixed by opening it, and the last
-    /// two are about the edits themselves.
-    fn rename_preview_from(
+    /// Every `Err` here is a refusal of the *whole* thing, and the order they are asked in is the
+    /// order of what the reader can do about them: a file operation is not something any amount of
+    /// opening tabs would fix, a file with no tab is fixed by opening it, and the last two are
+    /// about the edits themselves.
+    ///
+    /// Takes the three pieces of the question rather than the rename that asked it, because a
+    /// rename is no longer the only thing that arrives here: a code action reaching more than one
+    /// file comes down this same road, with the same refusals and the same box, and it has no old
+    /// name to put in a title. That is what an empty `old_name` means — see [`RenamePreview`].
+    fn edit_preview_from(
         &self,
-        asked: &PendingRename,
+        from: &(PathBuf, usize, usize),
+        old_name: &str,
+        new_name: &str,
         plan: crate::lsp::RenamePlan,
     ) -> Result<RenamePreview, String> {
         let lang = self.settings.lang;
@@ -6089,13 +6780,13 @@ impl App {
 
         // Where the cursor is, as an offset, worked out here because here is where the text it is
         // an offset into still exists.
-        let (path, line, col) = asked.from.clone();
+        let (path, line, col) = from.clone();
         let from_char = held(&path)
             .map(|e| e.rope.line_to_char(line.min(e.rope.len_lines().saturating_sub(1))) + col)
             .unwrap_or(0);
         Ok(RenamePreview {
-            old_name: asked.old_name.clone(),
-            new_name: asked.new_name.clone(),
+            old_name: old_name.to_string(),
+            new_name: new_name.to_string(),
             from: (path, line, col),
             from_char,
             files: targets,
@@ -6133,8 +6824,16 @@ impl App {
                 self.apply_rename_preview()
             }
             _ => {
+                // Which of the two sentences depends on what the box was showing, and the empty
+                // old name is what says so — see [`RenamePreview`].
+                let renaming =
+                    self.rename_preview.as_ref().is_some_and(|p| !p.old_name.is_empty());
                 self.rename_preview = None;
-                self.status_message = i18n::msg_rename_cancelled(lang).to_string();
+                self.status_message = if renaming {
+                    i18n::msg_rename_cancelled(lang).to_string()
+                } else {
+                    i18n::msg_edit_preview_cancelled(lang).to_string()
+                };
             }
         }
     }
@@ -6354,6 +7053,11 @@ impl App {
     /// The finding and the wording; the arithmetic is in [`format_spans`], which is a free
     /// function so it can be tested against a rope and a list of edits rather than against an
     /// application with two shells running in it.
+    ///
+    /// Shared with the code action that lands in a single buffer, which is the same question about
+    /// the same kind of answer: a list of spans in the server's units, against one open file, that
+    /// has to become one replacement or none. The two refusals below are the two that can happen
+    /// to either of them, which is why the wording fits both.
     fn format_edits_for(
         &self,
         path: &Path,
@@ -6375,6 +7079,528 @@ impl App {
                 FormatRefusal::Moved => i18n::msg_format_refused_moved(lang).to_string(),
                 FormatRefusal::Overlap => i18n::msg_format_refused_overlap(lang).to_string(),
             })
+    }
+
+    // ---- What the server offers to do about it -------------------------------------------------
+    //
+    // The third question that writes, and the one that reuses both of the roads the first two
+    // built rather than laying a third. What comes back is a list of things the server could do
+    // here; picking one produces a `WorkspaceEdit`, and a `WorkspaceEdit` is a thing this
+    // application already knows two ways of carrying out:
+    //
+    // * everything inside one open buffer goes down the format's road — converted with
+    //   `format_spans`, which is the general one, because an action's spans cross lines as a
+    //   matter of course (a `use` line inserted at the top, a block replaced by a guarded return)
+    //   and applied as a single edit that one Ctrl+Z takes back;
+    // * anything wider goes down the rename's — the preview, the revision check, and every one of
+    //   the rename's refusals, including the honest one for a file the server names that no tab
+    //   holds. Not a second policy: the same policy, asked the same question.
+    //
+    // On demand, never on save. The roadmap's rule, and the one this whole file obeys: first the
+    // mechanism, then the policy about when to run it.
+
+    /// Asks the server what can be done about the code under the cursor.
+    ///
+    /// The same opening as [`Self::lsp_find_references`], down to sending the file first, and for
+    /// the format's sharper version of the reason: the answer is a set of spans measured against
+    /// the text the server was last told about, and applying those to text that has since been
+    /// typed into would not move a mark, it would delete the wrong characters.
+    ///
+    /// The selection when there is one and the caret as an empty range when there is not. Both are
+    /// what the protocol means by a range, and the difference is a real one: "what can be done
+    /// here" and "what can be done to *this*" are different questions, and a server given a
+    /// selection answers the second — an extraction, a block turned inside out — where a caret
+    /// gets the fix for the error it is sitting in.
+    pub fn lsp_code_actions(&mut self) {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        let ((start_line, start_col), (end_line, end_col)) = editor
+            .selection_range()
+            .unwrap_or(((editor.cursor_line, editor.cursor_col), (editor.cursor_line, editor.cursor_col)));
+        // Each end's own line, because each end's column is measured against the line it is on —
+        // the mistake `format_spans` exists to avoid, made here instead.
+        let line_of = |line: usize| editor.rope.get_line(line).map(|l| l.to_string()).unwrap_or_default();
+        let (start_text, end_text) = (line_of(start_line), line_of(end_line));
+        let from = (path.clone(), editor.cursor_line, editor.cursor_col);
+        let text = editor.rope.to_string();
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        // What this file's server has said about it, in its own units and whole — the `code` and
+        // the `data` it hangs off its own diagnostics are what it matches its quick fixes against.
+        // Read before the client is borrowed, since both come out of `self`.
+        let diagnostics = self.lsp_raw.get(&path).cloned().unwrap_or_default();
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        // Asked before the question goes out rather than after a refusal comes back. A server that
+        // never claimed this can still be *sent* it — and would answer with a method-not-found the
+        // status line would then print as though it were news.
+        if !client.actions().offered {
+            self.status_message = i18n::msg_code_actions_unsupported(lang).to_string();
+            return;
+        }
+        client.did_change(&absolute, &text);
+        match client.code_actions(
+            &absolute,
+            (start_line, &start_text, start_col),
+            (end_line, &end_text, end_col),
+            &diagnostics,
+        ) {
+            Some(id) => {
+                self.lsp_acting = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_code_actions_asking(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Turns what the server offered into a list to choose from.
+    ///
+    /// In the server's own order, untouched, for the reason the outline keeps document order: the
+    /// order is the server's judgement of what is most likely wanted here — the quick fix for the
+    /// error under the caret first, the refactorings that apply anywhere after it — and sorting by
+    /// title would replace that judgement with the alphabet.
+    fn lsp_offer_code_actions(
+        &mut self,
+        id: i64,
+        actions: Result<Vec<crate::lsp::CodeAction>, String>,
+    ) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_acting.take().filter(|a| a.id == id) else { return };
+        let actions = match actions {
+            Ok(actions) => actions,
+            // The server's own sentence, as after a rename and a format, and for the same reason:
+            // it is the only party here that knows why.
+            Err(complaint) => {
+                self.status_message = complaint;
+                return;
+            }
+        };
+        if actions.is_empty() {
+            self.status_message = i18n::msg_code_actions_none(lang).to_string();
+            return;
+        }
+        let items = code_action_items(actions);
+        self.open_server_list(
+            Key::PickerCodeActions,
+            crate::picker::PickerKind::CodeActions,
+            items,
+            asked.from,
+        );
+    }
+
+    /// Carries out the action that was picked, or asks what it would change first.
+    ///
+    /// The second question is the ordinary case rather than the odd one: rust-analyzer names its
+    /// assists and computes none of their edits until one is chosen, which is why this is where
+    /// the resolve request lives — one round trip for the row somebody wanted, not a dozen for the
+    /// eleven they did not.
+    fn apply_code_action(
+        &mut self,
+        action: crate::lsp::CodeAction,
+        origin: Option<(PathBuf, usize, usize)>,
+    ) {
+        let lang = self.settings.lang;
+        // The list is only ever opened through `open_server_list`, which always writes one down.
+        // Without it there is no buffer to put a cursor back in and no file to resolve against.
+        let Some(from) = origin else { return };
+        if let Some(plan) = action.edit {
+            self.carry_out_code_action(&action.title, plan, from);
+            return;
+        }
+        // No file is announced here and none needs to be: the resolve request names an action and
+        // not a document, and the file it came from was sent when the list was asked for.
+        let path = from.0.clone();
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        match client.resolve_code_action(&action.raw) {
+            Some(id) => {
+                self.status_message = i18n::msg_code_action_asking(lang, &action.title);
+                self.lsp_action_edit = Some(PendingAction { id, from, title: action.title });
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Reads what the server filled in for the action that was picked, and carries it out.
+    fn lsp_code_action_edit(
+        &mut self,
+        id: i64,
+        plan: Result<Option<crate::lsp::RenamePlan>, String>,
+    ) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_action_edit.take().filter(|a| a.id == id) else { return };
+        match plan {
+            Err(complaint) => self.status_message = complaint,
+            // The server answered without saying what it would change. An answer, and said out
+            // loud for the reason an empty format answer is: a row that did nothing in silence is
+            // a row somebody presses again.
+            Ok(None) => self.status_message = i18n::msg_code_action_no_changes(lang).to_string(),
+            Ok(Some(plan)) => self.carry_out_code_action(&asked.title, plan, asked.from),
+        }
+    }
+
+    /// Writes one action's `WorkspaceEdit` into the buffers, down whichever of the two roads it
+    /// belongs on.
+    ///
+    /// The fork is the only decision this function makes, and it is made on what the answer
+    /// *reaches*: one open buffer is the format's case exactly — the text you are looking at,
+    /// changed while you watch, one step of undo — and anything else is the rename's, because the
+    /// edits are then somewhere nobody can see them arrive. A file the server names that no tab
+    /// holds is refused by that road, with its count and its instruction, which is the honest
+    /// answer here for the reason it is honest there.
+    fn carry_out_code_action(
+        &mut self,
+        title: &str,
+        plan: crate::lsp::RenamePlan,
+        from: (PathBuf, usize, usize),
+    ) {
+        let lang = self.settings.lang;
+        // Asked here as well as inside the preview, because the single-buffer road does not go
+        // through it — and a create, a move or a delete of a file is not something either road
+        // does. Refused whole, as the rename refuses it, and for its reason.
+        if plan.file_ops {
+            self.status_message = i18n::msg_rename_refused_file_ops(lang).to_string();
+            return;
+        }
+        // Back to the spelling the tabs use, as every other answer is mapped back: the server
+        // answers in resolved paths, and a file matched under the wrong name is one this would
+        // report as not open.
+        let files: Vec<crate::lsp::FileEdits> = plan
+            .files
+            .iter()
+            .map(|file| crate::lsp::FileEdits {
+                path: self.lsp_paths.get(&file.path).cloned().unwrap_or_else(|| file.path.clone()),
+                edits: file.edits.clone(),
+            })
+            .filter(|file| !file.edits.is_empty())
+            .collect();
+        if files.is_empty() {
+            self.status_message = i18n::msg_code_action_no_changes(lang).to_string();
+            return;
+        }
+        let one_open_buffer = files.len() == 1
+            && self.editors.iter().any(|e| e.path.as_deref() == Some(files[0].path.as_path()));
+        if !one_open_buffer {
+            // The rename's road, whole: its preview, its refusals, its revision check at Enter.
+            // The empty old name is what tells the box it is not a rename — see [`RenamePreview`].
+            match self.edit_preview_from(&from, "", title, plan) {
+                Ok(preview) => {
+                    self.rename_preview = Some(preview);
+                    self.status_message = String::new();
+                }
+                Err(refusal) => self.status_message = refusal,
+            }
+            return;
+        }
+        let path = files[0].path.clone();
+        let converted = match self.format_edits_for(&path, &files[0].edits) {
+            Ok(converted) => converted,
+            Err(refusal) => {
+                self.status_message = refusal;
+                return;
+            }
+        };
+        let Some(index) =
+            self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            self.status_message = i18n::msg_format_refused_moved(lang).to_string();
+            return;
+        };
+        let count = converted.len();
+        let (line, col) = (from.1, from.2);
+        let editor = &mut self.editors[index];
+        let Some((start, end, rebuilt)) = edits_as_one_span(editor, &converted) else { return };
+        editor.replace_char_range(start, end, &rebuilt);
+        // Where the cursor was, clamped to what the file now has — the format's treatment and not
+        // the rename's arithmetic, for the format's reason: an action moves whole lines around,
+        // and an offset carried through that lands somewhere defensible and visibly wrong.
+        editor.cursor_line = line.min(editor.rope.len_lines().saturating_sub(1));
+        editor.cursor_col = col.min(editor.line_char_len(editor.cursor_line));
+        // Nothing is told to the server here, as after a rename and a format: the revision the
+        // buffer just bumped is what the debounced `didChange` in the frame loop watches.
+        self.status_message = i18n::msg_code_action_applied(lang, title, count);
+    }
+
+    // ---- Widening and narrowing the selection ---------------------------------------------------
+    //
+    // The first thing here asked of a server that changes nothing but the *selection*, and the
+    // only one whose answer is used more than once: `textDocument/selectionRange` comes back as a
+    // ladder — the identifier, the expression around it, the statement around that, the item around
+    // that — and one request buys every rung. So the shape of this is a walk kept on the app, not a
+    // request per keypress: the first Expand asks, every Expand after it climbs, and Shrink goes
+    // back down without a word to anybody.
+    //
+    // The walk lives exactly as long as it is telling the truth. See [`SelectionWalk`] for the
+    // three things it checks and why the check is a check rather than a hook.
+
+    /// Widens the selection to the next thing that encloses it.
+    ///
+    /// Asks the server only when there is no walk in hand — which is the first press, and every
+    /// press after anything else has moved the cursor. A second press while the ladder is alive
+    /// climbs a rung in this process and sends nothing: the whole point of an answer that arrives
+    /// as a chain is that the round trips stop after the first one.
+    ///
+    /// The question is asked at the *start* of an active selection rather than at the cursor. A
+    /// selection running from an identifier out to the end of an expression has its caret at the
+    /// far end, and a server asked about that place answers about whatever begins there — so the
+    /// second press would climb a different ladder from the first, which reads on screen as the
+    /// selection jumping sideways instead of growing.
+    pub fn lsp_expand_selection(&mut self) {
+        let lang = self.settings.lang;
+        if self.step_selection_walk(1) {
+            return;
+        }
+        // No walk, or one that stopped being true: this is a fresh question about wherever the
+        // cursor is now, so anything left of the old one goes before the new one is asked for.
+        self.selection_walk = None;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return };
+        let Some(path) = editor.path.clone() else { return };
+        let (line, col) = match editor.selection_range() {
+            Some(((start_line, start_col), _)) => (start_line, start_col),
+            None => (editor.cursor_line, editor.cursor_col),
+        };
+        let line_text = editor.rope.line(line).to_string();
+        let text = editor.rope.to_string();
+        let from = (path.clone(), line, col);
+        let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, &path) else {
+            self.status_message = i18n::msg_lsp_needs_saving(lang).to_string();
+            return;
+        };
+        self.lsp_paths.insert(absolute.clone(), path.clone());
+        let Some(client) = self.lsp_client_for(&path).filter(|c| c.ready()) else {
+            self.status_message = i18n::msg_lsp_none_here(lang).to_string();
+            return;
+        };
+        // Asked before the question goes out, as the code action row does it and for its reason: a
+        // server that never claimed this would answer with a method-not-found, and the status line
+        // would print the server's protocol error as though it were an answer about the code.
+        if !client.offered().selection_ranges {
+            self.status_message = i18n::msg_selection_unsupported(lang).to_string();
+            return;
+        }
+        // The file goes first, as it does before every question whose answer is a set of positions:
+        // a ladder measured against the text of four hundred milliseconds ago would select the
+        // right number of characters in the wrong place.
+        client.did_change(&absolute, &text);
+        match client.selection_range(&absolute, line, &line_text, col) {
+            Some(id) => {
+                self.lsp_widening = Some(PendingAsk { id, from });
+                self.status_message = i18n::msg_selection_asking(lang).to_string();
+            }
+            None => self.status_message = i18n::msg_lsp_none_here(lang).to_string(),
+        }
+    }
+
+    /// Narrows the selection back to the last thing it grew out of.
+    ///
+    /// Never asks anybody anything. Shrinking is only meaningful as the undo of an expansion — there
+    /// is no such thing as "the thing inside this selection" without knowing which way you came —
+    /// so with no walk in hand there is nothing to do but say so.
+    pub fn lsp_shrink_selection(&mut self) {
+        if self.step_selection_walk(-1) {
+            return;
+        }
+        self.selection_walk = None;
+        self.status_message = i18n::msg_selection_nothing_to_shrink(self.settings.lang).to_string();
+    }
+
+    /// Climbs one rung of a live walk, or says the walk is not usable and answers `false`.
+    ///
+    /// The one place the three liveness questions are asked, so Expand and Shrink cannot come to
+    /// different conclusions about the same walk: it is about this buffer, at this revision, and
+    /// the selection on screen is still the one the walk put there.
+    ///
+    /// Running out of ladder is a `true` with a sentence, not a `false`: the walk is perfectly
+    /// alive, there is simply nothing wider in it — and answering `false` would send the same
+    /// question to the server again to be told the same thing a round trip later.
+    fn step_selection_walk(&mut self, direction: isize) -> bool {
+        let lang = self.settings.lang;
+        let index = self.active_editor_index();
+        let Some(editor) = self.editors.get(index) else { return false };
+        let Some(walk) = self.selection_walk.as_mut() else { return false };
+        if !walk.still_true(editor) {
+            return false;
+        }
+        match walk.step(direction) {
+            Step::Moved(start, end) => {
+                if let Some(editor) = self.editors.get_mut(index) {
+                    editor.select_char_range(start, end);
+                }
+                self.status_message = String::new();
+            }
+            // Both ends are said out loud rather than silently refused, because a key that does
+            // nothing is a key somebody presses harder.
+            Step::Widest => self.status_message = i18n::msg_selection_widest(lang).to_string(),
+            Step::Narrowest => {
+                self.status_message = i18n::msg_selection_narrowest(lang).to_string()
+            }
+        }
+        true
+    }
+
+    /// Reads the ladder the server sent, stands on the right rung of it, and keeps it.
+    ///
+    /// Which rung that is — and why the ones below it are kept — is [`SelectionWalk::starting_at`].
+    fn lsp_widen_selection(&mut self, id: i64, chain: Result<Vec<crate::lsp::Span>, String>) {
+        let lang = self.settings.lang;
+        let Some(asked) = self.lsp_widening.take().filter(|a| a.id == id) else { return };
+        let chain = match chain {
+            Ok(chain) => chain,
+            // The server's own sentence, as after a rename, a format and a code action.
+            Err(complaint) => {
+                self.status_message = complaint;
+                return;
+            }
+        };
+        let path = asked.from.0;
+        // The buffer may have been closed, switched or typed into while the answer was in flight.
+        // A ladder of char offsets into text that has moved is not a late answer, it is an answer
+        // about a different file, so it is dropped rather than applied to whatever is there now.
+        let Some(index) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        let spans = self.selection_spans_for(&path, index, &chain);
+        let Some(editor) = self.editors.get(index) else { return };
+        let here = selected_char_range(editor).unwrap_or_else(|| {
+            let at = editor.rope.line_to_char(editor.cursor_line) + editor.cursor_col;
+            (at, at)
+        });
+        let empty = spans.is_empty();
+        let revision = editor.revision();
+        let Some(walk) = SelectionWalk::starting_at(path, revision, spans, here) else {
+            // Either the server named nothing at all, or everything it named is already inside what
+            // is selected — which on a whole-file selection is the ordinary end of the walk.
+            self.status_message = if empty {
+                i18n::msg_selection_nothing_here(lang).to_string()
+            } else {
+                i18n::msg_selection_widest(lang).to_string()
+            };
+            return;
+        };
+        let (start, end) = walk.selected;
+        if let Some(editor) = self.editors.get_mut(index) {
+            editor.select_char_range(start, end);
+        }
+        self.selection_walk = Some(walk);
+        self.status_message = String::new();
+    }
+
+    /// The server's ladder as absolute char ranges in the buffer, innermost first.
+    ///
+    /// Both ends of every rung are converted, and each against the line it actually sits on: a
+    /// range that starts on one line and ends on another has two columns measured in two different
+    /// pieces of text, and converting both against the first line is the mistake `format_spans`
+    /// exists to avoid. Rungs that cannot be placed in this buffer — a line number past its end,
+    /// which is what a server answering about older text sends — are dropped one by one rather than
+    /// costing the whole ladder.
+    fn selection_spans_for(
+        &self,
+        path: &Path,
+        index: usize,
+        chain: &[crate::lsp::Span],
+    ) -> Vec<(usize, usize)> {
+        let Some(editor) = self.editors.get(index) else { return Vec::new() };
+        let lines = editor.rope.len_lines();
+        let mut out = Vec::with_capacity(chain.len());
+        for span in chain {
+            if span.start_line >= lines || span.end_line >= lines {
+                continue;
+            }
+            let text_of = |line: usize| editor.rope.line(line).to_string();
+            let start_col = self.lsp_chars_for(path, &text_of(span.start_line), span.start_col);
+            let end_col = self.lsp_chars_for(path, &text_of(span.end_line), span.end_col);
+            let at = |line: usize, col: usize| {
+                editor.rope.line_to_char(line) + col.min(editor.line_char_len(line))
+            };
+            let (start, end) = (at(span.start_line, start_col), at(span.end_line, end_col));
+            // Empty rungs are dropped rather than kept. A rung is something to *select*, and a
+            // selection of nothing is no selection at all — the walk would land on one and
+            // immediately decide it had been overtaken by somebody else's cursor.
+            if start < end {
+                out.push((start, end));
+            }
+        }
+        out
+    }
+
+    // ---- Where the server says the blocks are ----------------------------------------------------
+    //
+    // Folding was here before any of this and goes on working exactly as it did: `toggle_fold`,
+    // `is_hidden` and every drawing path are untouched. What changed is where the *boundary* comes
+    // from — a server's `foldingRange` answer where there is one for the line, and the braces-then-
+    // indentation heuristic everywhere else. See `Editor::foldable_range_at`, which is the one
+    // place that decides between them, and `Editor::server_folds` for why an edited buffer stops
+    // believing the server until the next save.
+
+    /// Asks each open file's server where its blocks are, at the two moments that is worth asking.
+    ///
+    /// Derived from the state rather than hooked into the saves: a buffer that is clean and whose
+    /// revision is not the one already asked about is a file the server has not seen this version
+    /// of. That is true when a file is first opened, and true again after each save — and untrue in
+    /// between, which is exactly the rule the cache needs, since a dirty buffer's line numbers are
+    /// moving under the answer as it travels.
+    fn lsp_refresh_folds(&mut self) {
+        if self.lsp.is_empty() {
+            return;
+        }
+        let mut wanted: Vec<(PathBuf, PathBuf, u64)> = Vec::new();
+        for editor in self.editors.iter().filter(|e| e.preview.is_none()) {
+            let Some(path) = editor.path.as_deref() else { continue };
+            let revision = editor.revision();
+            if editor.dirty || self.lsp_folds_asked.get(path) == Some(&revision) {
+                continue;
+            }
+            // Only once it has been announced. Asking about a file the server has not been told
+            // about is asking about a file it has never read.
+            if !self.lsp_sent.contains_key(path) {
+                continue;
+            }
+            let Some(absolute) = Self::lsp_absolute_for(&self.lsp_paths, path) else { continue };
+            wanted.push((absolute, path.to_path_buf(), revision));
+        }
+        for (absolute, held, revision) in wanted {
+            let Some(client) = self.lsp_client_for(&held).filter(|c| c.ready()) else { continue };
+            if !client.offered().folding_ranges {
+                // Written down anyway, so a server that does not do this is asked once per
+                // revision and not once per frame for the rest of the session.
+                self.lsp_folds_asked.insert(held, revision);
+                continue;
+            }
+            if let Some(id) = client.folding_ranges(&absolute) {
+                self.lsp_folding.insert(id, held.clone());
+            }
+            self.lsp_folds_asked.insert(held, revision);
+        }
+    }
+
+    /// Hands one file's fold boundaries to the tab that holds it.
+    ///
+    /// The same route a diagnostic takes, and for the same reason: the answer names a file, the
+    /// boundaries mean nothing without the buffer they are measured against, and a file no tab
+    /// holds has nothing for them to be true about. Nothing is redrawn differently on their
+    /// account — a fold marker only appears where something is foldable, and this changes which
+    /// lines those are, not what happens when one is pressed.
+    fn lsp_remember_folds(&mut self, id: i64, ranges: Vec<(usize, usize)>) {
+        let Some(path) = self.lsp_folding.remove(&id) else { return };
+        let Some(editor) = self.editors.iter_mut().find(|e| e.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        // Not guarded on the buffer having stayed clean while the answer travelled: it is
+        // `foldable_range_at` that refuses to read these while a buffer is dirty, in one place,
+        // and a second copy of that rule here would be a second chance to get it wrong.
+        editor.server_folds = ranges;
     }
 
     /// Offers everything the servers have said is wrong, as a list to jump into.
@@ -7690,14 +8916,11 @@ impl App {
             ui::NavControl::ZoomOut if !preview.zoom_by(-1) => return,
             ui::NavControl::ZoomIn if !preview.zoom_by(1) => return,
             ui::NavControl::ZoomOut | ui::NavControl::ZoomIn => {}
-            ui::NavControl::FitPage => {
-                preview.fit = crate::preview::Fit::Page;
-                preview.zoom = 1.0;
-            }
-            ui::NavControl::FitWidth => {
-                preview.fit = crate::preview::Fit::Width;
-                preview.zoom = 1.0;
-            }
+            // Both go through `set_fit`, which also decides whether the view stays the editor's
+            // to fit as the pane changes: "fit" is the automatic state and hands it back, "wide"
+            // is a choice and keeps it. See `Preview::adjusted`.
+            ui::NavControl::FitPage => preview.set_fit(crate::preview::Fit::Page),
+            ui::NavControl::FitWidth => preview.set_fit(crate::preview::Fit::Width),
             ui::NavControl::Invert => {
                 preview.inverted = !preview.inverted;
                 let (dark, kind) = (preview.inverted, preview.kind());
@@ -7778,12 +9001,20 @@ impl App {
     fn set_preview_scroll(&mut self, idx: usize, axis: ui::Axis, position: u32) {
         let Some(preview) = self.editors[idx].preview.as_mut() else { return };
         let (cols, rows) = (preview.area_cols, preview.area_rows);
+        // Nowhere to go on a picture shown whole, and no bar over one either — but a drag that
+        // arrived anyway must not be the thing that cuts it. See `Preview::pan_room`.
+        let (max_x, max_y) = preview.pan_room();
+        if (max_x, max_y) == (0, 0) {
+            return;
+        }
         let Some(full) = preview.full.as_ref() else { return };
-        let (max_x, max_y) = crate::preview::max_scroll(full, cols, rows);
         match axis {
             ui::Axis::Vertical => preview.scroll_px = position.min(max_y),
             ui::Axis::Horizontal => preview.scroll_x = position.min(max_x),
         }
+        // Dragged to a place on the page by hand: from here the pane stops re-fitting it, or the
+        // next resize would take the reader back to a corner they had just left.
+        preview.adjusted = true;
         let window =
             crate::preview::visible_window(full, cols, rows, preview.scroll_x, preview.scroll_px);
         preview.show(window);
@@ -7796,11 +9027,13 @@ impl App {
         let idx = self.pane_editor_index(self.editor_pane_focus);
         let Some(preview) = self.editors[idx].preview.as_mut() else { return false };
         let (cols, rows) = (preview.area_cols, preview.area_rows);
-        let Some(full) = preview.full.as_ref() else { return false };
-        let (max_x, max_y) = crate::preview::max_scroll(full, cols, rows);
+        // A picture nobody has zoomed is shown whole, so there is nothing past the edge of the
+        // pane to travel to and the arrows are somebody else's. See `Preview::pan_room`.
+        let (max_x, max_y) = preview.pan_room();
         if max_x == 0 && max_y == 0 {
             return false;
         }
+        let Some(full) = preview.full.as_ref() else { return false };
         // A step is a fraction of the pane, so the gesture feels the same whatever the zoom.
         let (pane_w, pane_h) = crate::preview::pane_pixels(cols, rows);
         let step_x = (pane_w / 6).max(20) as isize;
@@ -7812,6 +9045,8 @@ impl App {
         }
         preview.scroll_x = x;
         preview.scroll_px = y;
+        // Moved by hand, so the view is the reader's from here: see `set_preview_scroll`.
+        preview.adjusted = true;
         let window = crate::preview::visible_window(full, cols, rows, x, y);
         preview.show(window);
         // The bars fade on idleness, and a page being moved is not idle.
@@ -8690,6 +9925,7 @@ impl App {
         let mut file_line = None;
         let mut inspect = None;
         let mut recover = None;
+        let mut code_action = None;
         if let Some(action) = self.picker.as_ref().and_then(|p| p.selected_action()) {
             match action {
                 crate::picker::PickAction::Command(a) => cmd = Some(*a),
@@ -8701,7 +9937,20 @@ impl App {
                 }
                 crate::picker::PickAction::Inspect(name) => inspect = Some(name.clone()),
                 crate::picker::PickAction::Recover(entry) => recover = Some(entry.clone()),
+                crate::picker::PickAction::CodeAction(action) => {
+                    code_action = Some(action.clone())
+                }
             }
+        }
+        if let Some(action) = code_action {
+            // Where the list was asked from, taken before the picker goes: it is the buffer the
+            // edits are about and the cursor to put back afterwards, and unlike a jump it is not
+            // pushed onto the stack — nothing here goes anywhere, so there would be nothing to
+            // come back from.
+            let origin = self.picker.as_ref().and_then(|p| p.origin.clone());
+            self.picker = None;
+            self.apply_code_action(*action, origin);
+            return;
         }
         if let Some(entry) = recover {
             // The rest of the list is taken out before the picker goes, and put back up
@@ -9821,7 +11070,6 @@ impl App {
     /// for a preview is an explicit request to see two things at once, and refusing to make room
     /// for it would be answering a different question.
     fn open_rendered_preview(&mut self, source: PathBuf) {
-        let lang = self.settings.lang;
         // The same file now has two tabs, so a tab is found by path *and* kind: looking by path
         // alone would hand back the source and the preview would never open.
         if let Some(idx) = self
@@ -9840,6 +11088,16 @@ impl App {
             EditorPane::Left => EditorPane::Right,
             EditorPane::Right => EditorPane::Left,
         };
+        self.place_rendered_preview(source, pane);
+    }
+
+    /// The rendered tab itself, in the pane it is named for.
+    ///
+    /// Split out from the decision above because the MCP `preview` request wants the same tab in a
+    /// pane chosen by a different rule — the half the user is *not* working in, which is already
+    /// the half that code is standing in when it asks. Two callers, one way of building the tab.
+    fn place_rendered_preview(&mut self, source: PathBuf, pane: EditorPane) {
+        let lang = self.settings.lang;
         // The tab is *for* the source file and is a view *of* it: same path both times.
         let mut preview = crate::preview::Preview::rendered(source.clone());
         preview.inverted = self.settings.preview_dark_markdown;
@@ -10126,8 +11384,8 @@ impl App {
 
     /// Starts `agent` in the drawer, replacing the launcher with its pane.
     ///
-    /// Two details carry the design. The pane is spawned exactly like every other one — a shell,
-    /// with the command held until it is at a prompt — so it inherits `CLEE_SESSION` from
+    /// Three details carry the design. The pane is spawned exactly like every other one — a
+    /// shell, with the command held until it is at a prompt — so it inherits `CLEE_SESSION` from
     /// `with_startup` and the MCP server an agent starts in here is joined to *this* CleeCode by
     /// descent, for free. And the command is typed with `exec` in front of it, so the shell
     /// *becomes* the agent rather than waiting behind it: when the agent ends, the pane ends, and
@@ -10135,11 +11393,20 @@ impl App {
     /// sitting in an agent-shaped panel, which is the one thing this panel must never show.
     /// `exec` that fails leaves an interactive shell exactly where it was, so "command not found"
     /// is still said out loud by the shell rather than guessed at by us.
+    ///
+    /// The third is what makes the descent worth anything: the line and the pane's own
+    /// environment come from [`crate::mcp::drawer_launch`], which registers `clee --mcp` with the
+    /// agent it is about to start — a flag for two of them, a name in the environment for the
+    /// other two — so an agent launched here can ask what is open and where the cursor is without
+    /// anybody having configured it first. `exec` is also what makes that the careful part: a
+    /// flag an installed version does not know would print a usage message into a pane that has
+    /// already given up its shell, so anything unproven falls back to the bare line above.
     fn launch_drawer_agent(&mut self, agent: crate::session::Agent) {
         let lang = self.settings.lang;
         let command = agent.workspace_name();
         let root = self.root.clone();
-        match TerminalPanel::with_startup(24, 80, &root, Some(&format!("exec {command}"))) {
+        let launch = crate::mcp::drawer_launch(agent, self.settings.agent_mcp);
+        match TerminalPanel::with_startup_env(24, 80, &root, Some(&launch.line), &launch.env) {
             Ok(mut panel) => {
                 panel.name = Some(agent.label().to_string());
                 // The command as the rest of the app has to read it: `Agent::of_command` is one
@@ -11046,6 +12313,7 @@ impl App {
         self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
             || self.pending_upload.is_some()
+            || self.agent_edit_ask.is_some()
             || self.show_save_as
             || self.run_menu.is_some()
             || self.theme_menu.is_some()
@@ -11087,6 +12355,13 @@ impl App {
         // and the next thing typed there is the answer to it and not a command.
         if self.pending_upload.is_some() {
             self.handle_upload_prompt_key(key);
+            return;
+        }
+        // Beside the upload question and for the same reason: it is a one-letter answer about
+        // something that cannot be taken back, and the next key pressed is the answer to it
+        // rather than a command or a character.
+        if self.agent_edit_ask.is_some() {
+            self.handle_agent_edit_prompt_key(key);
             return;
         }
         // Ahead of the other modals: it can be opened *by* the unsaved-changes prompt, and
@@ -11245,6 +12520,15 @@ impl App {
             // undone. The mnemonic keys for this were spent long ago; the menu row prints the
             // chord, which is how J, L, Y and V are found too.
             Action::FormatDocument => self.lsp_format_document(),
+            // The Super layer, and the only two defaults on it. Neither the letters nor the
+            // Ctrl+Shift arrows had room left — the arrows are tabs and terminal windows already —
+            // and this is the one pair of actions in the application that is genuinely pressed
+            // several times in a row, so a menu row would not have done. What it costs is written
+            // down where readers meet it: the Command key reaches an application only under the
+            // kitty keyboard protocol, so in Terminal.app or under a window manager that keeps
+            // Super for itself these two arrive nowhere and the menu rows are the way to them.
+            Action::ExpandSelection => self.lsp_expand_selection(),
+            Action::ShrinkSelection => self.lsp_shrink_selection(),
             Action::GitPanel => self.toggle_git_panel(),
             // H rather than the F that VS Code uses for this: Ctrl+Shift+F already folds, and a
             // key that does two things is a key that does the wrong one.
@@ -11656,6 +12940,9 @@ impl App {
             MenuAction::DocumentSymbols => self.lsp_document_symbols(),
             MenuAction::RenameSymbol => self.lsp_rename_symbol(),
             MenuAction::FormatDocument => self.lsp_format_document(),
+            MenuAction::CodeActions => self.lsp_code_actions(),
+            MenuAction::ExpandSelection => self.lsp_expand_selection(),
+            MenuAction::ShrinkSelection => self.lsp_shrink_selection(),
             MenuAction::ShowDiagnostics => self.open_diagnostics_picker(),
             MenuAction::NewFile => self.open_new_entry(false),
             MenuAction::NewFolder => self.open_new_entry(true),
@@ -11972,6 +13259,11 @@ impl App {
     /// of it fits. `None` when the tab is not a preview, or the page fits whole.
     pub fn preview_scroll_view(&self, idx: usize, axis: ui::Axis) -> Option<(usize, usize, usize)> {
         let preview = self.editors.get(idx)?.preview.as_ref()?;
+        // A picture shown whole has no window on anything: nothing is off the pane, so a bar
+        // would be a control for scrolling a picture that is entirely in front of you.
+        if preview.shown_whole() {
+            return None;
+        }
         let full = preview.full.as_ref()?;
         let (pane_w, pane_h) = crate::preview::pane_pixels(preview.area_cols, preview.area_rows);
         let (total, position, viewport) = match axis {
@@ -14332,6 +15624,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// One buffer holding a line of Rust, and the ladder a server would send about the `x` in it:
+    /// the name, the expression, the statement, the function.
+    fn walk_fixture() -> (Editor, Vec<(usize, usize)>) {
+        let text = "fn main() {\n    let y = x + 1;\n}\n";
+        let mut ed = Editor::empty();
+        ed.insert_str(text);
+        ed.dirty = false;
+        // `x` is at char 24, `x + 1` runs to 29, the statement to 30, the function to 33.
+        (ed, vec![(24, 25), (24, 29), (16, 30), (0, 33)])
+    }
+
+    /// The point of an answer that arrives as a ladder: the server is asked once and every press
+    /// after the first is a step taken here, with nothing on the wire.
+    #[test]
+    fn widening_climbs_one_rung_a_press_and_narrowing_walks_back_down() {
+        let (mut ed, spans) = walk_fixture();
+        let path = PathBuf::from("main.rs");
+        ed.path = Some(path.clone());
+        // The caret sits on the `x`, with nothing selected: the first rung wider than an empty
+        // selection is the name itself.
+        ed.select_char_range(24, 24);
+        let here = (24, 24);
+        let mut walk =
+            SelectionWalk::starting_at(path, ed.revision(), spans.clone(), here).expect("a rung");
+        assert_eq!(walk.selected, (24, 25), "the name under the caret");
+        ed.select_char_range(24, 25);
+
+        // Out through the expression, the statement and the function, one press each.
+        for expected in [(24, 29), (16, 30), (0, 33)] {
+            assert!(walk.still_true(&ed), "nothing else has moved the selection");
+            assert_eq!(walk.step(1), Step::Moved(expected.0, expected.1));
+            ed.select_char_range(expected.0, expected.1);
+        }
+        // And the top of the ladder is an answer, not another question for the server.
+        assert!(walk.still_true(&ed));
+        assert_eq!(walk.step(1), Step::Widest);
+
+        // Back in the way it came, rung for rung, down to where the widening started.
+        for expected in [(16, 30), (24, 29), (24, 25)] {
+            assert_eq!(walk.step(-1), Step::Moved(expected.0, expected.1));
+            ed.select_char_range(expected.0, expected.1);
+            assert!(walk.still_true(&ed));
+        }
+        assert_eq!(walk.step(-1), Step::Narrowest);
+    }
+
+    /// A selection already several rungs up is grown from where it is, not from the caret: the
+    /// rung to stand on is the innermost that *strictly* contains what is on screen.
+    #[test]
+    fn a_fresh_ladder_stands_on_the_first_rung_wider_than_what_is_selected() {
+        let (_, spans) = walk_fixture();
+        let path = PathBuf::from("main.rs");
+        // With the expression selected, the next thing out is the statement — not the expression
+        // again, which is what a `contains` without the "strictly" would have chosen.
+        let walk = SelectionWalk::starting_at(path.clone(), 0, spans.clone(), (24, 29)).unwrap();
+        assert_eq!(walk.selected, (16, 30));
+        // The rungs below are kept, so narrowing can go further in than this expansion began.
+        assert_eq!(walk.at, 2);
+        // With the whole of what the server can see selected, there is no rung at all — which is
+        // the sentence the reader gets rather than a selection that does not move.
+        assert!(SelectionWalk::starting_at(path, 0, spans, (0, 33)).is_none());
+    }
+
+    /// The walk's whole liveness rule, and the reason it is a check rather than a hook: nothing
+    /// that moves a cursor has to remember to clear anything.
+    #[test]
+    fn anything_else_that_moves_the_selection_ends_the_walk() {
+        let (mut ed, spans) = walk_fixture();
+        let path = PathBuf::from("main.rs");
+        ed.path = Some(path.clone());
+        ed.select_char_range(24, 29);
+        let walk = SelectionWalk::starting_at(path.clone(), ed.revision(), spans.clone(), (24, 29))
+            .unwrap();
+        ed.select_char_range(walk.selected.0, walk.selected.1);
+        assert!(walk.still_true(&ed));
+
+        // An arrow key: the selection on screen is no longer the one the walk put there.
+        let mut moved = Editor::empty();
+        std::mem::swap(&mut moved, &mut ed);
+        moved.move_right();
+        assert!(!walk.still_true(&moved), "a keystroke ends it");
+
+        // A typed character: the offsets still match nothing, and the revision has moved besides.
+        let (mut edited, _) = walk_fixture();
+        edited.path = Some(path.clone());
+        edited.select_char_range(walk.selected.0, walk.selected.1);
+        edited.insert_str("z");
+        assert!(!walk.still_true(&edited), "an edit ends it");
+
+        // A different file, even with the very same text selected in it.
+        let (mut other, _) = walk_fixture();
+        other.path = Some(PathBuf::from("other.rs"));
+        other.select_char_range(walk.selected.0, walk.selected.1);
+        assert!(!walk.still_true(&other), "a file switch ends it");
+    }
+
     /// git is asked in the form that survives a real project: names with spaces, names in other
     /// alphabets, and a `.git` directory that is never a file to open.
     #[test]
@@ -14412,6 +15800,44 @@ mod tests {
         // should: because the plot changed, not because the session still has it.
         assert!(redrawn(&mut seen, &one, later));
         assert!(!redrawn(&mut seen, &one, later));
+    }
+
+    /// The arithmetic an agent's edit stands on. Getting it wrong means either refusing a change
+    /// that was perfectly unique or applying one to the wrong half of the file, and the second is
+    /// the kind of thing a user only finds out about later.
+    #[test]
+    fn an_agents_edit_lands_only_where_its_text_sits_exactly_once() {
+        let text = "let x = 1;\nlet y = 2;\nlet x = 3;\n";
+        assert_eq!(only_match(text, "let y = 2;"), Ok((11, 21)));
+        assert_eq!(only_match(text, "nothing like it"), Err(0), "no match is a buffer that moved on");
+        assert_eq!(only_match(text, "let x = "), Err(2), "and two is a request to be clearer");
+        // Counted in characters, not bytes: the offsets go straight to `replace_char_range`, and
+        // a file with an accent above the edit would otherwise be cut mid-letter.
+        let accented = "città\nlet x = 1;\n";
+        assert_eq!(only_match(accented, "let x = 1;"), Ok((6, 16)));
+        // The empty needle matches everywhere, which is not an edit anybody asked for.
+        assert_eq!(only_match(text, ""), Err(0));
+    }
+
+    /// A range an agent points at is clamped at both ends: the transposition it can make, and the
+    /// span so long that highlighting it says nothing at all.
+    #[test]
+    fn a_highlighted_range_is_a_gesture_and_not_a_whole_file() {
+        assert_eq!(agent_span_lines(10, 22), (10, 22));
+        assert_eq!(agent_span_lines(10, 4), (10, 10), "an end before the start is one line");
+        assert_eq!(agent_span_lines(0, 3), (1, 3), "lines are 1-based on the wire");
+        let (from, to) = agent_span_lines(1, 100_000);
+        assert_eq!(to - from + 1, AGENT_SPAN_LINES);
+    }
+
+    /// What the consent question counts. The two numbers are what tell "change one word" and
+    /// "replace the whole function" apart, and an empty side has to be nothing rather than one.
+    #[test]
+    fn the_size_of_an_edit_is_the_two_numbers_a_diff_would_print() {
+        assert_eq!(agent_edit_size("one line", "another line"), (1, 1));
+        assert_eq!(agent_edit_size("a\nb\nc", "z"), (1, 3));
+        assert_eq!(agent_edit_size("a\nb", ""), (0, 2), "a deletion adds nothing");
+        assert_eq!(agent_edit_size("", "a\nb\nc"), (3, 0), "and an insertion removes nothing");
     }
 
     /// Closing the last tab used to hand the keyboard to the terminal whether or not one was
@@ -15753,6 +17179,78 @@ mod tests {
         // The marker carries a space, so a line of code that starts with `--` cannot be read as
         // the file header the panel colours differently.
         assert!(rows.iter().all(|row| !row.starts_with("---")));
+    }
+
+    /// What a row of the code action list says, and that the thing behind it is the thing that
+    /// was on it. The kind is the second half of the row — it is what tells a fix for the error
+    /// under the caret from a refactoring that would apply anywhere — and an action the server did
+    /// not name a kind for gets no word of ours in its place.
+    #[test]
+    fn a_code_action_row_carries_the_title_the_kind_and_the_action() {
+        let answer = serde_json::json!([
+            {"title": "Import `HashMap`", "kind": "quickfix",
+             "edit": {"changes": {"file:///p/a.rs": [
+                 {"range": {"start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0}},
+                  "newText": "use std::collections::HashMap;\n"}]}}},
+            {"title": "Wrap the\nwhole thing", "edit": {"changes": {}}},
+        ]);
+        let actions = crate::lsp::offered_actions(Some(&answer), false);
+        let items = code_action_items(actions);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "Import `HashMap`");
+        assert_eq!(items[0].shortcut.as_deref(), Some("quickfix"));
+        // A title the server wrote across two lines is one row here, as a diagnostic's message is
+        // in the list beside this one.
+        assert_eq!(items[1].label, "Wrap the whole thing");
+        assert_eq!(items[1].shortcut, None, "no kind is no word, rather than one of ours");
+        // And the row carries the action itself, so nothing has to be asked again at Enter.
+        match &items[0].action {
+            crate::picker::PickAction::CodeAction(action) => {
+                assert_eq!(action.title, "Import `HashMap`");
+                assert!(action.edit.is_some());
+            }
+            _ => panic!("the row has to carry the action it is a row for"),
+        }
+    }
+
+    /// One action, all of it inside one open buffer: converted down the format's road — which is
+    /// the general one, and has to be, because an action's spans cross lines as a matter of course
+    /// — and applied as a single replacement, which is what makes it one step of undo.
+    ///
+    /// The fixture is the commonest quick fix there is: a `use` line inserted at the top and a name
+    /// corrected further down, two disjoint edits that must arrive together or not at all.
+    #[test]
+    fn a_code_action_inside_one_buffer_lands_as_one_edit() {
+        let editor = buffer("fn main() {\n    let m = HashMap::new();\n}\n");
+        let answer = serde_json::json!([{
+            "title": "Import `HashMap`",
+            "kind": "quickfix",
+            "edit": {"changes": {"file:///p/a.rs": [
+                {"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 0}},
+                 "newText": "use std::collections::HashMap;\n"},
+                {"range": {"start": {"line": 1, "character": 12},
+                           "end": {"line": 1, "character": 19}},
+                 "newText": "HashMap"},
+            ]}},
+        }]);
+        let actions = crate::lsp::offered_actions(Some(&answer), false);
+        let plan = actions[0].edit.as_ref().expect("the edit came with it");
+        assert_eq!(plan.files.len(), 1, "one file, which is what sends it down this road");
+        let lines = lines_of(&editor);
+        let converted =
+            format_spans(&editor.rope, &lines, &as_bytes, &plan.files[0].edits).unwrap();
+        assert_eq!(converted.len(), 2);
+        // One span from the first edit to the last, with the text between them carried over — and
+        // therefore one `replace_char_range`, which is one checkpoint and one Ctrl+Z.
+        let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();
+        let mut applied = buffer(&editor.rope.to_string());
+        applied.replace_char_range(start, end, &rebuilt);
+        assert_eq!(
+            applied.rope.to_string(),
+            "use std::collections::HashMap;\nfn main() {\n    let m = HashMap::new();\n}\n"
+        );
     }
 
     /// The preview measures in characters, not bytes: a line with an accent in it before the name

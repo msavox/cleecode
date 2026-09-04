@@ -317,6 +317,28 @@ pub struct Preview {
     /// because it is the only place that knows, and needed by the *next* render, which has to
     /// ask a rasteriser for a number of pixels before it has a pane to look at.
     pub area_cols: u16,
+    /// The pane, in cells, the picture in hand was actually fitted to.
+    ///
+    /// Not the same number as `area_cols`/`area_rows`, and the difference is the whole point: a
+    /// picture is fitted once, when it comes back from the decoder, against whatever the pane
+    /// measured *then* — and "then" is a moment nobody chose. A figure from a running script
+    /// arrives while the split that will hold it is still being made; a window resized, a seam
+    /// dragged or a split toggled afterwards moves the pane out from under it either way.
+    /// Everything after that is a silent mismatch: the picture is cut to a pane it was never
+    /// sized for, and a reader cannot tell a picture opened cropped from a program that drew it
+    /// wrong.
+    ///
+    /// Keeping the pane it *was* fitted to beside the pane it is *in* is what makes that
+    /// mismatch a fact the editor can notice and correct. See [`Preview::needs_refit`].
+    pub fitted_for: (u16, u16),
+    /// Set once the view has been aimed by hand: zoomed, panned, or put into "wide".
+    ///
+    /// An untouched picture belongs to the editor, which owes it the whole picture whatever the
+    /// pane does. An aimed one belongs to the reader, and a resize must not quietly take back
+    /// the corner they went looking for — so a re-fit stops at this flag. `fit` puts it down
+    /// again, because asking for the whole picture is asking for exactly what the automatic
+    /// state gives.
+    pub adjusted: bool,
     /// 1.0 is the page fitted to the pane; above that it is rasterised larger and scrolled.
     pub zoom: f32,
     /// Whether the page is shown inverted, for reading a white document on a dark screen.
@@ -391,7 +413,7 @@ impl Preview {
     }
 
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false, animation: None, animation_refused: false }
+        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, fitted_for: (0, 0), adjusted: false, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false, animation: None, animation_refused: false }
     }
 
     pub fn document(page: usize) -> Self {
@@ -404,6 +426,8 @@ impl Preview {
             document_failed: false,
             area_cols: 0,
             area_rows: 0,
+            fitted_for: (0, 0),
+            adjusted: false,
             zoom: 1.0,
             inverted: false,
             // A document is for reading, so it opens at the width that makes it readable.
@@ -431,6 +455,8 @@ impl Preview {
             document_failed: false,
             area_cols: 0,
             area_rows: 0,
+            fitted_for: (0, 0),
+            adjusted: false,
             zoom: 1.0,
             inverted: false,
             // A document is for reading, so it opens at the width that makes it readable.
@@ -521,7 +547,93 @@ impl Preview {
         let next = (self.zoom * 1.25f32.powi(steps)).clamp(0.5, 4.0);
         let changed = (next - self.zoom).abs() > f32::EPSILON;
         self.zoom = next;
+        // A zoom is a decision about this one picture, and from here the pane stops choosing for
+        // it: a window resized afterwards must not quietly put it back to the whole picture.
+        self.adjusted |= changed;
         changed
+    }
+
+    /// Chooses how the page meets the pane, and puts the zoom back to where that choice is
+    /// legible: both buttons mean "show it to me this way", not "this way, at the last zoom".
+    ///
+    /// "Fit" is also the state a picture opens in, so asking for it hands the view back to the
+    /// editor and later resizes go on fitting it — which is what makes `f` a way out of a
+    /// picture that has been aimed somewhere unhelpful. "Wide" is a choice of its own and is
+    /// kept against everything a pane does afterwards.
+    pub fn set_fit(&mut self, fit: Fit) {
+        self.fit = fit;
+        self.zoom = 1.0;
+        self.adjusted = fit != Fit::Page;
+    }
+
+    /// Whether what is in hand is shown entire rather than as a window onto something larger.
+    ///
+    /// True of a picture nobody has zoomed, panned or put into "wide" — which is the state every
+    /// picture opens in, and the one `fit` puts it back into. Everything else is deliberately
+    /// larger than its pane: a document fitted to the width, a picture zoomed past 100%, and for
+    /// those the window cut out of it *is* the view.
+    pub fn shown_whole(&self) -> bool {
+        self.kind() == Kind::Picture && !self.adjusted
+    }
+
+    /// The piece of what is in hand that the pane shows.
+    ///
+    /// Cutting a window out of a page is what makes a zoom mean anything at all, and it bounds
+    /// what the terminal is sent — but it is only ever right for a page *meant* to be larger
+    /// than its pane. A picture that is meant to fit and does not — because it was sized for a
+    /// pane that has since changed, or for a pane that had never been drawn when it arrived — is
+    /// handed over whole instead of cut, and the widget shrinks it to the pane. That costs a
+    /// frame or two at the wrong sharpness, which the re-fit then corrects; cutting it costs the
+    /// reader the picture, and there is nothing on screen to say the top-left corner is not what
+    /// the script drew.
+    pub fn window_of(&self, page: &image::DynamicImage) -> image::DynamicImage {
+        if self.shown_whole() {
+            return page.clone();
+        }
+        visible_window(page, self.area_cols, self.area_rows, self.scroll_x, self.scroll_px)
+    }
+
+    /// How far the window on the page can travel before its far edge is on screen.
+    ///
+    /// Zero on both axes for a picture shown whole: there is nothing past the edge of the pane
+    /// to travel to, and panning one would *cut* a picture nobody had asked to have cut — which
+    /// is the defect, arrived at by a different road.
+    pub fn pan_room(&self) -> (u32, u32) {
+        match &self.full {
+            Some(full) if !self.shown_whole() => max_scroll(full, self.area_cols, self.area_rows),
+            _ => (0, 0),
+        }
+    }
+
+    /// Whether the picture in hand was fitted to a pane that is no longer the pane it is drawn
+    /// in, and should therefore be made again for the one it is in now.
+    ///
+    /// This is what a picture opening cropped came down to. The fit is worked out once, where
+    /// the decoded picture arrives, against the pane as it measured at that moment; the renderer
+    /// writes down every size the pane takes afterwards and nothing ever reads them back. So a
+    /// figure fitted to a pane that was still being made — or to a pane a resize has since
+    /// changed — stayed sized for a pane that is not there: cut to its top-left corner, title
+    /// through the middle of a word, and no way back but pressing `fit`.
+    ///
+    /// Pictures only. A document is a subprocess and a rasteriser away, and re-making one on
+    /// every frame of a seam being dragged would cost far more than the sharpness it buys —
+    /// while a picture is a resample of bytes already on disk, at the price of a zoom step.
+    pub fn needs_refit(&self) -> bool {
+        self.kind() == Kind::Picture
+            // Aimed by hand: the view is the reader's now. See `adjusted`.
+            && !self.adjusted
+            // Nothing in hand to be wrong about — a picture that failed to decode is not made
+            // right by being decoded again at a different size, and asking would mean one dead
+            // subprocess per frame of a resize.
+            && self.full.is_some()
+            // A pane that has never been drawn is not a pane to fit anything to; the first frame
+            // that measures one is what starts this.
+            && self.area_cols != 0
+            && self.area_rows != 0
+            && self.fitted_for != (self.area_cols, self.area_rows)
+            // One read at a time. The answer already on its way is fitted to the pane as it will
+            // be when it lands, so starting another would be a second thread for the same work.
+            && !self.reading()
     }
 
     /// Whether re-making this would produce anything different. True for a document, whose
@@ -1132,6 +1244,15 @@ pub fn visible_window(
     scroll_y: u32,
 ) -> image::DynamicImage {
     let (pane_w, pane_h) = pane_pixels(cols, rows);
+    // No pane to cut against. The picture came back before the tab was ever drawn — a figure
+    // opening into a split that is still being made does exactly this — and the arithmetic below
+    // would answer a single pixel, which is a black pane and reads as a program that drew
+    // nothing. The whole picture is handed over instead: the widget shrinks what it is given to
+    // the pane, so it arrives whole and merely soft, and the re-fit that follows the first frame
+    // makes it sharp. See [`Preview::needs_refit`].
+    if pane_w == 0 || pane_h == 0 {
+        return page.clone();
+    }
     // Smaller than the pane in both directions: nothing to cut, and the widget will centre it.
     if page.height() <= pane_h && page.width() <= pane_w {
         return page.clone();
@@ -1744,6 +1865,106 @@ mod tests {
         // Already the right size: handed back untouched rather than resampled a second time.
         let exact = scale_picture(wide, (500, 500), Fit::Page);
         assert_eq!(scale_picture(exact, (500, 500), Fit::Page).dimensions(), (500, 100));
+    }
+
+    /// A figure has to open as the whole figure, and go on being the whole figure as the pane
+    /// changes shape under it.
+    ///
+    /// What this pins is the bug it was written for: a plot arrives from a running script while
+    /// the split that will hold it is still being made, so it is fitted to a pane that has never
+    /// been drawn — which is to say, to nothing. What reached the screen was a pane-sized cut of
+    /// the top-left corner of a full-size figure, title through the middle of a word, and only
+    /// pressing `fit` brought the rest of it back. Nobody can tell that from a script that
+    /// plotted rubbish, so it is the editor's job to notice, not the reader's.
+    ///
+    /// The pane, and not the moment the picture happened to arrive, is what decides its size —
+    /// right up until somebody aims the view themselves, which the last part of this is about.
+    #[test]
+    fn an_untouched_picture_is_fitted_to_the_pane_it_is_actually_drawn_in() {
+        use image::GenericImageView;
+        // Matplotlib's default shape: wide and short, which is the worst case for the tall
+        // narrow pane a split gives it.
+        let figure = image::DynamicImage::new_rgb8(1000, 600);
+        let mut preview = Preview::picture();
+
+        // The decode comes back before the tab has ever been drawn. There is no pane to cut
+        // against, so the whole picture is kept: the widget shrinks what it is given, so this
+        // reaches the screen whole and merely soft rather than as a corner of itself.
+        assert_eq!(preview.picture_box(), (0, 0));
+        let window = visible_window(&figure, preview.area_cols, preview.area_rows, 0, 0);
+        assert_eq!(window.dimensions(), (1000, 600), "an unmeasured pane cuts nothing");
+        preview.fitted_for = (preview.area_cols, preview.area_rows);
+        preview.full = Some(figure.clone());
+        // Stands in for the picture being on screen. Without a terminal to draw on this settles
+        // as `Failed`; all that matters here is that no read is left in flight.
+        preview.show(window);
+
+        // The first frame measures the pane: 80x50 cells, which at the fallback cell size is
+        // 640x800 pixels — half a window, full height, and narrower than the figure.
+        preview.area_cols = 80;
+        preview.area_rows = 50;
+        assert!(preview.needs_refit(), "fitted to nothing, drawn in a real pane");
+
+        // Until the re-fit lands, the picture in hand is wider than the pane it is drawn in.
+        // Cutting a window out of it is what put the figure's top-left corner on screen and
+        // nothing else; it is handed over whole and the widget shrinks it.
+        assert_eq!(
+            visible_window(&figure, preview.area_cols, preview.area_rows, 0, 0).dimensions(),
+            (640, 600),
+            "cut to the pane, this is the corner the reader saw"
+        );
+        assert!(preview.shown_whole());
+        assert_eq!(preview.window_of(&figure).dimensions(), (1000, 600), "the whole figure, always");
+        assert_eq!(preview.pan_room(), (0, 0), "and nothing to pan, since none of it is off-pane");
+
+        let fitted = scale_picture(figure.clone(), preview.picture_box(), preview.fit);
+        assert_eq!(fitted.dimensions(), (640, 384), "the whole figure, as large as the pane takes");
+        let window = visible_window(&fitted, preview.area_cols, preview.area_rows, 0, 0);
+        assert_eq!(window.dimensions(), (640, 384), "and none of it is cut away");
+        preview.fitted_for = (preview.area_cols, preview.area_rows);
+        preview.full = Some(fitted);
+        assert!(!preview.needs_refit(), "the picture is made for the pane it is in");
+
+        // The seam is dragged: same picture, different pane, and the fit it was given is now
+        // for a pane that is gone.
+        preview.area_cols = 40;
+        assert!(preview.needs_refit(), "a pane that changed under a picture is a picture to re-fit");
+        let fitted = scale_picture(figure.clone(), preview.picture_box(), preview.fit);
+        assert_eq!(fitted.dimensions(), (320, 192), "fitted to the narrower pane");
+        assert_eq!(
+            visible_window(&fitted, preview.area_cols, preview.area_rows, 0, 0).dimensions(),
+            (320, 192),
+            "still whole"
+        );
+        preview.fitted_for = (preview.area_cols, preview.area_rows);
+        preview.full = Some(fitted);
+
+        // Zoomed by hand. From here the picture is deliberately larger than the pane and the
+        // reader is looking at a part of it, so a resize must leave it exactly where it is.
+        assert!(preview.zoom_by(1), "there is room to zoom in");
+        assert!(preview.adjusted);
+        preview.area_cols = 100;
+        preview.area_rows = 30;
+        assert!(!preview.needs_refit(), "a resize does not take back a zoom");
+        // And a zoomed picture is a window on something larger again: the cut is the view.
+        let zoomed = scale_picture(figure.clone(), preview.picture_box(), preview.fit);
+        assert_eq!(zoomed.dimensions(), (1000, 600), "a quarter larger than the 800x480 pane");
+        assert!(!preview.shown_whole());
+        assert_eq!(
+            preview.window_of(&zoomed).dimensions(),
+            (800, 480),
+            "a pane's worth of it, which is what a zoom is for"
+        );
+
+        // `fit` is the way out: it asks for the whole picture, which is the automatic state, so
+        // the pane goes back to deciding.
+        preview.set_fit(Fit::Page);
+        assert!(!preview.adjusted && (preview.zoom - 1.0).abs() < f32::EPSILON);
+        assert!(preview.needs_refit());
+        // `wide` is a choice about this one picture and is kept against whatever the pane does.
+        preview.set_fit(Fit::Width);
+        assert!(preview.adjusted);
+        assert!(!preview.needs_refit(), "a resize does not take back `wide` either");
     }
 
     /// Markdown's two renderings. Switching between them changes what the view *is* — pages

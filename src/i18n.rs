@@ -146,6 +146,13 @@ pub enum Key {
     SettingCompletion,
     SettingLanguageServer,
     SettingFollowAgentEdits,
+    /// Whether an agent may change a buffer with unsaved work in it. Three answers rather than a
+    /// switch, so each value says what it does instead of leaving the reader to guess what "off"
+    /// would mean here.
+    SettingAgentEdits,
+    SettingAgentEditsAsk,
+    SettingAgentEditsAllow,
+    SettingAgentEditsDeny,
     SettingAutosaveRecovery,
     SettingPlotsInTabs,
     SettingPlotsNoDisplay,
@@ -180,6 +187,9 @@ pub enum Key {
     ItemDocumentSymbols,
     ItemRenameSymbol,
     ItemFormatDocument,
+    ItemCodeActions,
+    ItemExpandSelection,
+    ItemShrinkSelection,
     ItemShowDiagnostics,
     ItemGitStatus,
     ItemGitChanges,
@@ -227,6 +237,7 @@ pub enum Key {
     PickerReferences,
     PickerSymbols,
     PickerDiagnostics,
+    PickerCodeActions,
     PickerVariables,
     PickerVenvBrowse,
     PickerWorkspaceOpen,
@@ -584,6 +595,20 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, SettingFollowAgentEdits) => "Follow edits made outside (open the files)",
         (Lang::It, SettingFollowAgentEdits) => "Segui le modifiche da fuori (apri i file)",
 
+        // The row names the buffers it is about, because that is the whole of why it exists: a
+        // file with no unsaved work in it is one an agent edits on disk without asking anybody,
+        // and CleeCode reloads it. This is only ever about text that is on screen and nowhere
+        // else. Each value is a sentence in the first person, because the reader is deciding
+        // what happens to their own work rather than setting a mode.
+        (Lang::En, SettingAgentEdits) => "Agents editing unsaved buffers",
+        (Lang::It, SettingAgentEdits) => "Agenti che modificano buffer non salvati",
+        (Lang::En, SettingAgentEditsAsk) => "ask me each time",
+        (Lang::It, SettingAgentEditsAsk) => "chiedimelo ogni volta",
+        (Lang::En, SettingAgentEditsAllow) => "let them, without asking",
+        (Lang::It, SettingAgentEditsAllow) => "lasciali fare, senza chiedere",
+        (Lang::En, SettingAgentEditsDeny) => "never",
+        (Lang::It, SettingAgentEditsDeny) => "mai",
+
         // Says what it keeps rather than what it is called: "autosave" reads as "your file is
         // written for you", and this never writes your file. It writes a copy elsewhere.
         (Lang::En, SettingAutosaveRecovery) => "Keep recovery copies of unsaved files",
@@ -678,6 +703,15 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemRenameSymbol) => "Rinomina simbolo",
         (Lang::En, ItemFormatDocument) => "Format document",
         (Lang::It, ItemFormatDocument) => "Formatta il documento",
+        (Lang::En, ItemCodeActions) => "What can be done here",
+        (Lang::It, ItemCodeActions) => "Cosa si può fare qui",
+        // Named for what happens on screen rather than for the protocol's word for it: nobody
+        // opens a menu looking for "selection range", and everybody knows what a selection that
+        // grows is.
+        (Lang::En, ItemExpandSelection) => "Widen the selection",
+        (Lang::It, ItemExpandSelection) => "Allarga la selezione",
+        (Lang::En, ItemShrinkSelection) => "Narrow the selection",
+        (Lang::It, ItemShrinkSelection) => "Restringi la selezione",
         (Lang::En, ItemShowDiagnostics) => "Everything that is wrong",
         (Lang::It, ItemShowDiagnostics) => "Tutto quello che non va",
 
@@ -813,6 +847,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         // are open, so this is never the whole project however much it looks like it.
         (Lang::En, PickerDiagnostics) => "What is wrong in the open files",
         (Lang::It, PickerDiagnostics) => "Cosa non va nei file aperti",
+        (Lang::En, PickerCodeActions) => "What the server offers to do here",
+        (Lang::It, PickerCodeActions) => "Cosa il server si offre di fare qui",
 
         (Lang::En, PickerVariables) => "Variables",
         (Lang::It, PickerVariables) => "Variabili",
@@ -1965,6 +2001,81 @@ pub fn msg_drawer_start_error(lang: Lang, agent: &str, error: &str) -> String {
     }
 }
 
+// ---- What an agent does to the editor, said on the status line -------------------------------
+
+// Everything below is the corner-of-the-eye half of the MCP bridge: an agent that opened a file,
+// rendered one, said something or changed a buffer, reported in one line while the user goes on
+// working. All of them name the file, because "the agent did something" is not information, and
+// none of them is longer than a line — the status bar has exactly one.
+
+/// One line from the agent itself. Marked as coming from it and not from the editor, because
+/// everything else in this bar is CleeCode speaking and the difference matters: what follows is
+/// text a language model wrote.
+pub fn msg_agent_says(lang: Lang, text: &str) -> String {
+    match lang {
+        Lang::En => format!("agent: {text}"),
+        Lang::It => format!("agente: {text}"),
+    }
+}
+
+/// A file an agent asked to be shown. Names the line when it named one, since that is the part
+/// that says *why* the file appeared.
+pub fn msg_agent_opened(lang: Lang, path: &str, line: Option<usize>) -> String {
+    match (lang, line) {
+        (Lang::En, Some(line)) => format!("agent opened {path}:{line}"),
+        (Lang::En, None) => format!("agent opened {path}"),
+        (Lang::It, Some(line)) => format!("l'agente ha aperto {path}:{line}"),
+        (Lang::It, None) => format!("l'agente ha aperto {path}"),
+    }
+}
+
+pub fn msg_agent_previewed(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("agent is showing {path}"),
+        Lang::It => format!("l'agente sta mostrando {path}"),
+    }
+}
+
+/// The question asked before an agent may write into unsaved work.
+///
+/// It names the file and the size of the change, because "one line for two" and "eighty lines for
+/// none" are not the same question, and it prints its three keys for the reason [`yes_key`] gives:
+/// a prompt whose letters are not in its text is a prompt that looks broken while working exactly
+/// as written. `A` is the one that is neither yes nor no — it says yes to everything the agent
+/// asks for the rest of this session, and stops when CleeCode does.
+pub fn msg_agent_edit_confirm(lang: Lang, path: &str, added: usize, removed: usize) -> String {
+    let yes = yes_key(lang).to_ascii_uppercase();
+    match lang {
+        Lang::En => format!(
+            "The agent wants to change {path} (+{added}/-{removed} lines) — unsaved work. \
+             {yes} once · A this whole session · N no"
+        ),
+        Lang::It => format!(
+            "L'agente vuole modificare {path} (+{added}/-{removed} righe) — lavoro non salvato. \
+             {yes} una volta · A tutta la sessione · N no"
+        ),
+    }
+}
+
+/// Said after the change lands, naming where it landed and that the file on disk has not moved.
+/// The second half is the part the user has to be told: their buffer and their file now disagree,
+/// and nothing but them saving will settle it.
+pub fn msg_agent_edited(lang: Lang, path: &str, line: usize) -> String {
+    match lang {
+        Lang::En => format!("agent edited {path}:{line} — not saved, Ctrl+Z undoes it"),
+        Lang::It => format!("l'agente ha modificato {path}:{line} — non salvato, Ctrl+Z annulla"),
+    }
+}
+
+/// Said when the question is answered with anything but yes, so a refusal visibly did nothing
+/// rather than invisibly doing something. The same reason `msg_scp_cancelled` exists.
+pub fn msg_agent_edit_declined(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("{path} left alone — the agent has been told"),
+        Lang::It => format!("{path} lasciato com'era — l'agente è stato avvisato"),
+    }
+}
+
 /// A buffer with no file behind it. There is nothing to point an agent at, and the honest
 /// answer is to say what is missing rather than to send it a name that means nothing.
 pub fn msg_agent_unsaved(lang: Lang) -> String {
@@ -2189,6 +2300,11 @@ pub fn msg_rename_refused_moved(lang: Lang) -> &'static str {
 }
 
 /// The preview's title: what is being renamed to what, and how much of it there is.
+///
+/// An empty `old_name` is a preview that is not a rename — a code action reaching more than one
+/// buffer comes up in the same box, and there is no name it is turning into another. What is left
+/// is the server's own title for what it is about to do, which is the whole caption: an arrow with
+/// nothing on its left would be a sentence with a word missing.
 pub fn msg_rename_preview_title(
     lang: Lang,
     old_name: &str,
@@ -2196,9 +2312,14 @@ pub fn msg_rename_preview_title(
     edits: usize,
     files: usize,
 ) -> String {
+    let what = if old_name.is_empty() {
+        new_name.to_string()
+    } else {
+        format!("{old_name} → {new_name}")
+    };
     match lang {
-        Lang::En => format!("{old_name} → {new_name}  ·  {edits} change(s) in {files} file(s)"),
-        Lang::It => format!("{old_name} → {new_name}  ·  {edits} modifiche in {files} file"),
+        Lang::En => format!("{what}  ·  {edits} change(s) in {files} file(s)"),
+        Lang::It => format!("{what}  ·  {edits} modifiche in {files} file"),
     }
 }
 
@@ -2226,6 +2347,9 @@ pub fn msg_preview_keys(lang: Lang) -> String {
 }
 
 /// What happened, in the same numbers the preview showed, so the two can be compared.
+///
+/// An empty `old_name` means the same here as it does in the title above, and reads as what it is:
+/// an action was carried out, and it has a name of the server's own rather than two of ours.
 pub fn msg_rename_applied(
     lang: Lang,
     old_name: &str,
@@ -2233,6 +2357,12 @@ pub fn msg_rename_applied(
     edits: usize,
     files: usize,
 ) -> String {
+    if old_name.is_empty() {
+        return match lang {
+            Lang::En => format!("{new_name}: {edits} change(s) in {files} file(s)"),
+            Lang::It => format!("{new_name}: {edits} modifiche in {files} file"),
+        };
+    }
     match lang {
         Lang::En => format!("Renamed {old_name} to {new_name}: {edits} change(s) in {files} file(s)"),
         Lang::It => format!("Rinominato {old_name} in {new_name}: {edits} modifiche in {files} file"),
@@ -2243,6 +2373,16 @@ pub fn msg_rename_cancelled(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Rename cancelled — nothing was changed",
         Lang::It => "Rename annullato — non ho cambiato niente",
+    }
+}
+
+/// Esc over the same box when what it was showing was not a rename. Its own sentence rather than
+/// the one above, because the one above names the thing that did not happen — and telling somebody
+/// a rename was cancelled when they cancelled a quick fix is telling them about a different key.
+pub fn msg_edit_preview_cancelled(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Cancelled — nothing was changed",
+        Lang::It => "Annullato — non ho cambiato niente",
     }
 }
 
@@ -2308,6 +2448,131 @@ pub fn msg_format_refused_moved(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "The text changed while the server was answering — nothing was changed, ask again",
         Lang::It => "Il testo è cambiato mentre il server rispondeva — non ho cambiato niente, richiedi",
+    }
+}
+
+// ---- What the server offers to do about it ----------------------------------------------------
+//
+// Shorter again than the format's family, and for the same kind of reason: what could go wrong
+// here mostly goes wrong somewhere that already has words for it. An action that reaches more than
+// one buffer is refused by the rename's sentences, and one that reaches a single buffer by the
+// format's — this is the handful that belong to the question itself, which is asked, answered with
+// a list, and then answered again for the row that was picked.
+
+pub fn msg_code_actions_asking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking what can be done here…",
+        Lang::It => "Chiedo cosa si può fare qui…",
+    }
+}
+
+/// The server answers this request for nobody. Said the moment the row is picked rather than after
+/// a round trip, because a server that never claimed the request would answer with a
+/// method-not-found — and the status line would print it as though it were news.
+pub fn msg_code_actions_unsupported(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "This server does not offer code actions",
+        Lang::It => "Questo server non offre azioni sul codice",
+    }
+}
+
+/// The server answered, and its answer was that there is nothing to do here.
+///
+/// The commonest answer of all — in the middle of a line that is not wrong there usually is
+/// nothing — and the one that most needed writing down: a list that did not open and said nothing
+/// is indistinguishable from a menu row that is broken.
+pub fn msg_code_actions_none(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server has nothing to offer here",
+        Lang::It => "Il server non ha niente da offrire qui",
+    }
+}
+
+/// One action was picked and the server has not yet said what it would change.
+///
+/// Named, because the wait is the server computing the whole refactoring: the titles come back at
+/// once and the edits are worked out for the one that was chosen, so this is the line that sits
+/// there while that happens.
+pub fn msg_code_action_asking(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::En => format!("Asking the server what \"{title}\" would change…"),
+        Lang::It => format!("Chiedo al server cosa cambierebbe \"{title}\"…"),
+    }
+}
+
+/// The action turned out to change nothing, which is an answer. Said out loud for the reason
+/// [`msg_format_already`] is: a row that did nothing in silence is a row somebody presses again.
+pub fn msg_code_action_no_changes(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That action would change nothing",
+        Lang::It => "Quell'azione non cambierebbe niente",
+    }
+}
+
+/// What was done, named the way the server named it, and the promise that it is one step.
+pub fn msg_code_action_applied(lang: Lang, title: &str, edits: usize) -> String {
+    match lang {
+        Lang::En => format!("{title}: {edits} change(s), one Ctrl+Z takes them all back"),
+        Lang::It => format!("{title}: {edits} modifiche, un Ctrl+Z le rimette tutte a posto"),
+    }
+}
+
+// ---- Widening and narrowing the selection -----------------------------------------------------
+//
+// The shortest family here, and deliberately: this is a chord pressed several times in a row, and
+// every one of these sentences is something the reader sees *instead* of the selection moving. So
+// each says which of the four possible reasons it was — no server, a server that does not do this,
+// a caret with nothing around it, and the two ends of the ladder — and none of them says more.
+
+pub fn msg_selection_asking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking what encloses this…",
+        Lang::It => "Chiedo cosa racchiude questo…",
+    }
+}
+
+/// The server answers this request for nobody. Said before the question goes out, for the reason
+/// [`msg_code_actions_unsupported`] is.
+pub fn msg_selection_unsupported(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "This server does not widen selections",
+        Lang::It => "Questo server non allarga le selezioni",
+    }
+}
+
+/// The server answered and named nothing at all around the caret — a blank line, the inside of a
+/// comment, a file it has not finished reading.
+pub fn msg_selection_nothing_here(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "The server knows of nothing around the cursor",
+        Lang::It => "Il server non conosce niente attorno al cursore",
+    }
+}
+
+/// The top of the ladder. Worded as a fact about what the server can see rather than about the
+/// file, because that is what it is: the outermost range a server names is the item it parsed, and
+/// on most languages that is one function or one declaration and not the whole document.
+pub fn msg_selection_widest(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Already the widest thing the server sees around this",
+        Lang::It => "È già la cosa più larga che il server vede attorno a questo",
+    }
+}
+
+/// The bottom of it, which is where the caret was when the walk started.
+pub fn msg_selection_narrowest(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Back to where the widening started",
+        Lang::It => "Sei tornato da dove è partito l'allargamento",
+    }
+}
+
+/// Narrowing with nothing to narrow back into. Not a failure and not a server's fault: shrinking is
+/// the undo of a widening, and there is no such thing as the inside of a selection nobody grew.
+pub fn msg_selection_nothing_to_shrink(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Nothing to narrow back into — widen the selection first",
+        Lang::It => "Niente in cui restringere — allarga prima la selezione",
     }
 }
 
