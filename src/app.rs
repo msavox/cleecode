@@ -28,6 +28,10 @@ pub enum Focus {
     FileTree,
     Editor,
     Terminal,
+    /// The debug panel. A frame of its own for the same reason the drawer is one: while it holds
+    /// the keyboard, single letters are the debugger's verbs — which is only safe because no
+    /// other frame's keys change to make room for them.
+    Debug,
     /// The agent drawer. A frame of its own rather than a fourth terminal window, because the
     /// keyboard goes somewhere different depending on what is in it: to the pty when an agent is
     /// running, to the launcher's list when one is not.
@@ -873,6 +877,12 @@ pub struct App {
     pub stopped_at: Option<(PathBuf, usize)>,
     /// The debug adapter session, while there is one. See [`DebugSession`].
     pub debug: Option<DebugSession>,
+    /// The debug panel: its column, its cursor, and the watches. See [`DebugPanel`] for why it
+    /// sits beside the session rather than inside it.
+    pub debug_panel: DebugPanel,
+    /// The single-line question the debugger is asking, when it is asking one. See
+    /// [`DebugPrompt`].
+    pub debug_prompt: Option<DebugPrompt>,
     /// What this project's *Debug ▸ Start* runs, once somebody has started one.
     ///
     /// Remembered here and written into the workspace file at exit, beside the active venv and
@@ -2470,6 +2480,9 @@ pub struct ResizeLayout {
     /// Whether the agent drawer has a column right now. It is the rightmost one when it does,
     /// which is the third arrangement the two resolvers below have to know about.
     pub drawer_open: bool,
+    /// Whether the debug panel has one. It sits between the frames and the drawer, so it is the
+    /// rightmost column whenever the drawer is away and the one before it when it is not.
+    pub debug_open: bool,
 }
 
 /// Where a directional move lands. A "frame" for this purpose is finer-grained than `Focus`:
@@ -2480,6 +2493,7 @@ pub enum FocusTarget {
     Tree,
     Editor(EditorPane),
     Terminal(usize),
+    Debug,
     Drawer,
 }
 
@@ -2602,8 +2616,10 @@ pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget
                 Some(FocusTarget::Editor(EditorPane::Right))
             }
             Right if l.show_terminal && l.terminal_on_right => Some(FocusTarget::Terminal(0)),
-            // Only once nothing nearer has claimed Right: the drawer is beyond the terminal
-            // column, not instead of it.
+            // Only once nothing nearer has claimed Right: the debug panel and then the drawer are
+            // beyond the terminal column, not instead of it, and they are in that order because
+            // that is the order they are carved in.
+            Right if l.debug_open => Some(FocusTarget::Debug),
             Right if l.drawer_open => Some(FocusTarget::Drawer),
             Down if l.show_terminal && !l.terminal_on_right => Some(FocusTarget::Terminal(0)),
             _ => None,
@@ -2622,16 +2638,35 @@ pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget
                 // Right falls through to the arm below and reaches the drawer directly.
                 s if s == next => (l.terminal_index < last_window)
                     .then_some(FocusTarget::Terminal(l.terminal_index + 1))
+                    .or(l.debug_open.then_some(FocusTarget::Debug))
                     .or(l.drawer_open.then_some(FocusTarget::Drawer)),
                 s if s == leave => back_to_editor,
+                Right if l.debug_open => Some(FocusTarget::Debug),
                 Right if l.drawer_open => Some(FocusTarget::Drawer),
                 _ => None,
             }
         }
-        // Left is the way out, into whatever the drawer is sitting beside: the terminal panel
-        // where it is the right-hand column, the editor otherwise. Nothing else moves — the
-        // drawer spans the full height, so up and down have nowhere to go.
+        // The debug panel: Left is the way back into the frames it took its column from, and
+        // Right reaches the drawer, which is the only thing that can be beyond it. Like the
+        // drawer it spans the full height, so up and down have nowhere to go.
+        Focus::Debug => match side {
+            Left if l.show_terminal && l.terminal_on_right => {
+                Some(FocusTarget::Terminal(l.terminal_index.min(last_window)))
+            }
+            Left => Some(FocusTarget::Editor(if l.split_view {
+                EditorPane::Right
+            } else {
+                EditorPane::Left
+            })),
+            Right if l.drawer_open => Some(FocusTarget::Drawer),
+            _ => None,
+        },
+        // Left is the way out, into whatever the drawer is sitting beside: the debug panel where
+        // there is one, then the terminal panel where it is the right-hand column, the editor
+        // otherwise. Nothing else moves — the drawer spans the full height, so up and down have
+        // nowhere to go.
         Focus::Drawer => match side {
+            Left if l.debug_open => Some(FocusTarget::Debug),
             Left if l.show_terminal && l.terminal_on_right => {
                 Some(FocusTarget::Terminal(l.terminal_index.min(last_window)))
             }
@@ -2720,6 +2755,11 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
             Left => Some(ResizeCmd::Drawer(s * DRAWER_STEP)),
             _ => None,
         },
+        // The debug panel has no seam of its own. Its width is a share of the window worked out
+        // by the layout rather than a setting somebody nudges, because it is a panel you open at
+        // a breakpoint and close again — a scalar to remember for it would be a preference nobody
+        // would ever have a reason to set twice.
+        Focus::Debug => None,
         Focus::Editor => {
             // Which seams the focused editor region touches depends on whether it is split, and
             // on which pane holds focus.
@@ -2854,12 +2894,14 @@ pub struct DebugSession {
     /// directory it runs in, which is the project root.
     ///
     /// Both are held rather than dropped after the launch because they are what the session *is*:
-    /// wave 3's panel says what is being debugged, and a restart is the same three answers sent
-    /// again. Nothing reads them yet, which is why the compiler is told so here rather than left
-    /// to warn about a field somebody would then be tempted to delete.
-    #[allow(dead_code, reason = "the panel names them, and a restart re-sends them")]
+    /// a restart is the same three answers sent again, and the design's prompt asks for all three
+    /// rather than only the program. Only the program is asked for so far — see
+    /// [`App::open_debug_start`] — so nothing reads these two yet, which is why the compiler is
+    /// told so here rather than left to warn about a field somebody would then be tempted to
+    /// delete and have to invent again.
+    #[allow(dead_code, reason = "a restart re-sends them, and the prompt will grow to ask for them")]
     args: Vec<String>,
-    #[allow(dead_code, reason = "the panel names them, and a restart re-sends them")]
+    #[allow(dead_code, reason = "a restart re-sends them, and the prompt will grow to ask for them")]
     cwd: PathBuf,
     /// The thread the debuggee is stopped on, which is the thread every step names. `None` while
     /// it runs — which is also what makes "not stopped" a question this can answer honestly
@@ -2899,6 +2941,16 @@ impl DebugSession {
         }
     }
 
+    /// The last `rows` lines the session printed, oldest first.
+    ///
+    /// Copied out rather than borrowed because the panel draws it beside things it reads from the
+    /// panel's own state, and one `&self` borrow of the session that lived across the whole of the
+    /// drawing would make the rest of it unreachable. A handful of short strings a frame is not a
+    /// cost worth a lifetime for.
+    pub fn output_tail(&self, rows: usize) -> Vec<String> {
+        self.output.iter().rev().take(rows).rev().map(|(_, line)| line.clone()).collect()
+    }
+
     /// Remembers one line the session printed, dropping the oldest once the ring is full.
     fn remember_output(&mut self, category: String, text: String) {
         // Split, because an adapter is entitled to hand over a whole paragraph in one event and a
@@ -2916,12 +2968,357 @@ impl DebugSession {
 /// come in as [`MenuAction`]s; this is the same five with everything that is not about the
 /// debugger taken off, so the one place that checks "is there a session, and is it stopped"
 /// answers for all of them at once.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DebugVerb {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DebugVerb {
     Continue,
     StepOver,
     StepIn,
     StepOut,
+}
+
+/// One watch: an expression somebody typed, and whatever the adapter last made of it.
+///
+/// The answer is a `Result` and not a string because the two outcomes are drawn differently and
+/// mean opposite things: a value is what the expression *is*, and a refusal is the adapter saying
+/// it cannot read that here — which is the ordinary answer for a watch on a local that is not in
+/// scope in the frame you happen to be looking at, and not an error anybody needs shouting about.
+pub struct DebugWatch {
+    pub expression: String,
+    /// `None` until an answer has come back for it at all, which is what the panel says while a
+    /// question is out rather than showing the previous frame's number under this frame's name.
+    pub answer: Option<Result<String, String>>,
+}
+
+/// What the debug panel holds: where the arrows are, what the adapter has said about this stop,
+/// and the watches — which are the one part of it that outlives the session.
+///
+/// Beside [`DebugSession`] on the `App` rather than inside it, and that placement is the design:
+/// a session is dropped the moment the program exits, and a watch list that went with it would
+/// mean retyping every expression after every run. The rest of what is here *is* about one stop
+/// and is cleared whenever the program moves — see [`Self::forget_stop`].
+#[derive(Default)]
+pub struct DebugPanel {
+    /// Whether the column is on screen. Opened by a session starting, closed by it ending, and
+    /// turned on and off in between from the Debug menu.
+    pub open: bool,
+    /// Where the arrows are, counted over every row the panel draws — headings included, since
+    /// they are what the rows are between. Rows are rebuilt each frame, so this is clamped where
+    /// it is read rather than kept in range here.
+    pub selected: usize,
+    /// The stack of the thread the program is stopped on, innermost first.
+    frames: Vec<crate::dap::Frame>,
+    /// Which of them everything else on the panel is about. Not the same as [`Self::selected`]:
+    /// moving the arrows over the list changes what is highlighted, and pressing Enter is what
+    /// changes which frame the variables and the watches are read in.
+    frame: usize,
+    /// The scopes of that frame — "Locals", "Registers", whatever the adapter groups by.
+    scopes: Vec<crate::dap::Scope>,
+    /// What each reference turned out to hold, once it has been asked for. Keyed by the
+    /// adapter's own `variablesReference`, which is the only handle there is for the question.
+    children: std::collections::HashMap<i64, Vec<crate::dap::Variable>>,
+    /// Which references are open. Cleared with everything else when the program moves, because
+    /// the protocol invalidates every reference on a resume: keeping them would mean asking the
+    /// adapter about handles it has already forgotten.
+    expanded: std::collections::BTreeSet<i64>,
+    /// The watch list, in the order it was typed.
+    watches: Vec<DebugWatch>,
+    /// The `scopes` question out for the selected frame, by seq, so a late answer about the frame
+    /// somebody has already moved off is dropped rather than drawn under the new one's name.
+    awaiting_scopes: Option<i64>,
+    /// The `variables` questions out, each remembering which reference it was about.
+    awaiting_children: std::collections::HashMap<i64, i64>,
+    /// The `evaluate` questions out, each remembering which watch it was for.
+    awaiting_watch: std::collections::HashMap<i64, usize>,
+}
+
+impl DebugPanel {
+    /// Everything about one stop, forgotten. Called wherever the program starts moving again:
+    /// the frames, the variables and the answers are all statements about a place it has left.
+    ///
+    /// The watch *expressions* survive — they are the question, not the answer — but their values
+    /// do not, which is what stops the panel showing last stop's numbers as though they were now.
+    fn forget_stop(&mut self) {
+        self.frames.clear();
+        self.frame = 0;
+        self.scopes.clear();
+        self.children.clear();
+        self.expanded.clear();
+        self.awaiting_scopes = None;
+        self.awaiting_children.clear();
+        self.awaiting_watch.clear();
+        for watch in self.watches.iter_mut() {
+            watch.answer = None;
+        }
+    }
+
+    /// The frame every question about a value is asked in, or `None` before a stack has arrived.
+    fn current_frame(&self) -> Option<&crate::dap::Frame> {
+        self.frames.get(self.frame)
+    }
+}
+
+/// Which kind of thing a panel row is, which is what decides both how it is drawn and what Enter
+/// does to it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DebugRowKind {
+    /// A section caption. Never selectable: there is nothing to do to a word.
+    Heading,
+    /// A dim sentence standing where rows would be — "running…", "w adds one". Also not
+    /// selectable, for the same reason.
+    Note,
+    /// One frame of the stack, by its place in it.
+    Frame { index: usize, current: bool },
+    /// One variable or one scope. `reference` is non-zero when there is something inside it, and
+    /// that is exactly the condition under which Enter opens it.
+    Variable { reference: i64, expanded: bool },
+    /// One watch, by its place in the list.
+    Watch { index: usize },
+}
+
+/// One row of the debug panel, reduced to the three pieces a line is drawn from.
+///
+/// Built whole and pure, in the spirit of the workspace viewer's table: what the panel decides at
+/// a given state is then a question that can be asked without a terminal to look at.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DebugRow {
+    pub kind: DebugRowKind,
+    /// How far in the row sits, one step per level of the variable tree.
+    pub depth: usize,
+    /// The left-hand text: a section's word, a frame's function, a variable's or a watch's name.
+    pub label: String,
+    /// The right-hand text: a frame's site, a value, a refusal. Empty where a row has none.
+    pub value: String,
+    /// The adapter's word for the type, drawn dim after the value. Variables only.
+    pub type_name: Option<String>,
+    /// Whether `value` is a refusal rather than an answer. Carried on the row rather than looked
+    /// up again at drawing time, because it is the one thing about a row that its three strings
+    /// cannot say — "no variable named x here" is a perfectly ordinary sentence, and a panel that
+    /// painted it as a value would be reading the adapter's apology as data.
+    pub failed: bool,
+}
+
+impl DebugRow {
+    /// Whether the arrows may land here. Headings and notes are text, not rows.
+    pub fn selectable(&self) -> bool {
+        !matches!(self.kind, DebugRowKind::Heading | DebugRowKind::Note)
+    }
+
+    fn heading(label: &str) -> DebugRow {
+        DebugRow {
+            kind: DebugRowKind::Heading,
+            depth: 0,
+            label: label.to_string(),
+            value: String::new(),
+            type_name: None,
+            failed: false,
+        }
+    }
+
+    fn note(label: &str) -> DebugRow {
+        DebugRow {
+            kind: DebugRowKind::Note,
+            depth: 0,
+            label: label.to_string(),
+            value: String::new(),
+            type_name: None,
+            failed: false,
+        }
+    }
+}
+
+/// Which of the debugger's two single-line questions is being asked.
+///
+/// One box for both, because they are the same box: a title, a line of prompt, and one line of
+/// answer with the caret in it. Two flags and two input strings would have been two copies of the
+/// same four call sites — the key chain, the paste chain, the drawing and the dismissal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DebugAsk {
+    /// What to debug. Opened by *Debug ▸ Start debugging*, prefilled with the guess.
+    Debuggee,
+    /// One expression to watch. Opened by `w` in the panel, empty.
+    Watch,
+}
+
+/// A single-line question from the debugger, and what has been typed at it so far.
+pub struct DebugPrompt {
+    pub ask: DebugAsk,
+    pub typed: String,
+}
+
+/// Every row the panel draws, in the design's order: frames, then variables, then watches.
+///
+/// The output tail is not here. It is drawn in a strip of its own along the bottom, so that the
+/// rows above it can scroll under the arrows without the program's last few printed lines
+/// scrolling away with them — and keeping it out means every index in this list is stable
+/// whatever the panel's height turns out to be.
+pub fn debug_panel_rows(panel: &DebugPanel, stopped: bool, lang: i18n::Lang) -> Vec<DebugRow> {
+    let mut rows = vec![DebugRow::heading(i18n::t(lang, i18n::Key::DebugFrames))];
+    // One dim line instead of three sections of stale data. While the program is moving there is
+    // no frame, no scope and no value: everything the panel could show is an answer about a place
+    // it has left, and showing it would be the panel quietly lying.
+    if !stopped {
+        rows.push(DebugRow::note(i18n::t(lang, i18n::Key::DebugRunning)));
+        return rows;
+    }
+    if panel.frames.is_empty() {
+        rows.push(DebugRow::note(i18n::t(lang, i18n::Key::DebugAsking)));
+    }
+    for (index, frame) in panel.frames.iter().enumerate() {
+        rows.push(DebugRow {
+            kind: DebugRowKind::Frame { index, current: index == panel.frame },
+            depth: 0,
+            label: frame.name.clone(),
+            value: frame_site(frame),
+            type_name: None,
+            failed: false,
+        });
+    }
+
+    rows.push(DebugRow::heading(i18n::t(lang, i18n::Key::DebugVariables)));
+    if panel.scopes.is_empty() {
+        rows.push(DebugRow::note(i18n::t(lang, i18n::Key::DebugAsking)));
+    }
+    for scope in &panel.scopes {
+        rows.push(DebugRow {
+            kind: DebugRowKind::Variable {
+                reference: scope.reference,
+                expanded: panel.expanded.contains(&scope.reference),
+            },
+            depth: 0,
+            label: scope.name.clone(),
+            value: String::new(),
+            type_name: None,
+            failed: false,
+        });
+        push_children(&mut rows, panel, scope.reference, 1);
+    }
+
+    rows.push(DebugRow::heading(i18n::t(lang, i18n::Key::DebugWatches)));
+    if panel.watches.is_empty() {
+        rows.push(DebugRow::note(i18n::t(lang, i18n::Key::DebugNoWatches)));
+    }
+    for (index, watch) in panel.watches.iter().enumerate() {
+        // The adapter's own sentence, unedited, where it refused. "There is no variable named x
+        // here" is the useful thing to read, and an editor's paraphrase of it would be worse.
+        let (value, failed) = match watch.answer.as_ref() {
+            Some(Ok(value)) => (value.clone(), false),
+            Some(Err(message)) => (message.clone(), true),
+            None => (i18n::t(lang, i18n::Key::DebugAsking).to_string(), false),
+        };
+        rows.push(DebugRow {
+            kind: DebugRowKind::Watch { index },
+            depth: 0,
+            label: watch.expression.clone(),
+            value,
+            type_name: None,
+            failed,
+        });
+    }
+    rows
+}
+
+/// The rows under one open reference, and under theirs, as far as they have been asked for.
+///
+/// Recursive because the tree is, and bounded by what is in `expanded`: nothing appears here that
+/// somebody did not open, so the recursion is over what has already been fetched rather than over
+/// what could be.
+fn push_children(rows: &mut Vec<DebugRow>, panel: &DebugPanel, reference: i64, depth: usize) {
+    if reference == 0 || !panel.expanded.contains(&reference) {
+        return;
+    }
+    let Some(children) = panel.children.get(&reference) else { return };
+    for child in children {
+        rows.push(DebugRow {
+            kind: DebugRowKind::Variable {
+                reference: child.reference,
+                expanded: panel.expanded.contains(&child.reference),
+            },
+            depth,
+            label: child.name.clone(),
+            value: child.value.clone(),
+            type_name: child.type_name.clone(),
+            failed: false,
+        });
+        push_children(rows, panel, child.reference, depth + 1);
+    }
+}
+
+/// Where the cursor lands after one nudge: the next row it may stand on, in that direction.
+///
+/// Captions and notes are stepped over rather than landed on — Enter on the word "Variables"
+/// would have nothing to do — and either end stops rather than wrapping, the way every other list
+/// in this editor does: a cursor that jumped from the last watch back to the top of the stack
+/// would read as the panel having scrolled rather than as the end of it.
+pub fn debug_next_row(rows: &[DebugRow], here: usize, delta: i32) -> usize {
+    let landable: Vec<usize> =
+        rows.iter().enumerate().filter(|(_, r)| r.selectable()).map(|(i, _)| i).collect();
+    let (Some(&first), Some(&last)) = (landable.first(), landable.last()) else { return here };
+    if delta < 0 {
+        landable.iter().rev().find(|&&i| i < here).copied().unwrap_or(first)
+    } else {
+        landable.iter().find(|&&i| i > here).copied().unwrap_or(last)
+    }
+}
+
+/// Where a frame is, in the words a row has room for: the file's own name and the line.
+///
+/// The name and not the path, because the path is the project's and repeats on every row of the
+/// stack — and because the panel is a narrow column, where the part that repeats is the part
+/// worth dropping. A frame with no source says only its line, which is what the adapter knew.
+fn frame_site(frame: &crate::dap::Frame) -> String {
+    match frame.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+    {
+        Some(name) => format!("{name}:{}", frame.line),
+        None => String::new(),
+    }
+}
+
+/// What one key means to a focused debug panel.
+///
+/// A pure resolver rather than a match inside the handler, for the reason every other key table
+/// here is one: what these letters do is the design's own table, and a table is worth being able
+/// to check without an editor to press them in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DebugPanelKey {
+    /// One of the four the adapter is asked for.
+    Verb(DebugVerb),
+    Stop,
+    AddWatch,
+    DropWatch,
+    /// The arrows: `-1` up, `1` down.
+    Move(i32),
+    /// Enter: jump to a frame, or open what is under the cursor.
+    Act,
+    /// Out of the panel, back to the text.
+    Leave,
+}
+
+/// The design's table, and nothing global changes to make it work: these are plain letters, and
+/// they are only ever asked about while this one frame holds the keyboard. Anything carrying
+/// Ctrl, Alt or Super has already been claimed by the chord layer before the focus is consulted,
+/// and is refused here as well so that a chord which grows a meaning later cannot be shadowed.
+pub fn debug_panel_key(key: KeyEvent) -> Option<DebugPanelKey> {
+    match key.code {
+        KeyCode::Up => return Some(DebugPanelKey::Move(-1)),
+        KeyCode::Down => return Some(DebugPanelKey::Move(1)),
+        KeyCode::Enter => return Some(DebugPanelKey::Act),
+        KeyCode::Esc => return Some(DebugPanelKey::Leave),
+        _ => {}
+    }
+    let KeyCode::Char(c) = key.code else { return None };
+    if !is_a_typed_character(key) {
+        return None;
+    }
+    match c.to_ascii_lowercase() {
+        'c' => Some(DebugPanelKey::Verb(DebugVerb::Continue)),
+        'n' => Some(DebugPanelKey::Verb(DebugVerb::StepOver)),
+        's' => Some(DebugPanelKey::Verb(DebugVerb::StepIn)),
+        'o' => Some(DebugPanelKey::Verb(DebugVerb::StepOut)),
+        'x' => Some(DebugPanelKey::Stop),
+        'w' => Some(DebugPanelKey::AddWatch),
+        'd' => Some(DebugPanelKey::DropWatch),
+        _ => None,
+    }
 }
 
 /// The `[package] name` out of a `Cargo.toml`, when there is one.
@@ -2958,6 +3355,15 @@ fn debuggee_for(root: &Path, remembered: Option<&Path>) -> PathBuf {
         return root.join("target").join("debug").join(name);
     }
     root.to_path_buf()
+}
+
+/// What the *Debug ▸ Start debugging* box opens with: [`debuggee_for`]'s answer, as text.
+///
+/// A function of its own so that "the box is prefilled with the guess" is one line rather than a
+/// property of a method on `App` — the whole design decision is that these two are the same
+/// string, and a box that opened on anything else would be the editor guessing quietly again.
+fn debuggee_prefill(root: &Path, remembered: Option<&Path>) -> String {
+    debuggee_for(root, remembered).to_string_lossy().into_owned()
 }
 
 /// The adapter a settings line asks for, or `None` where the line is empty and discovery should
@@ -3183,6 +3589,9 @@ enum ModalTextField {
     FindQuery,
     FindReplace,
     GotoLine,
+    /// Both of the debugger's boxes: which one is up is on the prompt itself, and the text goes
+    /// to the same place either way.
+    DebugPrompt,
     ProjectSearch,
     NewEntry,
     Rename,
@@ -3373,6 +3782,8 @@ impl App {
             breakpoints: std::collections::HashMap::new(),
             stopped_at: None,
             debug: None,
+            debug_panel: DebugPanel::default(),
+            debug_prompt: None,
             debuggee: None,
             show_goto: false,
             goto_input: String::new(),
@@ -3751,6 +4162,10 @@ impl App {
             }
             Focus::Editor => self.editor_mut().insert_multiline(&text),
             Focus::Terminal => self.handle_terminal_paste(&text),
+            // A paste over the debug panel is dropped. Nothing in it is a text field: it is a
+            // list of what the program is, and the one place text goes in — the watch box — has
+            // its own paste arm and is not this frame.
+            Focus::Debug => {}
             // Straight into the agent's pane, by the same route a terminal takes it — brackets
             // where the program asked for them. Over the launcher there is nothing a paste
             // could mean, so it is dropped rather than typed at a list.
@@ -3810,6 +4225,14 @@ impl App {
             // there unparseable with no hint of why.
             ModalTextField::GotoLine => {
                 self.goto_input.extend(text.chars().filter(char::is_ascii_digit))
+            }
+            // A path pasted into the debuggee box is exactly the point of the box, and an
+            // expression pasted into the watch box is how anybody would move one out of the
+            // source they are reading.
+            ModalTextField::DebugPrompt => {
+                if let Some(prompt) = self.debug_prompt.as_mut() {
+                    prompt.typed.push_str(&text);
+                }
             }
             ModalTextField::ProjectSearch => self.search_field_mut().push_str(&text),
             ModalTextField::NewEntry => self.new_entry_input.push_str(&text),
@@ -3872,6 +4295,9 @@ impl App {
         }
         if self.show_goto {
             return Some(ModalTextField::GotoLine);
+        }
+        if self.debug_prompt.is_some() {
+            return Some(ModalTextField::DebugPrompt);
         }
         if self.show_search {
             return Some(ModalTextField::ProjectSearch);
@@ -5002,9 +5428,11 @@ impl App {
         let lang = self.settings.lang;
         // Nothing here came from a keypress, so nothing else has marked the screen out of date,
         // and nearly every event below changes something a person can see — a status line at the
-        // very least. A line of output is the exception and is excluded on purpose: a program
-        // printing in a loop must not cost a frame each time while nothing is drawn from it.
-        if !matches!(event, crate::dap::Event::Output { .. }) {
+        // very least. A line of output is the one that has to be asked about: with the panel open
+        // it is drawn, in the strip along the bottom, and a tail that lagged behind the program
+        // would be a strip that lies; with the panel away nothing reads it, and a program printing
+        // in a loop must not cost a frame each time for something nobody is looking at.
+        if !matches!(event, crate::dap::Event::Output { .. }) || self.debug_panel.open {
             self.mark_dirty();
         }
         match event {
@@ -5013,9 +5441,12 @@ impl App {
             // to see, and a status line saying "initialized" would be the editor reading its own
             // protocol out loud.
             crate::dap::Event::Initialized => {}
-            // What the adapter made of one file's breakpoints. Drawn differently by wave 3's
-            // panel; here the gutter already shows where they were asked for, and a line saying
-            // so on every start would talk over the reason the session was started.
+            // What the adapter made of one file's breakpoints. Still nothing to do with it: the
+            // gutter already shows where they were asked for, the panel is about where the
+            // program *is* rather than about where it was told to stop, and a line saying so on
+            // every start would talk over the reason the session was started. Drawing a
+            // breakpoint the adapter moved or refused differently in the gutter is real work with
+            // a real audience, and it belongs to whoever does that gutter next.
             crate::dap::Event::Breakpoints { .. } => {}
             crate::dap::Event::Stopped { thread, reason, description, path, line } => {
                 // A stop that named no thread leaves whatever was there: the protocol allows the
@@ -5024,13 +5455,27 @@ impl App {
                 if let (Some(session), Some(thread)) = (self.debug.as_mut(), thread) {
                     session.thread = Some(thread);
                 }
-                match (path, line) {
-                    // The adapter volunteered the place, which several do, and then there is
-                    // nothing to ask for.
-                    (Some(path), Some(line)) => self.jump_to_stopped_line(path, line),
-                    // And where it did not, the place is a question — asked here, answered a
-                    // frame or two later by `StackTrace` below.
-                    _ => self.ask_where_it_stopped(),
+                // Whatever was marked belongs to the stop before this one, and the adapter is
+                // not obliged to say it has moved: several never send `continued` for a step at
+                // all. Cleared here so that the `StackTrace` arm below can tell "the event told
+                // us where we are" from "nobody has yet" by looking at one field.
+                self.stopped_at = None;
+                if let (Some(path), Some(line)) = (path, line) {
+                    // The adapter volunteered the place, which several do, and then the editor
+                    // can follow it without waiting for an answer.
+                    self.jump_to_stopped_line(path, line);
+                }
+                // Asked whether or not the place was volunteered, because the panel needs the
+                // whole stack and not only the innermost line of it. This is the head of the
+                // choreography: `stackTrace` answers, which asks `scopes`, which asks
+                // `variables` one level down, and the watches go out beside them.
+                self.ask_where_it_stopped();
+                // A breakpoint hit while the panel was put away brings it back, as the design
+                // says it must: stopping is the moment the panel is the thing you want, and
+                // having to go and find a menu row first would be the editor making you ask
+                // twice. Without stealing the keyboard, for the same reason the jump does not.
+                if !self.debug_panel.open {
+                    self.show_debug_panel();
                 }
                 // The adapter's own sentence when it wrote one, and the protocol's word for the
                 // reason when it did not: "breakpoint", "step", "exception". Both are more use
@@ -5075,20 +5520,59 @@ impl App {
                 // The innermost frame that has a file. A stop inside a library with no symbols
                 // has frames and nowhere to point at, and the first frame that does is where the
                 // reader's own code is — which is what they wanted to look at.
-                let Some((path, line)) =
-                    frames.iter().find_map(|f| f.path.clone().map(|path| (path, f.line)))
-                else {
+                let place = frames.iter().find_map(|f| f.path.clone().map(|path| (path, f.line)));
+                // The panel's list, and the frame everything else on it is read in: the innermost
+                // one, which is where the program actually is.
+                self.debug_panel.frames = frames;
+                self.debug_panel.frame = 0;
+                self.refresh_debug_frame();
+                // Followed only when the stop itself did not already say where it was: an adapter
+                // that volunteered the place has been followed a frame ago, and jumping twice
+                // would move a pane the reader may have scrolled since.
+                if self.stopped_at.is_none()
+                    && let Some((path, line)) = place
+                {
+                    self.jump_to_stopped_line(path, line);
+                }
+            }
+            crate::dap::Event::Scopes { id, scopes } => {
+                if self.debug_panel.awaiting_scopes != Some(id) {
+                    return;
+                }
+                self.debug_panel.awaiting_scopes = None;
+                self.debug_panel.scopes = scopes;
+                self.open_first_level_of_scopes();
+            }
+            crate::dap::Event::Variables { id, variables } => {
+                let Some(reference) = self.debug_panel.awaiting_children.remove(&id) else {
                     return;
                 };
-                self.jump_to_stopped_line(path, line);
+                self.debug_panel.children.insert(reference, variables);
             }
-            // The three questions nothing here asks yet: they are the panel's, and the panel is
-            // wave 3. Named rather than swept up in a `_`, so that the day one of them is asked
-            // the compiler is the thing that notices nobody reads the answer.
-            crate::dap::Event::Scopes { .. }
-            | crate::dap::Event::Variables { .. }
-            | crate::dap::Event::Evaluated { .. } => {}
-            crate::dap::Event::Failed { command, message, .. } => {
+            crate::dap::Event::Evaluated { id, value, .. } => {
+                let Some(index) = self.debug_panel.awaiting_watch.remove(&id) else { return };
+                if let Some(watch) = self.debug_panel.watches.get_mut(index) {
+                    watch.answer = Some(Ok(value));
+                }
+            }
+            crate::dap::Event::Failed { id, command, message } => {
+                // A watch the adapter cannot read is not a failure of the editor and does not
+                // belong on the status line: "there is no variable named x here" is the honest
+                // answer for a local that is not in scope in the frame being looked at, and it
+                // belongs on that watch's own row, where the question is.
+                if let Some(index) = self.debug_panel.awaiting_watch.remove(&id) {
+                    if let Some(watch) = self.debug_panel.watches.get_mut(index) {
+                        watch.answer = Some(Err(message));
+                    }
+                    return;
+                }
+                // The other two the panel asks are dropped from their waiting lists as well, so
+                // that a refused `scopes` does not leave the panel waiting for an answer that is
+                // never coming.
+                self.debug_panel.awaiting_children.remove(&id);
+                if self.debug_panel.awaiting_scopes == Some(id) {
+                    self.debug_panel.awaiting_scopes = None;
+                }
                 self.status_message = i18n::msg_debugger_refused(lang, &command, &message);
             }
             crate::dap::Event::Dead { reason } => {
@@ -5132,6 +5616,10 @@ impl App {
         if let Some(session) = self.debug.as_mut() {
             session.thread = None;
         }
+        // The one place the panel is told the program has moved, because this is the one place
+        // that already knows: every frame, scope and value it holds is an answer about the place
+        // that has just stopped being where the program is. See [`DebugPanel::forget_stop`].
+        self.debug_panel.forget_stop();
         self.mark_dirty();
     }
 
@@ -5144,6 +5632,15 @@ impl App {
     fn end_debug_session(&mut self) {
         self.clear_stopped_line();
         self.debug = None;
+        // The column goes with the session it was about. The watches stay — they are the
+        // questions somebody wrote, not the answers this run gave — which is the whole reason
+        // they live on the panel rather than in the session.
+        self.debug_panel.open = false;
+        self.debug_panel.selected = 0;
+        // The keyboard cannot stay in a frame that is no longer drawn.
+        if self.focus == Focus::Debug {
+            self.focus = Focus::Editor;
+        }
     }
 
     /// What this project's *Debug ▸ Start* would run. See [`debuggee_for`].
@@ -5159,14 +5656,42 @@ impl App {
         if short.is_empty() { program.to_string_lossy().into_owned() } else { short }
     }
 
-    /// Starts a debug session on this project's executable.
+    /// Asks what to debug, with the guess filled in.
     ///
-    /// There is no prompt in front of this yet, and that is a gap rather than a decision: the
-    /// design asks for the guess to be offered in a single-line box with the answer editable, and
-    /// every such box in this editor is drawn by `ui.rs`, which this wave does not open. So the
-    /// guess is used as it stands and the status line names exactly what was started, the
-    /// workspace file remembers it, and a project whose executable is somewhere else is one line
-    /// of that file away from being right. The prompt arrives with the panel.
+    /// The design's rule, made good: *the editor does not guess silently*. What [`debuggee_for`]
+    /// worked out is put in the box as ordinary editable text, so accepting it is one keystroke
+    /// and correcting it is typing — which is the whole difference between a guess offered and a
+    /// guess acted on.
+    ///
+    /// The refusal for a session that is already running comes *before* the box rather than after
+    /// it: being asked which program to debug and then told that one is already being debugged
+    /// would be a question that never had an answer.
+    fn open_debug_start(&mut self) {
+        let lang = self.settings.lang;
+        if self.debug.is_some() {
+            self.status_message = i18n::msg_debugger_already_running(lang);
+            return;
+        }
+        let typed = debuggee_prefill(&self.root, self.debuggee.as_deref());
+        self.debug_prompt = Some(DebugPrompt { ask: DebugAsk::Debuggee, typed });
+    }
+
+    /// The answer, whatever was left in the box.
+    ///
+    /// Remembered before it is tried, and remembered even where the start then fails: a path to a
+    /// binary that has not been built yet is a perfectly good answer to "what do you debug here",
+    /// and making the user retype it after every failed start would punish them for the build.
+    ///
+    /// An emptied box means the guess again — the convention this editor already uses for the run
+    /// command box, where clearing the field puts the default back rather than setting the value
+    /// to nothing.
+    fn debug_start_answered(&mut self, typed: &str) {
+        let typed = typed.trim();
+        self.debuggee = (!typed.is_empty()).then(|| PathBuf::from(typed));
+        self.debug_start();
+    }
+
+    /// Starts a debug session on the answer given above.
     fn debug_start(&mut self) {
         let lang = self.settings.lang;
         if self.debug.is_some() {
@@ -5206,6 +5731,10 @@ impl App {
         // it is ready to be configured, so this is early rather than too early.
         self.publish_breakpoints_to_adapter();
         self.debuggee = Some(program.clone());
+        // The column, from the moment there is a session for it to be about. Nothing is in it
+        // until the program stops, and that is the point: it says "running…" while the program
+        // runs, so the first breakpoint hit lands somewhere the reader is already looking.
+        self.show_debug_panel();
         self.status_message = i18n::msg_debugger_started(lang, &adapter.name(), &self.debuggee_name(&program));
     }
 
@@ -5253,6 +5782,321 @@ impl App {
             DebugVerb::StepIn => session.client.step_in(thread),
             DebugVerb::StepOut => session.client.step_out(thread),
         };
+    }
+
+    // ---- The debug panel ----------------------------------------------------------------------
+
+    /// Whether the panel has a column right now.
+    ///
+    /// The session is asked as well as the flag, and on purpose: the panel is about a session, so
+    /// a column left standing after the program exited would be a frame with nothing in it that
+    /// the focus ring still had to walk through.
+    pub fn debug_panel_is_open(&self) -> bool {
+        self.debug.is_some() && self.debug_panel.open
+    }
+
+    /// Whether the program is stopped, which is the question the whole panel hangs on: stopped,
+    /// there are frames, scopes and values; running, there is one dim line saying so.
+    pub fn debug_is_stopped(&self) -> bool {
+        self.debug.as_ref().is_some_and(|s| s.thread.is_some())
+    }
+
+    /// Every row the panel draws, from the state it has.
+    pub fn debug_rows(&self) -> Vec<DebugRow> {
+        debug_panel_rows(&self.debug_panel, self.debug_is_stopped(), self.settings.lang)
+    }
+
+    /// The tail of the session's output, for the strip along the bottom of the panel.
+    pub fn debug_output_tail(&self, rows: usize) -> Vec<String> {
+        self.debug.as_ref().map(|s| s.output_tail(rows)).unwrap_or_default()
+    }
+
+    /// Shows the panel because a session has begun.
+    ///
+    /// Without taking the keyboard, which is the same rule the stopped-line jump follows: a
+    /// session starting is something the editor does *beside* what you were typing, and a column
+    /// that appeared and swallowed the next keystroke would be the opposite of that promise. The
+    /// menu row below takes the focus, because asking for the panel is asking to use it.
+    fn show_debug_panel(&mut self) {
+        self.debug_panel.open = true;
+        self.debug_panel.selected = 0;
+    }
+
+    /// The Debug menu's own row: the panel, on or off, for a session that is already running.
+    fn toggle_debug_panel(&mut self) {
+        let lang = self.settings.lang;
+        if self.debug.is_none() {
+            self.status_message = i18n::msg_debugger_no_session(lang);
+            return;
+        }
+        self.debug_panel.open = !self.debug_panel.open;
+        if self.debug_panel.open {
+            self.focus = Focus::Debug;
+        } else if self.focus == Focus::Debug {
+            self.focus = Focus::Editor;
+        }
+        self.status_message = i18n::msg_debug_panel_toggled(lang, self.debug_panel.open);
+    }
+
+    /// Asks everything that is about the frame the panel is now reading in.
+    ///
+    /// Called on every stop and on every frame change, and it is the whole of "the panel follows
+    /// the selected frame": the scopes are asked for again, whatever was expanded under the old
+    /// frame is dropped — those references belong to a frame nobody is looking at — and every
+    /// watch is put to the adapter again in the new frame's context, because a local means
+    /// something different one frame up.
+    fn refresh_debug_frame(&mut self) {
+        self.debug_panel.scopes.clear();
+        self.debug_panel.children.clear();
+        self.debug_panel.expanded.clear();
+        self.debug_panel.awaiting_scopes = None;
+        self.debug_panel.awaiting_children.clear();
+        let frame = self.debug_panel.current_frame().map(|f| f.id);
+        if let (Some(session), Some(frame)) = (self.debug.as_mut(), frame) {
+            self.debug_panel.awaiting_scopes = session.client.scopes(frame);
+        }
+        self.evaluate_watches();
+    }
+
+    /// Opens every scope of the stopped frame, one level and no further.
+    ///
+    /// One level is the design's own cap, and it is not a nicety: a `variables` for every
+    /// reference that came back would walk a linked list to its end, and a structure with a cycle
+    /// in it forever — on every step. Everything below the first level waits for somebody to
+    /// press Enter on it.
+    ///
+    /// A scope that says it is expensive is left closed. That flag exists precisely for the
+    /// panel that expands on every stop, and reading a whole register file on each step of a
+    /// program is what ignoring it costs.
+    ///
+    /// The cap is the loop: it walks the scopes and stops. A pass that followed every reference
+    /// it was handed back would walk a linked list to its end, and a structure with a cycle in it
+    /// forever — on every single step.
+    fn open_first_level_of_scopes(&mut self) {
+        let wanted: Vec<i64> = self
+            .debug_panel
+            .scopes
+            .iter()
+            .filter(|scope| scope.reference != 0 && !scope.expensive)
+            .map(|scope| scope.reference)
+            .collect();
+        for reference in wanted {
+            self.debug_panel.expanded.insert(reference);
+            self.ask_for_variables(reference);
+        }
+    }
+
+    /// Asks what is inside one reference, unless the answer is already here.
+    ///
+    /// The cap is not in here and cannot be: this asks about exactly the one reference it is
+    /// given, and it is the callers that decide how many of those there are. The automatic pass
+    /// above asks once per scope and stops; a keypress asks once per Enter.
+    fn ask_for_variables(&mut self, reference: i64) {
+        if reference == 0 || self.debug_panel.children.contains_key(&reference) {
+            return;
+        }
+        let Some(session) = self.debug.as_mut() else { return };
+        if let Some(seq) = session.client.variables(reference) {
+            self.debug_panel.awaiting_children.insert(seq, reference);
+        }
+    }
+
+    /// Puts every watch to the adapter again, in the frame the panel is reading in.
+    ///
+    /// All of them, every time, rather than only the ones that changed: nothing here knows which
+    /// expression a step made true, and an expression that used to fail and now reads is exactly
+    /// what somebody added a watch to find out.
+    fn evaluate_watches(&mut self) {
+        self.debug_panel.awaiting_watch.clear();
+        let frame = self.debug_panel.current_frame().map(|f| f.id);
+        let expressions: Vec<(usize, String)> = self
+            .debug_panel
+            .watches
+            .iter()
+            .enumerate()
+            .map(|(i, watch)| (i, watch.expression.clone()))
+            .collect();
+        for (index, expression) in expressions {
+            if let Some(watch) = self.debug_panel.watches.get_mut(index) {
+                watch.answer = None;
+            }
+            let Some(session) = self.debug.as_mut() else { return };
+            if let Some(seq) = session.client.evaluate(&expression, frame) {
+                self.debug_panel.awaiting_watch.insert(seq, index);
+            }
+        }
+    }
+
+    /// Keys while the panel has the keyboard. See [`debug_panel_key`] for the table.
+    fn handle_debug_panel_key(&mut self, key: KeyEvent) {
+        let Some(action) = debug_panel_key(key) else { return };
+        match action {
+            // Straight to wave 2's dispatch, refusals and all: a `c` pressed at a program that is
+            // running gets the same sentence the menu row would have given it, because it is the
+            // same question asked from a different place.
+            DebugPanelKey::Verb(verb) => self.debug_step(verb),
+            DebugPanelKey::Stop => self.debug_stop(),
+            DebugPanelKey::AddWatch => {
+                self.debug_prompt = Some(DebugPrompt { ask: DebugAsk::Watch, typed: String::new() })
+            }
+            DebugPanelKey::DropWatch => self.drop_selected_watch(),
+            DebugPanelKey::Move(delta) => self.move_debug_selection(delta),
+            DebugPanelKey::Act => self.act_on_debug_row(),
+            DebugPanelKey::Leave => self.focus = Focus::Editor,
+        }
+    }
+
+    /// Moves the cursor to the next row it may land on, skipping the captions and the notes.
+    ///
+    /// Stops at either end rather than wrapping, the way every other list in this editor does: a
+    /// cursor that jumped from the last watch back to the top frame would read as the panel having
+    /// scrolled rather than as the end of it.
+    fn move_debug_selection(&mut self, delta: i32) {
+        let rows = self.debug_rows();
+        self.debug_panel.selected = debug_next_row(&rows, self.debug_panel.selected, delta);
+    }
+
+    /// Enter on whatever the cursor is on.
+    ///
+    /// Three rows and three meanings, which is what the design asks for: a frame is a place, so
+    /// Enter goes there; a variable with something inside it is a box, so Enter opens or shuts it;
+    /// a watch is already showing everything it has, so Enter does nothing to it.
+    fn act_on_debug_row(&mut self) {
+        let rows = self.debug_rows();
+        let Some(row) = rows.get(self.debug_panel.selected) else { return };
+        match row.kind.clone() {
+            DebugRowKind::Frame { index, .. } => self.select_debug_frame(index),
+            DebugRowKind::Variable { reference, expanded } => {
+                if reference == 0 {
+                    return;
+                }
+                if expanded {
+                    self.debug_panel.expanded.remove(&reference);
+                } else {
+                    self.debug_panel.expanded.insert(reference);
+                    // One level, because one Enter was pressed. Nothing under this is fetched
+                    // until somebody presses Enter on that too, which is what keeps a structure
+                    // pointing at itself from being walked to the end of memory.
+                    self.ask_for_variables(reference);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads the panel in another frame of the stack, and shows where that frame is.
+    ///
+    /// The jump goes through the same show-beside-without-focus discipline every programmatic
+    /// navigation here uses: looking one frame up is looking, and it must not take the keyboard
+    /// out of the panel you are looking from.
+    fn select_debug_frame(&mut self, index: usize) {
+        if self.debug_panel.frames.get(index).is_none() {
+            return;
+        }
+        self.debug_panel.frame = index;
+        let place = self
+            .debug_panel
+            .frames
+            .get(index)
+            .and_then(|f| f.path.clone().map(|path| (path, f.line)));
+        if let Some((path, line)) = place {
+            let path = if path.is_absolute() { path } else { self.root.join(path) };
+            self.show_beside_without_focus(path, Some(line), None);
+        }
+        self.refresh_debug_frame();
+    }
+
+    /// Adds one watch and asks for it straight away, so that a expression typed at a stopped
+    /// program answers now rather than at the next step.
+    fn add_watch(&mut self, expression: &str) {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            return;
+        }
+        let lang = self.settings.lang;
+        self.debug_panel
+            .watches
+            .push(DebugWatch { expression: expression.to_string(), answer: None });
+        let index = self.debug_panel.watches.len() - 1;
+        let frame = self.debug_panel.current_frame().map(|f| f.id);
+        if let Some(session) = self.debug.as_mut()
+            && let Some(seq) = session.client.evaluate(expression, frame)
+        {
+            self.debug_panel.awaiting_watch.insert(seq, index);
+        }
+        self.status_message = i18n::msg_watch_added(lang, expression);
+    }
+
+    /// `d` on a watch row: takes that one off the list.
+    ///
+    /// Only on a watch row. `d` over a frame or a variable does nothing rather than dropping the
+    /// last watch, because a key that acts on something other than what the cursor is on is a key
+    /// nobody can aim.
+    fn drop_selected_watch(&mut self) {
+        let lang = self.settings.lang;
+        let rows = self.debug_rows();
+        let Some(DebugRowKind::Watch { index }) = rows.get(self.debug_panel.selected).map(|r| r.kind.clone())
+        else {
+            return;
+        };
+        if index >= self.debug_panel.watches.len() {
+            return;
+        }
+        let gone = self.debug_panel.watches.remove(index);
+        // The answers still out are addressed by position, and every position after this one has
+        // just moved. Dropped rather than renumbered: the next stop asks for all of them again,
+        // and an answer landing on the wrong row in between would be worse than a blank one.
+        self.debug_panel.awaiting_watch.clear();
+        self.status_message = i18n::msg_watch_removed(lang, &gone.expression);
+    }
+
+    /// A click in the panel: the keyboard comes here, and the row under the pointer is selected.
+    ///
+    /// The row is worked out from `ui::debug_panel_areas` and `ui::debug_scroll` — the same two
+    /// functions the drawing used to put it there — so the click and the screen cannot disagree
+    /// about which row is where. A click on a caption or on a note moves the focus and leaves the
+    /// cursor alone, because there is nothing there to select.
+    fn click_debug_panel(&mut self, rect: Rect, col: u16, row: u16) {
+        self.focus = Focus::Debug;
+        let body = ui::debug_panel_areas(ui::inner_rect(rect)).rows;
+        if !within(body, col, row) {
+            return;
+        }
+        let rows = self.debug_rows();
+        let scroll = ui::debug_scroll(rows.len(), body.height as usize, self.debug_panel.selected);
+        let index = scroll + (row - body.y) as usize;
+        if rows.get(index).is_some_and(|r| r.selectable()) {
+            self.debug_panel.selected = index;
+        }
+    }
+
+    /// Keys while one of the debugger's two single-line boxes is up.
+    ///
+    /// Ordinary typing, exactly like the Go-to-line box beside it — the only difference being
+    /// that this one takes any character rather than digits, because a path and an expression are
+    /// both text.
+    fn handle_debug_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.debug_prompt = None,
+            KeyCode::Enter => {
+                let Some(prompt) = self.debug_prompt.take() else { return };
+                match prompt.ask {
+                    DebugAsk::Debuggee => self.debug_start_answered(&prompt.typed),
+                    DebugAsk::Watch => self.add_watch(&prompt.typed),
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.debug_prompt.as_mut() {
+                    pop_grapheme(&mut prompt.typed);
+                }
+            }
+            KeyCode::Char(c) if is_a_typed_character(key) => {
+                if let Some(prompt) = self.debug_prompt.as_mut() {
+                    prompt.typed.push(c);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ---- Looking inside a variable ----------------------------------------------------------
@@ -12794,12 +13638,16 @@ impl App {
 
     fn cycle_focus(&mut self, forward: bool) {
         // Left to right across the window, which is the order the frames are in.
-        let mut order = vec![Focus::FileTree, Focus::Editor, Focus::Terminal, Focus::Drawer];
+        let mut order =
+            vec![Focus::FileTree, Focus::Editor, Focus::Terminal, Focus::Debug, Focus::Drawer];
         if !self.settings.show_sidebar {
             order.retain(|f| *f != Focus::FileTree);
         }
         if !self.settings.show_terminal {
             order.retain(|f| *f != Focus::Terminal);
+        }
+        if !self.debug_panel_is_open() {
+            order.retain(|f| *f != Focus::Debug);
         }
         if !self.drawer_is_open() {
             order.retain(|f| *f != Focus::Drawer);
@@ -12831,6 +13679,7 @@ impl App {
             || self.picker.is_some()
             || self.find.is_some()
             || self.show_goto
+            || self.debug_prompt.is_some()
             || self.show_search
             || self.show_new_entry
             || self.show_delete_confirm
@@ -12905,6 +13754,10 @@ impl App {
         }
         if self.show_goto {
             self.handle_goto_key(key);
+            return;
+        }
+        if self.debug_prompt.is_some() {
+            self.handle_debug_prompt_key(key);
             return;
         }
         if self.show_search {
@@ -13238,6 +14091,7 @@ impl App {
             Focus::FileTree => self.handle_file_tree_key(key),
             Focus::Editor => self.handle_editor_key(key),
             Focus::Terminal => self.handle_terminal_key(key),
+            Focus::Debug => self.handle_debug_panel_key(key),
             Focus::Drawer => self.handle_drawer_key(key),
         }
     }
@@ -13415,7 +14269,8 @@ impl App {
             MenuAction::RunSelection => self.run_selection(),
             MenuAction::SendToAgent => self.send_context_to_agent(),
             MenuAction::ToggleBreakpoint => self.toggle_breakpoint(),
-            MenuAction::DebugStart => self.debug_start(),
+            MenuAction::DebugStart => self.open_debug_start(),
+            MenuAction::DebugPanel => self.toggle_debug_panel(),
             MenuAction::DebugStop => self.debug_stop(),
             MenuAction::DebugContinue => self.debug_step(DebugVerb::Continue),
             MenuAction::DebugStepOver => self.debug_step(DebugVerb::StepOver),
@@ -13583,6 +14438,7 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.active_terminal = index.min(self.terminals.len().saturating_sub(1));
             }
+            FocusTarget::Debug => self.focus = Focus::Debug,
             FocusTarget::Drawer => self.focus = Focus::Drawer,
         }
     }
@@ -13599,6 +14455,7 @@ impl App {
             terminal_index: self.active_terminal,
             terminal_count: self.terminals.len(),
             drawer_open: self.drawer_is_open(),
+            debug_open: self.debug_panel_is_open(),
         }
     }
 
@@ -13613,6 +14470,7 @@ impl App {
             terminal_index: self.active_terminal,
             terminal_count: self.terminals.len(),
             drawer_open: self.drawer_is_open(),
+            debug_open: self.debug_panel_is_open(),
         };
         match resize_command(&layout, side, grow) {
             Some(ResizeCmd::Sidebar(d)) => {
@@ -15169,6 +16027,13 @@ impl App {
                 if self.try_start_drag(col, row, areas) {
                     return;
                 }
+                // The debug panel's own column, claimed before the frames it was carved out of.
+                // Nothing else owns these cells — it is a column of the layout, not an overlay —
+                // so this is only about order, not about a conflict.
+                if let Some(rect) = areas.debug.filter(|r| within(*r, col, row)) {
+                    self.click_debug_panel(rect, col, row);
+                    return;
+                }
                 if let Some(sidebar) = areas.sidebar {
                     if within(sidebar, col, row) {
                         self.focus = Focus::FileTree;
@@ -15876,6 +16741,10 @@ impl App {
                 (ContextTarget::Terminal, rect)
             }
             Focus::Editor => (ContextTarget::Editor, areas.editor),
+            // The editor's menu, over the panel's column: copy and paste are what a right-click
+            // is for anywhere, and the panel has no actions of its own that a menu could add
+            // which its own single letters do not already carry.
+            Focus::Debug => (ContextTarget::Editor, areas.debug.unwrap_or(self.last_full)),
             // The same menu a terminal pane gets: what is in the drawer is a terminal, and copy,
             // paste and the rest mean there exactly what they mean in one.
             Focus::Drawer => {
@@ -16465,6 +17334,272 @@ mod tests {
         assert_eq!(mine.name(), "lldb-dap");
     }
 
+    // ---- The debug panel ------------------------------------------------------------------
+
+    /// A stopped program's panel state, built by hand: two frames, one scope with two locals in
+    /// it, and one of those locals with a field of its own that has been asked for.
+    ///
+    /// Built rather than driven, because driving it would mean an adapter, and no test here
+    /// starts one. What is under test is what the panel *decides* from a given state, which is
+    /// exactly the seam this state is on either side of.
+    fn stopped_panel() -> DebugPanel {
+        let frame = |id: i64, name: &str, line: usize| crate::dap::Frame {
+            id,
+            name: name.to_string(),
+            path: Some(PathBuf::from("/p/src/main.rs")),
+            line,
+            column: 1,
+        };
+        let variable = |name: &str, value: &str, reference: i64| crate::dap::Variable {
+            name: name.to_string(),
+            value: value.to_string(),
+            type_name: Some("i32".to_string()),
+            reference,
+        };
+        let mut panel = DebugPanel {
+            frames: vec![frame(1, "inner", 12), frame(2, "outer", 40)],
+            scopes: vec![crate::dap::Scope {
+                name: "Locals".to_string(),
+                reference: 100,
+                expensive: false,
+            }],
+            ..DebugPanel::default()
+        };
+        panel.children.insert(100, vec![variable("total", "7", 0), variable("point", "Point", 101)]);
+        panel.children.insert(101, vec![variable("x", "3", 0)]);
+        panel.expanded.insert(100);
+        panel.watches.push(DebugWatch {
+            expression: "total * 2".to_string(),
+            answer: Some(Ok("14".to_string())),
+        });
+        panel
+    }
+
+    /// The panel's three sections, in the design's order, with the current frame marked.
+    #[test]
+    fn the_panel_reads_frames_then_variables_then_watches() {
+        let rows = debug_panel_rows(&stopped_panel(), true, i18n::Lang::En);
+        let words: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.kind == DebugRowKind::Heading)
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(words, vec!["Frames", "Variables", "Watches"], "{rows:#?}");
+
+        // The innermost frame is the one everything else is read in, and it is the one marked.
+        let frames: Vec<(&str, bool)> = rows
+            .iter()
+            .filter_map(|r| match r.kind {
+                DebugRowKind::Frame { current, .. } => Some((r.label.as_str(), current)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, vec![("inner", true), ("outer", false)]);
+        // And it says where it is in the words a narrow column has room for: the file's own name.
+        assert!(rows.iter().any(|r| r.value == "main.rs:12"), "{rows:#?}");
+
+        let watch = rows.iter().find(|r| matches!(r.kind, DebugRowKind::Watch { .. })).unwrap();
+        assert_eq!((watch.label.as_str(), watch.value.as_str()), ("total * 2", "14"));
+        assert!(!watch.failed);
+    }
+
+    /// The scope is open one level, and no further: the field inside `point` has been fetched but
+    /// nobody opened it, so it is not on screen.
+    ///
+    /// This is the cap the design asks for, and it is not a nicety — a panel that expanded
+    /// everything it was handed would walk a linked list to its end on every step.
+    #[test]
+    fn the_panel_opens_one_level_and_waits_to_be_asked_for_the_next() {
+        let mut panel = stopped_panel();
+        let names = |panel: &DebugPanel| -> Vec<(usize, String)> {
+            debug_panel_rows(panel, true, i18n::Lang::En)
+                .iter()
+                .filter(|r| matches!(r.kind, DebugRowKind::Variable { .. }))
+                .map(|r| (r.depth, r.label.clone()))
+                .collect()
+        };
+        assert_eq!(
+            names(&panel),
+            vec![
+                (0, "Locals".to_string()),
+                (1, "total".to_string()),
+                (1, "point".to_string()),
+            ],
+            "the second level is fetched but not shown until it is opened"
+        );
+
+        // Opened: one step further in, and only the one that was opened.
+        panel.expanded.insert(101);
+        assert_eq!(
+            names(&panel),
+            vec![
+                (0, "Locals".to_string()),
+                (1, "total".to_string()),
+                (1, "point".to_string()),
+                (2, "x".to_string()),
+            ]
+        );
+
+        // Shut again, and the panel is exactly what it was.
+        panel.expanded.remove(&101);
+        assert_eq!(names(&panel).len(), 3);
+        // And the scope itself closes too, taking everything under it.
+        panel.expanded.remove(&100);
+        assert_eq!(names(&panel), vec![(0, "Locals".to_string())]);
+    }
+
+    /// While the program is moving there is one dim line and nothing else. Every frame, scope and
+    /// value the panel holds is an answer about a place the program has left, and leaving them on
+    /// screen would be the panel quietly lying about where the program is.
+    #[test]
+    fn a_running_program_gets_one_line_rather_than_the_last_stops_numbers() {
+        let panel = stopped_panel();
+        let rows = debug_panel_rows(&panel, false, i18n::Lang::En);
+        assert!(rows.iter().all(|r| !r.selectable()), "nothing to select while it runs: {rows:#?}");
+        assert!(
+            rows.iter().any(|r| r.kind == DebugRowKind::Note && r.label.contains("running")),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.label == "inner" || r.label == "total"), "{rows:#?}");
+        // Stopped, the same panel is full again: the rows went away, the state did not.
+        assert!(debug_panel_rows(&panel, true, i18n::Lang::En).iter().any(|r| r.label == "inner"));
+    }
+
+    /// A watch the adapter would not read shows the adapter's own sentence, marked as a refusal
+    /// rather than as a value — "there is no variable named x here" is the ordinary answer for a
+    /// local that is not in scope in this frame, and reading it as data would be worse than
+    /// showing nothing.
+    #[test]
+    fn a_watch_the_adapter_refused_says_so_in_the_adapters_words() {
+        let mut panel = stopped_panel();
+        panel.watches.push(DebugWatch {
+            expression: "nowhere".to_string(),
+            answer: Some(Err("no variable named nowhere".to_string())),
+        });
+        panel.watches.push(DebugWatch { expression: "pending".to_string(), answer: None });
+        let rows = debug_panel_rows(&panel, true, i18n::Lang::En);
+        let watches: Vec<(&str, &str, bool)> = rows
+            .iter()
+            .filter(|r| matches!(r.kind, DebugRowKind::Watch { .. }))
+            .map(|r| (r.label.as_str(), r.value.as_str(), r.failed))
+            .collect();
+        assert_eq!(watches[1], ("nowhere", "no variable named nowhere", true));
+        // And one nobody has answered yet says it is waiting rather than showing a stale number.
+        assert_eq!(watches[2].0, "pending");
+        assert!(watches[2].1.contains("asking"), "{:?}", watches[2]);
+        assert!(!watches[2].2, "no answer yet is not a refusal");
+
+        // Which watch `d` takes off is whichever row the cursor is on, and the row carries its
+        // own place in the list rather than a position on screen that shifts with the stack.
+        let second = rows.iter().position(|r| r.label == "nowhere").unwrap();
+        assert_eq!(rows[second].kind, DebugRowKind::Watch { index: 1 });
+    }
+
+    /// An empty watch list still says something, because a section with nothing in it and no
+    /// hint under it is a section nobody ever finds out how to fill.
+    #[test]
+    fn an_empty_watch_list_says_which_key_fills_it() {
+        let mut panel = stopped_panel();
+        panel.watches.clear();
+        let rows = debug_panel_rows(&panel, true, i18n::Lang::En);
+        let after_heading = rows
+            .iter()
+            .skip_while(|r| r.label != "Watches")
+            .nth(1)
+            .expect("something under the heading");
+        assert_eq!(after_heading.kind, DebugRowKind::Note);
+        assert!(after_heading.label.contains('w'), "{:?}", after_heading.label);
+    }
+
+    /// The arrows walk the rows you can act on and step over the captions between them.
+    #[test]
+    fn the_arrows_step_over_the_captions_and_stop_at_the_ends() {
+        let rows = debug_panel_rows(&stopped_panel(), true, i18n::Lang::En);
+        let landable: Vec<usize> =
+            rows.iter().enumerate().filter(|(_, r)| r.selectable()).map(|(i, _)| i).collect();
+        assert!(landable.len() >= 5, "{rows:#?}");
+
+        // From the caption at the very top, down lands on the first frame and not on the caption.
+        let mut at = 0;
+        at = debug_next_row(&rows, at, 1);
+        assert_eq!(at, landable[0]);
+        for expected in &landable[1..] {
+            at = debug_next_row(&rows, at, 1);
+            assert_eq!(at, *expected);
+            assert!(rows[at].selectable());
+        }
+        // At the end it stays rather than wrapping round to the top.
+        assert_eq!(debug_next_row(&rows, at, 1), at);
+        // And back up the same way, stopping at the first row rather than at the caption over it.
+        for expected in landable.iter().rev().skip(1) {
+            at = debug_next_row(&rows, at, -1);
+            assert_eq!(at, *expected);
+        }
+        assert_eq!(debug_next_row(&rows, at, -1), at);
+
+        // A panel with nothing to stand on leaves the cursor where it was.
+        let running = debug_panel_rows(&stopped_panel(), false, i18n::Lang::En);
+        assert_eq!(debug_next_row(&running, 0, 1), 0);
+    }
+
+    /// The design's table, and the rule that makes single letters safe: they are only ever asked
+    /// about while this one frame holds the keyboard, and a letter carrying a modifier is not one
+    /// of them — the chord layer has already had its turn by then, and shadowing a chord that
+    /// grows a meaning later is exactly the bug this refusal prevents.
+    #[test]
+    fn the_panels_letters_are_the_debuggers_own_and_only_bare_ones() {
+        let bare = |c: char| debug_panel_key(KeyEvent::from(KeyCode::Char(c)));
+        assert_eq!(bare('c'), Some(DebugPanelKey::Verb(DebugVerb::Continue)));
+        assert_eq!(bare('n'), Some(DebugPanelKey::Verb(DebugVerb::StepOver)));
+        assert_eq!(bare('s'), Some(DebugPanelKey::Verb(DebugVerb::StepIn)));
+        assert_eq!(bare('o'), Some(DebugPanelKey::Verb(DebugVerb::StepOut)));
+        assert_eq!(bare('x'), Some(DebugPanelKey::Stop));
+        assert_eq!(bare('w'), Some(DebugPanelKey::AddWatch));
+        assert_eq!(bare('d'), Some(DebugPanelKey::DropWatch));
+        assert_eq!(bare('z'), None, "a letter with no verb does nothing rather than something");
+        // Shift is still the same letter — a terminal sends it as the capital — so it works.
+        assert_eq!(bare('C'), Some(DebugPanelKey::Verb(DebugVerb::Continue)));
+
+        // Every chord goes back to the application layer, `Ctrl+C` above all: a panel that ate it
+        // would be a panel you could not copy from.
+        for modifier in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+            for c in ['c', 'n', 's', 'o', 'x', 'w', 'd'] {
+                assert_eq!(
+                    debug_panel_key(KeyEvent::new(KeyCode::Char(c), modifier)),
+                    None,
+                    "{modifier:?}+{c} was claimed by the panel"
+                );
+            }
+        }
+
+        // The rows' own keys, which are the same everywhere in this editor.
+        assert_eq!(debug_panel_key(KeyEvent::from(KeyCode::Up)), Some(DebugPanelKey::Move(-1)));
+        assert_eq!(debug_panel_key(KeyEvent::from(KeyCode::Down)), Some(DebugPanelKey::Move(1)));
+        assert_eq!(debug_panel_key(KeyEvent::from(KeyCode::Enter)), Some(DebugPanelKey::Act));
+        assert_eq!(debug_panel_key(KeyEvent::from(KeyCode::Esc)), Some(DebugPanelKey::Leave));
+    }
+
+    /// The box *Debug ▸ Start debugging* opens is prefilled with the guess and with nothing else.
+    ///
+    /// That equality is the design's rule made good — *the editor does not guess silently* — and
+    /// it is the one thing about the box worth pinning: a prefill that came from somewhere other
+    /// than [`debuggee_for`] would be the editor offering one answer and acting on another.
+    #[test]
+    fn the_start_box_opens_on_exactly_the_guess() {
+        let dir = setup_dir("debuggee_prefill");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"clee\"\n").unwrap();
+        assert_eq!(
+            debuggee_prefill(&dir, None),
+            debuggee_for(&dir, None).to_string_lossy(),
+            "the box and the guess have to be the same string"
+        );
+        assert!(debuggee_prefill(&dir, None).ends_with("target/debug/clee"));
+        // An answer already given is what the box offers next time, which is what "remembered"
+        // means from in here.
+        let mine = PathBuf::from("build/thing");
+        assert!(debuggee_prefill(&dir, Some(&mine)).ends_with("build/thing"));
+    }
+
     fn make_venv(root: &std::path::Path, name: &str) -> PathBuf {
         let venv = root.join(name);
         std::fs::create_dir_all(venv.join(venv_bin_dir())).unwrap();
@@ -16856,6 +17991,7 @@ mod tests {
             terminal_index: 0,
             terminal_count: 1,
             drawer_open: false,
+            debug_open: false,
         }
     }
 

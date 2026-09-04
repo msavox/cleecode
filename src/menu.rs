@@ -49,6 +49,7 @@ pub enum MenuAction {
     DebugStepOver,
     DebugStepIn,
     DebugStepOut,
+    DebugPanel,
     ShowWorkspacePanel,
     InspectVariable,
     ToggleSplitView,
@@ -176,6 +177,7 @@ impl MenuAction {
         MenuAction::DebugStepOver,
         MenuAction::DebugStepIn,
         MenuAction::DebugStepOut,
+        MenuAction::DebugPanel,
         MenuAction::ShowWorkspacePanel,
         MenuAction::InspectVariable,
         MenuAction::ToggleSplitView,
@@ -609,6 +611,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemDebugStepOver, MenuAction::DebugStepOver, None),
                 item(Key::ItemDebugStepIn, MenuAction::DebugStepIn, None),
                 item(Key::ItemDebugStepOut, MenuAction::DebugStepOut, None),
+                // The panel opens with the session and closes with it, so this row is for the
+                // one case that is nobody's default: it was put away mid-session, and the way
+                // back has to be somewhere you can look rather than a letter you had to know.
+                group(Key::ItemDebugPanel, MenuAction::DebugPanel, None),
             ],
         },
         MenuDef {
