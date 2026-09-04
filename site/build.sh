@@ -45,9 +45,39 @@ opensans-variable.woff2
 rm -rf "$dist"
 mkdir -p "$dist/assets" "$dist/fonts"
 
-cp "$here/index.html" "$dist/index.html"
-cp "$here/style.css"  "$dist/style.css"
-echo "  page   index.html, style.css"
+# The stylesheet ships under a name carrying a hash of its own contents, and the
+# page is rewritten to point at that name. It is the only defence against a stale
+# stylesheet that does not depend on somebody's dashboard: cleecode.marunja.com
+# sits in a zone whose Browser Cache TTL raises any short max-age to four hours,
+# so a deploy that reuses the name style.css goes on serving the old design to
+# everyone who visited today — the words change, the layout does not, and the
+# result looks like a deploy that failed. A new name is a new URL, and no cache
+# anywhere can mistake it for the old one.
+#
+# Eight hex digits: enough that two stylesheets of this project will not collide,
+# short enough to read in a network tab.
+css_hash=$(
+  if   command -v shasum   >/dev/null 2>&1; then shasum -a 256 "$here/style.css"
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum    "$here/style.css"
+  else cksum "$here/style.css"
+  fi | cut -c1-8
+)
+css_name="style.$css_hash.css"
+
+cp "$here/style.css" "$dist/$css_name"
+# If the page ever spells the link differently, this substitution quietly does
+# nothing — and the reference check at the end catches it, because index.html
+# would then point at a style.css that dist/ does not have.
+sed "s|href=\"style\.css\"|href=\"$css_name\"|" "$here/index.html" > "$dist/index.html"
+echo "  page   index.html, $css_name"
+
+# Cache policy for the deploy. Named with a leading underscore because that is
+# what Cloudflare Pages looks for, and it must sit at the root of what is
+# uploaded — not under assets/ — or it is served as a file instead of read as a
+# rule. See the comments inside it for why the page and the stylesheet must not
+# be cached long.
+cp "$here/_headers" "$dist/_headers"
+echo "  page   _headers"
 
 echo "$ASSETS" | while read -r src dest; do
   [ -n "${src:-}" ] || continue
@@ -105,7 +135,7 @@ echo "  font   fonts/OFL-NOTICE.txt"
 missing=0
 for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" \
                 | sed -e 's/^[^"]*"//' -e 's/"$//'; \
-                grep -oE "url\([^)]*\)" "$dist/style.css" \
+                grep -oE "url\([^)]*\)" "$dist/$css_name" \
                 | sed -e "s/^url(//" -e "s/)$//" -e "s/^['\"]//" -e "s/['\"]$//"; } \
              | grep -vE '^(https?:|mailto:|data:|#)' | sort -u); do
   if [ -f "$dist/$ref" ]; then

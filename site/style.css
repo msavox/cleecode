@@ -40,6 +40,14 @@
   --wrap: 46rem;
   --wrap-wide: 76rem;
 
+  /* The hero lockup measured in one place: the name's size, the emblem taken
+     from it, and the gap between them. The tagline indents itself by the last
+     two, so it keeps starting at the "C" and not under the emblem — a literal
+     number there would have to be re-measured every time the mark changes. */
+  --mark-size: clamp(2.1rem, 7vw, 3rem);
+  --emblem-size: calc(var(--mark-size) * 1.2);
+  --emblem-gap: calc(var(--mark-size) * 0.3);
+
   color-scheme: dark;
 }
 
@@ -463,7 +471,7 @@ kbd {
 .wordmark {
   margin: 0 0 0.55rem;
   font-family: var(--house-face);
-  font-size: clamp(2.1rem, 7vw, 3rem);
+  font-size: var(--mark-size);
   font-weight: 700;
   letter-spacing: -0.005em;
   line-height: 1.1;
@@ -481,10 +489,13 @@ kbd {
   /* Back inline: the global img reset above says block, which dropped the
      name onto its own line under the mark instead of beside it. */
   display: inline-block;
-  width: 1.2em;
-  height: 1.2em;
+  width: var(--emblem-size);
+  height: var(--emblem-size);
   vertical-align: -0.22em;
-  margin-right: 0.1em;
+  /* The whole gap, with no space character in the markup beside it: the
+     tagline's indent is this plus the emblem's width, and a space nobody can
+     measure would push the name past where the line below starts. */
+  margin-right: var(--emblem-gap);
 }
 
 /* The words from the tab title, on the page itself: right under the wordmark —
@@ -496,7 +507,9 @@ kbd {
    browser without background-clip still reads it — the .house-mark pattern
    above. */
 .tagline {
-  margin: -0.35rem 0 0.9rem;
+  /* Indented past the emblem so the sentence starts under the name's first
+     letter, not under the mark: name and claim read as one stacked lockup. */
+  margin: -0.35rem 0 0.9rem calc(var(--emblem-size) + var(--emblem-gap));
   font-family: var(--house-face);
   font-size: clamp(1.15rem, 3.4vw, 1.5rem);
   font-weight: 700;
