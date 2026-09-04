@@ -3403,15 +3403,28 @@ pub fn msg_page(lang: Lang, page: usize) -> String {
     }
 }
 
-pub fn msg_markdown_preview(lang: Lang, as_document: bool) -> String {
-    match (lang, as_document) {
-        (Lang::En, true) => "Markdown preview: rendered as a document".to_string(),
-        (Lang::It, true) => "Anteprima markdown: resa come documento".to_string(),
-        (Lang::En, false) => {
+/// Which of the two renderings the tab actually got, and — when it is the styled one — why:
+/// a machine that cannot do better and a user who asked for text are different stories, and
+/// the advice that helps one ("install pandoc") is noise to the other. The demo recording
+/// caught the old two-way version claiming "a document" over plainly styled text, because it
+/// read what the machine could do instead of what the tab was asked for.
+pub fn msg_markdown_preview(lang: Lang, as_document: bool, by_choice: bool) -> String {
+    match (lang, as_document, by_choice) {
+        (Lang::En, true, _) => "Markdown preview: rendered as a document".to_string(),
+        (Lang::It, true, _) => "Anteprima markdown: resa come documento".to_string(),
+        (Lang::En, false, true) => {
+            "Markdown preview: styled text, as the setting asks (t on the preview for a document)"
+                .to_string()
+        }
+        (Lang::It, false, true) => {
+            "Anteprima markdown: testo con stili, come da impostazione (t sull'anteprima per il documento)"
+                .to_string()
+        }
+        (Lang::En, false, false) => {
             "Markdown preview: styled text (install pandoc, and a terminal with graphics, for a document)"
                 .to_string()
         }
-        (Lang::It, false) => {
+        (Lang::It, false, false) => {
             "Anteprima markdown: testo con stili (per il documento servono pandoc e un terminale con grafica)"
                 .to_string()
         }
