@@ -671,6 +671,10 @@ fn run(
             app.poll_inspector();
             app.poll_autosave();
             app.poll_mcp();
+            // Beside the other two clients that speak over a pipe, and after them for no reason
+            // beyond the order they were written in: a debug adapter that said nothing this frame
+            // costs one empty channel read.
+            app.poll_debug();
             app.poll_terminal_output();
         }));
         if let Err(text) = polled {

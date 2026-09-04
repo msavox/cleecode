@@ -43,6 +43,12 @@ pub enum MenuAction {
     RunSelection,
     SendToAgent,
     ToggleBreakpoint,
+    DebugStart,
+    DebugStop,
+    DebugContinue,
+    DebugStepOver,
+    DebugStepIn,
+    DebugStepOut,
     ShowWorkspacePanel,
     InspectVariable,
     ToggleSplitView,
@@ -164,6 +170,12 @@ impl MenuAction {
         MenuAction::RunSelection,
         MenuAction::SendToAgent,
         MenuAction::ToggleBreakpoint,
+        MenuAction::DebugStart,
+        MenuAction::DebugStop,
+        MenuAction::DebugContinue,
+        MenuAction::DebugStepOver,
+        MenuAction::DebugStepIn,
+        MenuAction::DebugStepOut,
         MenuAction::ShowWorkspacePanel,
         MenuAction::InspectVariable,
         MenuAction::ToggleSplitView,
@@ -573,6 +585,30 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // about how CleeCode looks: it changes what the interpreter is told to do.
                 item(Key::ItemPlotsInTabs, MenuAction::TogglePlotsInTabs, None),
                 group(Key::ItemRunTarget, MenuAction::RunTarget, None),
+            ],
+        },
+        MenuDef {
+            // A menu and no chords at all, which is the decision rather than an omission. The
+            // chord table is full, and the layer that could still hold six of them — Super plus a
+            // letter — only arrives from terminals that report the Command key with the press.
+            // A debugger you cannot step over ssh in Terminal.app would break the promise this
+            // editor is built on, so stepping is a row here, a palette entry, and single letters
+            // inside the debug panel where your hands already are.
+            //
+            // Breakpoints are not in this menu: `Ctrl+Shift+P` stays where it has always been,
+            // in Run, beside the interpreter debugger it was written for. They are one set of
+            // breakpoints and both debuggers are told about all of them, so the row that sets one
+            // should not move house depending on which of the two is going to stop there.
+            title_key: Key::MenuDebug,
+            items: vec![
+                item(Key::ItemDebugStart, MenuAction::DebugStart, None),
+                item(Key::ItemDebugStop, MenuAction::DebugStop, None),
+                // Below the line because these four are the ones that only mean anything while a
+                // program is stopped, where the two above are how a session begins and ends.
+                group(Key::ItemDebugContinue, MenuAction::DebugContinue, None),
+                item(Key::ItemDebugStepOver, MenuAction::DebugStepOver, None),
+                item(Key::ItemDebugStepIn, MenuAction::DebugStepIn, None),
+                item(Key::ItemDebugStepOut, MenuAction::DebugStepOut, None),
             ],
         },
         MenuDef {

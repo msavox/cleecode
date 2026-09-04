@@ -86,6 +86,15 @@ pub struct Workspace {
     pub active_file: Option<PathBuf>,
     #[serde(default)]
     pub active_venv: Option<String>,
+    /// The executable *Debug ▸ Start* runs, remembered so the question is asked once per project
+    /// rather than once per session.
+    ///
+    /// Beside `active_venv` because it is the same kind of fact: a choice about how this project
+    /// is run, made once and worth keeping, rather than anything about the shape of the window.
+    /// `None` writes nothing at all, so a file saved before the debugger existed and a file saved
+    /// by somebody who has never debugged are the same file.
+    #[serde(default)]
+    pub debuggee: Option<PathBuf>,
     #[serde(default)]
     pub active_terminal: usize,
     pub layout: WorkspaceLayout,
@@ -186,6 +195,9 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
             open_files: Vec::new(),
             active_file: None,
             active_venv: None,
+            // A built-in has no opinion about what to debug, the same way it has none about the
+            // drawer: it is a shape for the window, not a project's own choices.
+            debuggee: None,
             active_terminal: 0,
             layout: WorkspaceLayout {
                 show_sidebar: false,
@@ -209,6 +221,9 @@ pub fn built_in(name: &str, shape: &Shape) -> Option<Workspace> {
             open_files: Vec::new(),
             active_file: None,
             active_venv: None,
+            // A built-in has no opinion about what to debug, the same way it has none about the
+            // drawer: it is a shape for the window, not a project's own choices.
+            debuggee: None,
             active_terminal: 0,
             layout: WorkspaceLayout {
                 show_sidebar: true,
@@ -280,6 +295,7 @@ fn session_workspace(name: &str, shape: &Shape, start: &str, tab: &str) -> Works
         open_files: Vec::new(),
         active_file: None,
         active_venv: None,
+        debuggee: None,
         active_terminal: 0,
         layout: WorkspaceLayout {
             show_sidebar: true,
@@ -430,6 +446,7 @@ mod tests {
             open_files: vec![PathBuf::from("/work/project/src/main.rs")],
             active_file: Some(PathBuf::from("/work/project/src/main.rs")),
             active_venv: Some(".venv".to_string()),
+            debuggee: Some(PathBuf::from("/work/project/target/debug/project")),
             active_terminal: 1,
             layout: WorkspaceLayout {
                 show_sidebar: true,
@@ -488,6 +505,19 @@ mod tests {
         // have stopped every workspace from being written, silently.
         let drawer = back.drawer.expect("the drawer survives the round trip");
         assert_eq!((drawer.open, drawer.width, drawer.agent.as_deref()), (true, 45, Some("codex")));
+        // The debuggee is the answer to a question asked once per project, so the whole point of
+        // it is surviving the trip to disk: pinned explicitly, next to the terminal commands that
+        // are pinned for the same reason.
+        assert_eq!(
+            back.debuggee.as_deref(),
+            Some(Path::new("/work/project/target/debug/project")),
+            "what Debug ▸ Start runs has to come back"
+        );
+        // And it is written where a scalar can go — before the first table — or nothing at all
+        // would have been written: `save` swallows serialization errors.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (before_tables, _) = text.split_once("[layout]").expect("the layout block is there");
+        assert!(before_tables.contains("debuggee"), "written among the scalars:\n{text}");
     }
 
     /// A workspace saved without a drawer writes no `[drawer]` block at all, so files from
@@ -766,5 +796,6 @@ mod tests {
         assert!(ws.open_files.is_empty() && ws.terminals.is_empty());
         assert_eq!(ws.active_terminal, 0);
         assert!(ws.drawer.is_none(), "a file that says nothing about a drawer describes none");
+        assert!(ws.debuggee.is_none(), "and one that names no executable names none");
     }
 }

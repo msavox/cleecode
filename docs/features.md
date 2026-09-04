@@ -425,6 +425,22 @@ Everything works in both languages and almost none of it works the same way unde
 **[The full walkthrough is its own page](numeric.md)**, including what is different between the
 two and what is not built yet.
 
+### Debugging a compiled program
+
+The same breakpoints work on C, C++ and Rust. **Debug ▸ Start debugging** runs this project's
+executable under whichever debug adapter the machine has — `lldb-dap`, or a `gdb` 14 or newer,
+which speaks DAP natively — and where there is neither, one status line names what to install for
+your platform. For a Cargo project the executable is guessed from `Cargo.toml`
+(`target/debug/<package>`); the answer is remembered in the workspace file, and
+`debug_adapter` in `settings.toml` points at an adapter of your own.
+
+There is one set of breakpoints: `Ctrl+Shift+P` in any file, told to whichever debugger is
+running, including the moment you take the last one off a file. Stopping moves the editor to the
+line and marks it without taking the keyboard, exactly as the interpreter debugger does. Continue,
+step over, step into and step out are rows in the Debug menu and entries in the palette — no new
+chords, because a debugger you could not step over `ssh` in Terminal.app would not be worth the
+key it was bound to.
+
 ### It does not close on you
 
 CleeCode hosts long-running shells, so a crash costing you an `ssh` session or a build would be
