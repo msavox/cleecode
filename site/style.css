@@ -821,3 +821,27 @@ footer p { margin: 0 0 0.5rem; }
   font-size: 1.16rem;
   line-height: 1.55;
 }
+
+/* The Apple-page scroll: each slide rises and lights up as it enters the viewport.
+   Pure CSS scroll-driven animation — no JavaScript, which this site has promised to stay
+   without. Browsers that do not speak animation-timeline get the static page unchanged,
+   and a reader who asked for reduced motion is taken at their word. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .feature .wrap,
+    .install .wrap {
+      animation: rise-in both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 55%;
+    }
+    .feature figure {
+      animation: rise-in both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 70%;
+    }
+    @keyframes rise-in {
+      from { opacity: 0; transform: translateY(44px) scale(0.985); }
+      to   { opacity: 1; transform: none; }
+    }
+  }
+}
