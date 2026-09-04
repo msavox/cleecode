@@ -1232,16 +1232,25 @@ fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut F
 /// Split in two so that the painting cannot be skipped: the drawing below returns early for the
 /// splash screen, and an unreadable splash is exactly as unreadable as an unreadable editor.
 pub fn draw(f: &mut Frame, app: &mut App) {
-    // A theme that brings its own surface has to paint it whether or not the user asked for an
-    // opaque background: the setting is about a terminal whose colours you want to keep, and a
-    // light theme has no colours of the terminal's left to keep.
     let pal = app.palette();
-    let opaque = app.settings.opaque_background || app.theme.paints_its_own_background();
+    let paints = background_is_painted(app.settings.transparent_background, app.theme);
     draw_frame(f, app);
     // Last of all, once every widget has had its say about which cells it colours.
-    if opaque {
+    if paints {
         paint_background(f.buffer_mut(), pal);
     }
+}
+
+/// Whether this frame lays down a surface of its own, which is the setting and the theme read
+/// together.
+///
+/// The theme is asked second and can only say yes: one that brings its own surface has to paint
+/// it whether or not transparency was asked for, because the setting is about a terminal whose
+/// colours you want to keep and a light theme has no colours of the terminal's left to keep.
+/// Everything else paints unless somebody asked to see through it — a chosen theme owns its
+/// background, and only the switch hands it back.
+fn background_is_painted(transparent: bool, theme: crate::theme::Theme) -> bool {
+    !transparent || theme.paints_its_own_background()
 }
 
 fn draw_frame(f: &mut Frame, app: &mut App) {
@@ -1514,7 +1523,7 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         // What is actually on the screen, not what the setting says: with a theme that brings
         // its own surface the fill is on whatever the setting was left at, and a button showing
         // otherwise would be reporting a state the frame does not have.
-        let on = app.settings.opaque_background || app.theme.paints_its_own_background();
+        let on = background_is_painted(app.settings.transparent_background, app.theme);
         // Lit like the open menu title when it is on, so "something has been switched on here"
         // reads the same way everywhere on this row.
         let style = if on {
@@ -6159,6 +6168,49 @@ mod tests {
         // Nothing at all to draw on, and no arithmetic that wraps round.
         assert!(button_range(0, 0, 0).is_empty());
         assert!(button_range(2, 0, 0).is_empty());
+    }
+
+    /// The rule the frame is gated on, and the one the reported bug was about: a theme brings
+    /// its own surface unless somebody asked to see through it, and asking is not something a
+    /// light theme can be talked into.
+    #[test]
+    fn a_theme_paints_its_own_surface_unless_transparency_was_asked_for() {
+        use crate::theme::Theme;
+        // The new default: nothing asked for, so the theme paints — where the old setting left
+        // a dark theme leaning on whatever the terminal happened to be.
+        assert!(background_is_painted(false, Theme::CleeCode), "a dark theme paints by default");
+        // Asked for, and a dark theme obliges.
+        assert!(!background_is_painted(true, Theme::CleeCode));
+        // A light theme paints either way: dark text on an unpainted dark terminal is the
+        // unreadable screen the themes exist to fix.
+        for asked in [true, false] {
+            assert!(
+                background_is_painted(asked, Theme::CleeCodeLight),
+                "a light theme paints whatever the switch says"
+            );
+        }
+    }
+
+    /// And what the gate decides, spelled out on a real buffer: with the flag off every cell the
+    /// widgets left on `Reset` comes back the theme's own colour, and with it on they are left
+    /// for the terminal to fill.
+    #[test]
+    fn a_dark_theme_fills_the_frame_by_default_and_leaves_it_alone_when_asked_to() {
+        let theme = crate::theme::Theme::CleeCode;
+        let pal = theme.palette();
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 2, 1));
+        buffer[(0, 0)].set_bg(Color::Reset);
+        buffer[(1, 0)].set_bg(Color::Reset);
+        assert!(background_is_painted(false, theme));
+        paint_background(&mut buffer, pal);
+        assert_eq!(buffer[(0, 0)].bg, pal.background);
+        assert_eq!(buffer[(1, 0)].bg, pal.background);
+
+        // The other way: the pass is not run at all, so the cells stay the terminal's.
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 2, 1));
+        buffer[(0, 0)].set_bg(Color::Reset);
+        assert!(!background_is_painted(true, theme));
+        assert_eq!(buffer[(0, 0)].bg, Color::Reset);
     }
 
     /// The point of doing this to the finished frame: whatever a widget left showing the

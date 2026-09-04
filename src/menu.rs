@@ -47,7 +47,7 @@ pub enum MenuAction {
     InspectVariable,
     ToggleSplitView,
     ToggleHiddenFiles,
-    ToggleOpaqueBackground,
+    ToggleTransparentBackground,
     ShowThemes,
     TogglePlotsInTabs,
     Undo,
@@ -168,7 +168,7 @@ impl MenuAction {
         MenuAction::InspectVariable,
         MenuAction::ToggleSplitView,
         MenuAction::ToggleHiddenFiles,
-        MenuAction::ToggleOpaqueBackground,
+        MenuAction::ToggleTransparentBackground,
         MenuAction::ShowThemes,
         MenuAction::TogglePlotsInTabs,
         MenuAction::Undo,
@@ -522,7 +522,7 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // Also a button on the menu bar itself, since the reason to reach for it is
                 // that the screen has become hard to read — which is a bad moment to be asked
                 // to find a menu in it.
-                item(Key::ItemOpaqueBackground, MenuAction::ToggleOpaqueBackground, None),
+                item(Key::ItemTransparentBackground, MenuAction::ToggleTransparentBackground, None),
                 // Also a button on the menu bar, for the same reason as the one above it: the
                 // moment you want a different theme is the moment the current one is hard to
                 // read. Here as well, because a control reachable only by mouse is one the

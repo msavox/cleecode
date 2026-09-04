@@ -21,13 +21,10 @@ rm -rf "$root"
 for theme in cleecode turbo solarized-dark eighties mocha \
              cleecode-light solarized-light ocean-light github; do
     mkdir -p "$root/$theme/cleecode"
-    # The theme, and the solid background. A theme with light text is free to be left
-    # translucent, which is right for using it and wrong for photographing it: through it the
-    # picture would show the recorder's black rather than Turbo's blue or Solarized's slate.
-    {
-        printf 'theme = "%s"\n' "$theme"
-        printf 'opaque_background = true\n'
-    } > "$root/$theme/cleecode/settings.toml"
+    # Just the theme. The retired opaque_background key used to be written here so the
+    # photograph would show Turbo's blue rather than the recorder's black; since the theme's
+    # own surface became the default, the default says the same thing on its own.
+    printf 'theme = "%s"\n' "$theme" > "$root/$theme/cleecode/settings.toml"
 done
 
 echo "$root"

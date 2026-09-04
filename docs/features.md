@@ -396,10 +396,12 @@ There is also a `man clee`.
 A file tree with per-type Nerd Font icons and git status dots, live refresh, create/rename/delete
 and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
 Three layout presets, a resizable everything, and a settings panel that applies changes live.
-English and Italian throughout, including the manual. The `◐` at the right-hand end of the menu
-bar fills in the background, for a translucent terminal with something bright behind it — which
-is worth knowing about the other way round too: by default CleeCode paints no background of its
-own, so a terminal with a translucent window shows your desktop through the editor.
+English and Italian throughout, including the manual. CleeCode paints its own background: a theme
+is a set of colours and the surface they were chosen against, and it arrives with both. The `●`
+at the right-hand end of the menu bar hands that surface back — it becomes a `◐`, and a
+translucent terminal shows your desktop through the editor again. The next theme you choose takes
+it back, which is the point: a theme picked because the screen had become unreadable arrives
+whole.
 
 ![Layout and Run menus](screenshots/menu.png)
 
