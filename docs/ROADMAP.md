@@ -2622,6 +2622,17 @@ riflesso F5/F10/F11 va ripensato in Ctrl+Shift, e la scelta va scritta prima del
 > piedi. Adapter: `lldb-dap` (anche via `xcrun`), altrimenti `gdb -i=dap` da gdb 14; tabella
 > sovrascrivibile come i language server. Quattro ondate, elencate nel design.
 
+> **Costruita (2026-09-04, quattro ondate in un giorno).** Il filo (`src/dap.rs`, l'ordine
+> del ciclo di vita asserito da un test che guarda cosa vede l'adapter), la presa
+> dell'editor (sessione, prompt con l'ipotesi Cargo, breakpoint condivisi con la strada di
+> Octave), il pannello (frame/variabili/watch nella colonna, i verbi di gdb a fuoco), e la
+> prova (`drive_dap.py` contro l'lldb-dap vero, in CI col salto onesto dove l'adapter
+> manca). La regola "si verifica guidando il binario vero" ha pagato alla prima corsa: un
+> breakpoint in un progetto raggiunto via symlink veniva accettato, marcato rosso e mai
+> colpito — l'adapter confronta i path come li ha scritti il compilatore, symlink risolti,
+> e su un Mac ogni `/tmp` è un symlink. Nessun test unitario l'avrebbe visto. Resta, prima
+> del tag: l'uso vero — una sessione di debug vissuta, non guidata.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
