@@ -2611,6 +2611,17 @@ pannello — il precedente da seguire è il workspace numerico, la forma c'è gi
 decidono sulla tavola dei vincoli esistente: niente F-key per regola del progetto, quindi il
 riflesso F5/F10/F11 va ripensato in Ctrl+Shift, e la scelta va scritta prima del codice.
 
+> **Scritta (2026-09-04): `docs/design/debugger.md`.** La ricognizione ha trovato più casa
+> del previsto: i breakpoint col loro gutter, la riga fermata evidenziata, le variabili del
+> frame nel pannello workspace e `drive_debug.py` esistono già per il debug Octave — la 0.22
+> dà a quella forma un secondo backend, DAP, non un secondo debugger. E le corde sono
+> decise: **nessuna corda nuova**. Ctrl+Shift+P resta l'unico riflesso globale; il resto è
+> menu Debug e tasti singoli nel pannello a fuoco (`c`, `n`, `s`, `o`, come gdb li scrive) —
+> perché lo strato Ctrl+Super arriva solo dove c'è il protocollo kitty, e un debugger che
+> non sa fare step via ssh su Terminal.app romperebbe la promessa su cui l'editor sta in
+> piedi. Adapter: `lldb-dap` (anche via `xcrun`), altrimenti `gdb -i=dap` da gdb 14; tabella
+> sovrascrivibile come i language server. Quattro ondate, elencate nel design.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
