@@ -1,3 +1,33 @@
+## What's new in 0.23.0
+
+**A safety fix worth the release on its own.** Clicking an agent that is not installed used to
+type its install command *and run it* — for two of the four that meant a script downloaded from
+the web and piped straight into a shell, executed because a mouse landed on a row. Now the
+command is only placed at the prompt; the Enter that runs it is yours, as it always should have
+been. The same discipline the rest of the drawer already followed.
+
+**Zoomed pictures pan every way.** A picture zoomed past the pane now moves sideways on the
+left and right arrows, not only up and down — and its body can be grabbed and dragged with the
+mouse, the way every image viewer moves one.
+
+**The close box is easier to see, and calmer.** The little square that closes a tab or a pane
+is filled now instead of a hollow outline that all but vanished on the focused tab, and it is
+drawn in the accent colour rather than a red that read as "this will destroy something" on a
+control that only ever asks first.
+
+**Steadier on a bare shell.** On a shell without readline — `/bin/sh` is one on many Linux
+boxes — a command the editor typed for you could arrive mangled, a stray form feed dropped into
+the middle of it. The editor now waits for the prompt and holds that form feed back, so what it
+types lands whole, on that kind of shell and every other.
+
+**A Debian package.** `clee` now ships a `.deb` alongside the archives, for `apt install
+./clee.deb` on Debian and Ubuntu — the binary, its man page and a desktop entry, with its
+dependencies read off the binary itself.
+
+Under the hood, the interactive test drivers are now a required check on every push, on macOS
+and Linux both, rather than an advisory one — the interface they exercise is held to the same
+bar as the rest of the build.
+
 ## What's new in 0.22.0
 
 Four releases in one — the roadmap's 0.19 through 0.22, landed together.
