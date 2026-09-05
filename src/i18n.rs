@@ -41,6 +41,9 @@ pub enum Key {
     ItemToggleSidebar,
     ItemToggleTerminal,
     ItemToggleDrawer,
+    /// Another agent beside the ones in the drawer. Ellipsised because it opens the launcher and
+    /// stops there: what starts a process is choosing a name on it, not this row.
+    ItemNewAgentTab,
     /// The drawer's border title while the launcher is showing — before there is an agent to
     /// name it after.
     DrawerTitle,
@@ -332,6 +335,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleDrawer) => "Agent drawer",
         (Lang::It, ItemToggleDrawer) => "Cassetto agente",
+        (Lang::En, ItemNewAgentTab) => "New agent tab...",
+        (Lang::It, ItemNewAgentTab) => "Nuovo tab agente...",
         (Lang::En, DrawerTitle) => "agent",
         (Lang::It, DrawerTitle) => "agente",
         (Lang::En, DrawerNotInstalled) => "not installed",
@@ -2320,12 +2325,27 @@ pub fn msg_drawer_started(lang: Lang, agent: &str) -> String {
     }
 }
 
-/// The agent in the drawer has exited. Nothing takes its place: a shell appearing where an agent
-/// was looks exactly like the agent still being there, so the launcher comes back instead.
+/// The drawer's last agent has exited and the column is empty. Nothing takes its place: a shell
+/// appearing where an agent was looks exactly like the agent still being there, so the launcher
+/// comes back instead — which is what the second half of the line says.
 pub fn msg_drawer_agent_ended(lang: Lang, agent: &str) -> String {
     match lang {
         Lang::En => format!("{agent} has ended — the drawer is back to the list"),
         Lang::It => format!("{agent} è terminato — il cassetto torna alla lista"),
+    }
+}
+
+/// One of several agents in the drawer has exited, with others still running.
+///
+/// Said because a tab that ends in the background ends silently otherwise: its chip simply stops
+/// being on the strip, and a strip is not something anybody is watching. The agent is named for
+/// the same reason — with two claude tabs open, "an agent ended" is not information. Nothing about
+/// the list here, unlike the line above: the drawer is not back to it, the other conversations are
+/// still going.
+pub fn msg_drawer_tab_ended(lang: Lang, agent: &str) -> String {
+    match lang {
+        Lang::En => format!("{agent} in the drawer has ended — its tab is gone"),
+        Lang::It => format!("{agent} nel cassetto ha finito — il suo tab non c'è più"),
     }
 }
 

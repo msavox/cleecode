@@ -5,6 +5,7 @@ pub enum MenuAction {
     ToggleSidebar,
     ToggleTerminal,
     ToggleDrawer,
+    NewAgentTab,
     NewTerminalTab,
     CloseTerminalTab,
     RenameTerminal,
@@ -135,6 +136,7 @@ impl MenuAction {
         MenuAction::ToggleSidebar,
         MenuAction::ToggleTerminal,
         MenuAction::ToggleDrawer,
+        MenuAction::NewAgentTab,
         MenuAction::NewTerminalTab,
         MenuAction::CloseTerminalTab,
         MenuAction::RenameTerminal,
@@ -530,6 +532,13 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // to talk to, which covers opening it; putting it away is a decision, and a
                 // decision is what a menu row is for.
                 item(Key::ItemToggleDrawer, MenuAction::ToggleDrawer, None),
+                // Beside the row that shows the column, because it is the same column and the
+                // question "how do I get a second agent" is asked while looking at the first one.
+                // The ellipsis is the honest part: this opens the launcher, and nothing starts
+                // until a name is chosen there. `Ctrl+Shift+T` does it too when the keyboard is
+                // already in the drawer — this row is how it is found, and the only way to it
+                // when the keyboard is somewhere else.
+                item(Key::ItemNewAgentTab, MenuAction::NewAgentTab, None),
                 item(Key::ItemToggleMenuBar, MenuAction::ToggleMenuBar, Some("Ctrl+B")),
                 // Reachable from the palette on purpose: Ctrl+Shift+B is the only key that
                 // opens the menus, and a terminal without disambiguated key reporting sends
