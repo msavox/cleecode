@@ -14,9 +14,24 @@ be wrong, and all four are invisible to `cargo test`.
 So this launches the editor in a pty, finds its session directory the way an agent's environment
 would name it, speaks NDJSON JSON-RPC to a `clee --mcp` of its own, and then looks at the screen.
 
-The window is deliberately wide. Opening a file "beside" means opening the split, and CleeCode
-only opens one unasked when there is room for it — in a narrow window the file lands in the pane
-you are looking at, which is correct behaviour and unusable as a check on "beside".
+The window is wide — wider than the 120 columns CleeCode calls room for two panes — and that is
+now a check rather than a convenience. **An agent's `open_file` never opens the split.** A tool
+call is another program rearranging the frames of somebody who is typing in them, and "an agent
+read a file" must not be the answer to "why did my window just split", so with room to spare and
+the split off the file has to arrive as an ordinary tab and the layout has to stay exactly as it
+was. Where that tab goes is decided by where the keyboard was at that moment: in the editor it
+goes *behind* the file being typed in, and the status line is the only thing that moves; anywhere
+else — a terminal, which is where somebody talking to an agent usually is — it comes to the
+front, because there is nothing being typed for it to cover. Both halves are driven here, from
+the two places the keyboard can be.
+
+The split still matters to the range checks — a span highlighted in a pane nobody is focused on
+is the thing worth seeing — so this driver opens one itself, with the key a user would press,
+before it asks for a range. That is the honest arrangement now that the editor will not open one
+unasked: what an agent gets is the split the user has.
+
+The debugger and the Octave figures are the other side of that rule and still open a split of
+their own; drive_dap.py and drive_figures.py are where that is checked.
 """
 
 import json
@@ -31,7 +46,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pty_drive import Report, Session, binary_from_argv  # noqa: E402
 
-# Wide enough that CleeCode opens the split by itself: see the module docstring.
+# Wider than SPLIT_FOR_FIGURES_COLS (120), the width CleeCode calls room for two panes — so a
+# window that stayed one pane stayed one pane on purpose. See the module docstring.
 COLS, ROWS = 140, 34
 
 # `mcp::MAX_SAY`, mirrored here rather than imported: this driver speaks to the binary as a
@@ -190,6 +206,44 @@ def wait_for(predicate, timeout=15.0, session=None):
     return False
 
 
+def editor_panes(session):
+    """How many editor frames are on screen: one, or two while the split is open.
+
+    Counted from the top-left corners along the editor frames' own border row, which is the row
+    directly under the tab strip — the strip is the row the ▶ Run button rides, and the file
+    tree's corner is up there with it rather than down here. Read off the picture rather than
+    inferred from what is written in a pane, because the question is about the *layout*: which
+    file happens to be in front changes under half the checks below, and the number of frames
+    must not."""
+    row = session.row_of("▶ Run")
+    return session.full_line(row + 1).count("┌") if row is not None else None
+
+
+def editor_border_ink(session):
+    """The colour the editor frame's own top-left corner is drawn in.
+
+    A frame with the keyboard in it wears its border in the accent and one without it does not —
+    `focused_border_style` in src/ui.rs — so this is where the focus is, read off the picture. It
+    is what a focus move is *waited on* here: the repo's rule is to wait for the thing itself and
+    never for a moment of the clock, and a keystroke that moves the keyboard has this to show for
+    itself the instant it has landed."""
+    row = session.row_of("▶ Run")
+    if row is None:
+        return None
+    at = session.full_line(row + 1).find("┌")
+    return session.cells(row + 1)[at].fg if at >= 0 else None
+
+
+def tab_strip(session):
+    """The editor's tab strip, which is the row the ▶ Run button rides.
+
+    A tab opened behind the file somebody is typing in shows nowhere else: its contents are not on
+    screen, by design, and the strip is the whole of what a user sees happen. So this is what
+    "the file was opened" is asked of when the answer must not be "and it took the front"."""
+    row = session.row_of("▶ Run")
+    return session.full_line(row) if row is not None else ""
+
+
 def read_json(path):
     try:
         with open(path) as handle:
@@ -325,24 +379,85 @@ def main():
                      and "second_line_must_never_be_seen" not in session.text(),
                      session)
 
-        # ---- The one action ------------------------------------------------------------------
+        # ---- The one action, and where it is allowed to put the file --------------------------
+        #
+        # The keyboard is in the editor: the fixture was opened with Ctrl+O a moment ago and
+        # nothing has moved it since. That is precisely the case the rule is written for — a tab
+        # arriving over the line somebody is typing in is the layout changing under them — so
+        # what has to happen here is a tab in the strip, the user's own file still in front of
+        # it, and a sentence on the status line as the only thing that moved.
+        one_pane = editor_panes(session)
         asked, failed = mcp.tool("open_file", {"path": "src/other.rs", "line": OPEN_AT})
         report.check("open_file is accepted and answered at once",
                      not failed and isinstance(asked, dict) and asked.get("status") == "requested",
                      session, note=repr(asked))
 
-        appeared = session.wait(lambda s: "zzz_marker" in s.text(), 10)
-        report.check("the editor really opened the file the agent asked for", appeared, session)
+        appeared = session.wait(lambda s: "other.rs" in tab_strip(s), 10)
+        report.check("the editor really opened the file the agent asked for", appeared, session,
+                     note="a tab in the strip, which is where an ordinary tab goes")
 
+        # The whole of the change: an agent may not rearrange the frames. Twenty columns of room
+        # to spare and the window still has one editor pane in it.
+        report.check("and it did not open the split to do it",
+                     editor_panes(session) == one_pane, session,
+                     note="%s editor frame before the request, %s after — in a window %d columns "
+                          "wide, which is wider than CleeCode's own two-pane threshold"
+                          % (one_pane, editor_panes(session), COLS))
+        report.check("the file the user was typing in is the one still in front",
+                     "anchor_main" in session.text() and "zzz_marker" not in session.text(),
+                     session,
+                     note="opened behind the work: the keyboard was in this very pane")
+        report.check("and the status line is what says the file was opened",
+                     "other.rs" in session.full_line(session.rows - 1), session,
+                     note=session.full_line(session.rows - 1).strip()[:110])
+
+        # ---- the other half of the rule, from the other side of the keyboard ------------------
+        #
+        # Focus anywhere but the editor is the ordinary case: somebody asks an agent something in
+        # a terminal and looks up to see the answer. Nothing is being typed for the tab to cover,
+        # so the same request puts the file in front — which is also the only way the line it was
+        # asked for can be looked at.
+        in_editor = editor_border_ink(session)
+        # Ctrl+Alt+↓, into the terminal panel — waited on the editor's border going out, which is
+        # the frame saying it no longer has the keyboard.
+        left_editor = session.press(
+            "\x1b[1;7B", lambda s: editor_border_ink(s) not in (None, in_editor), 8)
+        report.check("the keyboard can be put where somebody talking to an agent has it",
+                     left_editor, session,
+                     note="the editor's border stops being the focused one: %s, now %s"
+                          % (in_editor, editor_border_ink(session)))
+        again, failed = mcp.tool("open_file", {"path": "src/other.rs", "line": OPEN_AT})
+        report.check("the same open_file is accepted again",
+                     not failed and isinstance(again, dict) and again.get("status") == "requested",
+                     session, note=repr(again))
         # Line 150 of a 200-line file cannot be on a screen that opened at line 1.
         marker = "zzz_marker_%d " % OPEN_AT
-        report.check("and at the line the agent named, not at the top",
-                     session.wait(lambda s: marker in s.text(), 6), session, note=marker)
+        fronted = session.wait(lambda s: marker in s.text(), 10)
+        report.check("with the keyboard outside the editor the file comes to the front instead",
+                     fronted, session, note="nothing was being typed for it to arrive over")
+        report.check("and at the line the agent named, not at the top", marker in session.text(),
+                     session, note=marker)
+        report.check("and it still did not open the split",
+                     editor_panes(session) == one_pane, session,
+                     note="where the file lands is the keyboard's business; the frames are the "
+                          "user's either way")
 
-        # Beside, not instead: the file that was already there is still on screen.
-        report.check("it opened beside the work rather than over it",
-                     "anchor_main" in session.text() and "zzz_marker" in session.text(),
-                     session)
+        # Back to the editor and back to the user's own file, which is the state the rest of this
+        # file is written for — the checks below type a character and ask where it landed.
+        session.press("\x1b[1;7A", lambda s: editor_border_ink(s) == in_editor, 8)  # Ctrl+Alt+↑
+        session.press("\x1b[1;6D", lambda s: "anchor_main" in s.text(), 8)   # Ctrl+Shift+←
+        report.check("the user can walk back to their own tab", "anchor_main" in session.text(),
+                     session, note="two tabs in the strip, and the other one is theirs")
+
+        # ---- a split the *user* opened --------------------------------------------------------
+        #
+        # Ctrl+L, the key a person presses. Everything from here down is about a file arriving in
+        # the pane beside the work, which is still what happens — an agent gets the split the user
+        # has, and this is the user giving it one.
+        session.send("\x0c")
+        split = session.wait(lambda s: (editor_panes(s) or one_pane) > one_pane, 8)
+        report.check("Ctrl+L gives the window two panes", split, session,
+                     note="%s editor frames, up from %s" % (editor_panes(session), one_pane))
 
         # ---- open_file with a range: end_line marks it, not just scrolls to it ----------------
         #
@@ -372,6 +487,13 @@ def main():
             8)
         report.check("the whole range, and its unselected neighbour right after it, are on screen",
                      ranged_on_screen, session)
+
+        # With a split there *is* somewhere else to put it, so it goes there — the half of the old
+        # behaviour that never changed. Both files on screen at once is the whole of "beside".
+        report.check("a split the user opened is one the agent's file lands in the other half of",
+                     "anchor_main" in session.text() and "zzz_marker" in session.text(), session,
+                     note="beside the work, not over it: the frames the user made are the frames "
+                          "the agent gets")
 
         if ranged_on_screen:
             first_row, last_row, below_row = (session.row_of(first_marker), session.row_of(last_marker),
@@ -428,7 +550,12 @@ def main():
                      session, note=repr(previewed))
 
         rendered = session.wait(lambda s: "preview_bold_marker" in s.text(), 8)
-        report.check("the preview tab opens beside the user's work", rendered, session)
+        # Beside, in the split the *driver* opened above — `preview` has no more right to the
+        # frames than `open_file` does, and in one pane this tab would be behind the user's work
+        # for exactly the same reason. What is checked here is the other arm: given a second pane,
+        # the rendered document goes into it rather than over the file being typed in.
+        report.check("the preview tab opens in the pane the user is not typing in", rendered,
+                     session)
         # Markdown's `**` never reaches the rendered lines — `Event::Start(Tag::Strong)` only
         # flips a style bit (src/preview.rs) — so its absence is what tells the preview surface
         # apart from the raw source, which would still be showing them.
