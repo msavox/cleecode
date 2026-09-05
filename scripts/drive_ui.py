@@ -450,8 +450,17 @@ def a_file_over_the_line_says_what_it_is_not_doing(binary, report):
         # Saved rather than left dirty: an unsaved buffer this size would be copied into the
         # recovery directory on the autosave tick and left there when this session is killed,
         # and the driver has no business leaving fifty megabytes on somebody's disk.
+        #
+        # Waited on the editor's own "no longer dirty" mark, not on the clock: writing fifty
+        # megabytes atomically — to a temporary file and then renamed over the original — takes
+        # longer than a fixed sleep allows on a slow disk, and reading the file back before the
+        # rename lands is how this check failed on a CI runner while passing on a fast laptop.
+        # The tab loses its `*` the moment the save completes, which is exactly the moment the
+        # bytes are there to read.
         session.send("\x13")                              # Ctrl+S
-        session.wait(lambda s: True, 2.0)
+        saved = session.wait(lambda s: "big.java*" not in s.text(), 20)
+        report.check("the large buffer reports itself saved", saved, session,
+                     note="the tab drops its dirty mark when the write has landed")
         with open(big_path, "rb") as handle:
             head = handle.read(8)
         report.check("a large buffer saves what was typed into it", head.startswith(b"co"),
