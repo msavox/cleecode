@@ -338,8 +338,8 @@ fn main() -> Result<()> {
     // The keyboard one matters for its own reason. Without it Ctrl+Tab arrives as a plain Tab —
     // the two are the same byte, 0x09, in the encoding terminals have used since VT100 — so
     // cycling frames from the keyboard would be impossible to tell from indenting. Ghostty,
-    // kitty, WezTerm and foot support this; Terminal.app does not, which is why Alt+1/2/3 reach
-    // the frames directly and work everywhere.
+    // kitty, WezTerm and foot support this; Terminal.app does not, which is why Ctrl+Alt with
+    // the arrows reaches the frames directly and works everywhere.
     //
     // Both have their own timeout, so a silent terminal costs a coarser picture rather than a
     // stall, and neither can happen once frames are being drawn.
