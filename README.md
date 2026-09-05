@@ -236,6 +236,12 @@ a one-row formatting bar: bold, headings, lists, links as buttons that toggle th
 around your selection — each showing the characters it writes, so the bar teaches you not to
 need it, and View hides it once it has.
 
+![The git panel on its History tab: the commit graph of this very repository, tags and branch
+heads coloured](docs/screenshots/gitpanel.png)
+
+*The git panel on History — this repository's own graph, tags and heads lit. Status, changes,
+branches and stashes are the other tabs, and the keys are written along the bottom edge.*
+
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named
 workspace and open it with `clee -w NAME`. Double-click a row of output to go where it points:
