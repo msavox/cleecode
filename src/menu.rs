@@ -713,11 +713,21 @@ pub fn command_entries() -> Vec<(Key, MenuItemDef)> {
             out.push((def.title_key, it));
         }
     }
-    for target in [ContextTarget::Sidebar, ContextTarget::Editor, ContextTarget::Terminal] {
+    for target in [
+        ContextTarget::Sidebar,
+        ContextTarget::Editor,
+        ContextTarget::Terminal,
+        ContextTarget::Drawer,
+    ] {
         let group_key = match target {
             ContextTarget::Sidebar => Key::PanelFile,
             ContextTarget::Editor => Key::MenuEdit,
             ContextTarget::Terminal => Key::MenuTerminal,
+            // The drawer has no menu of its own on the bar; its View item is the name people
+            // know the column by, so the palette files anything drawer-only under that. Today
+            // every one of its rows is already carried above and this contributes nothing —
+            // it is here so a row added to that menu tomorrow cannot become mouse-only.
+            ContextTarget::Drawer => Key::ItemToggleDrawer,
         };
         // Asked for with the git half included, because from the palette these act on the
         // tree's selection exactly as Rename and Delete do — and an action reachable only by
@@ -740,6 +750,7 @@ pub enum ContextTarget {
     Sidebar,
     Editor,
     Terminal,
+    Drawer,
 }
 
 /// A right-click / Ctrl+Space pop-up: a short, context-specific action list anchored where it was
@@ -865,6 +876,20 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
             item(Key::ItemRenameTerminal, MenuAction::RenameTerminal, Some("Ctrl+Shift+E")),
             group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
             item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, None),
+        ],
+        // Not the Terminal set, though the drawer holds terminals: half of that set is about
+        // panes — new pane, rename, close pane — and none of it exists here. What the drawer
+        // has is tabs of agents, so the rows below the copy pair are the tab ones: another
+        // agent, close this one, and put the whole column away. The last is the View menu's own
+        // toggle — the ptys go on running — and no Rename, because a drawer tab is named after
+        // its agent and keeps that name. The chord hints are honest: with focus in the drawer,
+        // Ctrl+Shift+T really does raise the agent picker rather than a shell tab.
+        ContextTarget::Drawer => vec![
+            item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
+            item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
+            group(Key::ItemNewAgentTab, MenuAction::NewAgentTab, Some("Ctrl+Shift+T")),
+            item(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
+            group(Key::ItemToggleDrawer, MenuAction::ToggleDrawer, None),
         ],
     }
 }
@@ -1014,6 +1039,35 @@ mod tests {
             labels.iter().any(|l| l.contains("Column selection")),
             "the palette should list it; it lists: {labels:?}"
         );
+    }
+
+    /// The drawer's right-click menu is about agent tabs, not about files or panes: it must
+    /// offer a way to open another agent, and it must not borrow the sidebar's errands — no
+    /// Rename, and no git rows even when the workspace is a repository, which is what the
+    /// `true` passed here claims it is.
+    #[test]
+    fn the_drawer_menu_is_about_agent_tabs_and_nothing_else() {
+        let items = context_items(ContextTarget::Drawer, true);
+        assert!(items.iter().any(|i| i.action == MenuAction::NewAgentTab));
+        assert!(items.iter().any(|i| i.action == MenuAction::ToggleDrawer));
+        assert!(items.iter().all(|i| i.action != MenuAction::Rename));
+        // The rows the sidebar gains when `versioned` turns true are exactly the git ones, so
+        // the difference is the list of what must not appear here — kept as a difference
+        // rather than spelled out, so a git row added tomorrow is covered without editing this.
+        let plain: Vec<MenuAction> =
+            context_items(ContextTarget::Sidebar, false).iter().map(|i| i.action).collect();
+        let git: Vec<MenuAction> = context_items(ContextTarget::Sidebar, true)
+            .into_iter()
+            .map(|i| i.action)
+            .filter(|a| !plain.contains(a))
+            .collect();
+        assert!(!git.is_empty(), "the sidebar's versioned half has gone missing");
+        for action in git {
+            assert!(
+                items.iter().all(|i| i.action != action),
+                "the drawer menu carries a git errand"
+            );
+        }
     }
 
     #[test]
