@@ -294,6 +294,46 @@ def frame_rows(session):
     return rows or None
 
 
+def focus_launcher(session):
+    """Give the open launcher the keyboard, by cycling the frames to it with Ctrl+Tab.
+
+    Not with Ctrl+Shift+A: that key opens the drawer only when there is no agent to talk to, and
+    once one is running in a pane it hands *it* the context instead — so pressing it here would
+    send a reference to that agent and leave the launcher untouched. The drawer is the last frame
+    in the cycle; focus is confirmed by the selection ring answering an arrow, and the arrow is
+    stepped back so the ring is where it was."""
+    for _ in range(6):
+        before = frame_rows(session)
+        if before:
+            session.press("\x1b[B", lambda s: True, 0.4)          # Down
+            if frame_rows(session) != before:
+                session.press("\x1b[A", lambda s: True, 0.3)      # and back, ring restored
+                return True
+        session.press("\x1b[9;5u", lambda s: True, 0.5)           # Ctrl+Tab, next frame
+    return False
+
+
+def highlight_agent(session, name):
+    """Walk the launcher's selection ring onto `name`'s mark, and say whether it got there.
+
+    The ring does not always stay where it was left: reopening the launcher — with an agent now
+    running in a pane, so the key that opens it is no longer the same gesture as before — can put
+    it back on the first agent. A check that pressed Enter trusting the ring to still be on the
+    name it clicked a moment ago would then start whichever agent the ring had drifted to, so the
+    ring is put where it is wanted rather than assumed. Measured against the mark on screen, the
+    same way every walk in this file is."""
+    for _ in range(6):
+        ring = frame_rows(session)
+        mark = mark_rows(session, name)
+        if not ring or not mark:
+            return False
+        if ring[0] <= mark[0] <= ring[-1]:
+            return True
+        session.press("\x1b[B" if ring[0] < mark[0] else "\x1b[A", lambda s: True, 0.4)
+    ring, mark = frame_rows(session), mark_rows(session, name)
+    return bool(ring and mark and ring[0] <= mark[0] <= ring[-1])
+
+
 def menu_action(session, menu_letter, label, report, note):
     """Runs a menu item by name: open the bar, jump to the menu by its first letter, walk down to
     the row and press Enter.
@@ -376,6 +416,43 @@ def focus_terminal(session):
     editor first, and from the editor down to the shells."""
     session.press("\x1b[1;7D", lambda s: True, 0.4)   # Ctrl+Alt+←
     session.press("\x1b[1;7B", lambda s: True, 0.4)   # Ctrl+Alt+↓
+
+
+def prompt_line_with(session, command):
+    """The shell-prompt line carrying `command`, or None — never the status line.
+
+    Two lines on screen name the install command: the shell prompt it was typed at, `$ curl …`,
+    and the status line's sentence about it, `opencode is not installed — `curl …``. Only the
+    first is what "sitting at a prompt" and "taken back off the prompt" are about, and the two
+    are told apart by what sits before the command — a `$` for the shell, a sentence for the
+    status line — and by the status line never being anywhere but the last row. Keying the waits
+    on the shell line and not on the command being *anywhere* in the text is the difference
+    between a check that watches the shell and one the status line answers for free, before the
+    shell has drawn a thing."""
+    for y in range(session.rows - 1):   # the status line is the last row; never it
+        line = session.full_line(y)
+        if command in line and "$" in line.split(command)[0]:
+            return line
+    return None
+
+
+def start_agent_in_terminal(session, name):
+    """Type an agent's name at a shell and wait for its stub to answer, retried if the first
+    line is lost to the pane's startup scrub.
+
+    A pane clears its shell's startup banner once, with a form feed, the moment the shell is
+    first reading keys — which on a slow machine can be exactly as this types the name. A shell
+    with readline turns that form feed into a redraw and no harm is done; `/bin/sh` on Linux is
+    dash, which has none, so the tty keeps it as a literal `^L` at the head of the line and the
+    line submits as `^Lcodex` — not a command. The scrub only ever fires once, so a second
+    attempt is clean; the line is cleared first each time so nothing is glued onto anything."""
+    for _ in range(3):
+        focus_terminal(session)
+        session.send("\x15")                      # kill any scrub residue already on the line
+        session.send(name + "\r")
+        if session.wait(lambda s: "AGENT-STUB %s ready" % name in s.text(), 15):
+            return True
+    return False
 
 
 def open_file(session, name):
@@ -693,9 +770,7 @@ def check_drawer(binary, report):
         # ---- precedence ----------------------------------------------------------------------
         # A second agent, in an ordinary terminal, started by typing its name. Ctrl+Shift+A now
         # has two to choose between, and the drawer is the one it means.
-        focus_terminal(session)
-        session.send("codex\r")
-        other = session.wait(lambda s: "AGENT-STUB codex ready" in s.text(), 30)
+        other = start_agent_in_terminal(session, "codex")
         report.check("a second agent starts in an ordinary terminal", other, session)
 
         if not open_file(session, "demo"):
@@ -920,24 +995,35 @@ def check_drawer(binary, report):
                 if how == "clicking":
                     click(session, drawer_column(session) + 4, row)
                 else:
-                    # The click above left the highlight on that same name, so Enter is the other
-                    # hand making the same gesture — which is the point of checking both.
-                    session.press(session.chord("a"),
-                                  lambda s: drawer_column(s) is not None, 8)
+                    # Enter is the other hand making the same gesture the click did — the point of
+                    # checking both. The launcher is still open from the click; what it needs is
+                    # the keyboard, and *not* by way of Ctrl+Shift+A: with the agent from the
+                    # precedence check still running in a pane, that key sends it the context
+                    # rather than opening anything, and the Enter would land in that agent's
+                    # prompt. So the keyboard is walked to the drawer through the frame cycle
+                    # instead, the ring put back on this name, and then Enter.
+                    if not focus_launcher(session):
+                        report.check("the launcher takes the keyboard for Enter", False, session)
+                        break
+                    highlight_agent(session, absent)
                     session.send("\r")
-                typed = session.wait(lambda s: command in s.text(), 8)
+                # Waited on the shell prompt drawing the command, not on the command being
+                # anywhere in the text: the status line names it the instant the key is pressed,
+                # so `command in text` passes before the shell — freshly opened when the agents
+                # are running in the other panes — has caught up and echoed a thing. On a slow
+                # machine that gap is real, and keying on it is what makes this watch the shell.
+                typed = session.wait(lambda s: prompt_line_with(s, command) is not None, 15)
                 report.check("%s an agent that is not installed types its install command"
                              % how, typed, session, note=command)
                 if not typed:
                     break
-                at = session.column_of(command)
+                line = prompt_line_with(session, command)
+                at = line.index(command)
                 seam = drawer_column(session)
                 report.check("and types it into a shell, not into the drawer",
-                             at is not None and (seam is None or at < seam), session,
+                             seam is None or at < seam, session,
                              note="column %s, drawer border at %s — the drawer is the agent's "
                                   "home and the agent is the thing that is missing" % (at, seam))
-                line = next((session.full_line(y) for y in range(session.rows)
-                             if command in session.full_line(y)), "")
                 report.check("and it is sitting at a prompt, unsent",
                              "$" in line.split(command)[0], session,
                              note="the shell's own prompt is still on the line: %r"
@@ -949,9 +1035,12 @@ def check_drawer(binary, report):
                              note=status.strip()[:110])
                 # Disarmed before anything else in this file can press Enter. A driver that walks
                 # away leaving `curl … | bash` on a live prompt is a driver that installs things.
-                session.press("\x15", lambda s: command not in s.text(), 5)
+                # Cleared off the shell line, which is the prompt — the status line goes on naming
+                # the command in its sentence, and waiting for it to leave *there* would wait for
+                # ever.
+                session.press("\x15", lambda s: prompt_line_with(s, command) is None, 5)
                 report.check("and the line can be taken back off the prompt",
-                             command not in session.text(), session,
+                             prompt_line_with(session, command) is None, session,
                              note="typed is not run: nothing here ever became a command")
     finally:
         session.close()
