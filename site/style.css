@@ -799,6 +799,16 @@ footer p { margin: 0 0 0.5rem; }
   margin: 0 0.4rem;
 }
 
+/* The Ko-fi cup: the same stroke drawing Maestrino's header carries, so the house pours one
+   coffee everywhere. It inherits the link's colour and warms to Ko-fi's own red under the
+   pointer — declared after the nav's own hover so the red wins the tie. */
+a.kofi svg {
+  width: 17px;
+  height: 17px;
+  vertical-align: -3px;
+}
+a.kofi:hover { color: #ff5e5b; }
+
 .copy {
   margin-top: 1rem;
   font-size: 0.83rem;
