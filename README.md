@@ -3,13 +3,71 @@
 An editor, a file tree and real terminals in one window. Written in Rust, driven from the
 keyboard, with the mouse as an alternative rather than the only way.
 
-Best in a terminal that can draw pictures — **Ghostty**, **kitty**, **WezTerm** or **iTerm2** —
-where pictures, PDFs and Markdown are shown as themselves rather than as coloured blocks. It
-works anywhere; those are where it looks like the screenshots.
+By **Matteo Savoia** ([msavox](https://github.com/msavox)) ·
+**[cleecode.marunja.com](https://cleecode.marunja.com)**
 
-By **Matteo Savoia** ([msavox](https://github.com/msavox)).
+![CleeCode in six beats: the splash, a script run, Markdown rendered beside its source, the
+commit graph, the Turbo theme repainting the whole screen, and the split editor](docs/demo.gif)
 
-![CleeCode in action](docs/demo.gif)
+*Six beats, one feature each: it starts, it runs your code, it renders your documents, it
+knows the repository's history, it changes its skin in one keypress, and it splits.*
+
+## Your coding agent, inside the editor
+
+`Ctrl+Shift+A` opens the agent drawer beside whatever you were doing. Empty, it is the
+launcher — claude, codex, opencode, gemini, drawn large, arrows and Enter to start one, the
+ones you do not have shown anyway and dimmed. The agent is the TUI you already have, on the
+subscription you already pay for: CleeCode holds no API key and rebuilds no chat. Subscription
+login and API keys both work, because the editor is agnostic by construction — the agent in
+the pane is the real CLI and authenticates itself; CleeCode never asks for, stores, or sees a
+credential of any kind.
+
+![The agent drawer opens on its launcher, claude starts inside it, and the edit it makes
+lands in the open file with the changed lines lit](docs/agent.gif)
+
+*The drawer, a real claude, one prompt — and the edit landing live in the buffer, the changed
+lines lit until you take the keyboard back.*
+
+Press `Ctrl+Shift+A` again with an agent running and CleeCode writes where you are at its
+prompt — selection, diagnostic or cursor line, as `path:line` — and never presses Enter for
+you. The files the agent rewrites reload on their own, the new lines lit in the gutter; a
+buffer with your unsaved edits never reloads itself, because your work wins over the agent's,
+always. Follow mode (*View → Follow edits made outside*, off until you ask) opens the files
+you did not have open beside your work, without ever taking the keyboard.
+
+And the editor answers back. `clee --mcp` makes it an MCP server with seven tools: the open
+files (unsaved ones flagged), the selection, the diagnostics, `open_file` with a line range
+the editor highlights, `preview` for rendering a file beside your work, `say` for one line in
+the status bar — and `edit_buffer`, which changes an unsaved buffer only after asking you, on
+your terms (`once`, `always this session`, or `no`). **An agent started from the drawer gets
+all of it with zero configuration.** Any other agent takes one line. Claude Code:
+
+```
+claude mcp add clee -- clee --mcp
+```
+
+codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.clee]
+command = "clee"
+args = ["--mcp"]
+```
+
+opencode, in `~/.config/opencode/opencode.json`:
+
+```json
+{ "mcp": { "clee": { "type": "local", "command": ["clee", "--mcp"], "enabled": true } } }
+```
+
+gemini, in `~/.gemini/settings.json`:
+
+```json
+{ "mcpServers": { "clee": { "command": "clee", "args": ["--mcp"] } } }
+```
+
+Then start the agent inside a CleeCode terminal: the wiring works by inheritance, so an agent
+started anywhere else is told it is not in a session rather than handed a wrong answer.
 
 ## Installing
 
@@ -21,28 +79,40 @@ brew trust msavox/clee
 brew install clee
 ```
 
-`brew trust` exists from Homebrew 6 onwards, and there it is required rather than a formality:
-a formula is Ruby code Homebrew executes locally, so it refuses to load one from a third-party
-tap until you trust the source — tapping alone doesn't grant that. Without it you get `Refusing
-to load formula msavox/clee/clee from untrusted tap`. On older Homebrew the command does not
-exist (`Unknown command: brew trust`) and is not needed: skip it and install.
+`brew trust` exists from Homebrew 6 onwards, where it is required rather than a formality; on
+older Homebrew the command does not exist and is not needed — skip it and install. The formula
+builds from source: well under a minute on macOS, longer on Linux, where it also pulls
+`libxcb`.
 
-If `brew tap` itself fails with `git@github.com: Permission denied (publickey)`, that is not
-about this tap — a global git rule is rewriting HTTPS URLs to SSH and you have no key on that
-machine. `git config --global --get-regexp 'url\..*\.insteadof'` shows it.
+<details>
+<summary>If <code>brew tap</code> or <code>brew install</code> refuses…</summary>
 
-The formula builds from source (well under a minute on macOS; longer on Linux, where it also
-pulls `libxcb`). [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap
-and CI verifies that install on Ubuntu, but only the *install* is tested.
+`Refusing to load formula msavox/clee/clee from untrusted tap` means Homebrew 6 without the
+`brew trust` line: a formula is Ruby code Homebrew executes locally, so it refuses to load one
+from a third-party tap until you trust the source — tapping alone doesn't grant that.
+
+`git@github.com: Permission denied (publickey)` on the tap is not about this tap — a global
+git rule is rewriting HTTPS URLs to SSH and you have no key on that machine.
+`git config --global --get-regexp 'url\..*\.insteadof'` shows it.
+
+[Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux) uses the same tap and CI verifies
+that install on Ubuntu, but only the *install* is tested.
+</details>
+
+### Windows — Scoop
+
+```powershell
+scoop bucket add clee https://github.com/msavox/scoop-clee
+scoop install clee
+```
 
 ### Prebuilt binaries
 
 macOS arm64/x86_64, Linux arm64/x86_64 and Windows x86_64 builds are attached to each
-[release](https://github.com/msavox/cleecode/releases). Outside macOS they're experimental: CI
-checks they start, nothing more. Each is built on the architecture it names — the arm64 Linux
-one covers an Ampere or Graviton server and a 64-bit Raspberry Pi OS. The Linux binaries need
-glibc and libxcb — install `libxcb1` (Debian/Ubuntu) or `libxcb` (Fedora/Arch) if one fails to
-start. For Alpine/musl, build from source.
+[release](https://github.com/msavox/cleecode/releases), each built on the architecture it
+names — the arm64 Linux one covers an Ampere or Graviton server and a 64-bit Raspberry Pi OS.
+The Linux binaries need glibc and libxcb — install `libxcb1` (Debian/Ubuntu) or `libxcb`
+(Fedora/Arch) if one fails to start. For Alpine/musl, build from source.
 
 ### Optional extras
 
@@ -55,12 +125,12 @@ brew install pandoc typst   # Markdown as a real document, pictures and all
 brew install chafa          # a picture inside a terminal pane
 ```
 
-Without a graphics-capable terminal (see the top of this file), pictures fall back to coloured
-half-blocks and Markdown to styled terminal text — less to look at, nothing missing.
-
-They are looked for where they are installed, not only on the `PATH`: an editor opened from the
-Dock inherits macOS's own environment rather than a shell's, and Homebrew and `/Library/TeX/texbin`
-are not in it.
+Best in a terminal that can draw pictures — **Ghostty**, **kitty**, **WezTerm** or
+**iTerm2** — where pictures, PDFs and Markdown are shown as themselves rather than as
+coloured blocks. It works anywhere; those are where it looks like the screenshots. The tools
+are looked for where they are installed, not only on the `PATH`: an editor opened from the
+Dock inherits macOS's own environment rather than a shell's, and Homebrew and
+`/Library/TeX/texbin` are not in it.
 
 ### From source
 
@@ -126,6 +196,9 @@ or a folder on it — or picking CleeCode under *Open with* in Finder's Get Info
 with its folder as the project root. To keep it in the Dock, open it once and choose
 *Options ▸ Keep in Dock*; to uninstall, drag the app to the Bin.
 
+<details>
+<summary>What the launcher needs, and why the bundle is built on your machine</summary>
+
 The launcher needs [Ghostty](https://ghostty.org) (`brew install --cask ghostty`) to host
 the editor, and asks for a new window in the Ghostty already running rather than starting a
 second one — which is automation, so macOS asks for permission the first time. Refusing it
@@ -138,6 +211,7 @@ Gatekeeper warnings: nothing arrives quarantined, so nothing needs an Apple Deve
 signature to open. The launcher is compiled into it, path to `clee` and all, so re-run the
 command after moving or reinstalling the binary — and to pick up any change to the launcher
 itself that came with a new version.
+</details>
 
 ## What it does
 
@@ -146,67 +220,16 @@ pictures, PDFs and Markdown, and Octave and Python as a live numeric session.
 
 ![CleeCode main view](docs/screenshots/main.png)
 
-**Your coding agent, inside the editor.** `Ctrl+Shift+A` opens the agent drawer: a panel down the
-right of the window, in whatever you were already doing. Empty, it is the list — claude, codex,
-opencode, gemini, each one drawn large, arrows and Enter to start it, the ones you do not have
-shown anyway and dimmed so the empty drawer is also where you find out what CleeCode runs. It is
-pinned by default, a column of the layout that everything makes room for; set it to autocollapse
-in the settings and it paints itself over the frames instead, withdrawing the moment the keyboard
-goes back to your work and returning on the same key. Dismissing it is not killing it: the agent
-goes on running and the conversation is where you left it, through workspace switches included.
-The agent is the TUI you already have, with the subscription you already pay for —
-CleeCode holds no API key and rebuilds no chat. Subscription login and API keys both work,
-because the editor is agnostic by construction: the agent in the pane is the real CLI and
-authenticates itself, with the login or the key it finds in your environment — CleeCode never
-asks for, stores, or sees a credential of any kind. That same `Ctrl+Shift+A`, once an agent is
-running, writes where you are at its prompt — selection, diagnostic or cursor line, as
-`path:line` — and never presses Enter for you; it finds the agent even where the process table
-calls it `node`, which is what a `claude` installed from npm runs as. The files the agent
-rewrites reload on their own, the new lines lit in the gutter until you type again; follow mode
-(*View → Follow edits made outside*, off until you ask) opens the files you did not have open
-beside your work, without ever taking the keyboard.
-
-The editor can also answer the agent's questions. `clee --mcp` makes it an MCP server with four
-read-only tools — the open files, the selection, the diagnostics, and `open_file`, which shows
-you a file beside your work without touching your keyboard. One line of configuration per agent.
-Claude Code:
-
-```
-claude mcp add clee -- clee --mcp
-```
-
-codex, in `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.clee]
-command = "clee"
-args = ["--mcp"]
-```
-
-opencode, in `~/.config/opencode/opencode.json`:
-
-```json
-{ "mcp": { "clee": { "type": "local", "command": ["clee", "--mcp"], "enabled": true } } }
-```
-
-gemini, in `~/.gemini/settings.json`:
-
-```json
-{ "mcpServers": { "clee": { "command": "clee", "args": ["--mcp"] } } }
-```
-
-Then start the agent inside a CleeCode terminal: the wiring works by inheritance, so an agent
-started anywhere else is told it is not in a session rather than handed a wrong answer. The
-Claude Code line is the one verified against a running agent; the other three are written from
-those projects' documented shapes.
-
 **Editing.** Multi-file tabs, a split editor, find and replace with regular expressions,
 project-wide search, code folding, column selection, and a git panel that stages, commits and
 switches branch. Words already in your buffers are offered as you type — along with what a
 language server suggests, where one is installed, and its errors underlined where they are.
-Over a Markdown file, a one-row formatting bar: bold, headings, lists, links as buttons that
-toggle the syntax around your selection — each showing the characters it writes, so the bar
-teaches you not to need it, and View hides it once it has.
+The commands you reach for every hour are all there: go to definition and back, every use of
+a name, the file's symbols, format as one undo, code actions on the diagnostic under the
+cursor, and a rename that shows you the diff before touching anything. Over a Markdown file,
+a one-row formatting bar: bold, headings, lists, links as buttons that toggle the syntax
+around your selection — each showing the characters it writes, so the bar teaches you not to
+need it, and View hides it once it has.
 
 **Terminals that are real.** Tiled shells that survive the editor's own mistakes, each with a
 name and a startup command. Save the whole set-up — root, files, frames, shells — as a named
@@ -255,7 +278,8 @@ in it. *Debug ▸ Start debugging* asks which program to run, with the guess alr
 runs it under whichever debug adapter you have: `lldb-dap`, or a `gdb` 14 or newer, which speaks
 the protocol natively. There is one set of breakpoints — the same `Ctrl+Shift+P` in the same
 gutter, in any file now — and stopping marks the line and opens a panel with the stack, the
-frame's variables and your watch expressions.
+frame's variables and your watch expressions, where `c`, `n`, `s` and `o` do what gdb taught
+your fingers they do.
 
 **Nine themes, five dark and four light.** The button beside the background toggle on the menu
 bar opens the list, or *View → Theme…* if your hands are on the keyboard. The choice is written
@@ -272,7 +296,9 @@ back with one switch, View → Transparent background.*
 
 **It does not close on you.** CleeCode hosts long-running shells, so an internal failure is
 contained and reported in the status line rather than ending the process. A broken terminal
-costs you that terminal, at most.
+costs you that terminal, at most — and against what no shield stops, `kill -9` included, your
+dirty buffers are copied to a recovery folder every few seconds and offered back at the next
+start.
 
 ## More
 
