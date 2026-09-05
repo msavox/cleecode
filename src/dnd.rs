@@ -532,6 +532,12 @@ fn url_opener() -> (&'static str, &'static [&'static str]) {
     }
 }
 
+/// Where the coffee is. Written down once, here beside the opener that has to approve it,
+/// because the menu bar's button, the Help menu's entry and the message the address is read out
+/// of over ssh are three places that must all mean the same page — and a second copy of an
+/// address is a second address the day one of them is edited.
+pub const KOFI_URL: &str = "https://ko-fi.com/msavox";
+
 /// Hands a URL to the desktop's browser.
 ///
 /// Only http(s) is a URL worth opening — anything else is a scheme the opener might hand to a

@@ -244,6 +244,7 @@ pub enum Key {
     ItemDeleteWorkspace,
     MenuHelp,
     ItemShowManual,
+    ItemSupportKofi,
     ManualTitle,
     ManualHint,
     MsgNoWorkspaces,
@@ -893,6 +894,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemShowManual) => "Manual...",
         (Lang::It, ItemShowManual) => "Manuale...",
+
+        (Lang::En, ItemSupportKofi) => "☕ Buy me a coffee",
+        (Lang::It, ItemSupportKofi) => "☕ Offrimi un caffè",
 
         (Lang::En, ManualTitle) => "CleeCode manual",
         (Lang::It, ManualTitle) => "Manuale CleeCode",
@@ -3326,6 +3330,27 @@ pub fn msg_opened_url(lang: Lang, url: &str) -> String {
     match lang {
         Lang::En => format!("Opening {url} in the browser"),
         Lang::It => format!("Apertura di {url} nel browser"),
+    }
+}
+
+/// The Ko-fi page went to the browser. Nothing more to say than thank you — the page itself is
+/// now in front of them, and repeating its address here would be telling them where they are.
+pub fn msg_kofi_opened(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "☕ Thank you!",
+        Lang::It => "☕ Grazie!",
+    }
+}
+
+/// The browser could not be reached — over ssh, most of the time, where `open_url` refuses on
+/// purpose. The address is *in* the message and not only on the clipboard: that clipboard is an
+/// OSC 52 write into a terminal on another machine, which some terminals quietly drop, and a
+/// line the eye can read off the status bar works even then.
+pub fn msg_kofi_copied(lang: Lang, url: &str) -> String {
+    let url = url.trim_start_matches("https://");
+    match lang {
+        Lang::En => format!("☕ {url} copied to the clipboard"),
+        Lang::It => format!("☕ {url} copiato negli appunti"),
     }
 }
 

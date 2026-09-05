@@ -22,6 +22,7 @@ pub enum MenuAction {
     RunTarget,
     Quit,
     ShowAbout,
+    SupportKofi,
     Copy,
     Cut,
     Paste,
@@ -151,6 +152,7 @@ impl MenuAction {
         MenuAction::RunTarget,
         MenuAction::Quit,
         MenuAction::ShowAbout,
+        MenuAction::SupportKofi,
         MenuAction::Copy,
         MenuAction::Cut,
         MenuAction::Paste,
@@ -680,7 +682,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuHelp,
             items: vec![
                 item(Key::ItemShowManual, MenuAction::ShowManual, Some("Ctrl+Shift+M")),
+                // Below the line with About, the other row that is about the program rather
+                // than about the file you are in. The ☕ on the menu bar is the same action
+                // reached the short way; this is the one no width can take away.
                 group(Key::ItemAbout, MenuAction::ShowAbout, None),
+                item(Key::ItemSupportKofi, MenuAction::SupportKofi, None),
             ],
         },
     ]
