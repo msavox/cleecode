@@ -35,6 +35,7 @@ screenshots/preview-md.png    preview-md.png
 screenshots/octave-ide.png    octave-ide.png
 screenshots/pylab-ide.png     pylab-ide.png
 screenshots/debug.png         debug.png
+screenshots/gitpanel.png      gitpanel.png
 screenshots/themes.png        themes.png
 '
 
