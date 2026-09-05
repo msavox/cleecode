@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CleeCode
+GenericName=Terminal IDE
+Comment=An editor, a file tree and real terminals in one window
+Exec=clee %F
+Terminal=true
+Categories=Development;IDE;
+Keywords=editor;terminal;ide;rust;
+MimeType=text/plain;inode/directory;
+StartupNotify=false
