@@ -122,13 +122,13 @@ def drawer_column(session):
     status line says "the agent is still running in it" the moment the drawer is hidden, and a
     plain search for the word found that sentence and reported the column still there.
 
-    The drawer is always closable \u2014 launcher or agent, it wears the same System 7 box the
-    terminal windows do \u2014 so its border reads "\u250c \u25a1 \u2500 agent", corner, a padded close box, a
+    The drawer is always closable \u2014 launcher or agent, it wears the same close box the
+    terminal windows do \u2014 so its border reads "\u250c \u25a0 \u2500 agent", corner, a padded close box, a
     padded dash, then the title, rather than the bare "\u250c agent" a frame with no close box still
     carries (the Files panel, which nothing ever closes). Both forms are anchored here, on the
     corner and nothing looser, because a title alone is also the sentence a status message uses
     when it names the agent running behind a hidden drawer."""
-    boxed = "\u250c \u25a1 \u2500"  # \u250c \u25a1 \u2500 : the corner, the close box, the dash before the title
+    boxed = "\u250c \u25a0 \u2500"  # \u250c \u25a0 \u2500 : the corner, the close box, the dash before the title
     for y in range(session.rows):
         line = session.full_line(y)
         for title in (" agent ", " Claude Code ", " codex ", " opencode ", " gemini "):
@@ -221,7 +221,7 @@ def ribbon_handle(session, col, mark):
 
 
 def close_cell(session):
-    """Where the drawer's □ close box is drawn, as a (column, row).
+    """Where the drawer's ■ close box is drawn, as a (column, row).
 
     Found on screen rather than worked out from the width, so what gets clicked is the button a
     person can see. Searched from the drawer's own left border rightwards, because every closable
@@ -233,7 +233,7 @@ def close_cell(session):
     if left is None:
         return None
     for y in range(session.rows):
-        at = session.full_line(y).find("□", left)
+        at = session.full_line(y).find("■", left)
         if at >= 0:
             return at, y
     return None
@@ -614,18 +614,18 @@ def check_drawer(binary, report):
             report.check("and the opening handle is back on the window's edge",
                          ribbon_handle(session, edge, "‹") is not None, session)
 
-            # Back in, so the □ can be put to the same question — two ways out is the point, and
+            # Back in, so the ■ can be put to the same question — two ways out is the point, and
             # the one in the corner is the one people already know.
             opening = ribbon_handle(session, edge, "‹")
             if opening:
                 click(session, edge, opening[0][len(opening[0]) // 2])
                 session.wait(lambda s: drawer_column(s) is not None, 8)
             spot = close_cell(session)
-            report.check("the drawer's title bar carries a □ as well", spot is not None, session)
+            report.check("the drawer's title bar carries a ■ as well", spot is not None, session)
             if spot:
                 click(session, *spot)
                 shut = session.wait(lambda s: drawer_column(s) is None, 6)
-                report.check("clicking the □ closes the drawer too", shut, session)
+                report.check("clicking the ■ closes the drawer too", shut, session)
 
         # ---- summoning ---------------------------------------------------------------------
         # There is no agent anywhere, so the key that hands an agent the context has nobody to
@@ -817,18 +817,18 @@ def check_drawer(binary, report):
                              note="hiding the column never touched the pty")
 
         # ---- the same round trip, with the mouse alone -----------------------------------------
-        # The □ over a running agent is the one that has to be trusted: it is drawn in the cell
+        # The ■ over a running agent is the one that has to be trusted: it is drawn in the cell
         # every other pane's close button lives in, and every other pane's close button ends what
         # is inside. This one hides the column and leaves the conversation going, which is the
         # only thing closing the drawer has ever meant.
         talk = "\n".join(session.frame_of("AGENT-STUB claude ready"))
         open_borders = vertical_borders(session, middle)
         spot = close_cell(session)
-        report.check("the drawer wears its □ with an agent in it too", spot is not None, session)
+        report.check("the drawer wears its ■ with an agent in it too", spot is not None, session)
         if spot and talk.strip():
             click(session, *spot)
             shut = session.wait(lambda s: drawer_column(s) is None, 6)
-            report.check("the □ over a running agent hides the drawer", shut, session)
+            report.check("the ■ over a running agent hides the drawer", shut, session)
             report.check("and says the agent is still running in it",
                          "still running" in session.text(), session,
                          note="the View menu's own close path, not the terminal panel's")
@@ -847,7 +847,7 @@ def check_drawer(binary, report):
                              note="summoning, not the launcher: there is somebody in there")
                 report.check("with the conversation exactly where it was",
                              "\n".join(session.frame_of("AGENT-STUB claude ready")) == talk,
-                             session, note="the □ hid the column and never touched the pty")
+                             session, note="the ■ hid the column and never touched the pty")
 
             # And the closing handle over the same conversation, which is the pair of gestures a
             # hand on the mouse would actually use: out by the edge, back by the edge, and the
