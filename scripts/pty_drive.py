@@ -15,6 +15,7 @@ import fcntl
 import os
 import pty
 import re
+import shutil
 import signal
 import struct
 import sys
@@ -45,7 +46,8 @@ except ImportError:
 class Session:
     """A CleeCode running in a pty, with a rendered picture of its screen."""
 
-    def __init__(self, binary, root, env=None, args=None, cols=COLS, rows=ROWS):
+    def __init__(self, binary, root, env=None, args=None, cols=COLS, rows=ROWS,
+                 keep_recovery=False):
         # Its own config directory, inside the throwaway project. Without this a driver reads the
         # settings of whoever is running it — so a check would depend on whether they happen to
         # have turned the feature off — and CleeCode's resume would reopen their last project
@@ -54,6 +56,20 @@ class Session:
         self.cols, self.rows = cols, rows
         self.config = os.path.join(root, ".config")
         os.makedirs(self.config, exist_ok=True)
+
+        # A fresh session must not inherit another one's crash-recovery. Several checks reuse one
+        # project across sessions — legitimately, to share its files — and CleeCode is taken down
+        # here with SIGKILL, which is a crash: a session that had typed into a buffer leaves a
+        # copy of it in the recovery directory, and the next session on the same project opens on
+        # the recovery picker rather than the plain frame. The picker sits over everything, so
+        # "Files" is still on screen and the frame looks normal, but Ctrl+O, the palette and
+        # Ctrl+Q all land in the picker instead — which is exactly the shape of the CI-only
+        # failures this fixed: the copy is written on a five-second tick, so a fast laptop kills
+        # the first session before it fires and a slow runner does not. Wiping the directory here
+        # makes every session independent regardless of the clock. drive_recover, whose whole
+        # subject is what survives a crash, passes keep_recovery=True to see it on purpose.
+        if not keep_recovery:
+            shutil.rmtree(os.path.join(self.config, "cleecode", "recovery"), ignore_errors=True)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm-256color"
