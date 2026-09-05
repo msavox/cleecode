@@ -182,6 +182,16 @@ jobs:
           bin="target/${{ matrix.target }}/release/clee"
           name="clee-${tag}-${{ matrix.slug }}"
 
+          # A dispatch that retro-attaches the .deb to a tag older than the packaging itself
+          # checks out a tree with no packaging/deb in it. The inputs are then taken from the
+          # commit this workflow run was started from — for a tag push that is the tag's own
+          # sha, so ordinary releases still build purely from the tag; only the retro-attach
+          # reaches forward, which is the whole point of dispatching it.
+          if [ ! -d packaging/deb ]; then
+            git fetch --depth 1 origin "${{ github.sha }}"
+            git checkout "${{ github.sha }}" -- packaging/deb
+          fi
+
           staging="debroot"
           mkdir -p "${staging}/DEBIAN" \
                    "${staging}/usr/bin" \
