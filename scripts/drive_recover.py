@@ -204,7 +204,10 @@ def main():
                      os.path.exists(copy) and open(copy).read() == body)
 
         # ---- the next session offers it, and restoring is not saving ----------------------------
-        session = Session(binary, project)
+        # keep_recovery, because this session's whole point is to inherit the copy the killed one
+        # left — the isolation the harness gives every other session is the one thing this check
+        # must not have.
+        session = Session(binary, project, keep_recovery=True)
         offered = session.wait(lambda s: "Unsaved work from a session that ended" in s.text(), 25)
         report.check("the next start offers the unsaved work", offered, session)
         if not offered:
@@ -248,7 +251,10 @@ def main():
                      and os.WEXITSTATUS(status) == 0, note=Session.describe_status(status))
         session.close()
 
-        after = Session(binary, project)
+        # keep_recovery here too, or the check below would be asking the harness rather than the
+        # editor: it is the *clean quit* that must have left nothing to offer, so the directory
+        # has to be whatever the editor left it, not one the harness emptied.
+        after = Session(binary, project, keep_recovery=True)
         session = after
         if started(after, report, "notes.txt", "the project opens again"):
             report.check("a session that ended cleanly leaves nothing to offer",
@@ -282,7 +288,9 @@ def main():
         hard_kill(session)
         session = None
 
-        session = Session(binary, scratch)
+        # keep_recovery: the same reason as the named case — this session exists to be offered
+        # the copy the killed one left behind.
+        session = Session(binary, scratch, keep_recovery=True)
         offered = session.wait(lambda s: "Unsaved work from a session that ended" in s.text(), 25)
         report.check("the next start offers the unnamed buffer back", offered, session)
         if offered:
