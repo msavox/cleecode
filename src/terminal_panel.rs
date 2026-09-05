@@ -220,13 +220,21 @@ pub fn selected_text(selection: TermSelection, cols: u16, cell: impl Fn(u16, u16
 /// it is rather than after two characters it would take literally.
 const LINE_RESET: &[u8] = if cfg!(windows) { b"" } else { b"\x05\x15" };
 
-/// The bytes that type `command` into a shell and run it: clear the line, the command, one
-/// carriage return. One line goes in and one line comes out, whatever the line editor was
-/// holding before — see `flush_pending` for why each piece is there. Any newlines inside the
+/// The bytes that type `command` onto a cleared prompt and stop there: the line reset, then the
+/// command, and no carriage return. One line is put in front of the user, whatever the line
+/// editor was holding before, and the decision to run it stays theirs. Any newlines inside the
 /// command itself would each submit a line of their own, so they are flattened to spaces.
-fn typed_line(command: &str) -> Vec<u8> {
+fn typed_line_unsent(command: &str) -> Vec<u8> {
     let mut bytes = LINE_RESET.to_vec();
     bytes.extend(command.replace(['\r', '\n'], " ").as_bytes());
+    bytes
+}
+
+/// The bytes that type `command` into a shell and run it: the same cleared line as
+/// [`typed_line_unsent`], with the one carriage return that submits it — see `flush_pending`
+/// for why each piece is there.
+fn typed_line(command: &str) -> Vec<u8> {
+    let mut bytes = typed_line_unsent(command);
     bytes.push(b'\r');
     bytes
 }
@@ -704,6 +712,16 @@ impl TerminalPanel {
     /// through here for that reason.
     pub fn type_line(&mut self, command: &str) {
         let bytes = typed_line(command);
+        self.write_input(&bytes);
+    }
+
+    /// Types one line at the prompt and stops there — the same cleared line as [`type_line`],
+    /// but no carriage return follows it, so nothing runs until the user presses Enter. For a
+    /// command they have to read before they run it: an install line that pipes a downloaded
+    /// script into a shell, above all, where submitting it on their behalf would be running a
+    /// remote program because a mouse landed on a row.
+    pub fn type_line_unsent(&mut self, command: &str) {
+        let bytes = typed_line_unsent(command);
         self.write_input(&bytes);
     }
 
@@ -1331,6 +1349,19 @@ mod tests {
         // A command someone pasted a newline into is still one line, not two.
         assert_eq!(typed_line("a\nb").iter().filter(|b| **b == b'\r').count(), 1);
         assert!(typed_line("a\nb").ends_with(b"a b\r"));
+    }
+
+    /// The unsent twin, which the install offer types: the same cleared line, and *no* carriage
+    /// return — because the command it carries is a script downloaded and piped into a shell, and
+    /// a stray `\r` there would run a remote program on the user's behalf. This pins the one byte
+    /// that is the whole difference between offering the line and executing it.
+    #[test]
+    fn the_unsent_line_never_submits() {
+        let danger = "curl -fsSL https://opencode.ai/install | bash";
+        let bytes = typed_line_unsent(danger);
+        assert!(bytes.starts_with(LINE_RESET), "the line is still cleared before anything is typed");
+        assert!(!bytes.contains(&b'\r'), "not one carriage return: the Enter is the user's");
+        assert!(bytes.ends_with(danger.as_bytes()), "and the command is all that is left on the line");
     }
 
     /// The other half of it: a shell is handed nothing at all until it is at a prompt. Writing

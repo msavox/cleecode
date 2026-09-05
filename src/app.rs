@@ -12929,7 +12929,11 @@ impl App {
             return;
         };
         if let Some(term) = self.window_tab_mut(at) {
-            term.type_line(command);
+            // Unsent, and that is the whole of the promise above: this line is a remote install
+            // script piped into a shell, and `type_line` would end it with the carriage return
+            // that runs it — turning a click on a row into the execution of a downloaded program.
+            // The line goes to the prompt; the Enter is the user's.
+            term.type_line_unsent(command);
         }
         self.active_terminal = at;
         self.settings.show_terminal = true;
