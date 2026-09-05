@@ -25,6 +25,17 @@ import time
 # choose their side-by-side shape, which is what most checks want to be looking at.
 ROWS, COLS = 30, 110
 
+# Every timeout in this file is written for a developer's machine and multiplied by this. The
+# drivers' waits are all conditions, so a fast machine never pays for the slack — a wait returns
+# the moment its predicate holds — but a CI runner pays dearly without it: on a fresh macos-14
+# image the first command a brand-new shell executes has been seen to take over thirty seconds
+# (cold dyld caches and the malware scan, neither of them the editor's doing), and a 52 MB write
+# on ubuntu's disks outlives a patience that a laptop's SSD made look generous. Stretching the
+# clock everywhere at once, from the environment, keeps the checks' evidence exactly as it is
+# and fixes only their impatience — the alternative is finding these one timeout at a time, one
+# red run each.
+PATIENCE = float(os.environ.get("CLEE_DRIVE_PATIENCE", "1"))
+
 try:
     import pyte
 except ImportError:
@@ -100,8 +111,12 @@ class Session:
         return "\x1b[%d;6u" % ord(letter.lower())
 
     def wait(self, predicate, timeout=10.0, settle=0.25):
-        """Read until `predicate(self)` holds, then a moment longer so the frame finishes."""
-        deadline = time.time() + timeout
+        """Read until `predicate(self)` holds, then a moment longer so the frame finishes.
+
+        The timeout is scaled by PATIENCE, the settle is not: the first is how long a condition
+        may take on the machine running this, the second is how long a finished frame takes to
+        stop moving, which is the editor's clock rather than the runner's."""
+        deadline = time.time() + timeout * PATIENCE
         while time.time() < deadline:
             self.drain()
             if predicate(self):
@@ -132,7 +147,7 @@ class Session:
         out. The pty is deliberately left open throughout: closing it first hangs the editor up,
         which would measure a different ending than the one being asked about."""
         self.send("\x11")
-        deadline = time.time() + timeout
+        deadline = time.time() + timeout * PATIENCE
         while time.time() < deadline:
             self.drain()
             try:

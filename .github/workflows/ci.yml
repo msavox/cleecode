@@ -70,6 +70,13 @@ jobs:
       matrix:
         os: [macos-14, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    env:
+      # Every driver timeout is written for a developer's machine; the runners are not one. A
+      # fresh macos-14 image has taken over thirty seconds to execute the first command of a
+      # brand-new shell (cold dyld caches, the malware scan), and ubuntu's disks have outlived
+      # the large-file patience a laptop's SSD set. The waits are all conditions, so a runner
+      # having a good day pays nothing for the slack.
+      CLEE_DRIVE_PATIENCE: "6"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
