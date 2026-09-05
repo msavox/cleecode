@@ -1,0 +1,17 @@
+Package: clee
+Version: @VERSION@
+Section: editors
+Priority: optional
+Architecture: @ARCH@
+Depends: @DEPENDS@
+Installed-Size: @INSTALLED_SIZE@
+Maintainer: Matteo Savoia <matteo.savoia@gmail.com>
+Homepage: https://cleecode.marunja.com
+Description: terminal IDE that works over ssh with zero configuration
+ CleeCode is one binary: an editor, a file tree and real terminals in one
+ window, written in Rust and driven from the keyboard, with the mouse as an
+ alternative rather than the only way. It wants no server on the far end of
+ an ssh session and no configuration file to be useful on the first run.
+ .
+ The command is clee. The package ships the binary, its man page and a
+ desktop entry that launches it in a terminal.

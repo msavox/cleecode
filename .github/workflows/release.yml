@@ -10,7 +10,7 @@ on:
         description: "Existing tag to build and attach artifacts to"
         required: true
       only:
-        description: "Attach one archive only (slug, e.g. linux-arm64). Empty attaches all."
+        description: "Attach one artifact only (slug, e.g. linux-arm64 or linux-x86_64-deb). Empty attaches all."
         required: false
         default: ""
 
@@ -69,6 +69,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             slug: linux-x86_64
             smoke: true
+            # The Debian package is built here, from the binary this job already built and
+            # smoke-checked, and attached under its own slug — `linux-x86_64-deb`.
+            deb: true
+            debarch: amd64
           # GitHub's arm64 Linux runners are free for public repositories, so this builds
           # natively and gets the same smoke-check as everything else — no cross toolchain,
           # no qemu, and a binary that has actually started once on the architecture it is
@@ -78,6 +82,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
             slug: linux-arm64
             smoke: true
+            # Same runner arrangement as the archive above: native, so dpkg-deb packages a
+            # binary that has already started on the architecture the package names.
+            deb: true
+            debarch: arm64
           - label: Windows x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -156,6 +164,56 @@ jobs:
           cat "${archive}.sha256"
           echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
 
+      # The Debian package, from the same binary the archive above just shipped. Its Depends
+      # line is not written by hand: every shared library the binary actually links is read
+      # back with ldd and resolved to the package that owns it with dpkg -S, on the oldest
+      # supported Ubuntu — so the list is derived from the build, and a new dependency slipping
+      # into the binary shows up here as a changed Depends rather than as a broken install on
+      # someone's machine. --root-owner-group spares us fakeroot: dpkg-deb records root
+      # ownership directly.
+      - name: Package the Debian archive
+        id: deb
+        if: matrix.deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          bin="target/${{ matrix.target }}/release/clee"
+          name="clee-${tag}-${{ matrix.slug }}"
+
+          staging="debroot"
+          mkdir -p "${staging}/DEBIAN" \
+                   "${staging}/usr/bin" \
+                   "${staging}/usr/share/man/man1" \
+                   "${staging}/usr/share/applications" \
+                   "${staging}/usr/share/doc/clee"
+          install -m 755 "$bin" "${staging}/usr/bin/clee"
+          gzip -9n < docs/clee.1 > "${staging}/usr/share/man/man1/clee.1.gz"
+          install -m 644 packaging/deb/clee.desktop "${staging}/usr/share/applications/clee.desktop"
+          install -m 644 LICENSE "${staging}/usr/share/doc/clee/copyright"
+
+          depends=$(ldd "$bin" | awk '/=>/ && $3 != "" {print $3}' \
+            | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u | paste -sd, - | sed 's/,/, /g')
+          size_kb=$(du -sk "$staging" | cut -f1)
+          sed -e "s/@VERSION@/${version}/" \
+              -e "s/@ARCH@/${{ matrix.debarch }}/" \
+              -e "s/@DEPENDS@/${depends}/" \
+              -e "s/@INSTALLED_SIZE@/${size_kb}/" \
+              packaging/deb/control.in > "${staging}/DEBIAN/control"
+          cat "${staging}/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "$staging" "dist/${name}.deb"
+          # The package has to survive its own round trip before it is published: dpkg-deb
+          # reads the control and the file list back out of the built package, so what is
+          # printed in the log is what an installer will see, not what this script meant.
+          dpkg-deb --info "dist/${name}.deb"
+          dpkg-deb --contents "dist/${name}.deb"
+          cd dist
+          sha256sum "${name}.deb" > "${name}.deb.sha256"
+          cat "${name}.deb.sha256"
+          echo "deb=dist/${name}.deb" >> "$GITHUB_OUTPUT"
+
       # Adding a platform to a release that is already out: everything still builds, so the
       # tag is checked on every target, but only the named archive is attached. The four that
       # are already published keep the bytes and the checksums they were published with —
@@ -184,6 +242,27 @@ jobs:
           gh release upload "$tag" \
             "${{ steps.package.outputs.archive }}" \
             "${{ steps.package.outputs.archive }}.sha256" \
+            --clobber
+
+      # The .deb travels under its own slug — `linux-x86_64-deb`, `linux-arm64-deb` — so it can
+      # be added to a release that is already out without the archive beside it being rebuilt
+      # and re-attached: the dispatch that validates this very step on an existing tag names
+      # the deb slug and nothing else, and the published tarballs keep their checksums.
+      - name: Upload the Debian archive to the release
+        if: ${{ matrix.deb && (github.event.inputs.only == '' || github.event.inputs.only == format('{0}-deb', matrix.slug)) }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --notes-file .github/release-notes.md \
+              || gh release view "$tag" >/dev/null
+          fi
+          gh release upload "$tag" \
+            "${{ steps.deb.outputs.deb }}" \
+            "${{ steps.deb.outputs.deb }}.sha256" \
             --clobber
 
   # Prints the checksum the Homebrew formula needs for the source tarball, so the tap can be
