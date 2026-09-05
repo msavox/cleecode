@@ -147,6 +147,9 @@ pub struct TerminalPanel {
     pub startup_command: Option<String>,
     /// The startup command, held back until the shell is actually reading. See `run_command`.
     pending_command: Option<String>,
+    /// A line to put at the prompt without running it, held back the same way. See
+    /// `queue_line_unsent`.
+    pending_unsent: Option<String>,
     /// Whether the banner has been scrubbed since this shell started. See `flush_pending`.
     cleared: bool,
     /// When the history was last scrolled through. The scrollbar is a hint rather than
@@ -690,6 +693,7 @@ impl TerminalPanel {
             name: None,
             startup_command: startup.map(str::to_string),
             pending_command: startup.map(str::to_string),
+            pending_unsent: None,
             cleared: false,
             last_scroll: None,
         })
@@ -713,16 +717,39 @@ impl TerminalPanel {
     pub fn type_line(&mut self, command: &str) {
         let bytes = typed_line(command);
         self.write_input(&bytes);
+        self.suppress_banner_scrub();
     }
 
-    /// Types one line at the prompt and stops there — the same cleared line as [`type_line`],
-    /// but no carriage return follows it, so nothing runs until the user presses Enter. For a
-    /// command they have to read before they run it: an install line that pipes a downloaded
-    /// script into a shell, above all, where submitting it on their behalf would be running a
-    /// remote program because a mouse landed on a row.
-    pub fn type_line_unsent(&mut self, command: &str) {
-        let bytes = typed_line_unsent(command);
-        self.write_input(&bytes);
+    /// Queues one line to be put at the prompt without running it, once the shell is actually
+    /// reading — no carriage return follows it, so nothing happens until the user presses Enter.
+    /// For a command they have to read before they run it: an install line that pipes a
+    /// downloaded script into a shell, above all, where submitting it for them would be running
+    /// a remote program because a mouse landed on a row.
+    ///
+    /// Held back rather than typed on the spot for the reason `run_command` is: the shell chosen
+    /// to type into may be one that has only just been opened, still inside its rc and not yet
+    /// reading keys, and a line written to it then is half-swallowed — `curl …` arriving as
+    /// `cu`. `flush_pending` waits for the prompt and then types it, in the same step as the
+    /// banner scrub so the two can never race: the scrub goes first, and the line's own leading
+    /// reset clears away anything it left, on a shell that binds the form feed and one that does
+    /// not alike.
+    pub fn queue_line_unsent(&mut self, command: &str) {
+        self.pending_unsent = Some(command.to_string());
+    }
+
+    /// Marks the one-time startup banner scrub as done without sending it, because a line has
+    /// just been typed here on purpose.
+    ///
+    /// The scrub is a form feed, fired the moment the shell is first reading keys — which, on a
+    /// slow machine, can be after this pane was handed a command rather than before. A shell with
+    /// readline turns that form feed into a harmless redraw; `/bin/sh` on Linux is dash, which
+    /// has none, so it keeps the form feed as a literal `^L` dropped into the middle of the line
+    /// we just typed — `curl …` arriving as `cu^L…`. Whatever the line was for, once it is down
+    /// the scrub can only hurt it: the command's own leading line-reset already cleared away
+    /// anything the banner left, so there is nothing left for the form feed to do but land in the
+    /// wrong place. Marking it done is how it is kept from firing behind us.
+    fn suppress_banner_scrub(&mut self) {
+        self.cleared = true;
     }
 
     pub fn run_command(&mut self, command: &str) {
@@ -771,6 +798,13 @@ impl TerminalPanel {
         }
         if let Some(command) = self.pending_command.take() {
             self.write_input(&typed_line(&command));
+        }
+        // The unsent twin, typed the same way and at the same one moment as the scrub above, so
+        // the form feed and the command can never arrive out of order: whatever the scrub left
+        // on the line, this line's own reset clears before it types. Left at the prompt, never
+        // submitted.
+        if let Some(command) = self.pending_unsent.take() {
+            self.write_input(&typed_line_unsent(&command));
         }
     }
 

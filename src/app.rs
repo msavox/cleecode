@@ -12930,10 +12930,12 @@ impl App {
         };
         if let Some(term) = self.window_tab_mut(at) {
             // Unsent, and that is the whole of the promise above: this line is a remote install
-            // script piped into a shell, and `type_line` would end it with the carriage return
-            // that runs it — turning a click on a row into the execution of a downloaded program.
-            // The line goes to the prompt; the Enter is the user's.
-            term.type_line_unsent(command);
+            // script piped into a shell, and a carriage return here would run it — turning a
+            // click on a row into the execution of a downloaded program. The line goes to the
+            // prompt; the Enter is the user's. Queued rather than typed on the spot because the
+            // shell may be one just opened for it and not yet reading, which would swallow half
+            // the line — `flush_pending` puts it down once the prompt is there.
+            term.queue_line_unsent(command);
         }
         self.active_terminal = at;
         self.settings.show_terminal = true;
