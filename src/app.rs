@@ -17306,10 +17306,11 @@ impl App {
             // is for anywhere, and the panel has no actions of its own that a menu could add
             // which its own single letters do not already carry.
             Focus::Debug => (ContextTarget::Editor, areas.debug.unwrap_or(self.last_full)),
-            // The same menu a terminal pane gets: what is in the drawer is a terminal, and copy,
-            // paste and the rest mean there exactly what they mean in one.
+            // The drawer's own menu, not the terminal one: what is in the drawer is a terminal,
+            // but its rows are tabs of agents, and "new pane" or "rename" would be promises the
+            // frame cannot keep.
             Focus::Drawer => {
-                (ContextTarget::Terminal, ui::drawer_rect(&areas).unwrap_or(self.last_full))
+                (ContextTarget::Drawer, ui::drawer_rect(&areas).unwrap_or(self.last_full))
             }
         };
         let versioned = self.selected_file_is_versioned();
@@ -17342,6 +17343,41 @@ impl App {
             self.focus = Focus::Editor;
             self.context_menu = Some(ContextMenu::new(ContextTarget::Editor, (col, row), false));
             return;
+        }
+        // The drawer, which used to fall through here and get no menu at all. A right-click on
+        // one of its chips first makes that tab the active one — the same geometry the left
+        // button reads in `click_drawer`, minus the ■: a right-click points at a tab, and
+        // closing is what the menu's own "Close tab" row is for, on the tab just pointed at.
+        if let Some(rect) = ui::drawer_rect(areas) {
+            if within(rect, col, row) {
+                self.focus = Focus::Drawer;
+                if self.drawer_showing_agents() && row == rect.y {
+                    let lang = self.settings.lang;
+                    let (labels, tab_count) =
+                        match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
+                            Some(window) => {
+                                (ui::terminal_tab_labels(window, 0, lang), window.tabs.len())
+                            }
+                            None => (Vec::new(), 0),
+                        };
+                    if tab_count > 1 {
+                        let strip = ui::terminal_tab_strip_rect(rect, true);
+                        let hit = ui::terminal_tab_ranges(strip, &labels)
+                            .into_iter()
+                            .position(|tab| col >= tab.full.0 && col < tab.full.1);
+                        if let Some(t) = hit {
+                            if let Some(window) =
+                                self.drawer.as_mut().and_then(|d| d.window.as_mut())
+                            {
+                                window.active = t;
+                            }
+                        }
+                    }
+                }
+                self.context_menu =
+                    Some(ContextMenu::new(ContextTarget::Drawer, (col, row), false));
+                return;
+            }
         }
         if let Some(term_areas) = &areas.terminals {
             if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {
