@@ -910,6 +910,12 @@ const BACKGROUND_BUTTON: [&str; 2] = [" ◐ ", " ● "];
 /// neighbour, so the two read as a pair rather than as one control and an ornament.
 const THEME_BUTTON: &str = " ◩ ";
 
+/// The Ko-fi button, left of the theme one and the leftmost of the three. Four columns, not
+/// three: the cup is an emoji and takes two of its own, which is exactly why nothing here
+/// counts characters — `columns` is asked every time, and the neighbours it leans on move with
+/// it rather than being spelled out anywhere.
+const KOFI_BUTTON: &str = " ☕ ";
+
 /// The badge naming the open workspace, right-aligned on the menu bar. Empty when none is open.
 /// Built here rather than in the drawing code because the button beside it has to know how wide
 /// it is, and a click has to land where the eye says it should.
@@ -950,11 +956,37 @@ pub fn menu_bar_theme_range(app: &App, width: u16) -> std::ops::Range<u16> {
     theme_range(background.start, titles)
 }
 
+/// Where the Ko-fi button sits: hard against the theme button, and gone whenever that one is.
+/// Last onto the bar and first off it — the other two are how the screen is made readable and
+/// how it is made to keep its own ground, and asking for a coffee is not worth a column either
+/// of those wanted. So the order the room is given up in is ☕, then ◩, then ◐.
+///
+/// It is only ever a shortcut: the same thing sits in the Help menu, which no width takes away.
+pub fn menu_bar_kofi_range(app: &App, width: u16) -> std::ops::Range<u16> {
+    let themes = menu_bar_theme_range(app, width);
+    if themes.is_empty() {
+        return 0..0;
+    }
+    let titles = menu_titles_within(&app.menu, app.settings.lang, width)
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or(0);
+    kofi_range(themes.start, titles)
+}
+
 /// The arithmetic of the above. `background_start` is where the button it leans on begins, which
 /// is the only thing about that button this needs to know.
 fn theme_range(background_start: u16, titles_end: u16) -> std::ops::Range<u16> {
     let button = columns(THEME_BUTTON);
     let end = background_start;
+    let start = end.saturating_sub(button);
+    if start < titles_end || end - start < button { start..start } else { start..end }
+}
+
+/// The same arithmetic one button further left, leaning on the theme button instead.
+fn kofi_range(theme_start: u16, titles_end: u16) -> std::ops::Range<u16> {
+    let button = columns(KOFI_BUTTON);
+    let end = theme_start;
     let start = end.saturating_sub(button);
     if start < titles_end || end - start < button { start..start } else { start..end }
 }
@@ -1596,14 +1628,23 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
     let button_width = button.end - button.start;
     let themes = menu_bar_theme_range(app, area.width);
     let themes_width = themes.end - themes.start;
+    let kofi = menu_bar_kofi_range(app, area.width);
+    let kofi_width = kofi.end - kofi.start;
     let pad = area
         .width
         .saturating_sub(used)
         .saturating_sub(columns(&workspace))
         .saturating_sub(button_width)
-        .saturating_sub(themes_width);
+        .saturating_sub(themes_width)
+        .saturating_sub(kofi_width);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad as usize), Style::default().bg(pal.bar)));
+    }
+    if kofi_width > 0 {
+        // Never lit, unlike the two beside it: it holds no setting and opens no list, so there
+        // is no state for a highlight to report. It is pressed, something happens, and the row
+        // looks exactly as it did.
+        spans.push(Span::styled(KOFI_BUTTON, Style::default().fg(pal.on_bar).bg(pal.bar)));
     }
     if themes_width > 0 {
         // Lit while its list is open, the same way an open menu title is lit.
@@ -6261,7 +6302,7 @@ mod tests {
     /// The About box is drawn at whatever size the terminal has room for, so the sizes have to
     /// agree with the thresholds that pick them: one column too many and the box is clipped by
     /// `centered_rect`, which takes the close hint off the bottom of it.
-    /// The two buttons at the right-hand end share a row with the menu titles and with each
+    /// The three buttons at the right-hand end share a row with the menu titles and with each
     /// other. Overlapping either way is the same bug twice: a button drawn over a title is a
     /// button nobody can see and a title nobody can click.
     /// The initial is split into a span of its own only for the themes that colour it. For the
@@ -6282,13 +6323,18 @@ mod tests {
     }
 
     #[test]
-    fn the_two_bar_buttons_never_overlap_or_land_on_a_title() {
+    fn the_bar_buttons_never_overlap_or_land_on_a_title() {
         for width in 0..=200u16 {
             for titles in 0..=width {
                 for badge in [0u16, 12] {
                     let background = button_range(width, titles, badge);
                     let themes = theme_range(background.start, titles);
                     if themes.is_empty() {
+                        // And nothing leans on a button that is not there.
+                        assert!(
+                            kofi_range(themes.start, titles).is_empty(),
+                            "a kofi button hanging off an absent theme button at {width}x{titles}"
+                        );
                         continue;
                     }
                     assert!(
@@ -6300,6 +6346,18 @@ mod tests {
                         "the theme button sits on a title at {width}x{titles}: {themes:?}"
                     );
                     assert!(!background.is_empty(), "a theme button with no background button");
+                    let kofi = kofi_range(themes.start, titles);
+                    if kofi.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        kofi.end <= themes.start,
+                        "the kofi button overlaps the themes at {width}x{titles}: {kofi:?} into {themes:?}"
+                    );
+                    assert!(
+                        kofi.start >= titles,
+                        "the kofi button sits on a title at {width}x{titles}: {kofi:?}"
+                    );
                 }
             }
         }
@@ -6307,7 +6365,7 @@ mod tests {
 
     /// The background button is the one worth keeping longest: it is the way back from a screen
     /// that cannot be read, and the themes are reachable from the list either way. So when the
-    /// bar runs out of room the theme button goes first.
+    /// bar runs out of room the theme button goes before it.
     #[test]
     fn the_theme_button_gives_up_its_room_first() {
         // A bar with exactly one button's worth of space to the right of the titles.
@@ -6316,6 +6374,31 @@ mod tests {
         let background = button_range(width, titles, 0);
         assert!(!background.is_empty(), "the background button should still fit");
         assert!(theme_range(background.start, titles).is_empty(), "the theme button should not");
+    }
+
+    /// And ahead of the theme button goes the ☕, which is the one thing on that end of the row
+    /// nobody is stuck without: it does not hold a setting, and the Help menu carries it anyway.
+    /// So the room is surrendered ☕, then ◩, then ◐, and never the other way round.
+    #[test]
+    fn the_kofi_button_gives_up_its_room_before_the_theme_button() {
+        let width = 40;
+        // Room for the background and theme buttons and not a column more.
+        let titles = width - columns(BACKGROUND_BUTTON[0]) - columns(THEME_BUTTON);
+        let background = button_range(width, titles, 0);
+        let themes = theme_range(background.start, titles);
+        assert!(!themes.is_empty(), "the theme button should still fit");
+        assert!(kofi_range(themes.start, titles).is_empty(), "the kofi button should not");
+
+        // One button's worth wider and it appears, hard against the theme button and exactly
+        // its own width — measured, because the cup is two columns and the padding two more.
+        let titles = titles - columns(KOFI_BUTTON);
+        let themes = theme_range(button_range(width, titles, 0).start, titles);
+        let kofi = kofi_range(themes.start, titles);
+        assert_eq!(kofi.end, themes.start);
+        assert_eq!(kofi.end - kofi.start, columns(KOFI_BUTTON));
+
+        // With no theme button there is no kofi button either, whatever room is left of it.
+        assert!(kofi_range(theme_range(0, 0).start, 0).is_empty());
     }
 
     #[test]
@@ -6661,6 +6744,11 @@ mod tests {
         // it every time it was pressed.
         assert_eq!(columns(BACKGROUND_BUTTON[0]), columns(BACKGROUND_BUTTON[1]));
         assert_eq!(columns(BACKGROUND_BUTTON[0]), 3);
+        // The cup is the one button on that end that is not three columns: it is an emoji and
+        // takes two by itself. Counting its characters would have put every range left of it a
+        // column out, which is the same bug the turtle taught at the other end of the row.
+        assert_eq!(columns(KOFI_BUTTON), 4);
+        assert!(KOFI_BUTTON.chars().count() < columns(KOFI_BUTTON) as usize, "the cup is wide");
     }
 
     /// The button has to be where the click looks for it, which is the same arithmetic run

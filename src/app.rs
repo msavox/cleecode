@@ -14393,6 +14393,7 @@ impl App {
             MenuAction::RunTarget => self.open_run_menu(self.editor_pane_focus),
             MenuAction::Quit => self.request_quit(),
             MenuAction::ShowAbout => self.show_about = true,
+            MenuAction::SupportKofi => self.support_kofi(),
             // Copy/Paste follow the focus: from a terminal they act on its selection and input,
             // so the same menu entries make sense whichever frame raised the context menu.
             MenuAction::Copy => {
@@ -17077,7 +17078,28 @@ impl App {
         let themes = ui::menu_bar_theme_range(self, width);
         if !themes.is_empty() && themes.contains(&col) {
             self.open_theme_menu();
+            return;
         }
+        let kofi = ui::menu_bar_kofi_range(self, width);
+        if !kofi.is_empty() && kofi.contains(&col) {
+            self.support_kofi();
+        }
+    }
+
+    /// The ☕, from the bar or from the Help menu. It opens the page in a browser where there is
+    /// one, and where there is not — over ssh, which is where a good deal of this editor is
+    /// used, and where `open_url` refuses rather than opening a page on the wrong machine — it
+    /// puts the address on the clipboard instead and says so with the address in the line. A
+    /// button that silently does nothing on half the sessions would be worse than no button.
+    fn support_kofi(&mut self) {
+        let lang = self.settings.lang;
+        self.status_message = match crate::dnd::open_url(crate::dnd::KOFI_URL) {
+            Ok(()) => i18n::msg_kofi_opened(lang).to_string(),
+            Err(_) => {
+                self.clipboard.set(crate::dnd::KOFI_URL);
+                i18n::msg_kofi_copied(lang, crate::dnd::KOFI_URL)
+            }
+        };
     }
 
     fn mouse_menu(&mut self, col: u16, row: u16, full: Rect) {
