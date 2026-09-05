@@ -156,7 +156,20 @@
   </div>
 </section>
 
-<section id="safety" class="feature alt">
+<section id="debug" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">Breakpoints and frames</p>
+    <h2>A debugger for C, C++ and Rust.</h2>
+    <p><kbd>Ctrl+Shift+P</kbd> puts a breakpoint in the gutter. <em>Debug ▸ Start debugging</em> opens with the program already in the box — in a Cargo project, read out of the manifest. Stopping marks the line and opens a panel: the stack, the frame's own variables, your watch expressions. There <code>c</code>, <code>n</code>, <code>s</code> and <code>o</code> do what gdb taught your fingers they do — no F-keys, so it works over plain ssh in any terminal.</p>
+    <figure>
+      <img src="assets/debug.png" alt="CleeCode stopped at a breakpoint: the line is marked in the editor and a panel beside it lists the stack frame's own variables" width="1600" height="900" loading="lazy">
+      <figcaption>Stopped on the line, and the panel lists that frame's variables — not the ones around it.</figcaption>
+    </figure>
+    <p class="note">Runs under <code>lldb-dap</code>, or a <code>gdb</code> 14 or newer that speaks the protocol itself: the <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md#debugging-a-compiled-program">debugging section</a> of the tour.</p>
+  </div>
+</section>
+
+<section id="safety" class="feature">
   <div class="wrap">
     <p class="kicker">Crash safety</p>
     <h2>It does not close on you.</h2>
@@ -164,7 +177,7 @@
   </div>
 </section>
 
-<section id="themes" class="feature">
+<section id="themes" class="feature alt">
   <div class="wrap">
     <p class="kicker">The far end of an ssh</p>
     <h2>Nothing to install at the far end.</h2>
