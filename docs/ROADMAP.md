@@ -2633,6 +2633,12 @@ riflesso F5/F10/F11 va ripensato in Ctrl+Shift, e la scelta va scritta prima del
 > e su un Mac ogni `/tmp` è un symlink. Nessun test unitario l'avrebbe visto. Resta, prima
 > del tag: l'uso vero — una sessione di debug vissuta, non guidata.
 
+> **Rilasciata (2026-09-05).** Tag v0.22.0, la release con i binari di tutte e cinque le
+> piattaforme e i loro sha256, le note cumulative con la 0.22 in testa: porta 0.19–0.22 in
+> un colpo solo. Il tag è arrivato prima della sessione vissuta, quindi il debito dell'uso
+> vero non si estingue: cambia solo di posto, dal pre-tag al rodaggio che la 1.0 chiede
+> comunque per intero.
+
 ## La vetrina — il marchio, il sito, i pacchetti (2026-09-02)
 
 Senza numero di release apposta: non è una release di funzionalità, è il lavoro che rende
@@ -2750,6 +2756,14 @@ finito, nei formati che macOS e Windows vogliono.
   > copre con `selectionRange` e `foldingRange`, due richieste LSP sulla macchina che c'è
   > già: la condizione si è avverata, la conclusione no, perché nel frattempo la strada
   > senza dipendenza C si è rivelata sufficiente.
+- **Il multi-cursor** (annotato il 2026-09-05, perché l'omissione diventi una scelta: era
+  l'unico gap della review di agosto rimasto senza una decisione scritta). La risposta di
+  CleeCode esiste già ed è la selezione colonna che scrive — un cursore e un'ancora che
+  descrivono una colonna, una lettera su ogni riga del blocco — il caso che copre la gran
+  parte degli usi reali del multi-cursor. Una lista di caret indipendenti è un secondo
+  modello del cursore da tenere in pari con ogni comando dell'editor — undo, replace,
+  rename, LSP — e un secondo modello, insegna questo stesso file, si paga per sempre. Se ne
+  riparla se l'uso quotidiano trova un caso che la colonna non copre.
 - **Un sistema di plugin.** Le due tabelle (`run_commands`, `language_servers`) più il
   contratto file del workspace (versionato, documentato in `docs/design/`) sono già
   un'estensibilità in embrione. Formalizzarla è lavoro da dopo-1.0: un'API si può aggiungere,
