@@ -120,3 +120,18 @@ Sleep 1s
 Screenshot docs/screenshots/palette.png
 Escape
 Sleep 1s
+
+# ---- gitpanel.png: the git panel on History — the graph of this repository's own commits,
+#      tags and branch heads coloured. Reached through the palette so the shot does not depend
+#      on which tab the panel remembers; the wait is on the Graph tab's key line, which only
+#      that tab draws.
+Ctrl+p
+Sleep 1s
+Type "history and branches"
+Sleep 1.5s
+Enter
+Wait+Screen@40s /cherry-pick/
+Sleep 2s
+Screenshot docs/screenshots/gitpanel.png
+Escape
+Sleep 1s
