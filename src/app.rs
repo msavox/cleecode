@@ -3358,7 +3358,15 @@ fn debuggee_for(root: &Path, remembered: Option<&Path>) -> PathBuf {
     {
         // The debug profile, because this is a debugger: a release binary is compiled without
         // the line tables every breakpoint here is expressed in.
-        return root.join("target").join("debug").join(name);
+        //
+        // And the platform's executable suffix on the end of the name, which is `.exe` on Windows
+        // and the empty string everywhere else. Cargo writes `clee.exe` into `target\debug`, so
+        // the bare package name there points at a file that does not exist — and `debug_start`
+        // checks exactly that before it launches anything. Without the suffix, *Debug ▸ Start* on
+        // Windows answers every correctly built Rust project with the sentence reserved for a
+        // program nobody has compiled yet, and the prefill in the box names the wrong file while
+        // it does so.
+        return root.join("target").join("debug").join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     }
     root.to_path_buf()
 }
@@ -17369,13 +17377,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             debuggee_for(&dir, None),
-            dir.join("target").join("debug").join("clee"),
+            dir.join("target").join("debug").join(format!("clee{}", std::env::consts::EXE_SUFFIX)),
             "the package's own name, not the first name in the file"
         );
 
         // An answer somebody gave wins over any guess, and a relative one is read against the
         // project root — which is where they were standing when they wrote it.
-        let elsewhere = PathBuf::from("/opt/build/thing");
+        //
+        // The fixture has to be absolute on the platform running it: Windows calls a path absolute
+        // only once it names a drive, so the obvious `/opt/build/thing` literal is *relative* there
+        // and gets joined onto the root's drive. The assertion would still have two sides to
+        // compare and would still fail for a reason that has nothing to do with the branch it was
+        // written to check — so the shape is chosen per platform and then confirmed, rather than
+        // assumed.
+        let elsewhere =
+            PathBuf::from(if cfg!(windows) { r"C:\opt\build\thing" } else { "/opt/build/thing" });
+        assert!(elsewhere.is_absolute(), "the fixture is only testing the absolute case if it is one");
         assert_eq!(debuggee_for(&dir, Some(&elsewhere)), elsewhere);
         assert_eq!(
             debuggee_for(&dir, Some(Path::new("build/thing"))),
@@ -17706,9 +17723,16 @@ mod tests {
             debuggee_for(&dir, None).to_string_lossy(),
             "the box and the guess have to be the same string"
         );
-        assert!(debuggee_prefill(&dir, None).ends_with("target/debug/clee"));
+        // Built as a path rather than written as a literal, because the tail of that string is
+        // spelled differently on each platform in two ways at once: the separator is a backslash
+        // on Windows, and the name Cargo actually writes there is `clee.exe`. A literal with
+        // forward slashes and no suffix is a check that can only pass where it was written, and
+        // the one platform it silently stops describing is the one where the suffix is the bug.
+        let tail = Path::new("target").join("debug").join(format!("clee{}", std::env::consts::EXE_SUFFIX));
+        assert!(debuggee_prefill(&dir, None).ends_with(tail.to_string_lossy().as_ref()));
         // An answer already given is what the box offers next time, which is what "remembered"
-        // means from in here.
+        // means from in here. Its own spelling is kept as it was typed — joining a relative path
+        // on does not rewrite the separators inside it — so this tail is the same everywhere.
         let mine = PathBuf::from("build/thing");
         assert!(debuggee_prefill(&dir, Some(&mine)).ends_with("build/thing"));
     }
