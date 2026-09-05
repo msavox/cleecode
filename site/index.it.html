@@ -67,7 +67,7 @@
       <p class="pitch-tail">claude · codex · opencode · gemini — editano i tuoi buffer in diretta. Niente chiavi API. Nessun editor grafico può dirlo.</p>
     </div>
 
-    <p class="quiet">Funzionano sia il login con abbonamento sia le chiavi API. L'agente è la CLI vera e si autentica da sé. CleeCode non vede mai una credenziale.</p>
+    <p class="quiet">Abbonamento o chiave API: vanno bene entrambi. L'agente è la vera CLI e si autentica da solo. CleeCode non vede mai una credenziale.</p>
 
     <p class="cta">
       <a class="button primary" href="#install">Installa</a>
@@ -91,10 +91,10 @@
 
 <section id="agent" class="feature">
   <div class="wrap">
-    <p class="kicker">L'agente dentro</p>
+    <p class="kicker">L'agente in casa</p>
     <h2>Un tasto. Zero configurazione.</h2>
-    <p><kbd>Ctrl+Shift+A</kbd>. L'agente si apre accanto al tuo lavoro — la CLI vera, in un terminale vero. Vede il tuo cursore. Edita i tuoi buffer in diretta. Chiede prima di scrivere.</p>
-    <p class="note">Sette strumenti MCP, le regole del consenso, la riga di configurazione per gli agenti fuori dal cassetto: il <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour su GitHub</a>.</p>
+    <p><kbd>Ctrl+Shift+A</kbd> e l'agente compare accanto al tuo lavoro: la CLI vera, in un terminale vero. Vede dove sei col cursore. Edita i buffer sotto i tuoi occhi. E prima di scrivere, chiede il permesso.</p>
+    <p class="note">Sette strumenti MCP, le regole del consenso, la riga di configurazione per gli agenti fuori dal cassetto: tutto nel <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour su GitHub</a>.</p>
     <figure>
       <img src="/assets/agent.gif" alt="Il cassetto agente si apre sul launcher — claude, opencode, codex, gemini — poi claude ci gira dentro, e l'edit che fa atterra nel main.py aperto con le righe cambiate accese" width="1800" height="1000" loading="lazy">
     </figure>
@@ -104,13 +104,13 @@
 <section id="previews" class="feature alt">
   <div class="wrap">
     <p class="kicker">Immagini, PDF, Markdown</p>
-    <h2>Un terminale che ti mostra l'immagine.</h2>
+    <h2>Un terminale che le immagini le mostra davvero.</h2>
     <p>Pixel veri. Anche via ssh.</p>
     <figure>
       <img src="/assets/preview-image.jpg" alt="Due fotografie aperte come schede in CleeCode, e la stessa immagine resa da chafa in un pannello terminale sotto" width="2000" height="1280" loading="lazy">
-      <figcaption>Lo stesso file due volte: pixel nella scheda, blocchi nel pannello. La differenza è il punto.</figcaption>
+      <figcaption>Lo stesso file, due volte: sopra i pixel, sotto i blocchi colorati. Ecco la differenza.</figcaption>
     </figure>
-    <p class="note">Al meglio in <a href="https://ghostty.org">Ghostty</a>, kitty, WezTerm o iTerm2; ripiego onesto ovunque. I dettagli nel <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour</a>.</p>
+    <p class="note">Rende al meglio in <a href="https://ghostty.org">Ghostty</a>, kitty, WezTerm o iTerm2; altrove degrada con grazia, senza perdere nulla. I dettagli nel <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">tour</a>.</p>
   </div>
 </section>
 
@@ -118,14 +118,14 @@
   <div class="wrap">
     <p class="kicker">Markdown &amp; LaTeX</p>
     <h2>I tuoi documenti, renderizzati.</h2>
-    <p>Il Markdown diventa un documento vivo accanto al sorgente — scrivi, e si muovono insieme. Il LaTeX si ricompone in pagina col Run.</p>
+    <p>Il Markdown diventa un documento accanto al suo sorgente: scrivi da una parte, si aggiorna dall'altra. Il LaTeX torna in pagina a ogni Run.</p>
     <figure>
       <img src="/assets/preview-md.png" alt="Sorgente Markdown a sinistra e documento renderizzato a destra, due schede su un solo file" width="2000" height="1272" loading="lazy">
       <figcaption>Un file, due schede: sorgente e documento. Senza salvare.</figcaption>
     </figure>
     <figure>
       <img src="/assets/preview-pdf.png" alt="Un sorgente LaTeX a sinistra e la sua pagina PDF composta a destra, dentro CleeCode" width="2000" height="1278" loading="lazy">
-      <figcaption>Modifica il <code>.tex</code>, premi Run. La pagina si ricompone sul posto.</figcaption>
+      <figcaption>Modifica il <code>.tex</code>, premi Run: la pagina si rifà davanti a te.</figcaption>
     </figure>
   </div>
 </section>
@@ -134,14 +134,14 @@
   <div class="wrap">
     <p class="kicker">Octave &amp; Python</p>
     <h2>Il tuo interprete, col pannello che nessun terminale ha.</h2>
-    <p>Ogni variabile, dal vivo. I grafici come schede. Il transcript resta tuo.</p>
+    <p>Ogni variabile, in tempo reale. I grafici diventano schede. E al tuo prompt scrivi solo tu.</p>
     <figure>
       <img src="/assets/octave-ide.png" alt="Il workspace Octave: lo script a sinistra, una figura come scheda, il prompt sotto e il pannello delle variabili accanto" width="1600" height="1071" loading="lazy">
       <figcaption><code>clee -w octave</code>: script, figura, prompt, e ogni variabile elencata senza chiedere.</figcaption>
     </figure>
     <figure>
       <img src="/assets/pylab-ide.png" alt="Il workspace pylab: una figura matplotlib come scheda, la sessione sotto e le sue variabili accanto" width="1600" height="1084" loading="lazy">
-      <figcaption><code>clee -w pylab</code>: lo stesso, in Python. Il Run alimenta la sessione che c'è già.</figcaption>
+      <figcaption><code>clee -w pylab</code>: lo stesso, in Python. Il Run parla alla sessione che c'è già, e non ne apre un'altra.</figcaption>
     </figure>
     <p class="note">Celle, breakpoint, variabili del frame: la <a href="https://github.com/msavox/cleecode/blob/master/docs/numeric.md">guida completa</a>.</p>
   </div>
@@ -151,7 +151,7 @@
   <div class="wrap">
     <p class="kicker">Il lavoro di ogni giorno</p>
     <h2>Rename. References. Format. Code actions.</h2>
-    <p>La potenza del language server, con la disciplina di git: ogni riscrittura ti mostra prima il diff, poi si applica come un solo undo. E <kbd>Ctrl+Shift+D</kbd> è un pannello git completo — la storia a grafo, gli hook che girano, i commit firmati.</p>
+    <p>La potenza del language server, con la disciplina di git: ogni riscrittura prima ti mostra il diff, poi si applica in un solo undo. E <kbd>Ctrl+Shift+D</kbd> è un pannello git completo — la storia disegnata a grafo, gli hook che girano, i commit firmati.</p>
     <p class="note">200 linguaggi, replace su tutto il progetto, selezione a colonna, folding: la <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md">lista completa</a>.</p>
   </div>
 </section>
@@ -160,14 +160,14 @@
   <div class="wrap">
     <p class="kicker">A prova di crash</p>
     <h2>Non ti si chiude addosso.</h2>
-    <p><code>kill -9</code> all'editor. Il tuo testo non salvato torna. Provato sul binario vero, ucciso davvero.</p>
+    <p>Ammazza l'editor con <code>kill -9</code>: al prossimo avvio il testo non salvato torna. Provato sul binario vero, ucciso per davvero.</p>
   </div>
 </section>
 
 <section id="themes" class="feature">
   <div class="wrap">
-    <p class="kicker">In fondo a un ssh</p>
-    <h2>Niente da installare dall'altra parte.</h2>
+    <p class="kicker">Dall'altro capo dell'ssh</p>
+    <h2>Niente da installare, di là.</h2>
     <p>Un binario. Il mouse funziona. L'output del compilatore si clicca. Nove temi, inglese e italiano.</p>
     <figure>
       <img src="/assets/themes.png" alt="I nove temi: CleeCode, Turbo, Solarized Dark, Eighties, Mocha, CleeCode Light, Solarized Light, Ocean Light e GitHub" width="1420" height="919" loading="lazy">
@@ -218,7 +218,7 @@ scoop install clee</code></pre>
     <pre><code>cargo install --locked --git https://github.com/msavox/cleecode</code></pre>
     <p class="note">Rust 1.85+. Poi <code>clee --install-font</code> per le icone; su macOS, <code>clee --install-app</code> per il Dock.</p>
 
-    <p class="next"><strong>Tutto in questa pagina è costruito e provato — niente è un piano.</strong> Parte del lavoro è su <code>master</code> oltre l'ultimo tag; le <a href="https://github.com/msavox/cleecode/releases">note di release</a> dicono cosa è dove.</p>
+    <p class="next"><strong>Tutto quello che vedi qui è costruito e provato — nessuna promessa.</strong> Una parte vive su <code>master</code> oltre l'ultimo tag: le <a href="https://github.com/msavox/cleecode/releases">note di release</a> dicono cosa trovi dove.</p>
   </div>
 </section>
 
