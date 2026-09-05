@@ -2397,6 +2397,12 @@ pub enum DragTarget {
     DrawerMouse(u16),
     /// Dragging a scrollbar's thumb along its track.
     Scrollbar(ScrollbarId),
+    /// Panning a zoomed picture by dragging its body — grab the page and move it, the way every
+    /// image viewer does. `idx` is the editor the drag started in, so a split's other picture is
+    /// left alone; `start` is the cell the press landed on and `from` the scroll offsets it began
+    /// at, so each motion sets an absolute position from the press rather than accumulating the
+    /// rounding of one step at a time.
+    PreviewPan { idx: usize, start: (u16, u16), from: (u32, u32) },
 }
 
 /// Which scrollbar a click, a drag or the pointer is on. A frame plus an axis is enough to name
@@ -10464,6 +10470,45 @@ impl App {
         self.editors[idx].mark_scrolled();
     }
 
+    /// Drops the window at an absolute point on both axes at once, for a picture being dragged by
+    /// its body. One `show` for the pair, rather than the two `set_preview_scroll` would cost.
+    fn set_preview_scroll_xy(&mut self, idx: usize, x: u32, y: u32) {
+        let Some(preview) = self.editors[idx].preview.as_mut() else { return };
+        let (cols, rows) = (preview.area_cols, preview.area_rows);
+        let (max_x, max_y) = preview.pan_room();
+        if (max_x, max_y) == (0, 0) {
+            return;
+        }
+        let Some(full) = preview.full.as_ref() else { return };
+        preview.scroll_x = x.min(max_x);
+        preview.scroll_px = y.min(max_y);
+        preview.adjusted = true;
+        let window =
+            crate::preview::visible_window(full, cols, rows, preview.scroll_x, preview.scroll_px);
+        preview.show(window);
+        self.editors[idx].mark_scrolled();
+    }
+
+    /// Pans a zoomed picture as its body is dragged: the page is grabbed and moved with the
+    /// pointer, so the offset falls as the pointer travels — a drag to the right carries the
+    /// picture right, bringing its left edge into view. Absolute from the press, so it never
+    /// drifts, and a press that has not moved leaves the page where it was.
+    fn drag_preview_pan(&mut self, idx: usize, start: (u16, u16), from: (u32, u32), col: u16, row: u16) {
+        let Some(preview) = self.editors[idx].preview.as_ref() else { return };
+        let (cols, rows) = (preview.area_cols, preview.area_rows);
+        if (cols, rows) == (0, 0) {
+            return;
+        }
+        let (pane_w, pane_h) = crate::preview::pane_pixels(cols, rows);
+        let px_per_col = pane_w as f32 / cols.max(1) as f32;
+        let px_per_row = pane_h as f32 / rows.max(1) as f32;
+        let dx = (start.0 as f32 - col as f32) * px_per_col;
+        let dy = (start.1 as f32 - row as f32) * px_per_row;
+        let x = (from.0 as f32 + dx).max(0.0) as u32;
+        let y = (from.1 as f32 + dy).max(0.0) as u32;
+        self.set_preview_scroll_xy(idx, x, y);
+    }
+
     /// Moves the window over a zoomed or width-fitted page. `true` when it handled the gesture,
     /// so a caller can fall through to scrolling text when there is no page to move.
     fn scroll_page(&mut self, dx: isize, dy: isize) -> bool {
@@ -15094,6 +15139,7 @@ impl App {
             | Some(DragTarget::DrawerSelection)
             | Some(DragTarget::DrawerMouse(_))
             | Some(DragTarget::Scrollbar(_))
+            | Some(DragTarget::PreviewPan { .. })
             | None => {}
         }
     }
@@ -15389,6 +15435,13 @@ impl App {
                 KeyCode::Down => scroll(self, 1),
                 KeyCode::PageUp => scroll(self, -20),
                 KeyCode::PageDown => scroll(self, 20),
+                // Sideways travel, for a picture zoomed past the pane's width. Only ever reached
+                // by a picture: a paged document took Left/Right as page turns in the control
+                // match above, and a page fitted whole or to its width has no room to the side,
+                // so `scroll_page` returns false and nothing moves — which is the same as these
+                // arrows being unbound there, without having to special-case it here.
+                KeyCode::Left => { self.scroll_page(-1, 0); }
+                KeyCode::Right => { self.scroll_page(1, 0); }
                 KeyCode::Home => self.editors[idx].top_line = 0,
                 _ => {}
             }
@@ -16223,6 +16276,18 @@ impl App {
                     }
                     if within(tab_bar, col, row) {
                         self.mouse_tab_click(col, tab_bar, self.editor_pane_focus);
+                    } else if self.editor().preview.as_ref().is_some_and(|p| p.pan_room() != (0, 0))
+                        && within(content, col, row)
+                    {
+                        // A zoomed picture is grabbed and dragged, the way every image viewer
+                        // moves one — there is no text under the pointer to select, and the body
+                        // was the one press in the pane that did nothing at all before this.
+                        let p = self.editor().preview.as_ref().unwrap();
+                        self.dragging = Some(DragTarget::PreviewPan {
+                            idx,
+                            start: (col, row),
+                            from: (p.scroll_x, p.scroll_px),
+                        });
                     } else {
                         // Alt while dragging makes it a column selection, which is the gesture
                         // every editor and terminal uses for one — worth honouring precisely
@@ -16339,6 +16404,9 @@ impl App {
                     self.continue_drag(col, row, full);
                 }
                 Some(DragTarget::Scrollbar(id)) => self.drag_scrollbar(id, col, row, areas),
+                Some(DragTarget::PreviewPan { idx, start, from }) => {
+                    self.drag_preview_pan(idx, start, from, col, row);
+                }
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
                         // Stay within the pane the drag started in, regardless of which
