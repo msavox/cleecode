@@ -107,6 +107,33 @@ def no_file_open(session):
     return "No file open" in session.text() or "Nessun file aperto" in session.text()
 
 
+def quick_open_up(session):
+    """Whether the quick-open box itself is on screen — read off the box, not off the tree.
+
+    Its filter line is a `>` prompt hard against the box's own left border, which is a thing only
+    an overlay draws: the border character is the box's, and nothing behind it puts one there.
+    That matters because the file tree stays visible underneath the box — with a file open and
+    with nothing open alike — so waiting for a project filename to appear in the screen text is
+    answered by the tree the instant Ctrl+O is pressed, and would be answered by it just the same
+    if the box never came up at all. The tree's names are already on screen before the key is
+    sent; the only honest question is whether the overlay is."""
+    return "│> " in session.text()
+
+
+def quick_open_offers(session, typed, name):
+    """Whether the box has been told `typed` and is sitting with `name` under its caret.
+
+    Both halves, because both are things Enter depends on and neither implies the other. The
+    filter line carrying the typed text says the keystrokes reached the picker and the list has
+    been rebuilt around them; the `▶` against the border says the walk that fills the list has
+    returned, the filter has been applied to it, and the row Enter would take is the wanted one.
+    Waiting on the clock instead — type, sleep, Enter — is what put this driver's CI failures on
+    a slow runner: Enter landed on a list that had not been filled yet, the box closed having
+    opened nothing, and four checks downstream reported on an editor that had never been asked
+    to do anything."""
+    return "│> " + typed in session.text() and "│▶ " + name in session.text()
+
+
 def closing_the_last_tab(binary, root, report):
     """Closing every tab has to leave nothing open, not a fresh untitled buffer.
 
@@ -125,9 +152,9 @@ def closing_the_last_tab(binary, root, report):
         session.send(" ")
         session.wait(lambda s: "Files" in s.text(), 10)
         session.send("\x0f")                            # Ctrl+O, quick-open — and the focus
-        session.wait(lambda s: "sample.rs" in s.text(), 8)
+        session.wait(quick_open_up, 8)
         session.send("sample")
-        session.wait(lambda s: True, 0.5)
+        session.wait(lambda s: quick_open_offers(s, "sample", "sample.rs"), 8)
         session.send("\r")
         session.wait(lambda s: "fn configure_pipeline" in s.text(), 8)
 
@@ -144,10 +171,15 @@ def closing_the_last_tab(binary, root, report):
                      session)
 
         # Still alive. A panic here would leave the last frame on screen, which reads as a pass
-        # until something is asked to change — so something is.
+        # until something is asked to change — so something is. And what is waited for has to be
+        # something that was not on screen already, which a project filename is not: closing the
+        # last tab does not close the file tree, so `sample.rs` is sitting in it before Ctrl+O is
+        # sent and would go on sitting there in the frozen final frame of a process that had
+        # stopped drawing. The box is the only thing here that can only exist because a frame was
+        # drawn after the keystroke.
         session.send("\x0f")
         report.check("the app is still drawing with nothing open",
-                     session.wait(lambda s: "sample.rs" in s.text(), 8), session)
+                     session.wait(quick_open_up, 8), session)
         session.send("\x1b")
     finally:
         session.close()
@@ -481,7 +513,13 @@ def a_pane_is_told_what_it_is_talking_to(binary, root, report):
         session.wait(lambda s: True, 1.0)
 
         session.send("echo TERM_IS=$TERM\r")
-        session.wait(lambda s: "TERM_IS=xterm" in s.text(), 8)
+        # Long, because what is being waited for is not the echo but the shell behind it: this is
+        # the first prompt of the first shell of a freshly booted CI runner, where the fork, the
+        # dynamic linker and the rc file are all cold, and the several seconds that costs are not
+        # the editor's doing. The evidence is right — the answer can only come from the pane's own
+        # shell — so the only thing to fix is the impatience, and being generous here costs a fast
+        # machine nothing, since the wait returns the moment the line is on screen.
+        session.wait(lambda s: "TERM_IS=xterm" in s.text(), 30)
         told = next((l for l in session.lines() if "TERM_IS=" in l and "echo" not in l), "")
         report.check("a pane is told it is an xterm-256color, whatever is outside",
                      "TERM_IS=xterm-256color" in told, session, note=repr(told.strip()[:60]))
@@ -558,7 +596,15 @@ def quitting_ends_the_process_cleanly(binary, root, report):
             return
         session.send(" ")
         session.wait(lambda s: "Files" in s.text(), 10)
-        status = session.quit()
+        # A minute, which sounds absurd for a keystroke and is not: quitting hangs up two live
+        # shells and waits for each of them to go before the editor's own process may end, and on
+        # a runner where merely *starting* one of those shells can take a handful of seconds,
+        # stopping both of them can take a good deal longer than the twenty seconds this asked for
+        # by default. Running out of patience here reports the process as still running, which is
+        # the same picture as the bug this check exists for — a quit that hangs — so the timeout
+        # has to be long enough that reaching it means something. The cost of the larger number is
+        # paid only by a run that was going to fail anyway.
+        status = session.quit(timeout=60)
         report.check("Ctrl+Q ends the process, and with status 0",
                      status is not None and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0,
                      note=Session.describe_status(status))
