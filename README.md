@@ -28,6 +28,11 @@ lands in the open file with the changed lines lit](docs/agent.gif)
 *The drawer, a real claude, one prompt — and the edit landing live in the buffer, the changed
 lines lit until you take the keyboard back.*
 
+One agent is not the limit. The drawer takes tabs: `Ctrl+Shift+T` inside it brings the
+launcher back, and the agent you pick starts in a tab of its own, beside the first, wired the
+same way. The little square on a tab's chip ends that conversation; the one on the window only
+hides the column, every conversation running on.
+
 Press `Ctrl+Shift+A` again with an agent running and CleeCode writes where you are at its
 prompt — selection, diagnostic or cursor line, as `path:line` — and never presses Enter for
 you. The files the agent rewrites reload on their own, the new lines lit in the gutter; a
@@ -37,8 +42,8 @@ you did not have open beside your work, without ever taking the keyboard.
 
 And the editor answers back. `clee --mcp` makes it an MCP server with seven tools: the open
 files (unsaved ones flagged), the selection, the diagnostics, `open_file` with a line range
-the editor highlights, `preview` for rendering a file beside your work, `say` for one line in
-the status bar — and `edit_buffer`, which changes an unsaved buffer only after asking you, on
+the editor highlights, `preview` for rendering a file beside your work — in the layout you have, never
+by opening the split for you — `say` for one line in the status bar — and `edit_buffer`, which changes an unsaved buffer only after asking you, on
 your terms (`once`, `always this session`, or `no`). **An agent started from the drawer gets
 all of it with zero configuration.** Any other agent takes one line. Claude Code:
 
