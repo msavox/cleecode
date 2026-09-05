@@ -156,7 +156,20 @@
   </div>
 </section>
 
-<section id="safety" class="feature alt">
+<section id="debug" class="feature alt">
+  <div class="wrap">
+    <p class="kicker">Breakpoint e frame</p>
+    <h2>Un debugger per C, C++ e Rust.</h2>
+    <p><kbd>Ctrl+Shift+P</kbd> mette un breakpoint nel margine. <em>Debug ▸ Avvia il debug</em> si apre col programma già scritto nella casella — in un progetto Cargo lo legge dal manifest. Quando si ferma, la riga resta segnata e accanto si apre un pannello: lo stack, le variabili di quel frame, le espressioni che tieni d'occhio. Lì <code>c</code>, <code>n</code>, <code>s</code> e <code>o</code> fanno quello che gdb ha insegnato alle tue dita — nessun tasto funzione, quindi via ssh funziona in qualunque terminale.</p>
+    <figure>
+      <img src="/assets/debug.png" alt="CleeCode fermo su un breakpoint: la riga è segnata nell'editor e il pannello accanto elenca le variabili del frame" width="1600" height="900" loading="lazy">
+      <figcaption>Fermo sulla riga, e il pannello elenca le variabili di quel frame — non quelle intorno.</figcaption>
+    </figure>
+    <p class="note">Gira su <code>lldb-dap</code>, oppure su un <code>gdb</code> 14 o più nuovo, che il protocollo lo parla da sé: la <a href="https://github.com/msavox/cleecode/blob/master/docs/features.md#debugging-a-compiled-program">sezione sul debug</a> del tour.</p>
+  </div>
+</section>
+
+<section id="safety" class="feature">
   <div class="wrap">
     <p class="kicker">A prova di crash</p>
     <h2>Non ti si chiude addosso.</h2>
@@ -164,7 +177,7 @@
   </div>
 </section>
 
-<section id="themes" class="feature">
+<section id="themes" class="feature alt">
   <div class="wrap">
     <p class="kicker">Dall'altro capo dell'ssh</p>
     <h2>Niente da installare, di là.</h2>

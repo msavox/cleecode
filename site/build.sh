@@ -34,6 +34,7 @@ screenshots/preview-pdf.png   preview-pdf.png
 screenshots/preview-md.png    preview-md.png
 screenshots/octave-ide.png    octave-ide.png
 screenshots/pylab-ide.png     pylab-ide.png
+screenshots/debug.png         debug.png
 screenshots/themes.png        themes.png
 '
 
