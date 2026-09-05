@@ -2556,6 +2556,42 @@ pub fn drawer_from_workspace(
     }
 }
 
+/// Which agent a drawer tab is: the name it was launched with, read back off the pane.
+///
+/// `startup_command` is where `launch_drawer_agent` writes the bare program name — `claude`, not
+/// `exec claude …` — precisely so it can be read back like this, and it is what `agent_pane`
+/// already uses as its declared-agent answer. Worth a name of its own now that the drawer holds
+/// several: `drawer.agent` is the last one *launched* and stops being the answer to "which agent
+/// is this tab" the moment there are two. `None` where the command is missing or names something
+/// the four do not cover, which leaves the caller to fall back.
+fn drawer_tab_agent(tab: &TerminalPanel) -> Option<crate::session::Agent> {
+    crate::session::Agent::of_command(tab.startup_command.as_deref()?)
+}
+
+/// The first entry of `before` that `after` no longer has a copy of.
+///
+/// A *multiset* difference and not a set one, which is the whole reason it is a function: two
+/// claude tabs are two identical entries, and asking "is Claude still in the list" would answer
+/// yes while one of them was being buried. So each survivor is spent as it is matched, and what
+/// falls out is the first one with nothing left to match it.
+///
+/// Pure, so the arithmetic that names a fallen agent can be read and tested without a pty in it.
+/// `None` means nothing went missing at all — which is what a reap that removed nothing looks like.
+fn first_missing<T: PartialEq + Copy>(before: &[T], mut after: Vec<T>) -> Option<T> {
+    before
+        .iter()
+        .find(|item| match after.iter().position(|kept| kept == *item) {
+            Some(at) => {
+                // Spent, so a second identical entry has to find a second survivor of its own.
+                // `swap_remove` because the order of what is left never matters here.
+                after.swap_remove(at);
+                false
+            }
+            None => true,
+        })
+        .copied()
+}
+
 /// Which pane the context goes to, out of everything that claims to hold an agent.
 ///
 /// Four claims, in this order, and the order is the whole function — which is why it is pure and
@@ -4132,15 +4168,40 @@ impl App {
         // whose whole job is holding a conversation. An agent that has ended returns the drawer
         // to the launcher: the conversation is over, and the choice is on offer again.
         if let Some(drawer) = self.drawer.as_mut() {
-            let ended = drawer.window.as_mut().is_some_and(|window| {
-                window.reap_exited();
-                window.tabs.is_empty()
-            });
+            // Who is in there, read *before* the reaping: a tab that has ended is dropped by
+            // `reap_exited` and there is nothing left to ask its name of afterwards. Read off each
+            // tab rather than taken from `drawer.agent`, which is the last one *launched* and stops
+            // being the answer to "who just died" the moment there are two.
+            let before: Vec<Option<crate::session::Agent>> = drawer
+                .window
+                .as_ref()
+                .map(|window| window.tabs.iter().map(drawer_tab_agent).collect())
+                .unwrap_or_default();
+            let after: Vec<Option<crate::session::Agent>> = match drawer.window.as_mut() {
+                Some(window) => {
+                    window.reap_exited();
+                    window.tabs.iter().map(drawer_tab_agent).collect()
+                }
+                None => Vec::new(),
+            };
+            let ended = drawer.window.as_ref().is_some_and(|w| w.tabs.is_empty());
             if ended {
-                let agent = drawer.agent;
+                // The drawer has emptied. Named after the last agent that was in it, which with
+                // one tab is the one that just went and with several is the last of them.
+                let agent = before.last().copied().flatten().or(drawer.agent);
                 drawer.back_to_launcher();
                 if let Some(agent) = agent {
                     self.status_message = i18n::msg_drawer_agent_ended(lang, agent.label());
+                }
+                reaped = true;
+            } else if after.len() < before.len() {
+                // Some went and some are still talking. Said out loud because a background tab's
+                // death is otherwise a chip quietly leaving a strip nobody is looking at — the one
+                // case the empty-drawer line above cannot cover, since the drawer is not empty and
+                // is not back to the list. The first of them names the line; several agents ending
+                // inside one poll is not a moment worth a sentence each.
+                if let Some(agent) = first_missing(&before, after).flatten() {
+                    self.status_message = i18n::msg_drawer_tab_ended(lang, agent.label());
                 }
                 reaped = true;
             }
@@ -11828,11 +11889,32 @@ impl App {
     fn cycle_focused_tab(&mut self, forward: bool) {
         match self.focus {
             Focus::Terminal => self.cycle_terminal_tab(forward),
-            // The drawer falls in with the file tree here rather than with the terminal panel:
-            // it holds one agent and has no strip of its own, so the only tabs the key can mean
-            // are the editor's.
+            // The drawer falls in with the terminal panel: it has a strip of its own now, so the
+            // tabs the key can mean while the keyboard is in it are that strip's. Symmetry, not a
+            // special case — the same chord walks the agents in this column as walks the shells in
+            // that one, and `cycle_tab` does nothing at one tab exactly as it does there.
+            //
+            // The launcher is the exception, and only because it is not a strip: while it is up
+            // there is nothing here to walk — the tabs behind it are running, but the pane is a
+            // list of four names and the arrows already mean something on it. So the key falls
+            // through to the editor's tabs, which is where it goes from the file tree too.
+            Focus::Drawer if self.drawer_showing_agents() => {
+                if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut()) {
+                    window.cycle_tab(forward);
+                }
+            }
             _ => self.cycle_editor(forward),
         }
+    }
+
+    /// Whether the drawer has an agent's pane on screen rather than the launcher.
+    ///
+    /// The question the tab keys and the strip's mouse handling all ask, in one place: there is a
+    /// window, and no launcher up over it. `showing_launcher` is the same fact from the other side
+    /// and is what the drawing reads; this is the side that says "so there are chips, and a tab
+    /// under the keyboard".
+    fn drawer_showing_agents(&self) -> bool {
+        self.drawer.as_ref().is_some_and(|d| d.window.is_some() && !d.choosing)
     }
 
     /// Sideways through the focused half's own strip. In a split each half cycles its own tabs
@@ -12216,10 +12298,30 @@ impl App {
             // Only what the drawer *is*, never what is in it. A workspace can say "open, this
             // wide, on codex"; it cannot say "and here is the conversation", because the
             // conversation is a running process and a TOML file is not where one of those goes.
+            //
+            // Which is also the answer to "why one agent when there are four tabs open". A saved
+            // agent is a line a workspace load *runs*, so a list of them would be a list of
+            // processes spawned by opening a file — four CLIs starting at once, each burning a
+            // session on a subscription somebody pays for, because a layout was restored. One is
+            // a reasonable thing to be handed on opening a project; a fleet is not something
+            // anybody would ask for by name. So the active tab is what is remembered: the agent
+            // you were talking to when you saved, which is the one the workspace is *about*.
             drawer: self.drawer.as_ref().map(|drawer| crate::workspace::WorkspaceDrawer {
                 open: drawer.open,
                 width: self.settings.drawer_pct,
-                agent: drawer.agent.map(|a| a.workspace_name().to_string()),
+                // Read off the tab rather than taken from `drawer.agent`, which is the last agent
+                // *launched* — the one that would be saved is then whichever tab was opened most
+                // recently, not the one on screen. Falls back to it where the pane cannot say.
+                agent: drawer
+                    .window
+                    .as_ref()
+                    // Indexed through `get` and not `active_tab`, which indexes raw: this runs on
+                    // the way out of the application as well as from the menu, and a workspace
+                    // save is the last moment that should be able to bring the editor down.
+                    .and_then(|window| window.tabs.get(window.active))
+                    .and_then(drawer_tab_agent)
+                    .or(drawer.agent)
+                    .map(|a| a.workspace_name().to_string()),
             }),
             terminals: self
                 .terminals
@@ -12887,7 +12989,116 @@ impl App {
         self.status_message = i18n::msg_drawer_toggled(lang, self.drawer_is_open());
     }
 
-    /// Starts `agent` in the drawer, replacing the launcher with its pane.
+    /// Another tab in whichever frame the keyboard is in.
+    ///
+    /// One chord, read by where you are standing: in the terminal panel it is another shell, in
+    /// the drawer it is another *agent* — which is a choice and not a spawn, so what appears is the
+    /// launcher and the tab is born only when a name is picked off it. Everywhere else the
+    /// terminal panel answers, as it always has: the panel is the frame this key belongs to and
+    /// doing nothing from the editor would be the stranger reply.
+    fn new_tab_in_focused_frame(&mut self) {
+        // An open drawer, because the launcher has to be somewhere the user can see it — and an
+        // agent whose column is hidden is still a drawer the keyboard can be in.
+        if self.focus == Focus::Drawer && self.drawer_is_open() {
+            // On the launcher already, this asks for the screen that is up: `new_drawer_tab`
+            // leaves it alone, which is the whole of "a no-op there".
+            self.new_drawer_tab();
+            return;
+        }
+        self.new_terminal_tab();
+    }
+
+    /// The tab the keyboard is looking at, closed — in the drawer, the agent in it.
+    ///
+    /// Not while the launcher is up: there is no tab under the keyboard then, only a list of names
+    /// over the ones still running, and the terminal panel is not what the user is looking at
+    /// either. So the drawer keeps the key and does nothing with it, which is the honest answer to
+    /// "close this" when there is no this.
+    fn close_tab_in_focused_frame(&mut self) {
+        if self.focus == Focus::Drawer && self.drawer_is_open() {
+            if self.drawer_showing_agents() {
+                self.close_active_drawer_tab();
+            }
+            return;
+        }
+        self.close_active_terminal_tab();
+    }
+
+    /// Asks for another agent beside the ones already in the drawer: the launcher, full-pane, with
+    /// the last agent used under the highlight.
+    ///
+    /// It is the *same screen as the first launch* and deliberately so. A tab in this column is
+    /// born from a chosen name and from nothing else, so there is no half-made tab to draw while
+    /// the choosing is going on — no empty chip on the strip, no shell prompt standing in for a
+    /// decision not yet taken. The tabs behind it go on running; `Esc` puts the column back the
+    /// way it was.
+    ///
+    /// Opens the drawer first when it is away, because a launcher in a column that is not on
+    /// screen is a question nobody was asked.
+    fn new_drawer_tab(&mut self) {
+        self.open_drawer();
+        if let Some(drawer) = self.drawer.as_mut() {
+            // Only over something. With an empty drawer the launcher is already the pane, and
+            // setting the flag would be a second reason for a screen that is showing anyway —
+            // which `Esc` would then have to know how to unset without a pane to go back to.
+            if drawer.window.is_some() {
+                drawer.start_choosing();
+            }
+        }
+    }
+
+    /// Closes the drawer tab the keyboard is looking at.
+    pub fn close_active_drawer_tab(&mut self) {
+        let Some(window) = self.drawer.as_ref().and_then(|d| d.window.as_ref()) else { return };
+        let tab = window.active;
+        self.close_drawer_tab(tab);
+    }
+
+    /// Closes one drawer tab, killing the agent in it.
+    ///
+    /// **The one deliberate kill path this column has, and the only one.** Everything else about
+    /// the drawer is careful never to end a conversation: the window's `■` hides the column and
+    /// leaves every pty running, `Ctrl+J`-style, and that is what makes putting the drawer away
+    /// cheap. The two controls that *do* kill are the chip's own `■` on the tab strip and this
+    /// chord — `Ctrl+Shift+K`, the same key that closes a shell in the terminal panel — and they
+    /// are the same code path on purpose, so there is one answer to what closing a tab means.
+    /// Dropping the `TerminalPanel` is what does it: `Drop` takes the pty and the process with it,
+    /// exactly as `close_terminal_tab` relies on.
+    ///
+    /// The last tab going takes the drawer with it, back to the launcher — the same place an agent
+    /// that exited on its own leaves it, because it is the same fact: there is no conversation
+    /// here any more and the choice is on offer again. Nothing is respawned in its place.
+    pub fn close_drawer_tab(&mut self, tab: usize) {
+        let lang = self.settings.lang;
+        let Some(drawer) = self.drawer.as_mut() else { return };
+        let Some(window) = drawer.window.as_mut() else { return };
+        if tab >= window.tabs.len() {
+            return;
+        }
+        // Read before the panel is dropped, because after the drop there is nothing left to ask.
+        // The tab's own command rather than `drawer.agent`, which is the last one *launched* and
+        // is a different agent from this one as soon as there are two tabs.
+        let closed = drawer_tab_agent(&window.tabs[tab]).or(drawer.agent);
+        window.tabs.remove(tab);
+        if window.active >= window.tabs.len() {
+            window.active = window.tabs.len().saturating_sub(1);
+        }
+        if !window.tabs.is_empty() {
+            return;
+        }
+        drawer.back_to_launcher();
+        if let Some(agent) = closed {
+            self.status_message = i18n::msg_drawer_agent_ended(lang, agent.label());
+        }
+    }
+
+    /// Starts `agent` in the drawer: a tab of its own beside whatever is already running there,
+    /// or the first pane when the column was empty.
+    ///
+    /// **The only door a drawer tab comes through.** Nothing else calls `add_tab` on this window,
+    /// which is what makes "a tab always holds an agent, never a shell" structural rather than a
+    /// rule someone has to keep: to have a tab you must have chosen a name off the launcher, and
+    /// choosing a name is what this function *is*.
     ///
     /// Three details carry the design. The pane is spawned exactly like every other one — a
     /// shell, with the command held until it is at a prompt — so it inherits `CLEE_SESSION` from
@@ -12918,15 +13129,27 @@ impl App {
                 // of the two ways a pane is recognised as an agent's, and it reads the first
                 // word. `exec claude` would name a program called `exec`.
                 panel.startup_command = Some(command.to_string());
-                let window = TerminalWindow {
-                    tabs: vec![panel],
-                    active: 0,
-                    weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
-                };
                 if let Some(drawer) = self.drawer.as_mut() {
-                    drawer.window = Some(window);
+                    // Appended to what is there, or the window's first tab when there is nothing
+                    // there. `add_tab` focuses what it adds, which is right for both: opening a
+                    // tab is always to switch to it, and an agent you have just started is an
+                    // agent you have just started in order to talk to.
+                    match drawer.window.as_mut() {
+                        Some(window) => window.add_tab(panel),
+                        None => {
+                            drawer.window = Some(TerminalWindow {
+                                tabs: vec![panel],
+                                active: 0,
+                                weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+                            })
+                        }
+                    }
                     drawer.agent = Some(agent);
                     drawer.selected = agent.index();
+                    // The choice is made, so the list comes down. Nothing else clears this on the
+                    // way through — the launcher is the pane until the moment there is a pane to
+                    // put in its place, and this is that moment.
+                    drawer.stop_choosing();
                 }
                 // Written now rather than at exit, for the same reason the workspace is: a crash
                 // must not cost the one thing the launcher remembers.
@@ -12984,6 +13207,13 @@ impl App {
         }
         self.active_terminal = at;
         self.settings.show_terminal = true;
+        // The launcher has done what it was up for, even though what it did was not start
+        // anything: the question was asked and answered, so the list comes down. Without this the
+        // keyboard would come back to a column still showing a stale choice over agents that were
+        // running the whole time — and `Esc` would be needed to reach the conversation again.
+        if let Some(drawer) = self.drawer.as_mut() {
+            drawer.stop_choosing();
+        }
         // The keyboard follows the line: the next keystroke that matters is the Enter this
         // deliberately did not press, and it has to land where the command is.
         self.focus = Focus::Terminal;
@@ -13016,10 +13246,22 @@ impl App {
                     self.choose_drawer_agent(agent);
                 }
             }
-            // The keyboard goes back to the editor, and what the column does about it is the
-            // mode's business, not this key's: pinned, it stays exactly where it is; on
-            // autocollapse, `settle_drawer` finds the focus gone and puts it away.
-            KeyCode::Esc => self.focus = Focus::Editor,
+            // Esc cancels the smallest thing it can, which is the rule everywhere else in the
+            // app and here means two different sentences on one screen.
+            //
+            // With agents running behind it, the launcher is a question the user asked and is now
+            // withdrawing: the answer is the pane they were already in, and the keyboard has no
+            // reason to leave a column it never left. Dropping the focus here would put the drawer
+            // away on autocollapse — a cancelled choice would cost the user the panel.
+            //
+            // With nothing behind it there is no smaller thing: the launcher *is* the drawer, so
+            // Esc is leaving the drawer. The keyboard goes back to the editor and what the column
+            // does about it is the mode's business, not this key's — pinned, it stays exactly
+            // where it is; on autocollapse, `settle_drawer` finds the focus gone and puts it away.
+            KeyCode::Esc => match self.drawer.as_mut() {
+                Some(drawer) if drawer.window.is_some() => drawer.stop_choosing(),
+                _ => self.focus = Focus::Editor,
+            },
             _ => {}
         }
     }
@@ -13220,6 +13462,13 @@ impl App {
                 // conversation never stopped — so without this the text would arrive at a prompt
                 // nobody can see, which is the one outcome this feature must not have.
                 self.open_drawer();
+                // A launcher left up over the agents is the same outcome by another route: the
+                // text went into the active tab, and the active tab has to be what the column is
+                // showing. The choice is abandoned rather than remembered — the user has started a
+                // sentence in a pane, and finishing it is what the focus was just handed over for.
+                if let Some(drawer) = self.drawer.as_mut() {
+                    drawer.stop_choosing();
+                }
                 self.status_message =
                     i18n::msg_agent_sent_to_drawer(lang, &reference, agent.label());
             }
@@ -14022,10 +14271,10 @@ impl App {
             // Inspect: what a variable actually contains, a screenful at a time.
             Action::InspectVariable => self.open_inspector_picker(),
             Action::NewTerminalWindow => self.new_terminal(),
-            Action::NewTerminalTab => self.new_terminal_tab(),
+            Action::NewTerminalTab => self.new_tab_in_focused_frame(),
             // One key closes the shell you are looking at. It takes the window with it when that
             // was its last tab, so there is nothing to remember about which of the two you meant.
-            Action::CloseTerminalTab => self.close_active_terminal_tab(),
+            Action::CloseTerminalTab => self.close_tab_in_focused_frame(),
             Action::ToggleFold => self.editor_mut().toggle_fold(),
             Action::ResizeMode => self.resize_mode = !self.resize_mode,
             Action::MenuBar => self.menu.open(),
@@ -14318,6 +14567,9 @@ impl App {
                 }
             }
             MenuAction::ToggleDrawer => self.toggle_drawer(),
+            // Opens the column first if it is away — a launcher nobody can see is a question
+            // nobody was asked — and then puts the list up over whatever is running.
+            MenuAction::NewAgentTab => self.new_drawer_tab(),
             MenuAction::OpenMenuBar => self.menu.open(),
             MenuAction::ColumnSelection => {
                 let lang = self.settings.lang;
@@ -14380,8 +14632,12 @@ impl App {
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::EditKeybindings => self.open_keybindings_file(),
             MenuAction::NewTerminal => self.new_terminal(),
-            MenuAction::NewTerminalTab => self.new_terminal_tab(),
-            MenuAction::CloseTerminalTab => self.close_active_terminal_tab(),
+            // The same two functions the chords run, and for a plain reason: these rows sit in the
+            // context menu that a right-click *in the drawer* raises, printing `Ctrl+Shift+T` and
+            // `Ctrl+Shift+K` beside themselves. A row that did something other than the chord it
+            // advertises would be the menu lying about the keyboard.
+            MenuAction::NewTerminalTab => self.new_tab_in_focused_frame(),
+            MenuAction::CloseTerminalTab => self.close_tab_in_focused_frame(),
             MenuAction::RenameTerminal => self.start_terminal_rename(),
             MenuAction::CloseTerminal => self.close_active_terminal(),
             MenuAction::Save => self.save_active_file(),
@@ -16711,7 +16967,8 @@ impl App {
     /// it is installed, offered for installing if it is not, which is [`Self::choose_drawer_agent`]
     /// either way. A click on the gap between two names only takes the focus — the ROADMAP asks
     /// for the names to be clickable, not for the whitespace around them to start something. On a
-    /// running agent it anchors a selection, exactly as a click in a terminal pane does.
+    /// running agent it anchors a selection, exactly as a click in a terminal pane does — unless
+    /// it landed on the tab strip, which the middle of this function claims.
     fn click_drawer(&mut self, rect: Rect, col: u16, row: u16) {
         // The ✕ on the title bar, before anything about what is inside the frame: it is the one
         // cell of the drawer that is not the drawer's contents. It goes to the View menu's own
@@ -16725,6 +16982,43 @@ impl App {
             return;
         }
         self.focus = Focus::Drawer;
+        // The chips, on the same border row the window's ■ just had its say on — and after it, so
+        // the two can never fight over a cell. They cannot in any case: `terminal_close_cell`
+        // points at `rect.x + 2` and the strip starts at `rect.x + 4`, because
+        // `terminal_tab_strip_rect` gives up four cells to the box and the pad on each side of it.
+        // The drawer always draws that box, so the strip is always the four-cell form here.
+        //
+        // A chip's own ■ closes that tab — the same `close_drawer_tab` the chord goes through,
+        // including the fall back to the launcher when it was the last one — and anywhere else on
+        // a chip switches to it. Mirrors `handle_terminal_titlebar_click` down to the order,
+        // because it is the same control on the same row and the two must not answer differently.
+        if self.drawer_showing_agents() && row == rect.y {
+            let lang = self.settings.lang;
+            let (labels, tab_count) = match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
+                // The window's own index is never read — every drawer tab carries its agent's
+                // name — so a zero here stands for "there is no place in the layout to name it
+                // after", the same zero `draw_drawer` passes the renderer.
+                Some(window) => (ui::terminal_tab_labels(window, 0, lang), window.tabs.len()),
+                None => (Vec::new(), 0),
+            };
+            if tab_count > 1 {
+                let strip = ui::terminal_tab_strip_rect(rect, true);
+                let hit = ui::terminal_tab_ranges(strip, &labels)
+                    .into_iter()
+                    .enumerate()
+                    .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1);
+                if let Some((t, tab)) = hit {
+                    if tab.close == Some(col) {
+                        self.close_drawer_tab(t);
+                    } else if let Some(window) =
+                        self.drawer.as_mut().and_then(|d| d.window.as_mut())
+                    {
+                        window.active = t;
+                    }
+                    return;
+                }
+            }
+        }
         if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
             // Asked of the same function that drew the list, so a click can never start the
             // agent above the one under the pointer.
@@ -18168,6 +18462,61 @@ mod tests {
         );
         // Nobody anywhere is what summons the drawer, so it has to be tellable from the rest.
         assert_eq!(agent_precedence(None, None, None, None), None);
+    }
+
+    /// Naming the agent whose drawer tab has just died, which is a multiset question and not a set
+    /// one. Two claude tabs are the case that decides it: with one of them gone, "is Claude still
+    /// in the list" answers yes and the death goes unsaid — the whole thing this function exists
+    /// to stop, since a background tab leaving the strip is otherwise silent.
+    #[test]
+    fn the_agent_that_left_is_found_even_when_a_twin_of_it_stayed() {
+        use crate::session::Agent::{Claude, Codex, Gemini};
+        // Nothing went: a reap that removed nothing has nothing to say.
+        assert_eq!(first_missing(&[Claude, Codex], vec![Claude, Codex]), None);
+        // One of two identical tabs. A set difference finds nothing here.
+        assert_eq!(first_missing(&[Claude, Claude], vec![Claude]), Some(Claude));
+        // The middle one, with the others in place around it.
+        assert_eq!(first_missing(&[Claude, Codex, Gemini], vec![Claude, Gemini]), Some(Codex));
+        // Order does not matter on the surviving side — tabs shift left as one is removed.
+        assert_eq!(first_missing(&[Claude, Codex, Gemini], vec![Gemini, Claude]), Some(Codex));
+        // Several at once: the first of them names the line, and one line is all there is.
+        assert_eq!(first_missing(&[Claude, Codex, Gemini], vec![Gemini]), Some(Claude));
+        // Everything gone is the emptied-drawer case, which its caller handles instead; the
+        // arithmetic still answers rather than reaching past the end of anything.
+        assert_eq!(first_missing(&[Claude], Vec::new()), Some(Claude));
+        assert_eq!(first_missing::<u8>(&[], Vec::new()), None);
+    }
+
+    /// The two `■`s that share the drawer's top border sit on cells of their own, and the strip
+    /// starts clear of the window box and both of its pads.
+    ///
+    /// This is the arithmetic `click_drawer` leans on rather than assumes: the window's box hides
+    /// the column and the chips' boxes kill agents, so a single overlapping cell would be a click
+    /// that dismissed a panel when it meant to end a conversation, or the reverse. The drawer
+    /// always draws its window box, so the four-cell form is the only one it ever sees.
+    #[test]
+    fn the_drawer_window_box_and_the_tab_boxes_never_share_a_cell() {
+        let rect = Rect { x: 10, y: 3, width: 40, height: 20 };
+        let window_box = ui::terminal_close_cell(rect).expect("wide enough to carry a title");
+        assert_eq!(window_box, (12, 3), "two in from the corner, on the border row");
+
+        let strip = ui::terminal_tab_strip_rect(rect, true);
+        assert_eq!(strip.x, rect.x + 4, "past the box and the pad on each side of it");
+        assert_eq!(strip.y, rect.y, "the same border row the box is on");
+        assert!(strip.x > window_box.0, "so nothing on the strip can be painted over the box");
+
+        let labels = vec!["Claude Code".to_string(), "Codex".to_string()];
+        let tabs = ui::terminal_tab_ranges(strip, &labels);
+        assert_eq!(tabs.len(), 2);
+        for tab in &tabs {
+            let close = tab.close.expect("a strip this wide fits every chip's box");
+            assert_ne!(close, window_box.0, "a chip box is never the window box");
+            assert!(close >= strip.x && close < tab.full.1);
+        }
+        assert_ne!(tabs[0].close, tabs[1].close, "one box per chip, on distinct cells");
+        // And a click landing on a chip but not on its box is the switch, not the kill: there is
+        // at least one such cell on every chip, or the control would be unusable.
+        assert!((tabs[0].full.0..tabs[0].full.1).any(|col| Some(col) != tabs[0].close));
     }
 
     /// A workspace governs the drawer's column and never its contents. The variant that would

@@ -5282,8 +5282,13 @@ struct TerminalChrome {
     /// Whether the layout resize mode is on, which colours the focused border differently.
     resizing: bool,
     focused: bool,
-    /// Whether to offer the window ■ in the corner. False for the drawer: it is closed from the
-    /// View menu, and a ■ there would be a promise to kill the agent.
+    /// Whether to offer the window ■ in the corner. False for the last terminal window, which
+    /// cannot be closed; true for the drawer, where it hides the column and leaves every pty
+    /// running — `App::click_drawer` claims that cell before anything else can, so the
+    /// resemblance to the panel's own button never becomes a route into `close_terminal`.
+    ///
+    /// It is also what pushes the tab strip four cells in rather than one, so the chips never sit
+    /// under the box or its padding: see `terminal_tab_strip_rect`.
     closable: bool,
     /// Whether the pointer is on this pane's scrollbar, or dragging it. Resolved by the caller,
     /// which is the half that knows which `ScrollbarId` this pane answers to — `Terminal(i)` for
@@ -5651,8 +5656,14 @@ fn clip_to(text: &str, width: usize) -> String {
     text.chars().take(width).collect()
 }
 
-/// The agent drawer's column: the agent's pane when one is running, the launcher when the drawer
-/// is open with nobody in it.
+/// The agent drawer's column: the agents' panes when any are running, the launcher when the drawer
+/// is open with nobody in it — or when another agent is being chosen to sit beside them.
+///
+/// The launcher is full-pane in both cases, which is the whole of what "the launcher is modal
+/// within the column" means: no strip is drawn while a choice is being made, because a tab does
+/// not exist until a name is picked and a strip with a blank chip on it would be drawing one that
+/// does not. So `showing_launcher` is the branch and not `window.is_none()` — the running tabs are
+/// still there behind it, untouched, and come straight back on `Esc`.
 ///
 /// Drawn straight after the terminal panel and before every modal, because it is a frame of the
 /// layout rather than something over the top of one — that is what pin mode means.
@@ -5665,7 +5676,8 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
     // there: it is a question about the pointer, which belongs to the app.
     let engaged = app.scrollbar_engaged(crate::app::ScrollbarId::Drawer, area, Axis::Vertical);
     let Some(drawer) = app.drawer.as_mut() else { return };
-    match drawer.window.as_mut() {
+    let launcher = drawer.showing_launcher();
+    match drawer.window.as_mut().filter(|_| !launcher) {
         Some(window) => draw_single_terminal(
             f,
             window,
@@ -5683,7 +5695,13 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
                 // route into `close_terminal`.
                 closable: true,
                 engaged,
-                // Never read: the drawer's one tab is always named after its agent.
+                // Never read, at one tab or at five. `terminal_tab_labels` reaches for this number
+                // only where a tab has no `name` of its own, and every tab in this column is named
+                // after its agent by `launch_drawer_agent` — which is the only way one gets here.
+                // Two claude tabs therefore both read "Claude Code": the strip names the agent,
+                // not the tab, and numbering them would be inventing an identity the panes do not
+                // have. A zero here would print "Terminal 0" if it were ever reached, which is the
+                // reason to say plainly that it cannot be.
                 number: 0,
             },
         ),

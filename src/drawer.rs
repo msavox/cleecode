@@ -1,4 +1,4 @@
-//! The agent drawer: a column on the right of the window that holds one coding agent.
+//! The agent drawer: a column on the right of the window that holds the coding agents.
 //!
 //! It is a terminal window like any other inside — a pty, a vt100 parser, the same drawing code —
 //! and everything interesting about it is where it *lives*.
@@ -22,12 +22,18 @@ use crate::terminal_panel::TerminalWindow;
 /// `split_pct`, because it is a layout scalar the seam drag writes to and the workspace file
 /// records — and a second copy on this struct would be a second thing to keep in step.
 pub struct Drawer {
-    /// The agent's pane, or `None` while the launcher is showing. It is a whole `TerminalWindow`
-    /// rather than a bare panel so the drawing code needs no special case; it holds exactly one
-    /// tab, because the drawer is one agent's home and a tab strip in it would be an invitation
-    /// to make it a second terminal panel.
+    /// The agents' panes, or `None` while nothing has been started. It is a whole `TerminalWindow`
+    /// rather than a bare panel so the drawing code needs no special case, and it may hold several
+    /// tabs — one agent each.
+    ///
+    /// **Every tab holds an agent, never a shell.** That is the rule that replaces the old
+    /// one-tab rule, and it is the one worth keeping: the strip is not an invitation to make this
+    /// a second terminal panel, because the only door a tab can come through is the launcher.
+    /// There is no "new shell here" in this column and there is no path that leaves a bare prompt
+    /// in a pane shaped like an agent — see `launch_drawer_agent`, which is the sole caller of
+    /// `add_tab` on this window.
     pub window: Option<TerminalWindow>,
-    /// Which agent is running, or was. Kept across the agent exiting so the launcher can put the
+    /// Which agent was launched last. Kept across an agent exiting so the launcher can put the
     /// highlight back where it was.
     pub agent: Option<Agent>,
     /// The highlighted row of the launcher.
@@ -38,6 +44,17 @@ pub struct Drawer {
     /// as the terminal panel's does under `Ctrl+J`. That is the difference between dismissing an
     /// agent and killing it, and it is the only reason hiding the drawer is a cheap thing to do.
     pub open: bool,
+    /// Whether the launcher is up *over* agents that are already running — someone asking for
+    /// another tab.
+    ///
+    /// A flag rather than a fifth thing the window could contain, because a tab in this column is
+    /// only ever born from a chosen agent: while the choice is being made there is nothing to put
+    /// in a tab yet, so a half-made tab would have to be drawn as something, and the only honest
+    /// something is a shell prompt — the one thing this panel must never show. So the launcher
+    /// takes the whole pane instead, exactly as it does on the first launch, and the tabs behind
+    /// it go on running untouched. Cancel (`Esc`) clears the flag and hands the column straight
+    /// back to the agent that had it; choosing one clears it too, in `launch_drawer_agent`.
+    pub choosing: bool,
 }
 
 impl Drawer {
@@ -50,12 +67,39 @@ impl Drawer {
             agent,
             selected: agent.map(Agent::index).unwrap_or(0),
             open: true,
+            // Nothing is running, so there is nothing to be choosing *over*: an empty window is
+            // already the launcher, and the flag would be a second way of saying so.
+            choosing: false,
         }
     }
 
     /// Whether the launcher is what is drawn in it right now.
+    ///
+    /// Two ways in, and they are the same screen: nothing has been started yet, or agents are
+    /// running and one more has been asked for. The second is why this is not simply
+    /// `window.is_none()` any more — see [`Drawer::choosing`].
     pub fn showing_launcher(&self) -> bool {
-        self.window.is_none()
+        self.window.is_none() || self.choosing
+    }
+
+    /// Puts the launcher up over whatever is running, to choose the agent for another tab.
+    pub fn start_choosing(&mut self) {
+        // The same staleness the drawer opening has: the list is about to say which of the four
+        // are installed, and the user may have installed one since it last asked.
+        forget_installed();
+        self.choosing = true;
+        if let Some(agent) = self.agent {
+            self.selected = agent.index();
+        }
+    }
+
+    /// Takes it back down again, leaving the running tabs exactly as they were.
+    ///
+    /// The cancel half of [`Drawer::start_choosing`], and it says nothing about the focus: the
+    /// keyboard was in this column before the launcher went up and has no reason to leave it
+    /// because a choice was not made. `app.rs` is where that distinction is spent.
+    pub fn stop_choosing(&mut self) {
+        self.choosing = false;
     }
 
     /// The agent under the highlight.
@@ -74,12 +118,17 @@ impl Drawer {
 
     /// Puts the launcher back, dropping whatever was in the pane.
     ///
-    /// The honest outcome of an agent exiting: the conversation is over, and what is on offer is
-    /// the same choice as before. Nothing is respawned — a shell appearing where an agent was is
-    /// the one thing this panel must never do, because it looks exactly like the agent still
-    /// being there.
+    /// The honest outcome of the last agent exiting: the conversation is over, and what is on
+    /// offer is the same choice as before. Nothing is respawned — a shell appearing where an agent
+    /// was is the one thing this panel must never do, because it looks exactly like the agent
+    /// still being there.
+    ///
+    /// Called only when the drawer has *emptied*: with tabs left, the one that ended is removed
+    /// and the rest go on. `choosing` is cleared with the window, because the flag only ever meant
+    /// "the launcher is up over something" and there is nothing left for it to be over.
     pub fn back_to_launcher(&mut self) {
         self.window = None;
+        self.choosing = false;
         // Coming back to the list is one of the two moments the launcher's answer to "is this one
         // installed?" can have gone stale under it — the other is the drawer opening. See
         // [`forget_installed`].
@@ -708,5 +757,61 @@ mod tests {
         drawer.back_to_launcher();
         assert!(drawer.showing_launcher());
         assert_eq!(drawer.highlighted(), Agent::Gemini);
+    }
+
+    /// A drawer with something in its pane, without needing a pty to say so.
+    ///
+    /// `window` is only ever read here through `is_none`, so the whole of "an agent is running"
+    /// for these tests is a window that exists — and a `TerminalWindow` with no tabs is one, while
+    /// costing no shell on a build runner. What the tabs *are* is the app's business and is tested
+    /// there; what is the state machine's business is which screen the column shows.
+    fn with_an_agent_running(agent: Agent) -> Drawer {
+        let mut drawer = Drawer::with_launcher(Some(agent));
+        drawer.agent = Some(agent);
+        drawer.window = Some(TerminalWindow {
+            tabs: Vec::new(),
+            active: 0,
+            weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+        });
+        drawer
+    }
+
+    /// The whole of which screen the column shows, at the four states it has. The launcher is one
+    /// screen reached two ways — nothing started yet, or another tab asked for — and the flag is
+    /// what makes the second possible without a half-made tab existing anywhere.
+    #[test]
+    fn the_launcher_shows_when_nothing_is_running_and_when_another_tab_is_asked_for() {
+        let fresh = Drawer::with_launcher(None);
+        assert!(fresh.showing_launcher(), "a drawer with nothing in it is the launcher");
+        assert!(!fresh.choosing, "and it is not *choosing over* anything: there is nothing there");
+
+        let mut running = with_an_agent_running(Agent::Claude);
+        assert!(!running.showing_launcher(), "an agent in the pane is what is drawn");
+
+        running.start_choosing();
+        assert!(running.showing_launcher(), "asking for another tab puts the list over it");
+        assert_eq!(running.highlighted(), Agent::Claude, "on the last one used, as ever");
+
+        // Esc: the choice is cancelled and the column goes straight back to the agent that had
+        // it. Nothing about the running tabs was ever touched.
+        running.stop_choosing();
+        assert!(!running.showing_launcher(), "cancelling returns the agent, it does not empty it");
+        assert!(running.window.is_some());
+    }
+
+    /// The drawer emptying clears the flag with the window. `choosing` means "the list is up over
+    /// something"; with nothing left to be over, a flag still set would be a second, invisible
+    /// reason the launcher was showing — and `stop_choosing` would then hand the column back to a
+    /// pane that is gone.
+    #[test]
+    fn emptying_the_drawer_clears_the_choice_it_was_in_the_middle_of() {
+        let mut drawer = with_an_agent_running(Agent::Codex);
+        drawer.start_choosing();
+        drawer.back_to_launcher();
+        assert!(!drawer.choosing);
+        assert!(drawer.showing_launcher(), "and the launcher is showing for the plain reason");
+        drawer.stop_choosing();
+        assert!(drawer.showing_launcher(), "with nothing to go back to, cancelling changes nothing");
+        assert_eq!(drawer.highlighted(), Agent::Codex);
     }
 }
