@@ -1,3 +1,22 @@
+## What's new in 0.24.1
+
+**The drawer answers the right button.** Right-clicking the agent drawer used to do nothing at
+all — which also left no way to find out that the column holds tabs. It now raises a menu of
+its own: copy and paste, *New agent tab* (the same picker `Ctrl+Shift+T` opens when the focus
+is there), *Close tab* — a right-click on a chip selects that tab first, so the row acts on the
+one under the pointer — and the View menu's toggle that puts the column away with every
+conversation still running.
+
+**A quieter cup.** The ☕ on the menu bar now asks for its text presentation: a line-drawn cup
+in the bar's own colour — the same cup the website pours — instead of the emoji font's
+full-colour sticker. A terminal that ignores the request keeps the emoji it showed before.
+
+**Follow mode keeps its hands off your frames.** A file arriving because a program wrote it no
+longer switches the split view on by itself: with the split open it lands in the other half as
+before; without it, it joins the tab strip behind your work and says so on the status line.
+The rule of 0.24 — nothing a program does may rearrange your layout — now covers the one road
+that had escaped it.
+
 ## What's new in 0.24.0
 
 **The drawer learns tabs.** The agent drawer can now hold more than one conversation: a tab
