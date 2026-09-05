@@ -720,6 +720,30 @@ fn accepts_registration(agent: crate::session::Agent) -> bool {
 /// The remembered answer for each agent, in [`crate::session::Agent::all`] order.
 static ACCEPTS: std::sync::Mutex<[Option<bool>; 4]> = std::sync::Mutex::new([None; 4]);
 
+/// Writes that answer down for all four agents, so a test can say which side of the decision it
+/// is about instead of inheriting it from the machine.
+///
+/// Left to itself the memo is filled by [`help_mentions`], which spawns the agent's own binary:
+/// on a developer's laptop claude is installed and answers yes, on a build runner nothing is
+/// installed and every answer is no. A test that asserts what the *registered* launch carries
+/// would then pass in one place and fail in the other while the code it is about never changed
+/// — the check would be reading the runner's package list rather than this module. Seeding is
+/// how such a test names the state it means.
+///
+/// All four at once, and no restore afterwards. The memo is one array for the whole process and
+/// the suite's tests run as parallel threads in it: putting `None` back at the end of a test
+/// would hand whoever is running alongside a probe they did not ask for, and a probe is the very
+/// thing being kept out of the suite. Any future test that wants the other answer seeds the
+/// other answer — the two must not overlap in one process, which is also why every test here
+/// that cares about a launch is the single test below.
+#[cfg(test)]
+fn seed_accepts_registration(answer: bool) {
+    let mut memo = ACCEPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for remembered in memo.iter_mut() {
+        *remembered = Some(answer);
+    }
+}
+
 /// The probe: run the agent's own `--help` and read whether the flag is in it.
 ///
 /// The binary is found through [`crate::tools::tool`] rather than left to the PATH, for the
@@ -2048,6 +2072,15 @@ mod tests {
     ///
     /// One test rather than two because both halves speak about this process's own session
     /// directory, and two tests would be two threads taking it away from each other.
+    ///
+    /// The probe is seeded rather than run, and that is what makes this a test about the
+    /// registration plumbing instead of a test about what happens to be installed here. Asked for
+    /// real, [`accepts_registration`] starts `claude --help` and believes what it reads: a laptop
+    /// with claude on it takes the registered branch, a build runner with no agents installed
+    /// falls back to the bare line, and the second one would fail on the assertion below while
+    /// this module was word for word the code that passed on the first. Whether an installed
+    /// agent understands the flag is [`help_mentions`]'s question; what the drawer hands an agent
+    /// that does is this one's, so the answer is written down before it is asked.
     #[test]
     fn a_launch_carries_the_file_and_the_name_its_line_depends_on() {
         use crate::session::Agent;
@@ -2066,6 +2099,12 @@ mod tests {
             assert!(launch.env.is_empty(), "and carries no name pointing at nothing");
         }
 
+        // Nothing above this line reaches the probe — with no file at the path, every agent that
+        // reads one has already returned the bare launch — so the first half is asserting what it
+        // says it does whether or not this runs. From here on the launches are meant to be the
+        // registered ones, and that is the state being named.
+        seed_accepts_registration(true);
+
         let session = Session::start().expect("a session directory must be creatable");
         for agent in file_readers() {
             let launch = drawer_launch(agent, true);
@@ -2078,9 +2117,12 @@ mod tests {
             assert_eq!(written, registration(agent, &server_command()).expect("a shape"));
         }
 
-        // Whichever way the probe answered on the machine running this, a line that reads
-        // `$CLEE_MCP_CLAUDE` has to come with the name it reads: a shell expanding a name nobody
-        // set would hand claude an empty `--mcp-config` and take the pane with it.
+        // All four now, codex included, and every one of them on the registered side: a line that
+        // reads `$CLEE_MCP_CLAUDE` has to come with the name it reads, whatever else the agent's
+        // shape is. A shell expanding a name nobody set would hand claude an empty `--mcp-config`
+        // and take the pane with it. The two registered through the environment name nothing in
+        // their line and codex names no environment at all, so the filter is what makes this one
+        // loop hold for the three shapes at once rather than three loops saying it separately.
         for agent in Agent::all() {
             let launch = drawer_launch(agent, true);
             if let Some(name) = config_env(agent).filter(|name| launch.line.contains(*name)) {
