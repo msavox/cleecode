@@ -218,8 +218,11 @@ def main():
 
         session.press("x", lambda s: "Y / N" in s.text() or "S / N" in s.text(), 5)
         answer = "y" if "Y / N" in session.text() else "s"
-        session.press(answer, lambda s: True, 3)
-        gone = session.wait(lambda s: not status(root), 10)
+        # Waited on the question being answered — the prompt gone — before the repository is
+        # asked, so a keypress dropped on a loaded machine is caught here as the prompt still
+        # standing, rather than a frame later as a discard that seems never to have happened.
+        session.press(answer, lambda s: "Y / N" not in s.text() and "S / N" not in s.text(), 6)
+        gone = session.wait(lambda s: not status(root), 12)
         report.check("answering yes throws the changes away", gone, session, note=str(status(root)))
         report.check("and the file is what the last commit says it is",
                      open(os.path.join(root, "main.rs")).read() != "fn main() { /* about to be thrown away */ }\n",
@@ -262,8 +265,15 @@ def main():
 
         session.press("r", lambda s: True, 3)
         session.press("\x1b[Z", lambda s: "A commit on main" in s.text(), 8)   # back to History
-        report.check("the history tab draws the commits", "A commit on main" in session.text(),
-                     session)
+        # Waited for the merge itself to reach the panel, not for a commit that predates it:
+        # "A commit on main" was on screen before the merge was made, so keying on it could read
+        # the graph a frame before the refresh caught up — as a straight column with no diagonals
+        # at all. The merge commit's own subject and a diagonal actually drawn are the evidence
+        # that the shape being checked is on screen.
+        drawn = session.wait(lambda s: "Merge branch" in s.text()
+                             and any("\\" in r or "/" in r for r in graph_art(s)), 10)
+        report.check("the history tab draws the commits", drawn, session,
+                     note=repr(graph_art(session)))
 
         # The art itself. Both diagonals are named, because they are the two that mean opposite
         # things: `|\\` is a branch leaving and `|/` is one coming back, and a graph that had
@@ -330,9 +340,11 @@ def main():
         report.check("D asks before dropping one",
                      "Y / N" in session.text() or "S / N" in session.text(), session)
         answer = "y" if "Y / N" in session.text() else "s"
-        session.press(answer, lambda s: True, 3)
+        # The same discipline as the discard confirmation: wait for the prompt to go, so the drop
+        # is only asked about once its answer has been taken.
+        session.press(answer, lambda s: "Y / N" not in s.text() and "S / N" not in s.text(), 6)
         report.check("and answering yes drops it",
-                     session.wait(lambda s: not git(root, "stash", "list"), 10), session,
+                     session.wait(lambda s: not git(root, "stash", "list"), 12), session,
                      note=repr(git(root, "stash", "list")))
 
         Report.show("final screen", session)
