@@ -511,17 +511,23 @@ pub struct TabLayout {
     pub label: (u16, u16),
     /// What a click has to hit to close the tab. Wider than the glyph: a one-cell target is one
     /// the mouse misses, which is why the preview bar grew `NAV_MIN_WIDTH` after the same
-    /// complaint. The padding either side of the □ belongs to nothing else, so it is given away
+    /// complaint. The padding either side of the ■ belongs to nothing else, so it is given away
     /// here — the glyph is still drawn in exactly one cell, and the tab is unchanged to look at.
     pub close: (u16, u16),
 }
 
-/// The close box, System 7's own: an empty square at the top-left of whatever it closes, be it a
-/// tab or a whole pane. One glyph for every close control in the app, because a control that
-/// changes shape from one corner to the next is one that has to be learnt twice. It measures a
-/// single column — U+25A1 is East Asian *ambiguous*, which unicode-width treats as narrow, the
-/// same class the preview tab's `▤` already relies on — so every layout here can count it as one.
-pub const CLOSE_BOX: &str = "\u{25a1}";
+/// The close box at the top-left of whatever it closes, be it a tab or a whole pane. One glyph
+/// for every close control in the app, because a control that changes shape from one corner to
+/// the next is one that has to be learnt twice.
+///
+/// A *filled* square, not the hollow one System 7 drew (asked for by the user, 2026-09-05): the
+/// hollow outline all but vanished on the focused tab, where it is drawn in the accent's own
+/// contrast colour on the accent — enough ink for the title's letters beside it, too little for a
+/// thin square. A solid block carries the same colour with the weight to be seen, on that
+/// background and every other. It measures a single column — U+25A0 is East Asian *ambiguous*,
+/// which unicode-width treats as narrow, the same class the preview tab's `▤` already relies on —
+/// so every layout here can still count it as one.
+pub const CLOSE_BOX: &str = "\u{25a0}";
 
 /// The arrow glyphs that stand in for tabs scrolled out of view, and the columns they take.
 pub const SCROLL_LEFT_GLYPH: &str = "\u{2039}";
@@ -556,7 +562,7 @@ impl TabStrip {
     }
 }
 
-/// Width each tab occupies: `" title* "` plus the `□` glyph and the space before it.
+/// Width each tab occupies: `" title* "` plus the `■` glyph and the space before it.
 /// The width of each tab in one pane's strip. Per pane, not per buffer: the two halves of a
 /// split hold different files, so they have different strips.
 pub fn tab_widths(app: &App, pane: EditorPane) -> Vec<u16> {
@@ -624,13 +630,13 @@ pub fn offset_revealing(widths: &[u16], width: u16, offset: usize, active: usize
     }
 }
 
-/// The narrowest a clipped tab can usefully be: the □ and its space, then one column of title.
+/// The narrowest a clipped tab can usefully be: the ■ and its space, then one column of title.
 const MIN_CLIPPED_TAB: u16 = 3;
 
 /// One tab occupying `x..x + w`, where `w` is either the width the title wants or — for the
 /// clipped case below — all the room there is.
 fn tab_layout_at(x: u16, w: u16, clipped: bool) -> TabLayout {
-    let close_start = x + 1; // the □ sits after the leading space, as System 7 kept it
+    let close_start = x + 1; // the ■ sits after the leading space, as System 7 kept it
     // The leading space is always part of the target. The space *after* the glyph is too, but
     // only when there is one: a title clipped hard enough is a lone ellipsis in that very column,
     // and swallowing it would close the tab from a cell showing text.
@@ -668,7 +674,7 @@ pub fn tab_strip_layout(widths: &[u16], width: u16, offset: usize) -> TabStrip {
 /// ordinary rather than exotic.
 ///
 /// Returning nothing here is what made the whole bar disappear: no name, no dirty marker and no
-/// □, so the one open file had nothing on screen and no way to be closed with the mouse. A tab
+/// ■, so the one open file had nothing on screen and no way to be closed with the mouse. A tab
 /// cut short with an ellipsis says less than a whole one and everything more than an empty row.
 ///
 /// The arrows still come first when there is anything on either side, because a strip you cannot
@@ -3859,7 +3865,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
         let position = strip.first + offset;
         let dirty = if editor.dirty { "*" } else { "" };
         // Drawn into the columns the layout gave this tab rather than into as many as the name
-        // wants: the two have to agree, or the □ is clicked where it is not and the strip runs
+        // wants: the two have to agree, or the ■ is clicked where it is not and the strip runs
         // off the end of the bar. `fit` cuts with an ellipsis; the padding is for the clipped
         // tab that is the whole strip, so the highlight still fills the row.
         let label_width = layout.label.1.saturating_sub(layout.label.0) as usize;
@@ -4873,7 +4879,7 @@ fn vt100_color(color: vt100::Color) -> Option<Color> {
     }
 }
 
-/// The cell holding a terminal panel's close button — the `□` on its top border, two columns in
+/// The cell holding a terminal panel's close button — the `■` on its top border, two columns in
 /// from the top-*left* corner, where System 7 put the close box and where every other close
 /// control in this app now sits. The box does not lean on the corner: one cell of border stands
 /// between them (asked for by the user, 2026-09-04), which is the leading pad `with_close_box`
@@ -4896,7 +4902,11 @@ pub fn terminal_close_cell(area: Rect) -> Option<(u16, u16)> {
 fn with_close_box<'a>(block: Block<'a>, pal: Palette) -> Block<'a> {
     block.title_top(Line::from(vec![
         Span::raw(" "),
-        Span::styled(CLOSE_BOX, Style::default().fg(pal.danger)),
+        // The accent, not danger: the box is a control that is always there, not a warning that
+        // something is about to be lost, and a red one read as the second when it is the first.
+        // It only destroys work once its own question is answered — that dialog is where danger
+        // belongs, not on a control sitting quietly on every pane's border.
+        Span::styled(CLOSE_BOX, Style::default().fg(pal.accent)),
         Span::raw(" "),
     ]))
 }
@@ -5152,7 +5162,7 @@ pub fn terminal_tab_strip_rect(area: Rect, window_close: bool) -> Rect {
     }
 }
 
-/// One tab in a terminal window's strip: its whole x-range, and the column of its `□` close
+/// One tab in a terminal window's strip: its whole x-range, and the column of its `■` close
 /// glyph (absent only when the strip is too narrow to fit it).
 pub struct TermTab {
     pub full: (u16, u16),
@@ -5177,7 +5187,7 @@ pub fn terminal_tab_labels(window: &TerminalWindow, window_index: usize, lang: L
         .collect()
 }
 
-/// The tabs laid out along a terminal window's strip, left to right. Each chip is ` □ {name} `
+/// The tabs laid out along a terminal window's strip, left to right. Each chip is ` ■ {name} `
 /// (a close glyph plus a display name). Shared by the renderer and click handling, and clipped to
 /// the strip width. Empty when there's a single tab (no strip is shown).
 pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
@@ -5192,8 +5202,8 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
             break;
         }
         let lw = label.chars().count() as u16;
-        let right = (x + lw + 4).min(end); // " □ name "
-        let close_x = x + 1; // the □ sits after the chip's leading space
+        let right = (x + lw + 4).min(end); // " ■ name "
+        let close_x = x + 1; // the ■ sits after the chip's leading space
         let close = (close_x < right).then_some(close_x);
         tabs.push(TermTab { full: (x, right), close });
         x = right;
@@ -5202,7 +5212,7 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 }
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
-/// never reads as an editor tab (those go cyan). Each tab carries a `□` to close it.
+/// never reads as an editor tab (those go cyan). Each tab carries a `■` to close it.
 fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[String], active: usize) {
     let tabs = terminal_tab_ranges(area, labels);
     let mut spans: Vec<Span> = Vec::new();
@@ -5231,8 +5241,8 @@ struct TerminalChrome {
     /// Whether the layout resize mode is on, which colours the focused border differently.
     resizing: bool,
     focused: bool,
-    /// Whether to offer the window □ in the corner. False for the drawer: it is closed from the
-    /// View menu, and a □ there would be a promise to kill the agent.
+    /// Whether to offer the window ■ in the corner. False for the drawer: it is closed from the
+    /// View menu, and a ■ there would be a promise to kill the agent.
     closable: bool,
     /// Whether the pointer is on this pane's scrollbar, or dragging it. Resolved by the caller,
     /// which is the half that knows which `ScrollbarId` this pane answers to — `Terminal(i)` for
@@ -5624,7 +5634,7 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
                 lang,
                 resizing,
                 focused,
-                // The □ in the corner, in the cell every other pane keeps it in. It reads as the
+                // The ■ in the corner, in the cell every other pane keeps it in. It reads as the
                 // terminal panel's close button and does something quieter: it takes the column
                 // away and leaves the pty running, which is the View menu's own path and the
                 // only thing closing the drawer has ever meant. `App::click_drawer` claims that
@@ -5736,7 +5746,7 @@ fn draw_drawer_launcher(
     focused: bool,
     resizing: bool,
 ) {
-    // The same □, in the same cell, as the drawer wears with an agent in it: the empty drawer is
+    // The same ■, in the same cell, as the drawer wears with an agent in it: the empty drawer is
     // as dismissable as the full one, and a control that came and went with the contents would be
     // one to hunt for. `terminal_close_cell` is where it is — which means it goes on before the
     // title, so it is the first left title and lands in that cell rather than after the words.
@@ -7238,7 +7248,7 @@ mod tests {
         // The box's cell is never part of the strip, so the tabs cannot paint over the button.
         assert!(strip.x > terminal_close_cell(area).unwrap().0);
 
-        // Three tabs: ` □ Terminal N ` chips (name = 10 cells, chip = 14) laid left to right, each
+        // Three tabs: ` ■ Terminal N ` chips (name = 10 cells, chip = 14) laid left to right, each
         // with a close glyph before the name.
         let labels: Vec<String> = (1..=3).map(|n| format!("Terminal {n}")).collect();
         let tabs = terminal_tab_ranges(strip, &labels);
@@ -7313,7 +7323,7 @@ mod tests {
         assert_eq!(strip.tabs.len(), 5);
         assert_eq!(strip.tabs[0].full, (0, 10));
         assert_eq!(strip.tabs[4].full, (40, 50));
-        // The □ is drawn one cell after the tab's leading space, and the label starts after it.
+        // The ■ is drawn one cell after the tab's leading space, and the label starts after it.
         assert_eq!(strip.tabs[0].label, (2, 10));
         // The click target is the glyph plus the padding either side of it: three cells, so the
         // close is aimed at rather than hunted for.
@@ -7392,7 +7402,7 @@ mod tests {
     }
 
     /// A tab wider than the whole strip used to take the bar down with it: the layout answered
-    /// "nothing fits" and the row went blank — no file name, no dirty marker, no □, and no way
+    /// "nothing fits" and the row went blank — no file name, no dirty marker, no ■, and no way
     /// to close the file with the mouse. One tab cut short is the answer; an empty bar is not.
     #[test]
     fn a_tab_wider_than_the_strip_is_clipped_rather_than_dropped() {
@@ -7419,7 +7429,7 @@ mod tests {
     #[test]
     fn tab_strip_degrades_without_panicking_when_too_narrow() {
         assert!(tab_strip_layout(&W, 0, 0).tabs.is_empty());
-        // Under three columns there is no room for the □, its space and a letter, so nothing is
+        // Under three columns there is no room for the ■, its space and a letter, so nothing is
         // drawn rather than a close button with no tab attached to it.
         assert!(tab_strip_layout(&W, 2, 0).tabs.is_empty());
         assert!(tab_strip_layout(&[], 50, 0).tabs.is_empty());
