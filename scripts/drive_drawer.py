@@ -9,6 +9,14 @@ come out of the layout rather than sit over the top of it, does the agent's outp
 after the first frame, does the conversation survive a workspace switch and being hidden, and does
 an agent that ends leave the list of four rather than a shell wearing an agent's frame.
 
+Then the column with several agents in it, one to a tab. `Ctrl+Shift+T` — or the View menu — puts
+the same full-pane launcher back over the ones already running, `Esc` hands the column straight
+back to them, and a name chosen off it arrives as another tab rather than in place of the first.
+The border stops carrying a title then and carries a strip of chips instead, so the drawer is
+found by both shapes; the window's own ■ still hides the column while a chip's ■ ends the agent
+in that chip. The case worth having is the same program twice — two tabs both reading
+"Claude Code" — which is why nothing in that section tells the two apart by their names.
+
 Then the same drawer in the other mode. On autocollapse it is on screen exactly while it holds
 the keyboard, and it is *painted over* the frames rather than carved out of them — so the proof
 is a picture compared with itself: every cell left of the seam has to be the cell it already was
@@ -114,24 +122,39 @@ def really_installed(name):
 # ---- reading the drawer off the screen ----------------------------------------------------
 
 
+# The words the drawer's own top border can carry: the launcher's title, and the label of
+# whichever agent is in the pane \u2014 which is also what a tab chip is named after. `Agent::label`,
+# copied here for the reason the install commands are: a check that reads the answer out of the
+# thing it is checking checks nothing.
+DRAWER_TITLES = (" agent ", " Claude Code ", " codex ", " opencode ", " gemini ")
+
+
 def drawer_column(session):
-    """The column the drawer's left border sits at, found from the title on its own border.
+    """The column the drawer's left border sits at, found from what is written on its own border.
 
     Read off the screen rather than computed from the percentage, so a check about the layout is
     a check about the layout and not about this file's arithmetic. It has to be the *border*: the
     status line says "the agent is still running in it" the moment the drawer is hidden, and a
     plain search for the word found that sentence and reported the column still there.
 
-    The drawer is always closable \u2014 launcher or agent, it wears the same close box the
-    terminal windows do \u2014 so its border reads "\u250c \u25a0 \u2500 agent", corner, a padded close box, a
-    padded dash, then the title, rather than the bare "\u250c agent" a frame with no close box still
-    carries (the Files panel, which nothing ever closes). Both forms are anchored here, on the
-    corner and nothing looser, because a title alone is also the sentence a status message uses
-    when it names the agent running behind a hidden drawer."""
-    boxed = "\u250c \u25a0 \u2500"  # \u250c \u25a0 \u2500 : the corner, the close box, the dash before the title
+    Three forms, and the third is why this is not one `find`. The drawer is always closable \u2014
+    launcher or agent, it wears the same close box the terminal windows do \u2014 so with one tab its
+    border reads "\u250c \u25a0 \u2500 agent": corner, a padded close box, a padded dash, then the title,
+    rather than the bare "\u250c agent" a frame with no close box still carries (the Files panel,
+    which nothing ever closes). With *two or more* tabs there is no title at all: the chips ride
+    the border in its place, so it reads "\u250c \u25a0  \u25a0 Claude Code  \u25a0 codex \u2500\u2500\u2500" \u2014 the window's own
+    box still in its cell, then the strip four columns in, each chip a padded \u25a0 and a name.
+
+    Every form is anchored on the corner and nothing looser, because a title alone is also the
+    sentence a status message uses when it names the agent running behind a hidden drawer. The
+    chip form is anchored on an *agent's* name for the same kind of reason: a terminal window with
+    two shells in it draws exactly this strip, and only the drawer's chips are named after agents.
+    """
+    boxed = "\u250c \u25a0 \u2500"    # corner, the close box, the dash before the title
+    stripped = "\u250c \u25a0  \u25a0"  # corner, the close box and its pad, then the first chip's own box
     for y in range(session.rows):
         line = session.full_line(y)
-        for title in (" agent ", " Claude Code ", " codex ", " opencode ", " gemini "):
+        for title in DRAWER_TITLES:
             at = line.find(title)
             if at <= 0:
                 continue
@@ -139,7 +162,51 @@ def drawer_column(session):
                 return at - 1
             if at >= len(boxed) and line[at - len(boxed):at] == boxed:
                 return at - len(boxed)
+            if at >= len(stripped) and line[at - len(stripped):at] == stripped:
+                return at - len(stripped)
     return None
+
+
+def drawer_border_row(session, left=None):
+    """The screen row the drawer's top border is drawn on, or None."""
+    left = drawer_column(session) if left is None else left
+    if left is None:
+        return None
+    return next((y for y in range(session.rows) if session.full_line(y)[left] == "\u250c"), None)
+
+
+def drawer_chips(session):
+    """The tab chips on the drawer's top border, left to right \u2014 empty at one tab, or none.
+
+    One dict per chip: where it starts and ends, the column of its own \u25a0, the name written in it,
+    and the colour it is filled with, which is how the active tab says it is the active one.
+
+    Found from the \u25a0s along the border rather than from the width of a label, because the chips
+    are what the mouse has to hit: `terminal_tab_ranges` puts each box one cell into its chip, and
+    a check that clicked a column computed here from a label's length would be checking this
+    file's arithmetic rather than the strip. The search starts at the drawer's own left border
+    plus four \u2014 the window's \u25a0 sits at plus two, with a pad either side, and it is not a chip."""
+    left = drawer_column(session)
+    row = drawer_border_row(session, left)
+    if left is None or row is None:
+        return []
+    line = session.full_line(row)
+    boxes = [x for x in range(left + 4, session.cols) if line[x] == "\u25a0"]
+    chips = []
+    for i, box in enumerate(boxes):
+        if i + 1 < len(boxes):
+            end = boxes[i + 1] - 1
+        else:
+            # The last chip runs to wherever the border's own fill takes the row back.
+            end = next((x for x in range(box, session.cols) if line[x] == "\u2500"), session.cols)
+        chips.append({
+            "start": box - 1,
+            "end": end,
+            "close": box,
+            "label": line[box + 2:end].strip(),
+            "fill": session.cells(row)[box].bg,
+        })
+    return chips
 
 
 def vertical_borders(session, row):
@@ -286,11 +353,20 @@ def frame_rows(session):
     The frame is the launcher's answer to "what am I about to start": a ring around the chosen
     mark. Its corner glyphs are the one thing on a launcher screen drawn *inside* the drawer that
     is box-drawing but not the drawer's own border, which sits exactly on `drawer_column` and is
-    excluded by starting one column in."""
+    excluded by starting one column in.
+
+    Both corners, not only the top one. The ring is drawn around the mark, so the mark's rows are
+    *between* them — a list holding only the top row makes `ring[0] <= mark[0] <= ring[-1]` a
+    question that cannot be answered yes, and `highlight_agent` then walked away from the very
+    name it had arrived at. The drawer's own bottom-left corner is at `left` exactly and is
+    excluded with the top one."""
     left = drawer_column(session)
     if left is None:
         return None
-    rows = [y for y in range(session.rows) if "┌" in session.full_line(y)[left + 1:]]
+    rows = [
+        y for y in range(session.rows)
+        if any(corner in session.full_line(y)[left + 1:] for corner in ("┌", "└"))
+    ]
     return rows or None
 
 
@@ -766,6 +842,151 @@ def check_drawer(binary, report):
         for _ in range(5):
             session.send("\x7f")
         session.wait(lambda s: True, 0.5)
+
+        # ---- the drawer holds several agents, one per tab -------------------------------------
+        # Everything from here to the end of this section runs on the stub started above, so it is
+        # gated exactly as the rest of the file is: nothing below the `if not ready: return` a few
+        # lines up runs on a machine where the launcher could not start anything.
+        #
+        # The interesting case is the same program twice. Two claude tabs is what a person actually
+        # ends up with — one agent on the bug and one on the branch — and it is the case a strip
+        # naming agents rather than tabs has to survive: both chips read "Claude Code", so nothing
+        # here may tell them apart by their labels. They are told apart the only honest way, by
+        # what has been typed at each one's prompt.
+        talk = "\n".join(session.frame_of("AGENT-STUB claude ready"))
+        first, second, third = "TAB_ONE", "TAB_TWO", "TAB_THREE"
+
+        session.send(session.chord("t"))
+        chose = session.wait(
+            lambda s: drawer_column(s) is not None
+            and all(mark_rows(s, name) is not None for name in INSTALLED + MISSING), 8)
+        report.check("Ctrl+Shift+T in the drawer puts the four names back over the running agent",
+                     chose, session,
+                     note="another tab here is a choice, not a spawn: the launcher is the door")
+        report.check("and the conversation is behind it rather than ended",
+                     "AGENT-STUB claude ready" not in session.text(), session,
+                     note="the launcher takes the whole column, so the pane is hidden, not closed")
+
+        session.press("\x1b", lambda s: "AGENT-STUB claude ready" in s.text(), 8)
+        report.check("Esc hands the column straight back to the agent",
+                     "\n".join(session.frame_of("AGENT-STUB claude ready")) == talk, session,
+                     note="the same pty, byte for byte: a cancelled choice touched nothing")
+        report.check("and the drawer is still a column of its own",
+                     drawer_column(session) is not None, session,
+                     note="cancelling a choice must not cost the panel it was made in")
+        # Where the next keystroke lands is the only definition of focus that matters — and the
+        # marker it leaves is how this section tells the first tab from the second one later.
+        session.send(first)
+        typed_here = session.wait(
+            lambda s: first in "\n".join(s.frame_of("AGENT-STUB claude ready")), 8)
+        report.check("and the keyboard never left the drawer either", typed_here, session,
+                     note="Esc cancelled the launcher, not the frame the launcher was in")
+
+        # The other door to the same screen, since the chord only works from inside the column.
+        if menu_action(session, "v", "New agent tab...", report, "the View menu"):
+            report.check("the View menu's New agent tab reaches the launcher too",
+                         session.wait(lambda s: mark_rows(s, "gemini") is not None, 8), session,
+                         note="the chord needs the keyboard to be in the drawer; this does not")
+        two = False
+        if focus_launcher(session) and highlight_agent(session, "claude"):
+            session.send("\r")
+            two = session.wait(
+                lambda s: "AGENT-STUB claude ready" in s.text() and first not in s.text(), 30)
+        report.check("choosing a second agent starts it beside the first, not over it", two,
+                     session, note="the same program twice is allowed, and is the ordinary case")
+        if two:
+            session.send(second)
+            session.wait(lambda s: second in "\n".join(
+                s.frame_of("AGENT-STUB claude ready")), 8)
+
+        chips = drawer_chips(session)
+        report.check("two tabs put a strip of chips on the border where the title was",
+                     len(chips) == 2, session,
+                     note="found %s" % [c["label"] for c in chips])
+        if len(chips) == 2:
+            left = drawer_column(session)
+            report.check("the window's own ■ keeps its cell, and the chips start after it",
+                         close_cell(session) == (left + 2, drawer_border_row(session, left))
+                         and chips[0]["start"] == left + 4, session,
+                         note="box at %s, first chip at %s" % (left + 2, chips[0]["start"]))
+            report.check("each chip is its agent's name with a ■ of its own",
+                         [c["label"] for c in chips] == ["Claude Code", "Claude Code"]
+                         and len({c["close"] for c in chips}) == 2
+                         and left + 2 not in {c["close"] for c in chips}, session,
+                         note="boxes at %s" % [c["close"] for c in chips])
+            report.check("and one of the two is lit as the tab on screen",
+                         chips[0]["fill"] != chips[1]["fill"], session,
+                         note="%s and %s" % (chips[0]["fill"], chips[1]["fill"]))
+
+            lit = [c["fill"] for c in chips]
+            session.press("\x1b[1;6D", lambda s: first in s.text(), 8)   # Ctrl+Shift+←
+            report.check("Ctrl+Shift+← in the drawer shows the tab beside it",
+                         first in session.text() and second not in session.text(), session,
+                         note="told apart by what was typed at each prompt, not by their names")
+            report.check("and the lit chip moved with it",
+                         [c["fill"] for c in drawer_chips(session)] == list(reversed(lit)),
+                         session, note="the strip says which conversation is on screen")
+            session.press("\x1b[1;6C", lambda s: second in s.text(), 8)  # Ctrl+Shift+→
+            report.check("and Ctrl+Shift+→ comes back to the one it left",
+                         second in session.text() and first not in session.text(), session)
+
+            # An agent ending by itself with another still talking. Ctrl+U first, for the reason
+            # the section at the end of this file gives: end-of-file on a half-typed line is not
+            # end of anything.
+            session.press("\x15", lambda s: second not in s.text(), 6)
+            session.send("\x04")
+            survived = session.wait(
+                lambda s: first in s.text() and drawer_column(s) is not None, 20)
+            report.check("an agent that ends with another still talking leaves the rest running",
+                         survived, session,
+                         note="the drawer does not go back to the list while a conversation is on")
+            ended = "Claude Code in the drawer has ended — its tab is gone"
+            report.check("and the status line says which one went",
+                         ended in session.full_line(session.rows - 1), session,
+                         note=session.full_line(session.rows - 1).strip()[:110])
+            report.check("and the border goes back to carrying a title",
+                         drawer_chips(session) == [] and drawer_column(session) is not None,
+                         session, note="one tab is a name on a border, not a strip of one chip")
+
+        # A third, so the chip's own ■ has two to choose between. It arrives active, which makes
+        # the chip pressed below the *background* one — a control that killed whatever was on
+        # screen instead of the tab it is drawn on would pass a check made on the active tab.
+        third_up = False
+        if session.wait(lambda s: drawer_column(s) is not None, 4):
+            session.send(session.chord("t"))
+            if session.wait(lambda s: mark_rows(s, "gemini") is not None, 8) \
+                    and focus_launcher(session) and highlight_agent(session, "claude"):
+                session.send("\r")
+                third_up = session.wait(
+                    lambda s: len(drawer_chips(s)) == 2 and first not in s.text(), 30)
+                if third_up:
+                    session.send(third)
+                    session.wait(lambda s: third in s.text(), 8)
+        report.check("a third agent joins the strip the same way", third_up, session)
+        if third_up:
+            chips = drawer_chips(session)
+            click(session, chips[0]["close"], drawer_border_row(session))
+            killed = session.wait(lambda s: len(drawer_chips(s)) == 0, 10)
+            report.check("a chip's ■ closes that tab and no other", killed, session,
+                         note="the window's ■ hides the column; a chip's ends the agent in it")
+            report.check("and the conversation the chip did not name is still going",
+                         third in session.text() and first not in session.text(), session)
+            session.send(session.chord("k"))
+            back = session.wait(
+                lambda s: all(mark_rows(s, name) is not None for name in INSTALLED + MISSING), 15)
+            report.check("Ctrl+Shift+K closes the last tab and the launcher comes back", back,
+                         session, note="never a respawned shell, here no more than anywhere else")
+
+        # And an agent again for the rest of the file, which is written for a drawer with one.
+        if session.wait(lambda s: frame_rows(s) is not None, 4):
+            if focus_launcher(session):
+                highlight_agent(session, "claude")
+                session.send("\r")
+        restarted = session.wait(lambda s: "AGENT-STUB claude ready" in s.text(), 30)
+        report.check("and the launcher starts one again for the checks that follow", restarted,
+                     session)
+        if not restarted:
+            return
 
         # ---- precedence ----------------------------------------------------------------------
         # A second agent, in an ordinary terminal, started by typing its name. Ctrl+Shift+A now
