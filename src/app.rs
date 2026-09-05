@@ -2872,6 +2872,43 @@ pub struct LayoutPreset {
 /// editor: two panes of thirty columns each are two panes nobody can read.
 const SPLIT_FOR_FIGURES_COLS: u16 = 120;
 
+/// What showing a file beside the work is allowed to do to the frames.
+///
+/// Two kinds of caller ask for the same thing — a file in front of somebody without taking their
+/// keyboard — and they do not have the same rights over the window. A figure and a debugger are
+/// following something the user themselves started and stepped, so they may open the split to put
+/// the stopped line beside the work; that is the rule of 0.9 and it stays. An agent may not. A
+/// tool call is another program deciding to rearrange the frames of somebody who is typing in
+/// them, and "an agent read a file" must never be the answer to "why did my window just split".
+///
+/// A value passed at the call site rather than a field on the app, because the difference is about
+/// *who is asking*, and once the call has started there is nowhere else to read that from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BesideLayout {
+    /// Open the split when the terminal is wide enough for two readable panes.
+    MakeRoom,
+    /// Leave the frames exactly as the user shaped them.
+    Keep,
+}
+
+/// Whether the tab the user was on stays in front of the one that was just opened for them.
+///
+/// Only ever true in a single pane: with a split there is a second half to put the file in, and
+/// the whole point of showing beside is that it lands there, visibly, while the keyboard stays
+/// put. Without one the file has to become an ordinary tab in the pane the user is in, and then
+/// the question is whether taking the front of that pane would take anything away from them — so
+/// it is asked of where their keyboard *was* when the request arrived. In the editor means they
+/// were typing in this very pane, and a tab appearing over their file mid-word is the layout
+/// changing under them by another name; the status line the caller writes is how they find it.
+/// Anywhere else — the drawer, a terminal, the tree — is the ordinary case of somebody talking to
+/// an agent and looking up to see the answer, so the answer is in front.
+///
+/// Split out as a rule rather than an `if` in each of the two places that need it, because two
+/// copies of this would be two chances to disagree about it.
+fn the_users_tab_stays_in_front(layout: BesideLayout, split_view: bool, was: Focus) -> bool {
+    layout == BesideLayout::Keep && !split_view && was == Focus::Editor
+}
+
 /// How many tabs follow mode may open in one session.
 ///
 /// A ceiling rather than a rotation: none of them is ever closed again by the editor. An agent
@@ -5715,7 +5752,10 @@ impl App {
         // lands *after* the sentence saying why the program stopped and wipes it out. The reader
         // is then told the one thing they can already see, instead of the one thing they cannot.
         let said = std::mem::take(&mut self.status_message);
-        self.show_beside_without_focus(path, Some(line), None);
+        // A split it may open: the user started this program and asked it to stop here, so the
+        // line it stopped on is what they are waiting to see, beside the file they set the
+        // breakpoint in.
+        self.show_beside_without_focus(path, Some(line), None, BesideLayout::MakeRoom);
         self.status_message = said;
     }
 
@@ -6182,7 +6222,9 @@ impl App {
             // Under the name the editor already has for it, for the same reason the stopped line
             // is. See [`Self::as_the_editor_spells_it`].
             let path = self.as_the_editor_spells_it(path);
-            self.show_beside_without_focus(path, Some(line), None);
+            // Same rights over the frames as the stopped line has, and for the same reason: it is
+            // the user climbing their own stack, one click at a time.
+            self.show_beside_without_focus(path, Some(line), None, BesideLayout::MakeRoom);
         }
         self.refresh_debug_frame();
     }
@@ -6996,6 +7038,10 @@ impl App {
     /// fourth writes into a buffer with unsaved changes in it, so it goes to
     /// [`Self::ask_or_apply_agent_edit`] and may end up as a question rather than as an edit.
     ///
+    /// "Cannot lose anybody any work" is read strictly, and it covers the window as well as the
+    /// buffers: none of these three moves a frame. An agent showing a file gets the split the
+    /// user has, not the one the file would look best in — see [`BesideLayout`].
+    ///
     /// An action a version does not recognise never arrives here at all: `take_requests` cannot
     /// parse it and deletes the file, which is the behaviour a new tool talking to an old editor
     /// needs — nothing, rather than a guess.
@@ -7004,7 +7050,7 @@ impl App {
         match request {
             crate::mcp::Request::Open { path, line, end_line } => {
                 let path = self.mcp_resolve(&path);
-                self.show_beside_without_focus(path.clone(), line, end_line);
+                self.show_beside_without_focus(path.clone(), line, end_line, BesideLayout::Keep);
                 if path.is_file() {
                     self.status_message = i18n::msg_agent_opened(lang, &self.mcp_short(&path), line);
                 }
@@ -7050,6 +7096,12 @@ impl App {
 
     /// Renders a file in the pane the user is *not* typing in, and gives the keyboard back.
     ///
+    /// Only ever asked for by an agent, so the frames are never touched: whatever the split is
+    /// doing when the request lands is what it goes on doing. In one pane the rendered tab is an
+    /// ordinary tab like any other, in front of the user's work or behind it according to
+    /// [`the_users_tab_stays_in_front`] — the same rule [`Self::show_beside_without_focus`]
+    /// follows, because from the reader's side the two requests are the same event.
+    ///
     /// `false` when there was nothing to show, so the caller can stay quiet: as with
     /// [`Self::show_beside_without_focus`], a path an agent guessed wrong is not worth a line in
     /// the middle of somebody else's work.
@@ -7064,13 +7116,10 @@ impl App {
         let ext = file_ext(&path);
         let picture = crate::preview::is_previewable(&ext) || crate::preview::is_document(&ext);
         if !picture && !crate::preview::is_renderable(&ext) {
-            self.show_beside_without_focus(path, None, None);
+            self.show_beside_without_focus(path, None, None, BesideLayout::Keep);
             return true;
         }
         let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
-        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
-            self.toggle_split_view();
-        }
         if self.split_view {
             self.editor_pane_focus = match was.1 {
                 EditorPane::Left => EditorPane::Right,
@@ -7100,7 +7149,9 @@ impl App {
             self.open_file_in_tab(path.clone());
             self.place_rendered_preview(path, beside);
         }
-        // Everything about where the keyboard was, put back.
+        // Everything about where the keyboard was, put back — and, in a single pane, which tab
+        // that pane is showing too. A rendered markdown tab arrives with its source behind it, so
+        // this puts both of them behind the file the user is typing in rather than one.
         self.focus = was.0;
         self.editor_pane_focus = was.1;
         if self.split_view {
@@ -7109,12 +7160,21 @@ impl App {
                 EditorPane::Right => self.active_editor_right = was.3,
             }
         }
+        if the_users_tab_stays_in_front(BesideLayout::Keep, self.split_view, was.0) {
+            self.active_editor = was.2;
+        }
         self.mark_dirty();
         true
     }
 
     /// Opens a file in the pane that is *not* being typed in, and gives the keyboard straight
     /// back — the rule the figures established in 0.9: show without taking.
+    ///
+    /// `layout` says what that is allowed to cost the window: a debugger following a program the
+    /// user is stepping may open the split to make the second pane, an agent may not. See
+    /// [`BesideLayout`]. With no second pane to show it in, the file becomes an ordinary tab in
+    /// the pane the user is already in, in front of their work or behind it according to
+    /// [`the_users_tab_stays_in_front`].
     ///
     /// A file that is not there is passed over in silence. The request came from a program, not
     /// from a key somebody pressed, and an error banner for a path an agent guessed wrong is
@@ -7123,20 +7183,25 @@ impl App {
     /// With `end_line` the span is *selected* rather than merely scrolled to, which is what makes
     /// it visible in a pane nobody is focused on: the renderer paints a selection wherever it
     /// finds one, focused or not, so an agent saying "these twelve lines" lands as twelve
-    /// highlighted lines the user did not have to press anything to see. Selection semantics also
-    /// give the other half of the rule for nothing — the moment the user clicks or types in that
-    /// pane, the mark is gone.
+    /// highlighted lines the user did not have to press anything to see. That holds in a tab
+    /// opened behind the work too — the mark is waiting on the line when they come to it.
+    /// Selection semantics also give the other half of the rule for nothing — the moment the user
+    /// clicks or types in that pane, the mark is gone.
     fn show_beside_without_focus(
         &mut self,
         path: PathBuf,
         line: Option<usize>,
         end_line: Option<usize>,
+        layout: BesideLayout,
     ) {
         if !path.is_file() {
             return;
         }
         let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
-        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
+        if layout == BesideLayout::MakeRoom
+            && !self.split_view
+            && self.last_full.width >= SPLIT_FOR_FIGURES_COLS
+        {
             self.toggle_split_view();
         }
         if self.split_view {
@@ -7160,7 +7225,10 @@ impl App {
                 }
             }
         }
-        // Everything about where the keyboard was, put back.
+        // Everything about where the keyboard was, put back — and, where the file had to be
+        // opened in the pane the user is typing in, which tab that pane is showing as well. The
+        // tab is open and the status line says so; it is just not standing in front of the line
+        // they were in the middle of.
         self.focus = was.0;
         self.editor_pane_focus = was.1;
         if self.split_view {
@@ -7168,6 +7236,9 @@ impl App {
                 EditorPane::Left => self.active_editor = was.2,
                 EditorPane::Right => self.active_editor_right = was.3,
             }
+        }
+        if the_users_tab_stays_in_front(layout, self.split_view, was.0) {
+            self.active_editor = was.2;
         }
         // Nothing here came from an event, so nothing has marked the screen out of date.
         self.mark_dirty();
@@ -17723,6 +17794,36 @@ mod tests {
         assert_eq!(agent_span_lines(0, 3), (1, 3), "lines are 1-based on the wire");
         let (from, to) = agent_span_lines(1, 100_000);
         assert_eq!(to - from + 1, AGENT_SPAN_LINES);
+    }
+
+    /// Who is allowed to move the furniture, and where a file an agent asked for lands when
+    /// nobody is. The whole table, because the interesting entries are the ones that differ.
+    #[test]
+    fn an_agent_shows_a_file_without_rearranging_the_window() {
+        // A debugger never opens behind anything: with room it makes the second pane, and the
+        // stopped line goes there. This function is only ever asked once that has happened.
+        for split in [false, true] {
+            for was in [Focus::Editor, Focus::Drawer, Focus::Terminal, Focus::FileTree] {
+                assert!(
+                    !the_users_tab_stays_in_front(BesideLayout::MakeRoom, split, was),
+                    "the debugger's file is the one to look at"
+                );
+            }
+        }
+        // An agent with a split already open is unchanged from before: the file goes to the other
+        // half, where it is visible without anything being taken.
+        assert!(!the_users_tab_stays_in_front(BesideLayout::Keep, true, Focus::Editor));
+        // One pane, and the user is typing in it: the tab is opened behind their work rather than
+        // over the line they were in the middle of.
+        assert!(the_users_tab_stays_in_front(BesideLayout::Keep, false, Focus::Editor));
+        // One pane, and the user is somewhere else — talking to the agent, most likely — so the
+        // answer they asked for is in front when they look back.
+        for was in [Focus::Drawer, Focus::Terminal, Focus::FileTree, Focus::Debug] {
+            assert!(
+                !the_users_tab_stays_in_front(BesideLayout::Keep, false, was),
+                "nothing was being typed into the editor, so nothing is covered up"
+            );
+        }
     }
 
     /// What the consent question counts. The two numbers are what tell "change one word" and
