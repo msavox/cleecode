@@ -1740,7 +1740,7 @@ const IT: &[Page] = &[
         "  │                         │ volta è sullo schermo.             │",
         "  └─────────────────────────┴────────────────────────────────────┘",
         "",
-        "  Ctrl+PgSu / Ctrl+PgGiù   finestra precedente / successiva",
+        "  Ctrl+Shift+↑ / ↓         finestra precedente / successiva",
         "  Ctrl+Shift+← / →         tab precedente / successiva",
         "  Ctrl+Shift+E             dà un nome al terminale e un comando",
         "                           di avvio",
