@@ -12,11 +12,14 @@ Three claims, in the order a user meets them:
 
   · a file open in a tab reloads on its own when something rewrites it
   · the lines that arrived are lit in the gutter, in a colour the other lines do not have
-  · with follow mode on, a file that is *not* open opens beside the work — and the keyboard
-    stays where it was, which is checked by typing and looking at where the character landed
+  · with follow mode on, a file that is *not* open opens in the layout you have — and the
+    keyboard stays where it was, which is checked by typing and looking at where the character
+    landed
 
-The window is opened wide on purpose: below 120 columns CleeCode will not split the editor, and
-the whole point of the third claim is a file arriving *beside* what you are reading.
+The split is opened by this script, with Ctrl+L, before follow mode fires: the editor no longer
+opens it for anything a program does — the layout belongs to who inhabits it — so a file
+arriving "beside" the work needs the two halves to already be there. The window is opened wide
+so that they fit.
 """
 
 import os
@@ -154,7 +157,7 @@ def main():
     make_repo(root)
 
     report = Report()
-    # Wide enough that the editor will split: a file arriving "beside" needs two halves.
+    # Wide enough for two halves: a file arriving "beside" needs both of them on screen.
     session = Session(binary, root, cols=190, rows=34)
     try:
         if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
@@ -183,6 +186,15 @@ def main():
                      note=f"arrived={arrived} untouched={untouched}")
 
         # ---- 3b: follow mode ---------------------------------------------------------------
+        #
+        # The split is ours to open, not follow mode's: the editor stopped rearranging the
+        # frames for anything a program does, so the second half has to exist before a file can
+        # land in it. With one tab open, Ctrl+L gives the right half an empty buffer, whose
+        # placeholder title is the thing to wait for.
+        split = session.press(
+            "\x0c", lambda s: "untitled" in s.text() or "senza nome" in s.text(), 8
+        )
+        report.check("the split opens at the user's own Ctrl+L", split, session)
         report.check("the settings panel switches follow mode on", switch_follow_on(session),
                      session, note=repr(follow_row(session)))
         session.send("\x1b")                               # close the panel

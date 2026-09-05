@@ -4987,31 +4987,18 @@ impl App {
         !(Editor::looks_binary(path) && self.run_command_for(&file_ext(path)).is_some())
     }
 
-    /// Puts a file on screen in the half you are not typing in, and leaves the keyboard exactly
-    /// where it was — the rule the figures of 0.9 established, by the same road they take.
+    /// Puts a file on screen in the layout you have, and leaves the keyboard exactly where it
+    /// was.
+    ///
+    /// This used to take the figures' road and open the split for itself when the window was
+    /// wide enough. But a figure appears because *you* ran the plot; a follow-mode file appears
+    /// because a program wrote something, and the rule since "the layout belongs to who
+    /// inhabits it" is that nothing a program does may rearrange your frames — an agent's
+    /// `open_file` already obeys it, and an agent editing through the filesystem is the same
+    /// event through a different door. So: with a split, the file lands in the half you are not
+    /// typing in, as always; without one, it joins the strip behind your work and waits there.
     fn open_beside_without_focus(&mut self, path: PathBuf) {
-        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
-        if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
-            self.toggle_split_view();
-        }
-        if self.split_view {
-            self.editor_pane_focus = match was.1 {
-                EditorPane::Left => EditorPane::Right,
-                EditorPane::Right => EditorPane::Left,
-            };
-        }
-        self.open_file_in_tab(path);
-        // Everything about where the keyboard was, put back — including which tab the pane you
-        // were in is showing. That last part is where this parts company with a figure: a
-        // picture that took the front of a narrow window still cannot receive a keystroke, and a
-        // text file can. In a window too narrow to split, the new tab therefore joins the strip
-        // and waits there rather than arriving in front of the line you were typing.
-        self.focus = was.0;
-        self.editor_pane_focus = was.1;
-        match was.1 {
-            EditorPane::Left => self.active_editor = was.2,
-            EditorPane::Right => self.active_editor_right = was.3,
-        }
+        self.show_beside_without_focus(path, None, None, BesideLayout::Keep);
     }
 
     /// Said when follow mode has just been switched, from wherever it was switched.
