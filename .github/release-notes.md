@@ -1,3 +1,29 @@
+## What's new in 0.24.0
+
+**The drawer learns tabs.** The agent drawer can now hold more than one conversation: a tab
+strip appears the moment a second agent starts, and asking for another (`Ctrl+Shift+T` in the
+drawer, or *New agent tab* in the View menu) brings back the same four-name launcher the first
+one came from. That is the rule that keeps the drawer what it is — a tab is only ever born from
+a name chosen off that list, never from a shell, so nothing in this column can turn into a
+second terminal panel. The keys follow the keyboard: the tab chords and arrows that walk the
+terminal panel's shells walk the drawer's agents when the focus is there. The window's little
+square still only *hides* the column, conversations running on; the one on each tab's chip is
+the one control that ends an agent, exactly as it ends a shell next door. And an agent that
+finishes in a background tab says so on the status line instead of quietly leaving the strip.
+Every tab gets the same zero-configuration MCP hookup the single agent always had.
+
+**Your layout stays yours.** An agent calling `open_file` or `preview` used to switch the
+split view on by itself to show the file "beside" your work. No more: with the split on, the
+file lands in the other half as before; with it off, it opens as an ordinary tab — kept behind
+the one you are typing in, announced on the status line, so nothing is rearranged under your
+hands. Octave figures and the debugger keep their split: a plot beside the script and a
+breakpoint beside the code are what those features are for.
+
+**A coffee button.** A small ☕ sits at the right end of the menu bar, beside the theme button
+— and in the Help menu, which no narrow window takes away. It opens the author's Ko-fi page;
+over ssh, where opening a browser would be the wrong machine's job, it copies the address to
+your clipboard and spells it out on the status line instead.
+
 ## What's new in 0.23.0
 
 **A safety fix worth the release on its own.** Clicking an agent that is not installed used to
