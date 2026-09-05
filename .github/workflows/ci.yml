@@ -59,12 +59,15 @@ jobs:
           "$bin" --help
 
   # The pty drivers are the only exercise of the interactive surface — everything else here
-  # checks that the binary starts, not that it behaves once a key is pressed. They have only
-  # ever run on the author's Mac, so continue-on-error stays on until the job is seen green on
-  # both runners; promoting it to a gate is a deliberate decision, same stance as lints below.
+  # checks that the binary starts, not that it behaves once a key is pressed. They are a gate
+  # now, on both runners: the run that earned it (2026-09-05) went green on macOS and Ubuntu at
+  # once, after the campaign that made them survive a slow runner and a shell without readline —
+  # the timeout multiplier above, the recovery directory swept per session, the drawer's
+  # install offer reproduced on a real Ubuntu and fixed on both sides. This is the frame 5 of
+  # the 1.0 list made true: the drivers run on every push and nothing is told to look the other
+  # way when they fail.
   drivers:
     name: Pty drivers (${{ matrix.os }})
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
