@@ -265,9 +265,14 @@ unsaved changes), `selection` (the active file, the cursor's line and column, an
 text) and `diagnostics` (what the language server currently says, whole or for one file). Three
 make the editor move: `open_file` (show a file, optionally at a line, optionally highlighting a
 range of them), `preview` (render a file in the preview pane — markdown as a document, images and
-PDFs as pictures) and `say` (one line in the status bar, marked as the agent's). All three open
-**beside** your work and none takes the keyboard, the same rule the Octave and Python figures
-follow; a highlighted range is an ordinary selection, and it goes the moment you touch that pane.
+PDFs as pictures) and `say` (one line in the status bar, marked as the agent's). None of the
+three takes the keyboard, and none touches your layout: **an agent never opens the split for
+you**. With two panes the file lands in the half you are not typing in; with one it arrives as an
+ordinary tab — behind the file you were typing in if that is where you were, in front of
+everything otherwise — and the status bar says which file arrived either way. A highlighted range
+is an ordinary selection, and it goes the moment you touch that pane. (The Octave and Python
+figures still open the split when there is room: a plot beside the script that drew it is what
+that feature is for, and you ran the script.)
 
 The seventh writes. `edit_buffer` changes text in a buffer that has **unsaved** changes in it —
 the ones `open_files` lists as dirty, where an agent cannot simply edit the file because your work
@@ -357,10 +362,19 @@ work — the signal is the focus, not a pointer passing over — and the same ke
 The difference is not decoration: a column resizes every pane, and a resized pane is a `SIGWINCH`
 to the pty in it, so a question asked in passing costs nothing on the way out or back.
 
+One agent is not the limit. The drawer takes tabs: `Ctrl+Shift+T` with the keyboard in it — or
+*View → New agent tab* from anywhere — brings the full-pane launcher back over whatever is
+running, and the agent you pick starts in a tab of its own, beside the first, with the same
+zero-configuration wiring. `Esc` cancels the choice and hands the column straight back. A tab is
+only ever born from a name chosen off that list — never a shell — which is what keeps the drawer
+what it is. `Ctrl+Shift+←/→` walk the tabs, exactly as they walk the shells next door; the chip's
+own little square (or `Ctrl+Shift+K`) is the one control that *ends* a conversation, and an agent
+that finishes in a background tab says so on the status line instead of quietly leaving the strip.
+
 Putting the drawer away is not killing it. The agent goes on running, the conversation is exactly
 where you left it, and it survives opening another workspace — which rebuilds every terminal in
-the window and never touches the drawer. When the agent itself ends, the launcher comes back:
-never a shell wearing the agent's frame.
+the window and never touches the drawer. When the last agent itself ends, the launcher comes
+back: never a shell wearing the agent's frame.
 
 There is nothing to install and nothing to configure, because this is a real pty and all four are
 terminal programs. Subscription login and API keys both work, and for the same reason: the agent
