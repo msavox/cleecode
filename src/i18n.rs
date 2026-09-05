@@ -900,8 +900,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemShowManual) => "Manual...",
         (Lang::It, ItemShowManual) => "Manuale...",
 
-        (Lang::En, ItemSupportKofi) => "☕ Buy me a coffee",
-        (Lang::It, ItemSupportKofi) => "☕ Offrimi un caffè",
+        (Lang::En, ItemSupportKofi) => "☕\u{FE0E} Buy me a coffee",
+        (Lang::It, ItemSupportKofi) => "☕\u{FE0E} Offrimi un caffè",
 
         (Lang::En, ManualTitle) => "CleeCode manual",
         (Lang::It, ManualTitle) => "Manuale CleeCode",
@@ -3357,8 +3357,8 @@ pub fn msg_opened_url(lang: Lang, url: &str) -> String {
 /// now in front of them, and repeating its address here would be telling them where they are.
 pub fn msg_kofi_opened(lang: Lang) -> &'static str {
     match lang {
-        Lang::En => "☕ Thank you!",
-        Lang::It => "☕ Grazie!",
+        Lang::En => "☕\u{FE0E} Thank you!",
+        Lang::It => "☕\u{FE0E} Grazie!",
     }
 }
 
@@ -3369,8 +3369,8 @@ pub fn msg_kofi_opened(lang: Lang) -> &'static str {
 pub fn msg_kofi_copied(lang: Lang, url: &str) -> String {
     let url = url.trim_start_matches("https://");
     match lang {
-        Lang::En => format!("☕ {url} copied to the clipboard"),
-        Lang::It => format!("☕ {url} copiato negli appunti"),
+        Lang::En => format!("☕\u{FE0E} {url} copied to the clipboard"),
+        Lang::It => format!("☕\u{FE0E} {url} copiato negli appunti"),
     }
 }
 

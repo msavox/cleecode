@@ -910,11 +910,14 @@ const BACKGROUND_BUTTON: [&str; 2] = [" ◐ ", " ● "];
 /// neighbour, so the two read as a pair rather than as one control and an ornament.
 const THEME_BUTTON: &str = " ◩ ";
 
-/// The Ko-fi button, left of the theme one and the leftmost of the three. Four columns, not
-/// three: the cup is an emoji and takes two of its own, which is exactly why nothing here
-/// counts characters — `columns` is asked every time, and the neighbours it leans on move with
-/// it rather than being spelled out anywhere.
-const KOFI_BUTTON: &str = " ☕ ";
+/// The Ko-fi button, left of the theme one and the leftmost of the three. The cup carries
+/// VARIATION SELECTOR-15, asking for the text presentation: a line-drawn cup in the bar's own
+/// foreground colour, the same one the website draws with stroke=currentColor, instead of the
+/// emoji font's full-colour sticker that matched nothing else on the row. A terminal that
+/// ignores the selector keeps today's emoji. The selector also changes what the cup measures —
+/// which is exactly why nothing here counts characters: `columns` is asked every time, and the
+/// neighbours it leans on move with it rather than being spelled out anywhere.
+const KOFI_BUTTON: &str = " ☕\u{FE0E} ";
 
 /// The badge naming the open workspace, right-aligned on the menu bar. Empty when none is open.
 /// Built here rather than in the drawing code because the button beside it has to know how wide
@@ -6762,11 +6765,16 @@ mod tests {
         // it every time it was pressed.
         assert_eq!(columns(BACKGROUND_BUTTON[0]), columns(BACKGROUND_BUTTON[1]));
         assert_eq!(columns(BACKGROUND_BUTTON[0]), 3);
-        // The cup is the one button on that end that is not three columns: it is an emoji and
-        // takes two by itself. Counting its characters would have put every range left of it a
-        // column out, which is the same bug the turtle taught at the other end of the row.
-        assert_eq!(columns(KOFI_BUTTON), 4);
-        assert!(KOFI_BUTTON.chars().count() < columns(KOFI_BUTTON) as usize, "the cup is wide");
+        // The cup carries VARIATION SELECTOR-15 — the line-drawn face — which is a character
+        // that adds no column and takes one away: asked as text, the cup measures narrow, so
+        // the pair is two chars on one column. Counting characters here would err in the other
+        // direction from the turtle, which is the same lesson taught twice: measure, never
+        // count.
+        assert_eq!(columns(KOFI_BUTTON), 3);
+        assert!(
+            KOFI_BUTTON.chars().count() > columns(KOFI_BUTTON) as usize,
+            "the selector takes no room of its own"
+        );
     }
 
     /// The button has to be where the click looks for it, which is the same arithmetic run
