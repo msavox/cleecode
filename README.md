@@ -323,7 +323,9 @@ Terminal panes launch `$SHELL` (falling back to `/bin/bash`) on Unix and `%ComSp
 
 ## Status
 
-Personal project, actively evolving.
+Personal project, actively evolving. If it earns a place in your day,
+[a coffee](https://ko-fi.com/msavox) ☕ is a kind way to say so — there is a little cup at the
+right end of the menu bar too.
 
 ## License
 
