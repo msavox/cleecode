@@ -1164,7 +1164,7 @@ fn run(
                 "path": path,
                 "line": line,
                 "end_line": end_line,
-                "note": "CleeCode opens it beside the user's work without taking the keyboard.",
+                "note": "CleeCode shows it in the user's own layout without taking the keyboard.",
             }))
         }
         "preview" => {
@@ -1174,7 +1174,7 @@ fn run(
             render(&json!({
                 "status": "requested",
                 "path": path,
-                "note": "CleeCode renders it beside the user's work without taking the keyboard.",
+                "note": "CleeCode renders it in the user's own layout without taking the keyboard.",
             }))
         }
         "say" => {
