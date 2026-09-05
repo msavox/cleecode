@@ -225,9 +225,10 @@ def run_lands_in_the_live_session(binary, report):
                      any("exec(open(" in line for line in session.lines()), session,
                      note=repr([l.strip()[:70] for l in session.lines() if "exec(open(" in l][:1]))
         # And no pane nobody asked for: handing it to the session must not also start a shell.
+        # A terminal's border carries the System 7 close box — "┌ □ ─ Terminal", not "┌ Terminal".
         report.check("without opening a terminal of its own",
-                     sum(1 for l in session.lines() if "┌ Terminal" in l) == 1, session,
-                     note=repr([l.strip()[:24] for l in session.lines() if "┌ Terminal" in l]))
+                     sum(1 for l in session.lines() if "┌ □ ─ Terminal" in l) == 1, session,
+                     note=repr([l.strip()[:24] for l in session.lines() if "Terminal" in l and "┌" in l]))
 
         # The half a fresh shell could not fake: ask the session, afterwards, for what the file
         # defined. This is the whole reason for running it there.

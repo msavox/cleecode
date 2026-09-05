@@ -39,8 +39,12 @@ def workspace_pane(session):
     `s` would have passed against an empty workspace, since single letters are in any line of
     code. Both were checks that could only fail if the screen were blank."""
     lines = session.lines()
-    corner = next(((y, line.find("┌ workspace")) for y, line in enumerate(lines)
-                   if "┌ workspace" in line), None)
+    # The window is closable, so its border reads "┌ □ ─ workspace" — corner, a padded System 7
+    # close box, a padded dash, then the title. The corner is what anchors the frame; the bare
+    # "┌ workspace" form is kept accepted so this file does not assume the box is forever.
+    corner = next(((y, line.find(prefix)) for y, line in enumerate(lines)
+                   for prefix in ("┌ □ ─ workspace", "┌ workspace")
+                   if prefix in line), None)
     if corner is None:
         return []
     top, left = corner
