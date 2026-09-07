@@ -907,6 +907,12 @@ pub struct App {
     /// Which terminal row was last clicked, and when, so the second click on the same one can
     /// mean "take me there".
     last_terminal_click: Option<(usize, u16, Instant)>,
+    /// Where the last press in an editor body landed — which buffer, which document position,
+    /// when, and how many presses in a row that made it. The count is the rung of the click
+    /// ladder: one is the cursor, two the word, three the line, and every press past that climbs
+    /// the same structural scale as [`Self::lsp_expand_selection`]. Anything that breaks the
+    /// rhythm — another position, another buffer, the threshold passing — starts the count over.
+    last_editor_click: Option<(usize, (usize, usize), Instant, u8)>,
     pub git_status: std::collections::HashMap<PathBuf, crate::git_status::FileStatus>,
     git_status_tx: Sender<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
     git_status_rx: Receiver<std::collections::HashMap<PathBuf, crate::git_status::FileStatus>>,
@@ -2364,6 +2370,12 @@ pub enum DragTarget {
     /// space (horizontally when tiled side by side, vertically when stacked).
     TerminalSplit(usize),
     TextSelection,
+    /// A drag born from a double-click: the selection grows by whole words, and the word the
+    /// press landed on stays selected whichever way the pointer goes — so it is carried here as
+    /// the pair of positions bounding it, not re-derived from an anchor the drag keeps moving.
+    WordSelection { anchor: ((usize, usize), (usize, usize)) },
+    /// A drag born from a triple-click: whole lines, from the one the press landed on.
+    LineSelection { anchor: usize },
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
     /// A button held down over a pane whose program asked for the mouse: the pane's index and the
@@ -3889,6 +3901,7 @@ impl App {
             project_settings,
             last_tree_click: None,
             last_terminal_click: None,
+            last_editor_click: None,
             git_status: std::collections::HashMap::new(),
             git_status_tx,
             git_status_rx,
@@ -6447,6 +6460,28 @@ impl App {
             .unwrap_or(false);
         self.last_terminal_click = Some((pane, row, now));
         again
+    }
+
+    /// How many presses in a row this press on an editor body makes — the rung of the click
+    /// ladder. The same shape as [`Self::second_click_on`], with a count instead of a bool
+    /// because this ladder has more than two rungs. Same buffer, same document position, inside
+    /// the threshold: one rung up. Anything else is a first click again. The position compared
+    /// is the *document* one, so two presses on different screen cells past the end of a line —
+    /// both clamped to its last column — count as the double-click they were meant as.
+    fn editor_click_count(&mut self, idx: usize, pos: (usize, usize)) -> u8 {
+        let now = Instant::now();
+        let count = match self.last_editor_click {
+            Some((was_idx, was_pos, when, n))
+                if was_idx == idx
+                    && was_pos == pos
+                    && now.duration_since(when) < DOUBLE_CLICK_THRESHOLD =>
+            {
+                n.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.last_editor_click = Some((idx, pos, now, count));
+        count
     }
 
     /// Opens whatever file a terminal row is pointing at. `true` when it found one.
@@ -15449,6 +15484,8 @@ impl App {
             Some(DragTarget::DrawerEdgePress { .. })
             // All handled where the drag happens, against the frame it started in.
             | Some(DragTarget::TextSelection)
+            | Some(DragTarget::WordSelection { .. })
+            | Some(DragTarget::LineSelection { .. })
             | Some(DragTarget::TerminalSelection(_))
             | Some(DragTarget::TerminalMouse(..))
             | Some(DragTarget::DrawerSelection)
@@ -16607,14 +16644,59 @@ impl App {
                         // Alt while dragging makes it a column selection, which is the gesture
                         // every editor and terminal uses for one — worth honouring precisely
                         // because there is no comfortable key combination left to spend on it.
+                        // Alt also stands outside the click ladder below: a rectangle is not a
+                        // rung on the way from a word to a statement.
                         let block = mouse.modifiers.contains(KeyModifiers::ALT);
-                        self.editor_mut().clear_selection();
-                        self.position_cursor_from_click(content, col, row);
-                        let anchor = (self.editor().cursor_line, self.editor().cursor_col);
-                        let ed = self.editor_mut();
-                        ed.selection_anchor = Some(anchor);
-                        ed.selection_block = block;
-                        self.dragging = Some(DragTarget::TextSelection);
+                        let pos = self.click_doc_position(content, col, row);
+                        // The click ladder: press again on the same spot, quickly, and the
+                        // selection climbs — cursor, word, line, then the same structural scale
+                        // Expand Selection walks from the keyboard, one rung a press.
+                        let count = match pos {
+                            Some(p) if !block => self.editor_click_count(idx, p),
+                            _ => {
+                                self.last_editor_click = None;
+                                1
+                            }
+                        };
+                        match (count, pos) {
+                            (2, Some((line, col))) => {
+                                let (start, end) = self.editor().word_range_at(line, col);
+                                let ed = self.editor_mut();
+                                ed.selection_block = false;
+                                ed.selection_anchor = Some(start);
+                                ed.cursor_line = end.0;
+                                ed.cursor_col = end.1;
+                                self.dragging =
+                                    Some(DragTarget::WordSelection { anchor: (start, end) });
+                            }
+                            (3, Some((line, _))) => {
+                                let (start, end) = self.editor().line_range_at(line);
+                                let ed = self.editor_mut();
+                                ed.selection_block = false;
+                                ed.selection_anchor = Some(start);
+                                ed.cursor_line = end.0;
+                                ed.cursor_col = end.1;
+                                self.dragging = Some(DragTarget::LineSelection { anchor: line });
+                            }
+                            (4.., Some(_)) => {
+                                // The cursor is left exactly where the third click put it: the
+                                // widening asks at the start of the selection it is growing, and
+                                // repositioning here would tear that selection down first. No
+                                // server, no answer? The line selection simply stands — the
+                                // status line says why, and nothing is lost.
+                                self.lsp_expand_selection();
+                                self.dragging = None;
+                            }
+                            _ => {
+                                self.editor_mut().clear_selection();
+                                self.position_cursor_from_click(content, col, row);
+                                let anchor = (self.editor().cursor_line, self.editor().cursor_col);
+                                let ed = self.editor_mut();
+                                ed.selection_anchor = Some(anchor);
+                                ed.selection_block = block;
+                                self.dragging = Some(DragTarget::TextSelection);
+                            }
+                        }
                     }
                     return;
                 }
@@ -16722,17 +16804,44 @@ impl App {
                 }
                 Some(DragTarget::TextSelection) => {
                     if within(areas.editor, col, row) {
-                        // Stay within the pane the drag started in, regardless of which
-                        // pane the pointer is currently over.
-                        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
-                        let pane_rect = if self.split_view && self.editor_pane_focus == EditorPane::Right {
-                            panes.get(1).copied().unwrap_or(areas.editor)
-                        } else {
-                            panes[0]
-                        };
-                        let idx = self.pane_editor_index(self.editor_pane_focus);
-                        let (_, _, content) = ui::pane_areas(self, idx, pane_rect);
+                        let content = self.dragged_editor_content(areas);
                         self.position_cursor_from_click(content, col, row);
+                    }
+                }
+                Some(DragTarget::WordSelection { anchor: (astart, aend) }) => {
+                    if within(areas.editor, col, row) {
+                        let content = self.dragged_editor_content(areas);
+                        if let Some((line, col)) = self.click_doc_position(content, col, row) {
+                            let (wstart, wend) = self.editor().word_range_at(line, col);
+                            // Whole words, and the word the press landed on always among them:
+                            // pointing before it selects from its far end back to the pointed
+                            // word's start, pointing after it the mirror — never a shrink past
+                            // the word that started the drag.
+                            let (new_anchor, cursor) = if (line, col) < astart {
+                                (aend, wstart)
+                            } else {
+                                (astart, wend)
+                            };
+                            let ed = self.editor_mut();
+                            ed.selection_anchor = Some(new_anchor);
+                            ed.cursor_line = cursor.0;
+                            ed.cursor_col = cursor.1;
+                        }
+                    }
+                }
+                Some(DragTarget::LineSelection { anchor }) => {
+                    if within(areas.editor, col, row) {
+                        let content = self.dragged_editor_content(areas);
+                        if let Some((line, _)) = self.click_doc_position(content, col, row) {
+                            // Whole lines between the one the press landed on and the one the
+                            // pointer is over, whichever order the hand chose them in.
+                            let (start, _) = self.editor().line_range_at(anchor.min(line));
+                            let (_, end) = self.editor().line_range_at(anchor.max(line));
+                            let ed = self.editor_mut();
+                            ed.selection_anchor = Some(start);
+                            ed.cursor_line = end.0;
+                            ed.cursor_col = end.1;
+                        }
                     }
                 }
                 Some(DragTarget::TerminalSelection(index)) => {
@@ -17247,10 +17356,29 @@ impl App {
         self.tab_offsets[pane.index()] = (first + delta).clamp(0, last) as usize;
     }
 
-    fn position_cursor_from_click(&mut self, content_area: Rect, col: u16, row: u16) {
+    /// The content rect of the editor pane a text drag is running in — the pane the press landed
+    /// in, regardless of which pane the pointer is over now, so a drag that crosses the split's
+    /// seam keeps selecting in the buffer it started in.
+    fn dragged_editor_content(&self, areas: &ui::Areas) -> Rect {
+        let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
+        let pane_rect = if self.split_view && self.editor_pane_focus == EditorPane::Right {
+            panes.get(1).copied().unwrap_or(areas.editor)
+        } else {
+            panes[0]
+        };
+        let idx = self.pane_editor_index(self.editor_pane_focus);
+        let (_, _, content) = ui::pane_areas(self, idx, pane_rect);
+        content
+    }
+
+    /// The document position a click on the editor body points at, or `None` for a press above
+    /// or left of the content. Split from [`Self::position_cursor_from_click`] so the click
+    /// ladder can ask *where* a press landed without moving anything: a fourth click has to
+    /// leave the selection it is about to widen exactly as the third click left it.
+    fn click_doc_position(&self, content_area: Rect, col: u16, row: u16) -> Option<(usize, usize)> {
         let inner = ui::inner_rect(content_area);
         if col < inner.x || row < inner.y {
-            return;
+            return None;
         }
         let gutter = ui::gutter_width(self.editor().rope.len_lines(), self.settings.show_line_numbers);
         let rel_row = (row - inner.y) as usize;
@@ -17258,14 +17386,20 @@ impl App {
         let top_line = self.editor().top_line;
         let rows = self.editor().visible_rows_from(top_line, rel_row + 1);
         let target_line = *rows.last().unwrap_or(&top_line);
-        self.editor_mut().cursor_line = target_line;
-        if rel_col >= 0 {
+        let target_col = if rel_col >= 0 {
             let left_col = self.editor().left_col;
-            let target_col = left_col + rel_col as usize;
-            let max_col = self.editor().line_char_len(target_line);
-            self.editor_mut().cursor_col = target_col.min(max_col);
+            (left_col + rel_col as usize).min(self.editor().line_char_len(target_line))
         } else {
-            self.editor_mut().cursor_col = 0;
+            0
+        };
+        Some((target_line, target_col))
+    }
+
+    fn position_cursor_from_click(&mut self, content_area: Rect, col: u16, row: u16) {
+        if let Some((line, col)) = self.click_doc_position(content_area, col, row) {
+            let ed = self.editor_mut();
+            ed.cursor_line = line;
+            ed.cursor_col = col;
         }
     }
 

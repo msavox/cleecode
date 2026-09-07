@@ -294,6 +294,116 @@ def typing_in_a_column_selection(binary, report):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def click(session, col, row):
+    """One press and release, in the SGR encoding CleeCode turns on at startup. One-based."""
+    session.send(f"\x1b[<0;{col + 1};{row + 1}M")
+    session.send(f"\x1b[<0;{col + 1};{row + 1}m")
+
+
+def clicks(session, col, row, times):
+    """`times` presses on one cell, sent as a single write so the 400ms double-click threshold
+    is a fact about the app's clock and never about this script's."""
+    one = f"\x1b[<0;{col + 1};{row + 1}M\x1b[<0;{col + 1};{row + 1}m"
+    session.send(one * times)
+
+
+def row_bgs(session, row, start, end):
+    """The background colours across a span of one screen row."""
+    return {cell.bg for cell in session.cells(row)[start:end]}
+
+
+def selecting_with_clicks(binary, report):
+    """The click ladder in the editor body: press again on the same cell, quickly, and the
+    selection climbs — cursor, word, line, then the structural scale, one rung a press.
+
+    What the unit tests own is the arithmetic: where a word starts, that a line takes its
+    newline. What they cannot own is the ladder itself — that the second press within the
+    threshold selects rather than re-anchors, that the fourth one on a file with no language
+    server leaves the line selection standing instead of tearing it down, and that a drag off
+    the second press grows by whole words. All of that is wiring between the mouse and the
+    editor, so it is checked here, by colour: a selection is nothing but cells whose background
+    is not the page's.
+
+    Its own session and fixture, like the column-selection one and for its reason: these checks
+    click by coordinates read off the screen, and sharing a buffer with earlier checks would
+    make every coordinate a bet on what they left behind."""
+    root = tempfile.mkdtemp(prefix="clee_clicks_")
+    with open(os.path.join(root, "words.txt"), "w") as handle:
+        handle.write("alpha beta_gamma delta\nsecond line here\nthird\n")
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the click-ladder session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.send("\x0f")                             # Ctrl+O, quick-open
+        session.wait(lambda s: "words.txt" in s.text(), 8)
+        session.send("words")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        if not session.wait(lambda s: "beta_gamma" in s.text(), 8):
+            report.check("the words fixture opens", False, session)
+            return
+
+        row = session.row_of("alpha beta_gamma delta")
+        left = session.full_line(row).index("alpha")
+        # The page's own background, read off a cell nothing has selected.
+        plain = session.cells(row)[left].bg
+
+        # Two presses on the middle of beta_gamma: the word, all of it, and only it.
+        clicks(session, left + 10, row, 2)
+        word_lit = session.wait(
+            lambda s: len(row_bgs(s, row, left + 6, left + 16)) == 1
+            and plain not in row_bgs(s, row, left + 6, left + 16), 6)
+        report.check("a double-click lights the whole word under it", word_lit, session,
+                     note="beta_gamma, underscore included: the motions' own word_class")
+        report.check("and the words either side stay unlit",
+                     session.cells(row)[left].bg == plain
+                     and session.cells(row)[left + 18].bg == plain, session)
+
+        # The drag off a double-click: whole words. A fresh double-click (the pause above the
+        # threshold resets the ladder), the second press held, the pointer walked onto delta.
+        session.wait(lambda s: True, 0.6)
+        click(session, left + 10, row)
+        session.send(f"\x1b[<0;{left + 11};{row + 1}M")          # the held second press
+        session.send(f"\x1b[<32;{left + 20};{row + 1}M")         # dragged onto delta
+        session.send(f"\x1b[<0;{left + 20};{row + 1}m")
+        both_words = session.wait(
+            lambda s: plain not in row_bgs(s, row, left + 6, left + 22)
+            and s.cells(row)[left].bg == plain, 6)
+        report.check("dragging on from the double-click grows by whole words", both_words,
+                     session, note="beta_gamma through delta lit, alpha still not")
+
+        # Three presses: the line, edge to edge — alpha and delta both lit now.
+        session.wait(lambda s: True, 0.6)
+        clicks(session, left + 10, row, 3)
+        line_lit = session.wait(
+            lambda s: plain not in row_bgs(s, row, left, left + 22), 6)
+        report.check("a triple-click lights the whole line", line_lit, session)
+
+        # A fourth, on a .txt nothing serves: the ladder has nowhere to climb, and the honest
+        # answer is the line still lit and the status line saying why — never a reset.
+        session.wait(lambda s: True, 0.6)
+        clicks(session, left + 10, row, 4)
+        session.wait(lambda s: "No language server" in s.text(), 6)
+        report.check("a fourth click without a server keeps the line and says why",
+                     "No language server" in session.text()
+                     and plain not in row_bgs(session, row, left, left + 22), session,
+                     note=session.lines()[-1].strip()[:80])
+
+        # And the ladder resets like any other click: one press elsewhere is just a cursor.
+        session.wait(lambda s: True, 0.6)
+        other = session.row_of("second line here")
+        click(session, left + 2, other)
+        cleared = session.wait(lambda s: plain in row_bgs(s, row, left + 6, left + 16), 6)
+        report.check("a single click elsewhere drops the selection as it always has", cleared,
+                     session)
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def the_status_bar_names_line_endings_and_converts_them(binary, report):
     """The chip beside row:col — "UTF-8 LF" / "UTF-8 CRLF" — and the Edit menu's "Convert line
     endings" that flips it.
@@ -653,6 +763,7 @@ def main():
 
     try:
         typing_in_a_column_selection(binary, report)
+        selecting_with_clicks(binary, report)
         the_status_bar_names_line_endings_and_converts_them(binary, report)
         a_file_over_the_line_says_what_it_is_not_doing(binary, report)
         closing_the_last_tab(binary, root, report)

@@ -1408,6 +1408,50 @@ impl Editor {
         idx
     }
 
+    /// The word under a document position, as `(start, end)` cursor positions on that line —
+    /// the run of characters of one class around `(line, col)`, read with the same `word_class`
+    /// the motions use so a double-click and Alt+arrow can never disagree about where a word
+    /// ends. Whitespace is a class of its own here rather than something to skip over: a motion
+    /// crosses a gap to reach the next word, but a click *on* the gap is pointing at the gap,
+    /// and selecting the run of spaces is the answer every terminal gives. Never leaves the
+    /// line — the newline is a boundary, not a member. A click past the end of the line means
+    /// the last word on it; an empty line has nothing to hold, so both ends are its start.
+    pub fn word_range_at(&self, line: usize, col: usize) -> ((usize, usize), (usize, usize)) {
+        let len = self.line_char_len(line);
+        if len == 0 {
+            return ((line, 0), (line, 0));
+        }
+        let at = col.min(len - 1);
+        let line_start = self.rope.line_to_char(line);
+        let class_of = |i: usize| {
+            let c = self.rope.char(line_start + i);
+            if c.is_whitespace() { 0 } else { word_class(c) }
+        };
+        let class = class_of(at);
+        let mut start = at;
+        while start > 0 && class_of(start - 1) == class {
+            start -= 1;
+        }
+        let mut end = at + 1;
+        while end < len && class_of(end) == class {
+            end += 1;
+        }
+        ((line, start), (line, end))
+    }
+
+    /// The whole of `line` as `(start, end)` cursor positions, newline included — the end is the
+    /// head of the next line, which is what makes two triple-clicked lines copy as two lines
+    /// rather than one run-on. The last line has no newline to take, so there the end is its own
+    /// length.
+    pub fn line_range_at(&self, line: usize) -> ((usize, usize), (usize, usize)) {
+        let last = self.rope.len_lines().saturating_sub(1);
+        if line < last {
+            ((line, 0), (line + 1, 0))
+        } else {
+            ((line, 0), (line, self.line_char_len(line)))
+        }
+    }
+
     pub fn move_word_left(&mut self) {
         let target = self.word_left_idx(self.cursor_char_idx());
         self.set_cursor_char_idx(target);
@@ -3060,6 +3104,40 @@ mod tests {
         assert_eq!(ed.cursor_line, 2);
         ed.move_line_up();
         assert_eq!(ed.rope.to_string(), "one\none\ntwo");
+    }
+
+    /// The double-click's idea of a word, checked against the ways a click can land: inside an
+    /// identifier, on punctuation, on the gap between words, past the end of the line, and on a
+    /// line with nothing on it. The classes must match the motions' `word_class`, so `let` and
+    /// `x` are separate words while `foo_bar` is one.
+    #[test]
+    fn word_range_at_selects_the_run_under_the_click() {
+        let mut ed = Editor::empty();
+        ed.insert_str("let foo_bar = baz();\n\nnext");
+        // Inside the identifier, at its first char, and at its last: all the same word.
+        for col in [4, 8, 10] {
+            assert_eq!(ed.word_range_at(0, col), ((0, 4), (0, 11)), "col {col}");
+        }
+        // On the `=`: the punctuation run, not the words around it.
+        assert_eq!(ed.word_range_at(0, 12), ((0, 12), (0, 13)));
+        // On the space between `let` and `foo_bar`: the gap is what was pointed at.
+        assert_eq!(ed.word_range_at(0, 3), ((0, 3), (0, 4)));
+        // `();` is one run of punctuation.
+        assert_eq!(ed.word_range_at(0, 17), ((0, 17), (0, 20)));
+        // Past the end of the line means the last thing on it.
+        assert_eq!(ed.word_range_at(0, 99), ((0, 17), (0, 20)));
+        // An empty line holds nothing, and says so rather than reaching into a neighbour.
+        assert_eq!(ed.word_range_at(1, 0), ((1, 0), (1, 0)));
+    }
+
+    /// The triple-click's idea of a line: newline included, so two of them copy as two lines —
+    /// except the last, which has no newline to take.
+    #[test]
+    fn line_range_at_takes_the_newline_except_on_the_last_line() {
+        let mut ed = Editor::empty();
+        ed.insert_str("first\nsecond");
+        assert_eq!(ed.line_range_at(0), ((0, 0), (1, 0)));
+        assert_eq!(ed.line_range_at(1), ((1, 0), (1, 6)));
     }
 
     #[test]
