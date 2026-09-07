@@ -7,7 +7,7 @@ authors = ["Matteo Savoia"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/msavox/cleecode"
-homepage = "https://github.com/msavox/cleecode"
+homepage = "https://cleecode.marunja.com"
 keywords = ["editor", "terminal", "tui", "ide", "ratatui"]
 categories = ["text-editors", "command-line-utilities"]
 # Screenshots, the demo GIF and CI config aren't needed to build; docs/clee.1 is, because the

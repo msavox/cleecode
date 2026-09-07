@@ -275,20 +275,79 @@ jobs:
             "${{ steps.deb.outputs.deb }}.sha256" \
             --clobber
 
-  # Prints the checksum the Homebrew formula needs for the source tarball, so the tap can be
-  # updated without building anything locally.
-  homebrew-checksum:
-    name: Homebrew source checksum
-    needs: build
+  # `brew install clee` today builds the formula from the tag's codeload archive
+  # (github.com/.../archive/refs/tags/...), a URL GitHub does not count as a download of
+  # anything. Publishing our own tarball as a release asset instead means every install
+  # shows up in the asset's download_count, which the weekly stats snapshot can then chart.
+  # Built in its own job, on the cheapest runner, so it isn't tangled up with the platform
+  # matrix — it needs nothing that job builds.
+  source-tarball:
+    name: Homebrew source tarball
+    needs: guard
     runs-on: ubuntu-24.04
     steps:
-      - name: Compute sha256 of the tag's source tarball
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build the source tarball
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          name="clee-${tag}-src"
+
+          mkdir -p dist
+          # HEAD is exactly the commit checkout just landed on for this tag — archiving it
+          # avoids any question of whether a local `refs/tags/...` ref exists to name.
+          git archive --format=tar.gz --prefix="cleecode-${version}/" -o "dist/${name}.tar.gz" HEAD
+
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          else
+            shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          fi
+          cat "${name}.tar.gz.sha256"
+          echo "archive=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Same retro-attach guard as every platform slug above: this job always builds, but
+      # only uploads when `only` is empty or names this asset — slug `src`.
+      - name: Upload to the release
+        if: ${{ github.event.inputs.only == '' || github.event.inputs.only == 'src' }}
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          url="https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --notes-file .github/release-notes.md \
+              || gh release view "$tag" >/dev/null
+          fi
+          gh release upload "$tag" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256" \
+            --clobber
+
+  # Prints the checksum the Homebrew formula needs, so the tap can be updated without
+  # building anything locally. Points at the `src` asset the job above publishes rather
+  # than the tag's codeload archive, since that asset is the one whose download_count
+  # actually moves when `brew install clee` runs.
+  homebrew-checksum:
+    name: Homebrew source checksum
+    needs: [build, source-tarball]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Compute sha256 of the release source tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          url="https://github.com/${{ github.repository }}/releases/download/${tag}/clee-${tag}-src.tar.gz"
           # GitHub answers an anonymous archive request under load with a 200 and a
           # two-line "429: Too Many Requests" body. Hashing that ships a checksum no
           # user can ever match, so authenticate, retry, and refuse anything that is
