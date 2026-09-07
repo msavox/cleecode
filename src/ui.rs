@@ -1243,13 +1243,19 @@ fn focused_border_style(pal: Palette, is_focused: bool, resizing: bool) -> Style
     }
 }
 
+/// The name as the product writes it — CleeCode, not CLEECODE — in half-block pixels drawn on
+/// the letterforms the site sets its wordmark in: round bowls on the C, e and o, bare stems with
+/// no feet on the l and the d, the e's bar a single pixel row. Block-capital banners exist
+/// because that idiom has no lowercase; this one does, so the splash stops being the one place
+/// the name loses its case. Every row is the same width on purpose: the lines are centered as
+/// they are, trailing spaces included, and rows of uneven width would each find their own middle.
 const SPLASH_BANNER: &[&str] = &[
-    r" ██████╗██╗     ███████╗███████╗ ██████╗ ██████╗ ██████╗ ███████╗",
-    r"██╔════╝██║     ██╔════╝██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-    r"██║     ██║     █████╗  █████╗  ██║     ██║   ██║██║  ██║█████╗  ",
-    r"██║     ██║     ██╔══╝  ██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝  ",
-    r"╚██████╗███████╗███████╗███████╗╚██████╗╚██████╔╝██████╔╝███████╗",
-    r" ╚═════╝╚══════╝╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+    r" ▄█▀▀▀█▄  ██                    ▄█▀▀▀█▄                 ██          ",
+    r"██     ▀▀ ██                   ██     ▀▀                ██          ",
+    r"██        ██  ▄█▀▀█▄   ▄█▀▀█▄  ██         ▄█▀▀█▄   ▄█▀▀███  ▄█▀▀█▄  ",
+    r"██        ██ ██▄▄▄▄██ ██▄▄▄▄██ ██        ██    ██ ██    ██ ██▄▄▄▄██ ",
+    r"██     ▄▄ ██ ██    ▄▄ ██    ▄▄ ██     ▄▄ ██    ██ ██    ██ ██    ▄▄ ",
+    r" ▀█▄▄▄█▀  ██  ▀█▄▄█▀   ▀█▄▄█▀   ▀█▄▄▄█▀   ▀█▄▄█▀   ▀█▄▄███  ▀█▄▄█▀  ",
 ];
 
 fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
@@ -1264,6 +1270,10 @@ fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut F
     for row in SPLASH_BANNER {
         lines.push(Line::from(Span::styled(*row, Style::default().fg(pal.success))).alignment(ratatui::layout::Alignment::Center));
     }
+    // Two blank rows under the wordmark, not one: its last row fills the bottom halves of its
+    // cells, so a single row of air after it reads as half a gap — against the drawing when the
+    // screen holds one, against the tagline's own turtle when it does not.
+    lines.push(Line::from(""));
     lines.push(Line::from(""));
     lines.push(Line::from(i18n::t(lang, Key::SplashTagline)).alignment(ratatui::layout::Alignment::Center));
     lines.push(Line::from(""));
@@ -1301,7 +1311,7 @@ fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut F
     // Short of that margin, the splash is exactly what it has always been.
     const SPLASH_ART_MARGIN: u16 = 2;
     let art_rows = about_art_height(ABOUT_ART_NARROW);
-    let tagline_row = SPLASH_BANNER.len() + 1;
+    let tagline_row = SPLASH_BANNER.len() + 2;
     let art = if full.height >= lines.len() as u16 + art_rows + 1 + SPLASH_ART_MARGIN {
         // Reserved as blank paragraph rows rather than left out of `lines` entirely, so the
         // paragraph still owns the vertical rhythm of the tagline and everything under it, and the
