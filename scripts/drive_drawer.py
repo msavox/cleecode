@@ -755,6 +755,28 @@ def check_drawer(binary, report):
         report.check("the launcher shows all four agents", len(names) == 4, session,
                      note="found %s" % names)
 
+        # ---- the ring follows the pointer ---------------------------------------------------
+        # Resting the pointer on a name selects it, no click — the rule every pop-up list keeps
+        # now, and the launcher is the list this panel opens on. Read against the mark on
+        # screen, the way every walk in this file is. Onto gemini and back onto claude: the
+        # "arrows and Enter" section below counts a full turn of the ring from the first name,
+        # so this check hands back the position exactly as it found it — by the same gesture it
+        # is proving.
+        on_name = lambda s, name: (lambda r, m: bool(r and m and r[0] <= m[0] <= r[-1]))(
+            frame_rows(s), mark_rows(s, name))
+        gem = mark_rows(session, "gemini")
+        left = drawer_column(session)
+        ring_moved = False
+        if gem and left is not None:
+            hover(session, left + 6, gem[len(gem) // 2])
+            ring_moved = session.wait(lambda s: on_name(s, "gemini"), 6)
+        report.check("the selection ring follows the pointer onto a name, no click",
+                     ring_moved, session, note="hover selects; the click stays the choice")
+        first = mark_rows(session, "claude")
+        if first and left is not None:
+            hover(session, left + 6, first[len(first) // 2])
+            session.wait(lambda s: on_name(s, "claude"), 6)
+
         # ---- the marks --------------------------------------------------------------------
         # Each entry is that program's own mark drawn in cells, its name in brick letters beside
         # the mascot — there is no caption under a banner that already says who it is. These
