@@ -250,6 +250,7 @@ scoop install clee</code></pre>
     <p class="counter" id="site-counter" hidden>
       <span class="counter-item" title="Total visits"><svg class="counter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><span id="counter-visits">0</span></span>
       <span class="counter-item" title="Unique visitors"><svg class="counter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span id="counter-unique">0</span></span>
+      <span class="counter-item" id="counter-users-item" title="Estimated users" hidden><svg class="counter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span id="counter-users">0</span></span>
     </p>
     <p class="copy">© msavox — Matteo Savoia. MIT licensed.</p>
   </div>
@@ -264,6 +265,12 @@ scoop install clee</code></pre>
     document.getElementById('counter-visits').textContent = d.visits
     document.getElementById('counter-unique').textContent = d.unique
     document.getElementById('site-counter').hidden = false
+    // users is best-effort (GitHub-backed, cached) — show it only when present,
+    // without holding up visits/unique.
+    if (typeof d.users === 'number') {
+      document.getElementById('counter-users').textContent = d.users
+      document.getElementById('counter-users-item').hidden = false
+    }
   }).catch(function () {})
 </script>
 
