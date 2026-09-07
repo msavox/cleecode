@@ -75,6 +75,10 @@ class Session:
             os.environ["TERM"] = "xterm-256color"
             os.environ["SHELL"] = "/bin/sh"
             os.environ["XDG_CONFIG_HOME"] = self.config
+            # The update check's kill switch: a driven session must stay offline and
+            # deterministic, and a "new version" modal arriving mid-run would eat the next
+            # keystroke of whatever check happened to be typing.
+            os.environ["CLEE_UPDATE_CHECK"] = "0"
             os.environ.update(env or {})
             os.chdir(root)
             try:

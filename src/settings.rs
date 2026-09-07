@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 17;
+pub const SETTINGS_COUNT: usize = 18;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -253,6 +253,13 @@ pub struct Settings {
     // decision made once instead of per invocation.
     #[serde(default = "default_true")]
     pub show_splash: bool,
+    // Whether the once-a-day background ask "is there a newer release?" runs at all. On by
+    // default because the ask sends nothing of the user's and the answer is one status line —
+    // see src/update.rs, which is where the philosophy lives — and off here for anyone whose
+    // machine should not speak to GitHub unprompted, which is a preference this editor takes
+    // seriously enough to spell out as its own row.
+    #[serde(default = "default_true")]
+    pub update_check: bool,
     // Whether the terminal's own background is left showing through instead of the editor
     // painting its own. Off by default, because a theme is a set of colours *and* the surface
     // they were chosen against: handing it only the colours is how the text ends up on somebody
@@ -542,6 +549,7 @@ impl Default for Settings {
             follow_agent_edits: false,
             autosave_recovery: true,
             show_splash: true,
+            update_check: true,
             transparent_background: false,
             theme: crate::theme::ThemeChoice::default(),
             last_root: None,
@@ -1372,6 +1380,7 @@ impl Settings {
                 value: drawer_mode_value(lang, self.drawer_pinned),
             },
             SettingRow { label: i18n::t(lang, Key::SettingSplash), value: b(self.show_splash) },
+            SettingRow { label: i18n::t(lang, Key::SettingUpdateCheck), value: b(self.update_check) },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
         ]
@@ -1407,8 +1416,11 @@ impl Settings {
             // drawer never hears about it.
             13 => self.drawer_pinned = !self.drawer_pinned,
             14 => self.show_splash = !self.show_splash,
-            15 => self.mouse_enabled = !self.mouse_enabled,
-            16 => self.lang = self.lang.next(),
+            // Read at the next launch, when the check thread is (or is not) spawned: a check
+            // already in flight this session is one status line at worst.
+            15 => self.update_check = !self.update_check,
+            16 => self.mouse_enabled = !self.mouse_enabled,
+            17 => self.lang = self.lang.next(),
             _ => {}
         }
     }

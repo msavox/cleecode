@@ -687,6 +687,15 @@ pub struct App {
     save_as_then: Option<UnsavedPrompt>,
     /// When set, an unsaved-changes prompt is up, holding back the given action.
     pub unsaved_prompt: Option<UnsavedPrompt>,
+    /// The update offer, when one is on screen: the new version and the install method whose
+    /// upgrade command Enter would run. Only ever set for methods that *have* such a command —
+    /// everything else is a status line, never a question. `None` is both "no news" and "news
+    /// already declined": declining leaves the plain notice and nothing to come back to.
+    pub update_prompt: Option<(String, crate::update::InstallMethod)>,
+    /// Whether an upgrade was already launched this session — one attempt, never a retry.
+    update_attempted: bool,
+    update_tx: Sender<crate::update::UpdateEvent>,
+    update_rx: Receiver<crate::update::UpdateEvent>,
     /// When set, an upload is waiting on a yes from the status line. See [`PendingUpload`].
     pub pending_upload: Option<PendingUpload>,
     /// The agent's edit currently being asked about on the status line. See [`PendingAgentEdit`].
@@ -3772,6 +3781,10 @@ impl App {
         let (git_panel_tx, git_panel_rx) = mpsc::channel();
         let git_status_pending = Arc::new(AtomicBool::new(false));
         spawn_git_status_refresh(root.clone(), git_status_tx.clone(), git_status_pending.clone());
+        let (update_tx, update_rx) = mpsc::channel();
+        // The check thread sleeps its own startup delay before doing anything, so spawning it
+        // here does not put a network ask in front of the shells — see src/update.rs.
+        crate::update::spawn_check(update_tx.clone(), settings.update_check);
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
         let project_settings = settings::ProjectSettings::load(&root);
         let file_tree = FileTree::new(root.clone(), settings.show_hidden_files);
@@ -3848,6 +3861,10 @@ impl App {
             save_as_target: None,
             save_as_then: None,
             unsaved_prompt: None,
+            update_prompt: None,
+            update_attempted: false,
+            update_tx,
+            update_rx,
             pending_upload: None,
             agent_edit_ask: None,
             agent_edit_queue: std::collections::VecDeque::new(),
@@ -4018,6 +4035,37 @@ impl App {
     pub fn poll_background_messages(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             self.status_message = msg;
+            self.redraw = true;
+        }
+    }
+
+    /// Drains the update check's channel, once a frame like every other one. News about an
+    /// install that can be upgraded in one safe command becomes the offer; news about any other
+    /// install becomes a status line naming where to go. The end of an accepted upgrade lands
+    /// here too, well or badly — see src/update.rs for why success says "next launch".
+    pub fn poll_update(&mut self) {
+        let lang = self.settings.lang;
+        while let Ok(event) = self.update_rx.try_recv() {
+            match event {
+                crate::update::UpdateEvent::Available { version, method } => {
+                    match crate::update::upgrade_command_line(method) {
+                        Some(_) => self.update_prompt = Some((version, method)),
+                        None => {
+                            self.status_message =
+                                i18n::msg_update_available(lang, &version, None);
+                        }
+                    }
+                }
+                crate::update::UpdateEvent::UpgradeFinished { ok, version, method } => {
+                    self.status_message = if ok {
+                        i18n::msg_update_done(lang, &version)
+                    } else {
+                        let cmd = crate::update::upgrade_command_line(method)
+                            .unwrap_or_else(|| "cleecode.marunja.com".to_string());
+                        i18n::msg_update_failed(lang, &cmd)
+                    };
+                }
+            }
             self.redraw = true;
         }
     }
@@ -4398,6 +4446,7 @@ impl App {
         // about letting an agent change a buffer.
         if self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
+            || self.update_prompt.is_some()
             || self.pending_upload.is_some()
             || self.agent_edit_ask.is_some()
         {
@@ -14182,6 +14231,7 @@ impl App {
     fn a_modal_owns_the_keyboard(&self) -> bool {
         self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
+            || self.update_prompt.is_some()
             || self.pending_upload.is_some()
             || self.agent_edit_ask.is_some()
             || self.show_save_as
@@ -14283,6 +14333,10 @@ impl App {
         }
         if self.show_delete_confirm {
             self.handle_delete_confirm_key(key);
+            return;
+        }
+        if self.update_prompt.is_some() {
+            self.handle_update_prompt_key(key);
             return;
         }
         if self.show_rename {
@@ -14915,6 +14969,30 @@ impl App {
                 self.show_delete_confirm = false;
                 self.delete_target = None;
                 self.status_message = i18n::msg_delete_cancelled(self.settings.lang);
+            }
+        }
+    }
+
+    /// The update offer's keys, in the delete-confirm's shape but stricter: this modal arrives
+    /// on its own schedule rather than in answer to a keypress, so only Enter — never a letter
+    /// somebody was in the middle of typing — accepts, and everything else is "not now".
+    /// Declining is not losing the news: the plain notice lands on the status line, where the
+    /// silenced version of this feature has always lived.
+    fn handle_update_prompt_key(&mut self, key: KeyEvent) {
+        let Some((version, method)) = self.update_prompt.take() else { return };
+        let lang = self.settings.lang;
+        let cmd = crate::update::upgrade_command_line(method)
+            .unwrap_or_else(|| "cleecode.marunja.com".to_string());
+        match key.code {
+            // One attempt a session: an upgrade that failed once is not improved by a second
+            // run nobody watched, and the failure message already names the by-hand command.
+            KeyCode::Enter if !self.update_attempted => {
+                self.update_attempted = true;
+                crate::update::spawn_upgrade(method, version, self.update_tx.clone());
+                self.status_message = i18n::msg_update_running(lang, &cmd);
+            }
+            _ => {
+                self.status_message = i18n::msg_update_available(lang, &version, Some(&cmd));
             }
         }
     }
@@ -16419,6 +16497,15 @@ impl App {
                     self.show_delete_confirm = false;
                     self.delete_target = None;
                     self.status_message = i18n::msg_delete_cancelled(self.settings.lang);
+                    return;
+                }
+                // A click is "any other interaction": the offer is declined, the plain notice
+                // stays — the same answer every key but Enter gives it.
+                if let Some((version, method)) = self.update_prompt.take() {
+                    let cmd = crate::update::upgrade_command_line(method)
+                        .unwrap_or_else(|| "cleecode.marunja.com".to_string());
+                    self.status_message =
+                        i18n::msg_update_available(self.settings.lang, &version, Some(&cmd));
                     return;
                 }
                 if self.show_rename {
