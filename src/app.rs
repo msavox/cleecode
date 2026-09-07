@@ -16517,6 +16517,16 @@ impl App {
         // tracked while a menu was open would leave a scrollbar lit under it afterwards.
         self.pointer = Some((col, row));
 
+        // Motion with no button held: the pointer browsing. It moves the highlight in whichever
+        // pop-up list is open — the way every menu on every desktop behaves, and the way this
+        // one did not: the arrows moved the selection and the pointer needed a click to be
+        // believed. Handled here and consumed, because no later branch has ever had anything
+        // else to do with a bare movement.
+        if mouse.kind == MouseEventKind::Moved {
+            self.hover_popups(col, row, areas, full);
+            return;
+        }
+
         // The git panel is a reader too: the wheel moves through it, a click on a tab switches
         // to it, a click outside puts it away.
         if self.git_panel.is_some() {
@@ -17784,26 +17794,133 @@ impl App {
             self.context_menu = None;
             return;
         }
-        // Rows map to items, skipping the separator rules woven between groups.
+        // Rows map to items through the one shared walk, skipping the separator rules woven
+        // between groups — a caption is a row you can click on and nothing happens, which is
+        // what it looks like: the hover's highlight does not stop on one either.
         let target = (row - inner.y) as usize;
         let action = self.context_menu.as_ref().and_then(|m| {
-            let mut display_row = 0;
-            for item in &m.items {
-                if item.new_group {
-                    display_row += 1;
-                }
-                if display_row == target {
-                    // A caption is a row you can click on and nothing happens, which is what it
-                    // looks like: no highlight follows the pointer over one either.
-                    return (!item.header).then_some(item.action);
-                }
-                display_row += 1;
-            }
-            None
+            crate::menu::item_at_display_row(&m.items, target).map(|idx| m.items[idx].action)
         });
         if let Some(action) = action {
             self.context_menu = None;
             self.run_menu_action(action);
+        }
+    }
+
+    /// A bare pointer movement while a pop-up list is open: the highlight follows it.
+    ///
+    /// One rule across every list where Enter acts on a highlighted row — the bar's dropdown,
+    /// the context menu, the theme and run lists, the Extras panel, the drawer's launcher:
+    /// resting the pointer on a row selects it, clicking stays what it was. Selection only,
+    /// never action, which is what makes it safe for the hover to be wrong by a row while a
+    /// modal is painted over the list: Enter still goes to the modal, and a highlight nobody
+    /// can see costs nothing. Each surface asks the same geometry its click and its drawing
+    /// ask, so the three can never disagree about which row the pointer is on. Movement
+    /// outside the rows moves nothing — walking off the edge of a menu is not a choice.
+    /// With no list open this falls straight through, which keeps a bare movement as cheap
+    /// as it always was.
+    fn hover_popups(&mut self, col: u16, row: u16, areas: &ui::Areas, full: Rect) {
+        let lang = self.settings.lang;
+        // The context menu first: it is painted over everything below and is never open at
+        // the same time as the bar's own dropdown.
+        if self.context_menu.is_some() {
+            let rect = self
+                .context_menu
+                .as_ref()
+                .map(|m| ui::context_menu_rect(m, lang, &self.keymap, self.last_full))
+                .unwrap_or(self.last_full);
+            let inner = ui::inner_rect(rect);
+            if within(inner, col, row) {
+                let target = (row - inner.y) as usize;
+                if let Some(m) = self.context_menu.as_mut() {
+                    if let Some(idx) = crate::menu::item_at_display_row(&m.items, target) {
+                        m.selected = idx;
+                    }
+                }
+            }
+            return;
+        }
+        if self.menu.active {
+            let dropdown = ui::menu_dropdown_rect(&self.menu, lang, &self.keymap, full);
+            if within(dropdown, col, row) {
+                let inner = ui::inner_rect(dropdown);
+                if row >= inner.y {
+                    let target = (row - inner.y) as usize;
+                    let items = &self.menu.defs[self.menu.menu_index].items;
+                    if let Some(idx) = crate::menu::item_at_display_row(items, target) {
+                        self.menu.item_index = idx;
+                    }
+                }
+                return;
+            }
+            // Along the bar itself, an open menu follows the pointer from title to title —
+            // the gesture every menu bar honours. Same ranges the click reads; the logo and
+            // the buttons at the far end are not titles and move nothing.
+            if row == 0 {
+                let ranges = ui::menu_title_ranges(&self.menu, lang);
+                if let Some(i) =
+                    ranges.iter().position(|(start, end)| col >= *start && col < *end)
+                {
+                    if i != self.menu.menu_index {
+                        self.menu.menu_index = i;
+                        self.menu.item_index = 0;
+                    }
+                }
+            }
+            return;
+        }
+        if self.theme_menu.is_some() {
+            if let Some(inner) = ui::theme_menu_rect(self, full)
+                .map(ui::inner_rect)
+                .filter(|inner| within(*inner, col, row))
+            {
+                let idx = (row - inner.y) as usize;
+                if idx < crate::theme::ThemeChoice::all().len() {
+                    self.theme_menu = Some(idx);
+                }
+            }
+            return;
+        }
+        if self.run_menu.is_some() {
+            let len = self.run_menu_rows().len();
+            if let Some(inner) = ui::run_menu_rect(self, areas.editor, full)
+                .map(ui::inner_rect)
+                .filter(|inner| within(*inner, col, row))
+            {
+                let idx = (row - inner.y) as usize;
+                if idx < len {
+                    if let Some(menu) = self.run_menu.as_mut() {
+                        menu.selected = idx;
+                    }
+                }
+            }
+            return;
+        }
+        if self.extras_menu.is_some() {
+            if let Some(inner) = ui::extras_menu_rect(self, full)
+                .map(ui::inner_rect)
+                .filter(|inner| within(*inner, col, row))
+            {
+                let idx = (row - inner.y) as usize;
+                if idx < crate::extras::Extra::all().len() {
+                    self.extras_menu = Some(idx);
+                }
+            }
+            return;
+        }
+        // The launcher: the pointer resting on a name puts the selection ring on it, and the
+        // click stays the choice — the two halves of the same gesture the list rows above
+        // share. Asked of the same function that draws the rows, so the ring can never sit on
+        // the name above the one under the pointer.
+        if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
+            if let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) {
+                let (_, rows) = ui::drawer_launcher_rows(ui::inner_rect(rect));
+                if let Some(index) = rows.iter().position(|r| within(*r, col, row)) {
+                    if let Some(drawer) = self.drawer.as_mut() {
+                        drawer.selected = index;
+                    }
+                }
+            }
         }
     }
 
@@ -17891,24 +18008,17 @@ impl App {
         if within(dropdown, col, row) {
             let inner = ui::inner_rect(dropdown);
             if row >= inner.y {
-                // Separator rules occupy display rows too, so walk the items and
-                // account for the extra row each group opener adds above itself.
+                // Separator rules occupy display rows too; the shared walk accounts for the
+                // extra row each group opener adds above itself, exactly as the hover does.
                 // A click that lands on a separator maps to no item and is ignored.
                 let target = (row - inner.y) as usize;
-                let mut display_row = 0;
-                for (idx, item) in self.menu.defs[self.menu.menu_index].items.iter().enumerate() {
-                    if item.new_group {
-                        display_row += 1;
+                let items = &self.menu.defs[self.menu.menu_index].items;
+                if let Some(idx) = crate::menu::item_at_display_row(items, target) {
+                    self.menu.item_index = idx;
+                    if let Some(action) = self.menu.selected_action() {
+                        self.menu.close();
+                        self.run_menu_action(action);
                     }
-                    if display_row == target {
-                        self.menu.item_index = idx;
-                        if let Some(action) = self.menu.selected_action() {
-                            self.menu.close();
-                            self.run_menu_action(action);
-                        }
-                        break;
-                    }
-                    display_row += 1;
                 }
             }
             return;

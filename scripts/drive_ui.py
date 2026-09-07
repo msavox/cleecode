@@ -312,6 +312,35 @@ def row_bgs(session, row, start, end):
     return {cell.bg for cell in session.cells(row)[start:end]}
 
 
+def hover(session, col, row):
+    """Rest the pointer on a cell without pressing anything — the SGR any-motion report,
+    button bits 35, which CleeCode receives because it asks for any-event tracking."""
+    session.send(f"\x1b[<35;{col + 1};{row + 1}M")
+    session.wait(lambda s: True, 0.4)
+
+
+def right_click(session, col, row):
+    """The other button, pressed and released — SGR button 2."""
+    session.send(f"\x1b[<2;{col + 1};{row + 1}M")
+    session.send(f"\x1b[<2;{col + 1};{row + 1}m")
+
+
+def label_spot(session, label):
+    """Where `label` sits on screen, as (row, col), or None."""
+    return next(((y, line.index(label)) for y, line in enumerate(session.lines())
+                 if label in line), None)
+
+
+def label_lit(session, label):
+    """Whether the row carrying `label` shows it highlighted — REVERSED cells across the
+    label's own span, which is how every menu's selection reads at this resolution."""
+    spot = label_spot(session, label)
+    if spot is None:
+        return False
+    y, x = spot
+    return all(cell.reverse for cell in session.cells(y)[x:x + len(label)])
+
+
 def selecting_with_clicks(binary, report):
     """The click ladder in the editor body: press again on the same cell, quickly, and the
     selection climbs — cursor, word, line, then the structural scale, one rung a press.
@@ -883,6 +912,92 @@ def the_extras_panel_and_the_font_offer(binary, report):
         session.close()
 
 
+def the_highlight_follows_the_pointer(binary, report):
+    """Pop-up lists follow the pointer now: resting it on a row moves the highlight, no click.
+    The arrows always did this; the mouse needed a press to be believed, which left the menus
+    reading as dead under a moving pointer. Colour is the witness again: a menu's selection is
+    a run of REVERSED cells, so every check is which label wears them after the pointer has
+    rested where — and the separator case is the negative that keeps the rule honest, because
+    walking off a row must not be a choice.
+
+    Its own session, like every section that clicks by coordinates."""
+    root = tempfile.mkdtemp(prefix="clee_hover_")
+    with open(os.path.join(root, "hello.txt"), "w") as handle:
+        handle.write("hello pointer line\nsecond line\n")
+    session = Session(binary, root)
+    try:
+        if not session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            report.check("the hover session starts", False, session)
+            return
+        session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+
+        # The bar's dropdown: open File, rest the pointer on a lower row, read the highlight.
+        bar = session.full_line(0)
+        if "File" not in bar or "Help" not in bar:
+            report.check("the menu bar is on screen", False, session)
+            return
+        click(session, bar.index("File") + 1, 0)
+        opened = session.wait(lambda s: "Save As..." in s.text(), 6)
+        report.check("File drops its menu", opened, session)
+        if opened:
+            spot = label_spot(session, "Save As...")
+            hover(session, spot[1] + 2, spot[0])
+            report.check("the dropdown's highlight follows the pointer onto a row",
+                         session.wait(lambda s: label_lit(s, "Save As..."), 6), session,
+                         note="no click: resting the pointer is enough")
+            # An open menu follows the pointer along the bar itself, title to title.
+            hover(session, bar.index("Help") + 1, 0)
+            switched = session.wait(lambda s: "Extras..." in s.text(), 6)
+            report.check("sliding along the bar switches the open menu", switched, session)
+            # And Enter acts on the row the pointer chose, exactly as it would after arrows.
+            if switched:
+                spot = label_spot(session, "Extras...")
+                hover(session, spot[1] + 2, spot[0])
+                lit = session.wait(lambda s: label_lit(s, "Extras..."), 6)
+                session.send("\r")
+                acted = lit and session.wait(lambda s: "chafa" in s.text(), 6)
+                report.check("Enter runs the row the pointer rested on", acted, session)
+                if acted:
+                    session.press("\x1b", lambda s: "chafa" not in s.text(), 4)
+
+        # The context menu, which has separators and knows not to stop on them.
+        session.send("\x0f")
+        session.wait(lambda s: "hello.txt" in s.text(), 8)
+        session.send("hello")
+        session.wait(lambda s: True, 0.5)
+        session.send("\r")
+        if not session.wait(lambda s: "hello pointer line" in s.text(), 8):
+            report.check("the hover fixture opens", False, session)
+            return
+        # Anchored on the whole phrase: the tree shows "hello.txt" on this same screen row,
+        # and a shorter needle would hand the click to the sidebar's column.
+        row = session.row_of("hello pointer line")
+        col = session.full_line(row).index("hello pointer line")
+        right_click(session, col + 2, row)
+        menu_up = session.wait(lambda s: "Select All" in s.text(), 6)
+        report.check("right-click raises the editor's menu", menu_up, session)
+        if menu_up:
+            spot = label_spot(session, "Go to line...")
+            hover(session, spot[1] + 2, spot[0])
+            moved = session.wait(lambda s: label_lit(s, "Go to line..."), 6)
+            report.check("the context menu's highlight follows the pointer", moved, session)
+            if moved:
+                # The rule above "Find / Replace..." is a separator: resting the pointer on
+                # it moves nothing, and the highlight stays where the last real row put it.
+                find = label_spot(session, "Find / Replace...")
+                hover(session, find[1] + 2, find[0] - 1)
+                session.wait(lambda s: True, 0.6)
+                report.check("a separator does not steal the highlight",
+                             label_lit(session, "Go to line...")
+                             and not label_lit(session, "Find / Replace..."),
+                             session, note="walking off a row is not a choice")
+            session.press("\x1b", lambda s: "Select All" not in s.text(), 4)
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -922,6 +1037,7 @@ def main():
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)
         the_extras_panel_and_the_font_offer(binary, report)
+        the_highlight_follows_the_pointer(binary, report)
         quitting_ends_the_process_cleanly(binary, root, report)
     finally:
         shutil.rmtree(root, ignore_errors=True)

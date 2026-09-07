@@ -902,6 +902,30 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
     }
 }
 
+/// The item a dropdown's display row points at, `None` for a separator rule or a caption.
+///
+/// Separators occupy display rows of their own — each `new_group` opener adds one above
+/// itself — so a screen row and an item index are two different countings, and this walk is
+/// the one translation between them. It used to live twice, inline in the click handlers of
+/// the menu bar and of the context menu, until the pointer learned to move the highlight
+/// without clicking: three copies of the same arithmetic is where a hover and a click start
+/// disagreeing about which row the pointer is on, so now there is one.
+pub fn item_at_display_row(items: &[MenuItemDef], target: usize) -> Option<usize> {
+    let mut display_row = 0;
+    for (idx, item) in items.iter().enumerate() {
+        if item.new_group {
+            display_row += 1;
+        }
+        if display_row == target {
+            // A caption is a row the pointer can rest on and nothing happens, which is what
+            // it looks like: not selectable, so neither the highlight nor a click lands on it.
+            return (!item.header).then_some(idx);
+        }
+        display_row += 1;
+    }
+    None
+}
+
 pub struct MenuBar {
     pub active: bool,
     pub menu_index: usize,
@@ -957,6 +981,32 @@ impl MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one translation between screen rows and item indices, checked against every kind of
+    /// row a dropdown can show: plain items, the separator a group opener adds above itself,
+    /// and a caption. The click and the hover both lean on this, so a wrong answer here is a
+    /// menu that highlights one row and runs another.
+    #[test]
+    fn display_rows_map_to_items_and_rules_and_captions_map_to_nothing() {
+        let plain = |key, action| MenuItemDef { label_key: key, action, shortcut: None, new_group: false, header: false };
+        let items = vec![
+            plain(Key::ItemCopy, MenuAction::Copy),
+            plain(Key::ItemPaste, MenuAction::Paste),
+            // A new group: one separator row above this item.
+            MenuItemDef { label_key: Key::ItemNewAgentTab, action: MenuAction::NewAgentTab, shortcut: None, new_group: true, header: false },
+            // A caption: occupies its row, answers to nothing.
+            MenuItemDef { label_key: Key::ItemToggleDrawer, action: MenuAction::ToggleDrawer, shortcut: None, new_group: false, header: true },
+            plain(Key::ItemCloseAgentTab, MenuAction::CloseTerminalTab),
+        ];
+        assert_eq!(item_at_display_row(&items, 0), Some(0));
+        assert_eq!(item_at_display_row(&items, 1), Some(1));
+        assert_eq!(item_at_display_row(&items, 2), None, "the separator rule is nobody's row");
+        assert_eq!(item_at_display_row(&items, 3), Some(2));
+        assert_eq!(item_at_display_row(&items, 4), None, "a caption is not selectable");
+        assert_eq!(item_at_display_row(&items, 5), Some(4));
+        assert_eq!(item_at_display_row(&items, 6), None, "past the end is past the end");
+        assert_eq!(item_at_display_row(&[], 0), None);
+    }
 
     /// The switch reads out which way it is set. Without this the Run menu offered "Plots: tabs
     /// or windows" and answered neither — the only way to learn the state was to change it and
