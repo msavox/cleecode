@@ -419,6 +419,13 @@ whole.
 
 ![Layout and Run menus](screenshots/menu.png)
 
+Once a day, in the background, CleeCode asks GitHub — its own release channel — whether a newer
+version exists. Nothing of yours is sent and nothing is installed unasked: a Homebrew or Scoop
+install gets one small question naming the exact upgrade command, where Enter runs it in the
+background and any other key means not now; every other install gets one status line pointing at
+the site. Each version is mentioned once, `update_check = false` in `settings.toml` (or the
+settings panel) turns the whole thing off, and a build from source is never bothered at all.
+
 ### Octave and Python, as an IDE
 
 `clee -w octave` or `clee -w pylab` starts the interpreter you already have — in a terminal you

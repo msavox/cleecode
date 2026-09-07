@@ -188,6 +188,7 @@ pub enum Key {
     SettingDrawerPinned,
     SettingDrawerAutocollapse,
     SettingSplash,
+    SettingUpdateCheck,
     SettingMouseEnabled,
     SettingLanguage,
     On,
@@ -271,6 +272,8 @@ pub enum Key {
     // The frames the modals hang in. A box whose title is in one language and whose prompt is
     // in another reads as an unfinished translation, which is what it was.
     ModalDelete,
+    /// The update offer's title — good news, so it is named as news and not as a question.
+    ModalUpdate,
     ModalUnsaved,
     ModalRename,
     ModalTerminalForm,
@@ -729,6 +732,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingDrawerAutocollapse) => "a scomparsa, sopra i frame",
         (Lang::En, SettingSplash) => "Splash screen at startup",
         (Lang::It, SettingSplash) => "Schermata iniziale all'avvio",
+        (Lang::En, SettingUpdateCheck) => "Check for updates",
+        (Lang::It, SettingUpdateCheck) => "Controllo aggiornamenti",
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
@@ -972,6 +977,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         // is the drawing's business, and a title with its padding baked in cannot be measured.
         (Lang::En, ModalDelete) => "Delete?",
         (Lang::It, ModalDelete) => "Eliminare?",
+        (Lang::En, ModalUpdate) => "Update available",
+        (Lang::It, ModalUpdate) => "Aggiornamento disponibile",
 
         (Lang::En, ModalUnsaved) => "Unsaved changes",
         (Lang::It, ModalUnsaved) => "Modifiche non salvate",
@@ -3234,6 +3241,58 @@ pub fn msg_rename_failed(lang: Lang, name: &str, err: &str) -> String {
     match lang {
         Lang::En => format!("Failed to rename {name}: {err}"),
         Lang::It => format!("Rinomina di {name} fallita: {err}"),
+    }
+}
+
+/// The plain notice, for installs that get told and never acted for — and for a declined
+/// offer, which falls back to exactly this. The command is the one the install method makes
+/// right; without one, the site is the answer.
+pub fn msg_update_available(lang: Lang, version: &str, command: Option<&str>) -> String {
+    match (lang, command) {
+        (Lang::En, Some(cmd)) => format!("CleeCode {version} is out — {cmd}"),
+        (Lang::It, Some(cmd)) => format!("È uscita CleeCode {version} — {cmd}"),
+        (Lang::En, None) => format!("CleeCode {version} is out — cleecode.marunja.com"),
+        (Lang::It, None) => format!("È uscita CleeCode {version} — cleecode.marunja.com"),
+    }
+}
+
+/// The offer's question, naming the exact command so consent is to something spelled out.
+pub fn msg_update_question(lang: Lang, version: &str, command: &str) -> String {
+    match lang {
+        Lang::En => format!("CleeCode {version} is out. Update in the background with `{command}`?"),
+        Lang::It => format!("È uscita CleeCode {version}. Aggiornare in background con `{command}`?"),
+    }
+}
+
+/// Enter and nothing else accepts: this modal arrives on its own schedule, and a letter the
+/// user was typing must not be the keystroke that runs a package manager.
+pub fn msg_update_choices(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Enter = update in background · any other key = not now",
+        Lang::It => "Invio = aggiorna in background · altro tasto = non ora",
+    }
+}
+
+pub fn msg_update_running(lang: Lang, command: &str) -> String {
+    match lang {
+        Lang::En => format!("Updating in the background ({command})..."),
+        Lang::It => format!("Aggiornamento in background ({command})..."),
+    }
+}
+
+/// Honest about what just happened: the binary on disk is new, the process reading this is
+/// still the old one, and that is fine.
+pub fn msg_update_done(lang: Lang, version: &str) -> String {
+    match lang {
+        Lang::En => format!("Updated to {version} — the new version starts on the next launch"),
+        Lang::It => format!("Aggiornata alla {version} — la nuova versione parte al prossimo avvio"),
+    }
+}
+
+pub fn msg_update_failed(lang: Lang, command: &str) -> String {
+    match lang {
+        Lang::En => format!("Update failed — try it by hand: {command}"),
+        Lang::It => format!("Aggiornamento fallito — prova a mano: {command}"),
     }
 }
 

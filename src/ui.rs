@@ -1485,6 +1485,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.unsaved_prompt.is_some() {
         draw_unsaved_modal(f, app, f.area());
     }
+    if app.update_prompt.is_some() {
+        draw_update_modal(f, app, f.area());
+    }
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
@@ -2023,6 +2026,33 @@ fn draw_delete_confirm_modal(f: &mut Frame, app: &App, full: Rect) {
 
 pub fn unsaved_modal_rect(full: Rect) -> Rect {
     centered_rect(64, 6, full)
+}
+
+/// The update offer, in the unsaved prompt's clothes but the accent's colour: it is good news
+/// asking one question, not a warning. Two lines — the question naming the exact command
+/// consent would run, and the choices, where only Enter accepts because this modal arrives on
+/// its own schedule (see `App::handle_update_prompt_key`).
+fn draw_update_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    let Some((version, method)) = app.update_prompt.as_ref() else { return };
+    let lang = app.settings.lang;
+    let cmd = crate::update::upgrade_command_line(*method).unwrap_or_default();
+    let rect = unsaved_modal_rect(full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(lang, Key::ModalUpdate)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(i18n::msg_update_question(lang, version, &cmd)),
+        Line::from(Span::styled(
+            i18n::msg_update_choices(lang),
+            Style::default().fg(pal.text_muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_unsaved_modal(f: &mut Frame, app: &App, full: Rect) {

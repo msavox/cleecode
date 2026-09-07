@@ -31,6 +31,7 @@ mod terminal_panel;
 mod theme;
 mod tools;
 mod ui;
+mod update;
 mod workspace;
 mod wsnap;
 mod wsview;
@@ -655,6 +656,7 @@ fn run(
             app.poll_splash();
             app.poll_turtle();
             app.poll_background_messages();
+            app.poll_update();
             app.poll_previews();
             app.refresh_rendered_previews();
             app.poll_terminal_exits();
