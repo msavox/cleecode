@@ -1,3 +1,21 @@
+## What's new in 0.24.2
+
+**The mouse works over a running agent.** Coding agents ask for the mouse the moment they
+start, and every press over the drawer used to be handed straight to them — the tab chips,
+their close boxes and the title bar could be seen but not clicked, and the right button never
+reached the menu 0.24.1 built for it. The border row now belongs to the window, not to the
+program behind it (terminal panes included, so a full-screen program no longer swallows clicks
+on their tab strip either), and in the drawer the right button is always CleeCode's: no agent
+uses it, and the menu is its whole point there. Clicking a launcher name shown over a running
+agent now chooses that name instead of vanishing into the pane underneath, and a right-click
+on the auto-collapsed drawer raises the drawer's menu rather than the editor's below it.
+
+**A lone agent gets a close box.** With a single conversation the drawer used to carry a plain
+title — and no mouse control at all that could end the agent, since the window's own box only
+hides the column. A lone tab now wears the same chip it would have beside a second one, ■ and
+all. And the menu row that closes one is worded for what it closes: *Close agent tab*, same
+key, same action as ever.
+
 ## What's new in 0.24.1
 
 **The drawer answers the right button.** Right-clicking the agent drawer used to do nothing at
