@@ -809,6 +809,31 @@ a.kofi svg {
 }
 a.kofi:hover { color: #ff5e5b; }
 
+/* Visit counter: an eye for total visits, two heads for unique visitors — the same
+   pair Maestrino's toolbar carries. Stays out of the layout until the inline script
+   at the bottom of the page fills it in; see index.html for why. */
+.counter {
+  display: flex;
+  gap: 0.9rem;
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.counter[hidden] { display: none; }
+
+.counter-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.counter-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  opacity: 0.85;
+}
+
 .copy {
   margin-top: 1rem;
   font-size: 0.83rem;
