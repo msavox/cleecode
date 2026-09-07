@@ -3,11 +3,8 @@
 An editor, a file tree and real terminals in one window. Written in Rust, driven from the
 keyboard, with the mouse as an alternative rather than the only way.
 
-By **Matteo Savoia** ([msavox](https://github.com/msavox))
-
-**The front door is the site: [cleecode.marunja.com](https://cleecode.marunja.com)** — what it
-looks like, how it installs, the whole story on one page. This repository is the source, the
-releases and the issue tracker.
+By **Matteo Savoia** ([msavox](https://github.com/msavox)) ·
+**[cleecode.marunja.com](https://cleecode.marunja.com)**
 
 ![CleeCode in six beats: the splash, a script run, Markdown rendered beside its source, the
 commit graph, the Turbo theme repainting the whole screen, and the split editor](docs/demo.gif)
