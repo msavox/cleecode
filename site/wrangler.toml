@@ -1,0 +1,13 @@
+# Cloudflare Pages config for the CleeCode site.
+#
+# This file is what lets `wrangler pages deploy` pick up functions/ and hand the
+# COUNTER KV binding to them on a direct-upload deploy — without it, Pages has no
+# way to learn a binding except through the dashboard, and the Function above
+# would run with env.COUNTER undefined.
+name = "cleecode"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "COUNTER"
+id = "101efa4eebd242c890d09baa7b07fb58"

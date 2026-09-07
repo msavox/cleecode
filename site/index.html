@@ -245,9 +245,27 @@ scoop install clee</code></pre>
       <span aria-hidden="true">·</span>
       <a class="kofi" href="https://ko-fi.com/msavox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg> Ko-fi</a>
     </p>
+    <!-- Filled in by the script below once /api/counter answers; stays hidden on a failed
+         fetch (no function, offline, blocked) rather than showing a false zero. -->
+    <p class="counter" id="site-counter" hidden>
+      <span class="counter-item" title="Total visits"><svg class="counter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><span id="counter-visits">0</span></span>
+      <span class="counter-item" title="Unique visitors"><svg class="counter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span id="counter-unique">0</span></span>
+    </p>
     <p class="copy">© msavox — Matteo Savoia. MIT licensed.</p>
   </div>
 </footer>
+
+<script>
+  // POST bumps the count and hands back the fresh totals in one round trip; a GET
+  // afterwards would just re-read what this already returned. Silent on failure —
+  // the block above stays hidden rather than flashing a zero.
+  fetch('/api/counter', { method: 'POST' }).then(function (r) { return r.json() }).then(function (d) {
+    if (typeof d.visits !== 'number' || typeof d.unique !== 'number') return
+    document.getElementById('counter-visits').textContent = d.visits
+    document.getElementById('counter-unique').textContent = d.unique
+    document.getElementById('site-counter').hidden = false
+  }).catch(function () {})
+</script>
 
 </body>
 </html>
