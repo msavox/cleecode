@@ -5208,6 +5208,7 @@ pub fn terminal_tab_strip_rect(area: Rect, window_close: bool) -> Rect {
 
 /// One tab in a terminal window's strip: its whole x-range, and the column of its `■` close
 /// glyph (absent only when the strip is too narrow to fit it).
+#[derive(Debug, PartialEq, Eq)]
 pub struct TermTab {
     pub full: (u16, u16),
     pub close: Option<u16>,
@@ -5238,6 +5239,15 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
     if labels.len() <= 1 {
         return Vec::new();
     }
+    drawer_tab_ranges(area, labels)
+}
+
+/// The same strip without the single-tab gate: one label is still one chip. The drawer reads its
+/// tabs through this, because there a lone chip is not decoration — its ■ is the only mouse
+/// control that ends the agent, the window's own ■ merely hiding the column. A terminal window
+/// keeps going through [`terminal_tab_ranges`] and its gate, since its title bar already closes
+/// for real. One layout underneath, so the two kinds of strip can never drift apart.
+pub fn drawer_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
     let mut tabs = Vec::new();
     let end = area.x + area.width;
     let mut x = area.x;
@@ -5258,7 +5268,9 @@ pub fn terminal_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
 /// never reads as an editor tab (those go cyan). Each tab carries a `■` to close it.
 fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[String], active: usize) {
-    let tabs = terminal_tab_ranges(area, labels);
+    // The ungated layout: the callers decide whether a strip is drawn at all, and the drawer
+    // draws one for a single tab — see `drawer_tab_ranges`.
+    let tabs = drawer_tab_ranges(area, labels);
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let budget = (tab.full.1 - tab.full.0) as usize;
@@ -5299,6 +5311,13 @@ struct TerminalChrome {
     engaged: bool,
     /// The number a nameless single tab is called by, which is the pane's place on screen.
     number: usize,
+    /// Whether a lone tab still gets its chip on the border, ■ and all. True for the drawer,
+    /// where the chip's ■ is the only mouse control that *ends* an agent — the window's own ■
+    /// only hides the column — so a single agent without one simply could not be closed by
+    /// pointing at anything. A terminal pane keeps the plain title instead: its window ✕
+    /// already closes for real, and a second close box on the same row would be two answers
+    /// to one question.
+    lone_chip: bool,
 }
 
 fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
@@ -5321,6 +5340,7 @@ fn draw_terminals(f: &mut Frame, app: &mut App, term_areas: &[Rect]) {
             closable,
             engaged,
             number: i,
+            lone_chip: false,
         };
         let Some(window) = app.terminals.get_mut(i) else { continue };
         draw_single_terminal(f, window, *area, chrome);
@@ -5333,11 +5353,13 @@ fn draw_single_terminal(
     area: Rect,
     chrome: TerminalChrome,
 ) {
-    let TerminalChrome { pal, lang, resizing, focused, closable, engaged, number } = chrome;
+    let TerminalChrome { pal, lang, resizing, focused, closable, engaged, number, lone_chip } =
+        chrome;
     let labels = terminal_tab_labels(window, number, lang);
     let active_tab = window.active;
     let tab_count = labels.len();
     let window_close = closable;
+    let chips = tab_count > 1 || (lone_chip && tab_count == 1);
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -5351,8 +5373,9 @@ fn draw_single_terminal(
     }
     // With a single tab the top border carries the (possibly renamed) terminal's name — after the
     // box, which has already claimed its cell; with several, the tabs ride the border instead
-    // (drawn below) and stand in for the title.
-    if tab_count <= 1 {
+    // (drawn below) and stand in for the title. The drawer never takes the title route: even its
+    // lone tab is a chip, because the chip's ■ is the one control that ends the agent in it.
+    if !chips {
         block = block.title(format!(" {} ", labels.first().map(String::as_str).unwrap_or("")));
     }
     // The tab strip rides the top border, so the content is the whole interior.
@@ -5360,7 +5383,7 @@ fn draw_single_terminal(
 
     // The border (and close button) first, then the tabs over the top border, then the contents.
     f.render_widget(block, area);
-    if tab_count > 1 {
+    if chips {
         let strip = terminal_tab_strip_rect(area, window_close);
         draw_terminal_tab_strip(pal, f, strip, &labels, active_tab);
     }
@@ -5706,6 +5729,10 @@ pub fn draw_drawer(f: &mut Frame, app: &mut App, area: Rect) {
                 // have. A zero here would print "Terminal 0" if it were ever reached, which is the
                 // reason to say plainly that it cannot be.
                 number: 0,
+                // A lone agent keeps its chip, ■ and all — see the field's own note: this
+                // column's only deliberate kill control is that box, so a tab without one
+                // would be an agent the mouse cannot end.
+                lone_chip: true,
             },
         ),
         None => draw_drawer_launcher(f, pal, lang, area, drawer.selected, focused, resizing),
@@ -7371,6 +7398,26 @@ mod tests {
         assert_eq!(tabs[0].close, Some(10));
         assert_eq!(tabs[1].full, (23, 37));
         assert_eq!(tabs[1].close, Some(24));
+    }
+
+    /// The drawer's exception to the gate above: a lone agent still gets a chip with a live ■,
+    /// because in that column the chip's box is the only mouse control that ends the agent —
+    /// the window's own ■ merely hides it. Same layout underneath, so the chip a single label
+    /// gets is the one it would have as the first of several.
+    #[test]
+    fn the_drawer_gives_even_a_lone_tab_its_chip() {
+        let area = Rect { x: 5, y: 2, width: 40, height: 10 };
+        let strip = terminal_tab_strip_rect(area, true);
+        let label = vec!["Claude Code".to_string()];
+        let alone = drawer_tab_ranges(strip, &label);
+        assert_eq!(alone.len(), 1);
+        assert!(alone[0].close.is_some(), "the ■ is the whole point of the lone chip");
+        // While a terminal window's strip stays gated: one tab, no chips.
+        assert!(terminal_tab_ranges(strip, &label).is_empty());
+        // And the lone chip is laid out exactly as it would be with company, because the two
+        // functions are one layout.
+        let two: Vec<String> = vec!["Claude Code".into(), "Codex".into()];
+        assert_eq!(alone[0], drawer_tab_ranges(strip, &two)[0]);
     }
 
     #[test]

@@ -888,7 +888,9 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),
             item(Key::ItemPaste, MenuAction::Paste, Some("Ctrl+V")),
             group(Key::ItemNewAgentTab, MenuAction::NewAgentTab, Some("Ctrl+Shift+T")),
-            item(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
+            // The panel's own close action behind an agent's wording: a row that said
+            // "terminal" in this column would name the machinery, not the thing being closed.
+            item(Key::ItemCloseAgentTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
             group(Key::ItemToggleDrawer, MenuAction::ToggleDrawer, None),
         ],
     }
@@ -1051,6 +1053,12 @@ mod tests {
         assert!(items.iter().any(|i| i.action == MenuAction::NewAgentTab));
         assert!(items.iter().any(|i| i.action == MenuAction::ToggleDrawer));
         assert!(items.iter().all(|i| i.action != MenuAction::Rename));
+        // The close row is the panel's own action wearing the agent's name: in a column where
+        // every tab holds an agent, a row that said "terminal" would name the wrong thing.
+        assert!(items
+            .iter()
+            .any(|i| i.action == MenuAction::CloseTerminalTab
+                && matches!(i.label_key, crate::i18n::Key::ItemCloseAgentTab)));
         // The rows the sidebar gains when `versioned` turns true are exactly the git ones, so
         // the difference is the list of what must not appear here — kept as a difference
         // rather than spelled out, so a git row added tomorrow is covered without editing this.

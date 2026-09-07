@@ -12,10 +12,14 @@ an agent that ends leave the list of four rather than a shell wearing an agent's
 Then the column with several agents in it, one to a tab. `Ctrl+Shift+T` — or the View menu — puts
 the same full-pane launcher back over the ones already running, `Esc` hands the column straight
 back to them, and a name chosen off it arrives as another tab rather than in place of the first.
-The border stops carrying a title then and carries a strip of chips instead, so the drawer is
-found by both shapes; the window's own ■ still hides the column while a chip's ■ ends the agent
-in that chip. The case worth having is the same program twice — two tabs both reading
-"Claude Code" — which is why nothing in that section tells the two apart by their names.
+Every tab is a chip on the border, the lone one included — its ■ is the only mouse control that
+ends an agent, so a tab without one would be an agent the mouse cannot close — and the border
+carries a title only while the launcher is up; the window's own ■ still hides the column while a
+chip's ■ ends the agent in that chip. The case worth having is the same program twice — two tabs
+both reading "Claude Code" — which is why nothing in that section tells the two apart by their
+names. And because the real agents ask for the mouse — which is what made every press over the
+column vanish into the pty — one round runs against a stub that has SGR reporting on: the chips,
+their ■s and the right-click menu all have to keep working over it.
 
 Then the same drawer in the other mode. On autocollapse it is on screen exactly while it holds
 the keyboard, and it is *painted over* the frames rather than carved out of them — so the proof
@@ -96,6 +100,21 @@ done
 echo "AGENT-STUB %s done"
 """
 
+# The same stand-in with the mouse asked for, which is what the real agents do — Claude Code
+# turns SGR mouse reporting on — and exactly the case the plain stub never exercised: with a
+# program holding the mouse, every press over the column used to be encoded and written into
+# the pty, so the chips could be seen but not clicked and the right button never reached the
+# menu. The reports the stub receives are never read back; what these checks are about is who
+# gets the press, not what the agent does with it.
+MOUSE_STUB = """#!/bin/sh
+printf '\\033[?1002h\\033[?1006h'
+echo "AGENT-STUB %s ready mouse=on session=${CLEE_SESSION:+yes}"
+while IFS= read -r line; do
+    echo "SUBMITTED: $line"
+done
+echo "AGENT-STUB %s done"
+"""
+
 
 def fake_agents(root):
     """A directory holding a stub for each *installed* agent, to be put in front of `PATH`."""
@@ -107,6 +126,15 @@ def fake_agents(root):
             handle.write(STUB % (name, name))
         os.chmod(path, 0o755)
     return bin_dir
+
+
+def swap_stub(root, name, body):
+    """Rewrites one stub in place, for the *next* launch of that name — the PATH already points
+    here, and nothing running is touched: an agent is its process, not its file."""
+    path = os.path.join(root, "fakebin", name)
+    with open(path, "w") as handle:
+        handle.write(body % (name, name))
+    os.chmod(path, 0o755)
 
 
 def really_installed(name):
@@ -138,12 +166,13 @@ def drawer_column(session):
     plain search for the word found that sentence and reported the column still there.
 
     Three forms, and the third is why this is not one `find`. The drawer is always closable \u2014
-    launcher or agent, it wears the same close box the terminal windows do \u2014 so with one tab its
+    launcher or agent, it wears the same close box the terminal windows do \u2014 so the launcher's
     border reads "\u250c \u25a0 \u2500 agent": corner, a padded close box, a padded dash, then the title,
     rather than the bare "\u250c agent" a frame with no close box still carries (the Files panel,
-    which nothing ever closes). With *two or more* tabs there is no title at all: the chips ride
-    the border in its place, so it reads "\u250c \u25a0  \u25a0 Claude Code  \u25a0 codex \u2500\u2500\u2500" \u2014 the window's own
-    box still in its cell, then the strip four columns in, each chip a padded \u25a0 and a name.
+    which nothing ever closes). With an agent in it there is no title at all, at one tab as at
+    three: the chips ride the border in its place \u2014 the lone chip's \u25a0 being the only mouse
+    control that ends an agent \u2014 so it reads "\u250c \u25a0  \u25a0 Claude Code  \u25a0 codex \u2500\u2500\u2500", the window's
+    own box still in its cell, then the strip four columns in, each chip a padded \u25a0 and a name.
 
     Every form is anchored on the corner and nothing looser, because a title alone is also the
     sentence a status message uses when it names the agent running behind a hidden drawer. The
@@ -176,7 +205,8 @@ def drawer_border_row(session, left=None):
 
 
 def drawer_chips(session):
-    """The tab chips on the drawer's top border, left to right \u2014 empty at one tab, or none.
+    """The tab chips on the drawer's top border, left to right \u2014 one per tab, the lone tab
+    included; empty only while the launcher holds the border.
 
     One dict per chip: where it starts and ends, the column of its own \u25a0, the name written in it,
     and the colour it is filled with, which is how the active tab says it is the active one.
@@ -217,6 +247,14 @@ def click(session, col, row):
     """One press and release, in the SGR encoding CleeCode turns on at startup. One-based."""
     session.send(f"\x1b[<0;{col + 1};{row + 1}M")
     session.send(f"\x1b[<0;{col + 1};{row + 1}m")
+
+
+def right_click(session, col, row):
+    """The other button, pressed and released — SGR button 2. What it raises over the drawer is
+    the drawer's own menu, never the agent's: no agent uses the right button, so it is the one
+    press the column keeps for itself even from a program that asked for the mouse."""
+    session.send(f"\x1b[<2;{col + 1};{row + 1}M")
+    session.send(f"\x1b[<2;{col + 1};{row + 1}m")
 
 
 def drag(session, col, row, to_col):
@@ -900,7 +938,7 @@ def check_drawer(binary, report):
                 s.frame_of("AGENT-STUB claude ready")), 8)
 
         chips = drawer_chips(session)
-        report.check("two tabs put a strip of chips on the border where the title was",
+        report.check("two tabs make the strip a strip of two chips",
                      len(chips) == 2, session,
                      note="found %s" % [c["label"] for c in chips])
         if len(chips) == 2:
@@ -944,9 +982,11 @@ def check_drawer(binary, report):
             report.check("and the status line says which one went",
                          ended in session.full_line(session.rows - 1), session,
                          note=session.full_line(session.rows - 1).strip()[:110])
-            report.check("and the border goes back to carrying a title",
-                         drawer_chips(session) == [] and drawer_column(session) is not None,
-                         session, note="one tab is a name on a border, not a strip of one chip")
+            report.check("and the strip narrows to the chip that is left",
+                         [c["label"] for c in drawer_chips(session)] == ["Claude Code"]
+                         and drawer_column(session) is not None,
+                         session, note="a lone tab keeps its chip: the ■ on it is the only mouse"
+                                       " control that ends an agent")
 
         # A third, so the chip's own ■ has two to choose between. It arrives active, which makes
         # the chip pressed below the *background* one — a control that killed whatever was on
@@ -966,7 +1006,7 @@ def check_drawer(binary, report):
         if third_up:
             chips = drawer_chips(session)
             click(session, chips[0]["close"], drawer_border_row(session))
-            killed = session.wait(lambda s: len(drawer_chips(s)) == 0, 10)
+            killed = session.wait(lambda s: len(drawer_chips(s)) == 1, 10)
             report.check("a chip's ■ closes that tab and no other", killed, session,
                          note="the window's ■ hides the column; a chip's ends the agent in it")
             report.check("and the conversation the chip did not name is still going",
@@ -976,6 +1016,103 @@ def check_drawer(binary, report):
                 lambda s: all(mark_rows(s, name) is not None for name in INSTALLED + MISSING), 15)
             report.check("Ctrl+Shift+K closes the last tab and the launcher comes back", back,
                          session, note="never a respawned shell, here no more than anywhere else")
+
+        # ---- the mouse over an agent that asked for it -----------------------------------------
+        # The case every check above dodged, and the one a real drawer lives in: Claude Code and
+        # its kind turn SGR mouse reporting on the moment they start. Every press over the column
+        # then used to be encoded and written into the pty — the chips could be seen but not
+        # clicked, and the right button never reached the menu. From here the claude stub asks
+        # for the mouse, and every control the drawer owns has to keep working over it: the border
+        # row is chrome, not content, and the right button is the drawer's everywhere.
+        lone = False
+        if session.wait(lambda s: frame_rows(s) is not None, 4) and focus_launcher(session):
+            highlight_agent(session, "claude")
+            session.send("\r")
+            lone = session.wait(lambda s: "AGENT-STUB claude ready" in s.text(), 30)
+        report.check("a lone agent wears a chip rather than a title",
+                     lone and [c["label"] for c in drawer_chips(session)] == ["Claude Code"],
+                     session,
+                     note="its ■ is the only mouse control that ends an agent — a lone tab"
+                          " without one could not be closed by pointing at anything")
+        swap_stub(root, "claude", MOUSE_STUB)
+        mouse_up = False
+        if lone:
+            session.send(session.chord("t"))
+            if session.wait(lambda s: mark_rows(s, "gemini") is not None, 8) \
+                    and focus_launcher(session) and highlight_agent(session, "claude"):
+                session.send("\r")
+                mouse_up = session.wait(lambda s: "mouse=on" in s.text(), 30)
+        report.check("an agent that asks for the mouse starts beside the plain one", mouse_up,
+                     session, note="the stub prints the same escape a real agent sends")
+        if mouse_up:
+            left = drawer_column(session)
+            border = drawer_border_row(session, left)
+            # The right button, well inside the pane of the program that grabbed the mouse. It
+            # must not be forwarded: no agent uses it, and the menu is its whole point here.
+            right_click(session, left + 4, border + 3)
+            menu_up = session.wait(
+                lambda s: "New agent tab" in s.text() and "Close agent tab" in s.text(), 6)
+            report.check("right-click over the agent raises the drawer's own menu", menu_up,
+                         session,
+                         note="never the agent's: the right button is the one press the column"
+                              " keeps for itself even from a program that asked for the mouse")
+            if menu_up:
+                session.press("\x1b", lambda s: "Close agent tab" not in s.text(), 4)
+            # The launcher over a mouse-mode agent, and a *click* choosing the name: what is on
+            # screen is CleeCode's own chooser, so the press must choose — never land in the pty
+            # underneath, which once asked for the mouse and cannot even be seen.
+            chosen = False
+            session.send(session.chord("t"))
+            if session.wait(lambda s: mark_rows(s, "gemini") is not None, 8):
+                rows = mark_rows(session, "claude")
+                if rows:
+                    click(session, drawer_column(session) + 4, rows[len(rows) // 2])
+                    chosen = session.wait(lambda s: len(drawer_chips(s)) == 3, 30)
+            report.check("clicking a launcher name over a mouse-mode agent still chooses it",
+                         chosen, session,
+                         note="the launcher is chrome painted over the pane: no press on it"
+                              " is the pane's")
+            # The chip's ■, pressed while the program on screen holds the mouse: the press lands
+            # on the chrome and ends the tab instead of vanishing into the pty.
+            pressed = False
+            chips = drawer_chips(session)
+            if len(chips) == 3:
+                click(session, chips[2]["close"], border)
+                pressed = session.wait(lambda s: len(drawer_chips(s)) == 2, 10)
+            report.check("a chip's ■ still works over an agent holding the mouse", pressed,
+                         session, note="the border row is chrome, not content")
+            # And the menu's own close row, which is the mouse's whole route to Ctrl+Shift+K: the
+            # right-click points at a tab, the row worded for what the tab holds closes it.
+            closed_by_menu = False
+            chips = drawer_chips(session)
+            if len(chips) == 2:
+                right_click(session, (chips[1]["start"] + chips[1]["end"]) // 2, border)
+                if session.wait(lambda s: "Close agent tab" in s.text(), 6):
+                    row_y = next((y for y in range(session.rows)
+                                  if "Close agent tab" in session.full_line(y)), None)
+                    if row_y is not None:
+                        row_x = session.full_line(row_y).index("Close agent tab")
+                        click(session, row_x + 2, row_y)
+                        closed_by_menu = session.wait(
+                            lambda s: len(drawer_chips(s)) == 1
+                            and "mouse=on" not in s.text(), 10)
+            report.check("the menu's Close agent tab row ends the tab the right-click pointed at",
+                         closed_by_menu, session,
+                         note="the same close as Ctrl+Shift+K, worded for what a drawer tab holds")
+            # The lone chip's ■ ends the last conversation, and what is left is the choice — the
+            # one thing a mouse alone could not do while a lone tab had no chip.
+            chips = drawer_chips(session)
+            lone_kill = False
+            if len(chips) == 1:
+                click(session, chips[0]["close"], drawer_border_row(session))
+                lone_kill = session.wait(
+                    lambda s: all(mark_rows(s, name) is not None
+                                  for name in INSTALLED + MISSING), 15)
+            report.check("the lone chip's ■ ends the last agent and the launcher returns",
+                         lone_kill, session,
+                         note="one tab used to mean no chip at all: an agent the mouse could"
+                              " see but never close")
+        swap_stub(root, "claude", STUB)
 
         # And an agent again for the rest of the file, which is written for a drawer with one.
         if session.wait(lambda s: frame_rows(s) is not None, 4):
@@ -1153,6 +1290,16 @@ def check_drawer(binary, report):
                                  [row[:seam] for row in underneath]
                                  == main_rows_left_of(session, seam), session,
                                  note="every cell left of the seam is the cell it already was")
+                    # The overlay lies on the editor's own cells, and the right button has to
+                    # read the screen the way the eye does: asked in layout order, the editor
+                    # underneath would have answered for a frame the pointer cannot even see.
+                    right_click(session, seam + 4, middle)
+                    over = session.wait(lambda s: "New agent tab" in s.text(), 6)
+                    report.check("right-click on the overlay raises the drawer's menu,"
+                                 " not the editor's", over, session,
+                                 note="what is on top of the screen is on top of the pointer")
+                    if over:
+                        session.press("\x1b", lambda s: "New agent tab" not in s.text(), 4)
 
             # ---- Ctrl+Shift+A on a collapsed drawer ------------------------------------------
             # The founding rule of the key: the text has to arrive where it can be read. A
