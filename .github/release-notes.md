@@ -1,3 +1,42 @@
+## What's new in 0.25.0
+
+**The name, written the way it's written.** The splash banner is now *CleeCode* — half-block
+pixels drawn on the letterforms the site sets its wordmark in, round bowls and bare stems —
+instead of block capitals shouting an all-caps word the product never uses. The demo on the
+README and the site opens on it.
+
+**Selection climbs under your clicks.** Double-click selects the word, triple-click the line,
+and from the fourth press every click climbs the same structural scale as *Expand Selection*
+does from the keyboard — expression, statement, block. Dragging on from a double-click grows
+the selection by whole words, from a triple-click by whole lines, with the word or line you
+started on always inside.
+
+**It tells you when a new version is out — and can install it, if you say so.** At most one
+quiet ask a day to GitHub's release list (which is already where your builds come from):
+nothing of yours is sent, every failure is silence, and each version is mentioned once. On a
+brew or scoop install the notice becomes the smallest question the app knows: Enter runs the
+upgrade in the background, any other key is a no. The `update_check` setting turns the whole
+thing off, and a build run from someone's `target/` directory is never nagged at all — whoever
+builds from source is ahead of the releases, not behind them.
+
+**Install clee and have everything.** On first launch, if the bundled Nerd Font isn't on the
+machine, CleeCode offers to install it — Enter installs, any other key declines and it never
+asks again; over ssh it doesn't ask at all, since the font belongs on the machine your
+terminal runs on. And *Help ▸ Extras* puts the README's optional tools one Enter away: what
+this machine has, and each missing tool's install command typed at a shell prompt — read
+before run, the Enter always yours.
+
+**Menus follow the pointer.** Hovering a menu item highlights it — the bar's dropdowns, the
+right-click menu, the theme and run menus, the Extras panel and the drawer's launcher — and
+with a dropdown open, sliding along the menu bar walks from one menu to the next. Captions
+and separators stay out of the way, exactly as they do for clicks.
+
+**The drawer sees a freshly installed agent.** Installers that write into your home —
+opencode's into `~/.opencode/bin`, anything choosing `~/.local/bin`, cargo's, bun's,
+Homebrew-on-Linux's — tell the *next* shell about it and never the running process, so an
+agent could answer from the terminal pane while the launcher went on calling it not
+installed. The launcher now looks where the installers actually put things.
+
 ## What's new in 0.24.2
 
 **The mouse works over a running agent.** Coding agents ask for the mouse the moment they
