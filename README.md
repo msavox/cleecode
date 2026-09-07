@@ -119,6 +119,23 @@ names — the arm64 Linux one covers an Ampere or Graviton server and a 64-bit R
 The Linux binaries need glibc and libxcb — install `libxcb1` (Debian/Ubuntu) or `libxcb`
 (Fedora/Arch) if one fails to start. For Alpine/musl, build from source.
 
+This is the road for a machine where brew and git cannot go — a locked-down server reached
+over ssh needs nothing but a `curl` that can GET. Latest release, checksum verified, into
+`~/.local/bin`:
+
+```bash
+V=$(curl -fsSL https://api.github.com/repos/msavox/cleecode/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+curl -fsSLO https://github.com/msavox/cleecode/releases/download/$V/clee-$V-linux-x86_64.tar.gz
+curl -fsSLO https://github.com/msavox/cleecode/releases/download/$V/clee-$V-linux-x86_64.tar.gz.sha256
+sha256sum -c clee-$V-linux-x86_64.tar.gz.sha256   # stop here unless it says OK
+tar xzf clee-$V-linux-x86_64.tar.gz
+install -Dm755 clee-$V-linux-x86_64/clee ~/.local/bin/clee
+hash -r
+```
+
+Swap the asset name for your platform (`linux-arm64`, `macos-arm64`, …; on macOS the checker
+is `shasum -a 256 -c`). The tarball also carries the man page and the bundled font.
+
 ### Optional extras
 
 Previews reach for a few outside tools. None is required — without them CleeCode shows less
