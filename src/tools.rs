@@ -21,13 +21,40 @@ use std::path::{Path, PathBuf};
 /// is what some editors do; it means running somebody's shell configuration at startup, in
 /// whichever of five shells they use, to parse a list back out of it. A handful of known
 /// prefixes is smaller, and does not depend on the shell being willing to answer.
-const TOOL_DIRS: [&str; 5] = [
+const TOOL_DIRS: [&str; 6] = [
     "/opt/homebrew/bin",   // Homebrew on Apple silicon
     "/usr/local/bin",      // Homebrew on Intel, MacTeX's Ghostscript, and npm's global bin
     "/opt/local/bin",      // MacPorts
     "/Library/TeX/texbin", // MacTeX and TeX Live, the /etc/paths.d case above
     "/usr/local/texlive/bin/universal-darwin", // a TeX Live installed without the symlinks
+    "/home/linuxbrew/.linuxbrew/bin", // Homebrew on Linux, at its shared default
 ];
+
+/// The same problem again, one directory over: installers that write into the *home*. The
+/// launcher's own install offer runs `curl … | bash` for opencode, the script drops the binary
+/// in `~/.opencode/bin` and appends the PATH line to the shell's rc — which every shell spawned
+/// from here on reads, and the already-running process never does. The result was an agent that
+/// answered from the terminal pane while the drawer went on calling it not installed: the two
+/// were reading different PATHs, and only one of them had been told the news. These are the
+/// user-level homes the known installers actually use; joined to $HOME at ask time because a
+/// const cannot hold somebody's home directory.
+const HOME_TOOL_DIRS: [&str; 5] = [
+    ".opencode/bin",  // opencode's install script
+    ".local/bin",     // pipx, uv, and the install.sh convention generally
+    ".cargo/bin",     // cargo install
+    ".bun/bin",       // bun-installed CLIs
+    ".linuxbrew/bin", // Homebrew on Linux, installed into a home instead of the default
+];
+
+/// Every directory worth searching beyond the PATH: the fixed prefixes, then the home-joined
+/// ones. Split from [`tool`] and handed the home, so a test can hold the answer still.
+fn extra_dirs(home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = TOOL_DIRS.iter().map(PathBuf::from).collect();
+    if let Some(home) = home {
+        dirs.extend(HOME_TOOL_DIRS.iter().map(|d| home.join(d)));
+    }
+    dirs
+}
 
 /// Finds an external tool: the PATH first, since a user who put one somewhere deliberately means
 /// that one, then the places above. `None` is the honest "it is not installed", which is what
@@ -35,7 +62,7 @@ const TOOL_DIRS: [&str; 5] = [
 /// agent dim rather than offering to start something that is not there.
 pub fn tool(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::env::split_paths(&path).chain(TOOL_DIRS.iter().map(PathBuf::from));
+    let dirs = std::env::split_paths(&path).chain(extra_dirs(dirs::home_dir()));
     lookup(dirs, name)
 }
 
@@ -89,5 +116,23 @@ mod tests {
             assert!(lookup(std::iter::once(PathBuf::from("/")), "bin").is_none());
             assert!(lookup(bin(), "").is_none());
         }
+    }
+
+    /// The home-level installers' directories are searched too, joined to whatever home is
+    /// handed in — the opencode case: its script installs into `~/.opencode/bin` and tells the
+    /// *next* shell about it via the rc, so the running process has to know the place on its
+    /// own. No home, no home-joined entries, and never a panic.
+    #[test]
+    fn the_installers_home_directories_are_searched_beside_the_fixed_prefixes() {
+        let home = PathBuf::from("/home/roboto");
+        let dirs = extra_dirs(Some(home.clone()));
+        assert!(dirs.contains(&home.join(".opencode/bin")));
+        assert!(dirs.contains(&home.join(".local/bin")));
+        assert!(dirs.contains(&PathBuf::from("/home/linuxbrew/.linuxbrew/bin")));
+        // The fixed prefixes survive in front, PATH-less Dock launches depending on them.
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        let bare = extra_dirs(None);
+        assert!(bare.iter().all(|d| !d.starts_with(&home)));
+        assert!(!bare.is_empty());
     }
 }
