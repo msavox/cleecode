@@ -826,6 +826,11 @@ a.kofi:hover { color: #ff5e5b; }
   align-items: center;
   gap: 0.3rem;
 }
+/* Same reason as .counter[hidden] above: this rule's own display: inline-flex
+   would otherwise outrank the browser's [hidden] default at equal specificity.
+   Needed here because the users item hides itself independently of the other
+   two when the GitHub-backed estimate isn't in the response. */
+.counter-item[hidden] { display: none; }
 
 .counter-icon {
   width: 13px;
