@@ -16677,14 +16677,12 @@ impl App {
                     return;
                 }
                 // Over a pane that asked for the mouse, the right button is the program's too —
-                // lazygit and mc both use it — and Shift is still the way to our own menu.
+                // lazygit and mc both use it — and Shift is still the way to our own menu. The
+                // drawer is deliberately not asked: every tab in that column holds an agent by
+                // construction, none of the four uses the right button, and the menu is the whole
+                // point of that button there — forwarding it handed the click to a program that
+                // does nothing with it and left the menu unreachable.
                 if self.terminal_takes_press(
-                    terminal_panel::BUTTON_RIGHT,
-                    col,
-                    row,
-                    mouse.modifiers,
-                    areas,
-                ) || self.drawer_takes_press(
                     terminal_panel::BUTTON_RIGHT,
                     col,
                     row,
@@ -16943,6 +16941,14 @@ impl App {
         }
         let Some(term_areas) = &areas.terminals else { return false };
         let Some(index) = term_areas.iter().position(|r| within(*r, col, row)) else { return false };
+        // Only the interior. `cell_at` clamps — the drags below need that, because a drag that
+        // wanders outside is still the program's — but a *press* on the border row is a press on
+        // the chrome: the tab chips, the ■, the ✕ all live there, and clamping it into the top
+        // row of the screen would hand the program a click that was aimed at a control it cannot
+        // even see.
+        if !within(ui::terminal_content_rect(term_areas[index]), col, row) {
+            return false;
+        }
         let Some(cell) = cell_at(ui::terminal_content_rect(term_areas[index]), col, row) else {
             return false;
         };
@@ -16989,6 +16995,19 @@ impl App {
             return false;
         }
         let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) else { return false };
+        // Interior only, exactly as in `terminal_takes_press` and for the same reason: the border
+        // row carries the chips and their ■, and an agent in mouse mode was swallowing every
+        // press on them — the strip could be seen but not clicked.
+        if !within(ui::terminal_content_rect(rect), col, row) {
+            return false;
+        }
+        // And nothing while the launcher is up: what is on screen then is CleeCode's own chooser,
+        // painted over the panes, and a press on a name must choose that name — not land in
+        // whichever agent happens to be underneath, invisibly, because it once asked for the
+        // mouse.
+        if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
+            return false;
+        }
         let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) else { return false };
         let Some(term) = self.drawer_panel_mut() else { return false };
         let Some(report) = term.mouse_report(button, MouseAction::Press, cell.0, cell.1) else {
@@ -17052,29 +17071,29 @@ impl App {
         // because it is the same control on the same row and the two must not answer differently.
         if self.drawer_showing_agents() && row == rect.y {
             let lang = self.settings.lang;
-            let (labels, tab_count) = match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
+            let labels = match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
                 // The window's own index is never read — every drawer tab carries its agent's
                 // name — so a zero here stands for "there is no place in the layout to name it
                 // after", the same zero `draw_drawer` passes the renderer.
-                Some(window) => (ui::terminal_tab_labels(window, 0, lang), window.tabs.len()),
-                None => (Vec::new(), 0),
+                Some(window) => ui::terminal_tab_labels(window, 0, lang),
+                None => Vec::new(),
             };
-            if tab_count > 1 {
-                let strip = ui::terminal_tab_strip_rect(rect, true);
-                let hit = ui::terminal_tab_ranges(strip, &labels)
-                    .into_iter()
-                    .enumerate()
-                    .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1);
-                if let Some((t, tab)) = hit {
-                    if tab.close == Some(col) {
-                        self.close_drawer_tab(t);
-                    } else if let Some(window) =
-                        self.drawer.as_mut().and_then(|d| d.window.as_mut())
-                    {
-                        window.active = t;
-                    }
-                    return;
+            // No single-tab gate, unlike the panel's own title bar: the drawer draws a chip for
+            // a lone agent too — `drawer_tab_ranges` is the ungated layout it is drawn from —
+            // because that chip's ■ is the only mouse control that ends the conversation in it.
+            let strip = ui::terminal_tab_strip_rect(rect, true);
+            let hit = ui::drawer_tab_ranges(strip, &labels)
+                .into_iter()
+                .enumerate()
+                .find(|(_, tab)| col >= tab.full.0 && col < tab.full.1);
+            if let Some((t, tab)) = hit {
+                if tab.close == Some(col) {
+                    self.close_drawer_tab(t);
+                } else if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut())
+                {
+                    window.active = t;
                 }
+                return;
             }
         }
         if self.drawer.as_ref().is_some_and(|d| d.showing_launcher()) {
@@ -17307,6 +17326,37 @@ impl App {
     /// Right-click: focus the frame under the pointer (selecting the clicked tree row first, so
     /// Rename/Delete act on it), then raise its context menu at the click.
     fn open_context_menu_at(&mut self, col: u16, row: u16, areas: &ui::Areas) {
+        // The drawer before every frame it might be painted over: in autocollapse it lies on top
+        // of the editor, and asking the editor first answered for a frame the pointer cannot
+        // even see — the same reason the left button's walk asks the overlay first. A right-click
+        // on one of its chips makes that tab the active one — the same geometry the left button
+        // reads in `click_drawer`, minus the ■: a right-click points at a tab, and closing is
+        // what the menu's own "Close agent tab" row is for, on the tab just pointed at.
+        if let Some(rect) = ui::drawer_rect(areas) {
+            if within(rect, col, row) {
+                self.focus = Focus::Drawer;
+                if self.drawer_showing_agents() && row == rect.y {
+                    let lang = self.settings.lang;
+                    let labels = match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
+                        Some(window) => ui::terminal_tab_labels(window, 0, lang),
+                        None => Vec::new(),
+                    };
+                    let strip = ui::terminal_tab_strip_rect(rect, true);
+                    let hit = ui::drawer_tab_ranges(strip, &labels)
+                        .into_iter()
+                        .position(|tab| col >= tab.full.0 && col < tab.full.1);
+                    if let Some(t) = hit {
+                        if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut())
+                        {
+                            window.active = t;
+                        }
+                    }
+                }
+                self.context_menu =
+                    Some(ContextMenu::new(ContextTarget::Drawer, (col, row), false));
+                return;
+            }
+        }
         if let Some(sidebar) = areas.sidebar {
             if within(sidebar, col, row) {
                 self.focus = Focus::FileTree;
@@ -17330,41 +17380,6 @@ impl App {
             self.focus = Focus::Editor;
             self.context_menu = Some(ContextMenu::new(ContextTarget::Editor, (col, row), false));
             return;
-        }
-        // The drawer, which used to fall through here and get no menu at all. A right-click on
-        // one of its chips first makes that tab the active one — the same geometry the left
-        // button reads in `click_drawer`, minus the ■: a right-click points at a tab, and
-        // closing is what the menu's own "Close tab" row is for, on the tab just pointed at.
-        if let Some(rect) = ui::drawer_rect(areas) {
-            if within(rect, col, row) {
-                self.focus = Focus::Drawer;
-                if self.drawer_showing_agents() && row == rect.y {
-                    let lang = self.settings.lang;
-                    let (labels, tab_count) =
-                        match self.drawer.as_ref().and_then(|d| d.window.as_ref()) {
-                            Some(window) => {
-                                (ui::terminal_tab_labels(window, 0, lang), window.tabs.len())
-                            }
-                            None => (Vec::new(), 0),
-                        };
-                    if tab_count > 1 {
-                        let strip = ui::terminal_tab_strip_rect(rect, true);
-                        let hit = ui::terminal_tab_ranges(strip, &labels)
-                            .into_iter()
-                            .position(|tab| col >= tab.full.0 && col < tab.full.1);
-                        if let Some(t) = hit {
-                            if let Some(window) =
-                                self.drawer.as_mut().and_then(|d| d.window.as_mut())
-                            {
-                                window.active = t;
-                            }
-                        }
-                    }
-                }
-                self.context_menu =
-                    Some(ContextMenu::new(ContextTarget::Drawer, (col, row), false));
-                return;
-            }
         }
         if let Some(term_areas) = &areas.terminals {
             if let Some(i) = term_areas.iter().position(|r| within(*r, col, row)) {

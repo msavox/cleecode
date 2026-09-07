@@ -44,6 +44,10 @@ pub enum Key {
     /// Another agent beside the ones in the drawer. Ellipsised because it opens the launcher and
     /// stops there: what starts a process is choosing a name on it, not this row.
     ItemNewAgentTab,
+    /// The drawer menu's close row. The same action and chord as `ItemCloseTerminalTab`, worded
+    /// for what a drawer tab holds: in a column where every tab is an agent, a row that said
+    /// "terminal" would be naming the machinery instead of the thing being closed.
+    ItemCloseAgentTab,
     /// The drawer's border title while the launcher is showing — before there is an agent to
     /// name it after.
     DrawerTitle,
@@ -337,6 +341,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ItemToggleDrawer) => "Cassetto agente",
         (Lang::En, ItemNewAgentTab) => "New agent tab...",
         (Lang::It, ItemNewAgentTab) => "Nuovo tab agente...",
+        (Lang::En, ItemCloseAgentTab) => "Close agent tab",
+        (Lang::It, ItemCloseAgentTab) => "Chiudi tab agente",
         (Lang::En, DrawerTitle) => "agent",
         (Lang::It, DrawerTitle) => "agente",
         (Lang::En, DrawerNotInstalled) => "not installed",
