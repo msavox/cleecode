@@ -17,7 +17,11 @@ jobs:
     name: Record a stats snapshot
     runs-on: ubuntu-24.04
     env:
-      GH_TOKEN: ${{ github.token }}
+      # The traffic endpoints refuse the workflow's own token — they want push access from a
+      # real credential — so views and clones come out null until a classic PAT with repo scope
+      # is stored as the STATS_TOKEN secret. Everything else works on the default token, and
+      # the fallback keeps the workflow green either way.
+      GH_TOKEN: ${{ secrets.STATS_TOKEN || github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,15 +51,17 @@ jobs:
           # Traffic and stars need push access, which the workflow's own token has on
           # its own repo — but tolerate a failure here too rather than lose the whole
           # snapshot to one flaky endpoint.
-          views=0
-          visitors=0
+          # Null, not zero, when the endpoint refuses us: a zero in the history reads as "nobody
+          # came", and that is not what a 403 means.
+          views=null
+          visitors=null
           if views_json="$(gh api "repos/${repo}/traffic/views" 2>/dev/null)"; then
             views="$(jq '.count // 0' <<<"$views_json")"
             visitors="$(jq '.uniques // 0' <<<"$views_json")"
           fi
 
-          clones=0
-          cloners=0
+          clones=null
+          cloners=null
           if clones_json="$(gh api "repos/${repo}/traffic/clones" 2>/dev/null)"; then
             clones="$(jq '.count // 0' <<<"$clones_json")"
             cloners="$(jq '.uniques // 0' <<<"$clones_json")"
