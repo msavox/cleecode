@@ -79,6 +79,9 @@ class Session:
             # deterministic, and a "new version" modal arriving mid-run would eat the next
             # keystroke of whatever check happened to be typing.
             os.environ["CLEE_UPDATE_CHECK"] = "0"
+            # Its sibling for the first-launch font offer: every driven session has a fresh
+            # XDG_CONFIG_HOME, so without this the offer would greet every single run.
+            os.environ["CLEE_FONT_OFFER"] = "0"
             os.environ.update(env or {})
             os.chdir(root)
             try:

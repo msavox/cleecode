@@ -130,6 +130,9 @@ brew install pandoc typst   # Markdown as a real document, pictures and all
 brew install chafa          # a picture inside a terminal pane
 ```
 
+The same list lives in the editor, under *Help ▸ Extras*: what this machine has, and each
+missing tool's install command typed at a shell prompt — never run — when its row is chosen.
+
 Best in a terminal that can draw pictures — **Ghostty**, **kitty**, **WezTerm** or
 **iTerm2** — where pictures, PDFs and Markdown are shown as themselves rather than as
 coloured blocks. It works anywhere; those are where it looks like the screenshots. The tools

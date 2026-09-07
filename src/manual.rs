@@ -121,6 +121,11 @@ const EN: &[Page] = &[
         "runs it in the background, anything else means not now. Other",
         "installs get one status line. Each version is mentioned once, and",
         "the settings panel (or update_check in settings.toml) turns it off.",
+        "",
+        "Help > Extras lists the optional tools the previews reach for —",
+        "the bundled icon font, poppler, pandoc, typst, chafa — with what",
+        "this machine has. Choosing a missing one types its install",
+        "command at a shell prompt, unsent: the Enter is yours.",
     ]),
     ("Layout", &[
         "The layout is yours to shape, and it is remembered between runs.",
@@ -1333,6 +1338,11 @@ const IT: &[Page] = &[
         "tasto è \"non ora\". Le altre installazioni ricevono una riga di",
         "stato. Ogni versione è nominata una volta sola, e il pannello",
         "impostazioni (o update_check in settings.toml) spegne tutto.",
+        "",
+        "Aiuto > Corredo elenca gli strumenti opzionali che le anteprime",
+        "cercano — il font con le icone, poppler, pandoc, typst, chafa —",
+        "con ciò che questa macchina ha. Scegliere un mancante scrive il",
+        "suo comando d'installazione al prompt, non inviato: l'Invio è tuo.",
     ]),
     ("Layout", &[
         "Il layout si modella come si vuole e viene ricordato fra un avvio",

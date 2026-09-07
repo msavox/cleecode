@@ -252,6 +252,9 @@ pub enum Key {
     ItemDeleteWorkspace,
     MenuHelp,
     ItemShowManual,
+    /// The Extras panel: the README's optional tools, one Enter away. Ellipsised because it
+    /// opens a list and stops there — what installs anything is a choice made on it.
+    ItemExtras,
     ItemSupportKofi,
     ManualTitle,
     ManualHint,
@@ -274,6 +277,9 @@ pub enum Key {
     ModalDelete,
     /// The update offer's title — good news, so it is named as news and not as a question.
     ModalUpdate,
+    /// The first-launch font offer's title, and the Extras panel's.
+    ModalFont,
+    ModalExtras,
     ModalUnsaved,
     ModalRename,
     ModalTerminalForm,
@@ -910,6 +916,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemShowManual) => "Manual...",
         (Lang::It, ItemShowManual) => "Manuale...",
+        (Lang::En, ItemExtras) => "Extras...",
+        (Lang::It, ItemExtras) => "Corredo...",
 
         (Lang::En, ItemSupportKofi) => "☕\u{FE0E} Buy me a coffee",
         (Lang::It, ItemSupportKofi) => "☕\u{FE0E} Offrimi un caffè",
@@ -979,6 +987,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, ModalDelete) => "Eliminare?",
         (Lang::En, ModalUpdate) => "Update available",
         (Lang::It, ModalUpdate) => "Aggiornamento disponibile",
+        (Lang::En, ModalFont) => "Icons need a font",
+        (Lang::It, ModalFont) => "Le icone vogliono un font",
+        (Lang::En, ModalExtras) => "Extras",
+        (Lang::It, ModalExtras) => "Corredo",
 
         (Lang::En, ModalUnsaved) => "Unsaved changes",
         (Lang::It, ModalUnsaved) => "Modifiche non salvate",
@@ -3293,6 +3305,108 @@ pub fn msg_update_failed(lang: Lang, command: &str) -> String {
     match lang {
         Lang::En => format!("Update failed — try it by hand: {command}"),
         Lang::It => format!("Aggiornamento fallito — prova a mano: {command}"),
+    }
+}
+
+/// The first-launch font offer's question. It says what the font is *for* — the icons —
+/// because "install a font" with no reason is exactly the kind of dialog nobody should say
+/// yes to.
+pub fn msg_font_question(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Install the bundled Nerd Font, for the icons in the file tree?",
+        Lang::It => "Installo il Nerd Font incluso, per le icone dell'albero dei file?",
+    }
+}
+
+/// Enter and nothing else accepts, for the same reason as the update offer: this modal
+/// arrives on its own schedule, and a letter mid-word must not install anything.
+pub fn msg_font_choices(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Enter = install · any other key = no, and don't ask again",
+        Lang::It => "Invio = installa · altro tasto = no, e non chiederlo più",
+    }
+}
+
+pub fn msg_font_installing(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Installing the font in the background...",
+        Lang::It => "Installazione del font in background...",
+    }
+}
+
+/// The end of an accepted install, with the one step that stays human: the terminal draws
+/// with the font *it* is set to, and only Ghostty's config is ours to point.
+pub fn msg_font_done(lang: Lang, ghostty_updated: bool) -> &'static str {
+    match (lang, ghostty_updated) {
+        (Lang::En, true) => "Font installed — Ghostty's config now points at it; restart Ghostty to see the icons",
+        (Lang::It, true) => "Font installato — la config di Ghostty ora lo usa; riavvia Ghostty per vedere le icone",
+        (Lang::En, false) => "Font installed — select \"JetBrainsMono Nerd Font Mono\" in your terminal's settings",
+        (Lang::It, false) => "Font installato — seleziona \"JetBrainsMono Nerd Font Mono\" nelle impostazioni del terminale",
+    }
+}
+
+pub fn msg_font_failed(lang: Lang, error: &str) -> String {
+    match lang {
+        Lang::En => format!("Font install failed ({error}) — try `clee --install-font` from a shell"),
+        Lang::It => format!("Installazione del font fallita ({error}) — prova `clee --install-font` da una shell"),
+    }
+}
+
+/// A declined offer names the road back, once: the question never returns on its own.
+pub fn msg_font_declined(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "All right — `clee --install-font` whenever you want it",
+        Lang::It => "Va bene — `clee --install-font` quando lo vorrai",
+    }
+}
+
+/// What each Extras row is for, in the README's own words: the reason to want it, in the
+/// space a row affords.
+pub fn extra_purpose(lang: Lang, extra: crate::extras::Extra) -> &'static str {
+    use crate::extras::Extra;
+    match (lang, extra) {
+        (Lang::En, Extra::Font) => "icons in the file tree",
+        (Lang::It, Extra::Font) => "le icone dell'albero dei file",
+        (Lang::En, Extra::Pdf) => "PDF pages (ghostscript works too)",
+        (Lang::It, Extra::Pdf) => "pagine PDF (va bene anche ghostscript)",
+        (Lang::En, Extra::Pandoc) => "Markdown as a real document",
+        (Lang::It, Extra::Pandoc) => "Markdown come documento vero",
+        (Lang::En, Extra::Typst) => "the PDF engine pandoc leans on",
+        (Lang::It, Extra::Typst) => "il motore PDF su cui pandoc si appoggia",
+        (Lang::En, Extra::Chafa) => "a picture inside a terminal pane",
+        (Lang::It, Extra::Chafa) => "un'immagine dentro un pane del terminale",
+    }
+}
+
+pub fn msg_extra_installed(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("{name} is already installed"),
+        Lang::It => format!("{name} è già installato"),
+    }
+}
+
+/// The Extras twin of the drawer launcher's install offer, and the same promise: typed at a
+/// prompt, never submitted.
+pub fn msg_extra_typed(lang: Lang, name: &str, command: &str) -> String {
+    match lang {
+        Lang::En => format!("{name}: `{command}` is at a shell prompt, unsent. Enter is yours."),
+        Lang::It => format!("{name}: `{command}` è al prompt della shell, non inviato. L'Invio è tuo."),
+    }
+}
+
+pub fn msg_extra_no_shell(lang: Lang, name: &str, command: &str) -> String {
+    match lang {
+        Lang::En => format!("{name}: no shell to type into — install it with: {command}"),
+        Lang::It => format!("{name}: nessuna shell dove scriverlo — installalo con: {command}"),
+    }
+}
+
+/// The honest row for a machine whose package manager has no name for this tool (or has no
+/// package manager at all): the program's name is still an answer someone can search for.
+pub fn msg_extra_no_command(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("No package manager road found for {name} — its site will know"),
+        Lang::It => format!("Nessuna strada di package manager per {name} — il suo sito saprà"),
     }
 }
 

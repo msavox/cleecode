@@ -7,6 +7,7 @@ mod dap;
 mod dnd;
 mod drawer;
 mod editor;
+mod extras;
 mod file_tree;
 mod find;
 mod font_install;
