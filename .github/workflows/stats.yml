@@ -1,0 +1,112 @@
+name: Stats snapshot
+
+# A weekly point in a history nothing else keeps: release asset downloads (the `src` asset
+# from release.yml is what makes `brew install clee` finally count towards something),
+# repo traffic, stars, and the marunja site counter. One append-only line per run — the
+# chart lives in whatever later reads docs/stats/snapshots.jsonl, not in this workflow.
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Monday 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    name: Record a stats snapshot
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect and append today's snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          date="$(date -u +%Y-%m-%d)"
+
+          # `gh api --paginate` prints one JSON document per page; slurping and adding
+          # them together turns N page-arrays back into the single array they'd have
+          # been without pagination.
+          releases_json="$(gh api --paginate "repos/${repo}/releases?per_page=100" | jq -s 'add')"
+
+          # Every release asset except the .sha256 checksums counts towards the total;
+          # the per-family splits classify by the filename conventions release.yml uses
+          # (clee-vX.Y.Z-src.tar.gz, -windows-*.zip, -linux-*.tar.gz, -macos-*.tar.gz,
+          # linux *.deb).
+          downloads_total="$(jq '[.[].assets[] | select(.name | endswith(".sha256") | not) | .download_count] | add // 0' <<<"$releases_json")"
+          downloads_src="$(jq '[.[].assets[] | select(.name | endswith("-src.tar.gz")) | .download_count] | add // 0' <<<"$releases_json")"
+          downloads_windows="$(jq '[.[].assets[] | select(.name | endswith(".zip")) | .download_count] | add // 0' <<<"$releases_json")"
+          downloads_deb="$(jq '[.[].assets[] | select(.name | endswith(".deb")) | .download_count] | add // 0' <<<"$releases_json")"
+          downloads_linux="$(jq '[.[].assets[] | select((.name | test("linux")) and (.name | endswith(".tar.gz"))) | .download_count] | add // 0' <<<"$releases_json")"
+          downloads_macos="$(jq '[.[].assets[] | select((.name | test("macos")) and (.name | endswith(".tar.gz"))) | .download_count] | add // 0' <<<"$releases_json")"
+
+          # Traffic and stars need push access, which the workflow's own token has on
+          # its own repo — but tolerate a failure here too rather than lose the whole
+          # snapshot to one flaky endpoint.
+          views=0
+          visitors=0
+          if views_json="$(gh api "repos/${repo}/traffic/views" 2>/dev/null)"; then
+            views="$(jq '.count // 0' <<<"$views_json")"
+            visitors="$(jq '.uniques // 0' <<<"$views_json")"
+          fi
+
+          clones=0
+          cloners=0
+          if clones_json="$(gh api "repos/${repo}/traffic/clones" 2>/dev/null)"; then
+            clones="$(jq '.count // 0' <<<"$clones_json")"
+            cloners="$(jq '.uniques // 0' <<<"$clones_json")"
+          fi
+
+          stars=0
+          if repo_json="$(gh api "repos/${repo}" 2>/dev/null)"; then
+            stars="$(jq '.stargazers_count // 0' <<<"$repo_json")"
+          fi
+
+          # The site counter is someone else's endpoint on someone else's infrastructure:
+          # a GET only, since POST increments it, and its failure must never fail this
+          # workflow — the snapshot is still worth recording without it.
+          site_visits=null
+          site_unique=null
+          if site_json="$(curl -fsSL --max-time 10 "https://cleecode.marunja.com/api/counter" 2>/dev/null)"; then
+            site_visits="$(jq '(.visits // .visitCount // .total // .count) // null' <<<"$site_json" 2>/dev/null || echo null)"
+            site_unique="$(jq '(.unique // .uniques // .visitors // .uniqueVisitors) // null' <<<"$site_json" 2>/dev/null || echo null)"
+            [ -z "$site_visits" ] && site_visits=null
+            [ -z "$site_unique" ] && site_unique=null
+          fi
+
+          mkdir -p docs/stats
+          jq -nc \
+            --arg date "$date" \
+            --argjson total "$downloads_total" \
+            --argjson src "$downloads_src" \
+            --argjson windows "$downloads_windows" \
+            --argjson linux "$downloads_linux" \
+            --argjson macos "$downloads_macos" \
+            --argjson deb "$downloads_deb" \
+            --argjson views "$views" \
+            --argjson visitors "$visitors" \
+            --argjson clones "$clones" \
+            --argjson cloners "$cloners" \
+            --argjson stars "$stars" \
+            --argjson site_visits "$site_visits" \
+            --argjson site_unique "$site_unique" \
+            '{date: $date,
+              downloads: {total: $total, src: $src, windows: $windows, linux: $linux, macos: $macos, deb: $deb},
+              traffic14d: {views: $views, visitors: $visitors, clones: $clones, cloners: $cloners},
+              stars: $stars,
+              site: {visits: $site_visits, unique: $site_unique}}' \
+            >> docs/stats/snapshots.jsonl
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/stats/snapshots.jsonl
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "stats: snapshot ${date} [skip ci]"
+            git push
+          fi
