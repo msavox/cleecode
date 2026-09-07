@@ -142,6 +142,12 @@ pub struct UpdateState {
     pub notified: String,
     #[serde(default)]
     pub last_output: String,
+    /// Whether the first-launch font offer has had its one turn — set the moment the question
+    /// goes up, whatever the answer. A "no" here is forever: whoever declined may be using
+    /// another Nerd Font and seeing perfect icons, and we can only see whether our file is on
+    /// disk, never what the terminal actually draws with. See `font_install::should_offer`.
+    #[serde(default)]
+    pub font_offered: bool,
 }
 
 fn state_path() -> Option<std::path::PathBuf> {

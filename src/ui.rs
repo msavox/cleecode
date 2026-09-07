@@ -1488,6 +1488,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.update_prompt.is_some() {
         draw_update_modal(f, app, f.area());
     }
+    if app.font_prompt {
+        draw_font_modal(f, app, f.area());
+    }
     if app.show_rename {
         draw_rename_modal(f, app, f.area());
     }
@@ -1533,6 +1536,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     }
     if app.theme_menu.is_some() {
         draw_theme_menu(f, app, f.area());
+    }
+    if app.extras_menu.is_some() {
+        draw_extras_menu(f, app, f.area());
     }
     if app.venv_register.is_some() {
         draw_venv_register_modal(f, app, f.area());
@@ -2049,6 +2055,33 @@ fn draw_update_modal(f: &mut Frame, app: &App, full: Rect) {
         Line::from(i18n::msg_update_question(lang, version, &cmd)),
         Line::from(Span::styled(
             i18n::msg_update_choices(lang),
+            Style::default().fg(pal.text_muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The first-launch font offer, in the update offer's clothes down to the colour: good news
+/// asking one question, Enter the only yes (see `App::handle_font_prompt_key`). What it is
+/// *for* is in the question itself — a font with no reason is a dialog nobody should accept.
+fn draw_font_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    if !app.font_prompt {
+        return;
+    }
+    let lang = app.settings.lang;
+    let rect = unsaved_modal_rect(full);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(lang, Key::ModalFont)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(i18n::msg_font_question(lang)),
+        Line::from(Span::styled(
+            i18n::msg_font_choices(lang),
             Style::default().fg(pal.text_muted),
         )),
     ];
@@ -3233,6 +3266,65 @@ fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
             // answer to "what did I pick", and the only one that survives a change of terminal.
             let marker = if choice == app.settings.theme { "\u{25cf} " } else { "  " };
             ListItem::new(Line::from(format!("{marker}{}", choice.name())))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    let list = List::new(items)
+        .highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+/// One Extras row as it is drawn, so the layout and the hit test read the same text: the ✓
+/// or the two spaces standing where it would be, the program's name, and what it is for.
+fn extras_row_text(app: &App, extra: crate::extras::Extra) -> (bool, String) {
+    let installed = extra.installed();
+    let mark = if installed { "\u{2713} " } else { "  " };
+    let purpose = i18n::extra_purpose(app.settings.lang, extra);
+    (installed, format!("{mark}{} \u{2014} {}", extra.name(), purpose))
+}
+
+/// Centered, like the modals, rather than hung off the menu bar like the theme list: the
+/// panel is opened from a menu that has already closed, so there is no button to hang from.
+pub fn extras_menu_rect(app: &App, full: Rect) -> Option<Rect> {
+    app.extras_menu?;
+    let widest = crate::extras::Extra::all()
+        .into_iter()
+        .map(|e| columns(&extras_row_text(app, e).1))
+        .max()
+        .unwrap_or(0);
+    // Two for the borders, two of air so the longest row does not touch them.
+    let width = (widest + 4).min(full.width);
+    let height = (crate::extras::Extra::all().len() as u16 + 2).min(full.height);
+    Some(centered_rect(width, height, full))
+}
+
+/// The Extras panel: the README's optional tools as rows, each saying whether this machine
+/// has it and what it is for. Installed rows wear their ✓ dimmed — they are answers, not
+/// controls; a missing row is the one thing here to act on, and Enter on it types the
+/// install command at a prompt, unsent (see `App::activate_extras_row`).
+fn draw_extras_menu(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    let Some(selected) = app.extras_menu else { return };
+    let Some(rect) = extras_menu_rect(app, full) else { return };
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(app.settings.lang, Key::ModalExtras)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let items: Vec<ListItem> = crate::extras::Extra::all()
+        .into_iter()
+        .map(|extra| {
+            let (installed, text) = extras_row_text(app, extra);
+            let style = if installed {
+                Style::default().fg(pal.text_dim)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(text, style)))
         })
         .collect();
     let mut state = ListState::default();

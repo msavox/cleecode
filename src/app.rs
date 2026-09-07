@@ -696,6 +696,18 @@ pub struct App {
     update_attempted: bool,
     update_tx: Sender<crate::update::UpdateEvent>,
     update_rx: Receiver<crate::update::UpdateEvent>,
+    /// The first-launch font offer, up. In the update offer's clothes and answered by its
+    /// rules: Enter installs, anything else is no — and the no is forever, remembered in the
+    /// same state file the update check keeps (see `font_install::should_offer`).
+    pub font_prompt: bool,
+    /// The offer's decision, taken at construction but held until the splash is down: a modal
+    /// raised under the splash would be answered by the keypress that dismisses it.
+    font_pending: bool,
+    font_tx: Sender<crate::font_install::FontEvent>,
+    font_rx: Receiver<crate::font_install::FontEvent>,
+    /// The Extras panel — the README's optional tools as rows — holding the highlighted row
+    /// while it is up.
+    pub extras_menu: Option<usize>,
     /// When set, an upload is waiting on a yes from the status line. See [`PendingUpload`].
     pub pending_upload: Option<PendingUpload>,
     /// The agent's edit currently being asked about on the status line. See [`PendingAgentEdit`].
@@ -3785,6 +3797,17 @@ impl App {
         // The check thread sleeps its own startup delay before doing anything, so spawning it
         // here does not put a network ask in front of the shells — see src/update.rs.
         crate::update::spawn_check(update_tx.clone(), settings.update_check);
+        let (font_tx, font_rx) = mpsc::channel();
+        // Decided now, shown later: the answer depends only on facts that hold at startup
+        // (the file, ssh, the state file), and taking it here keeps the frame loop's half to
+        // a boolean. The question itself waits for the splash to come down — see
+        // `poll_update`.
+        let font_pending = crate::font_install::should_offer(
+            crate::font_install::installed(),
+            crate::font_install::over_ssh(),
+            crate::update::load_state().font_offered,
+            crate::font_install::offer_disabled_by_env(),
+        );
         let available_venvs = available_venvs(&root, &settings.registered_venvs);
         let project_settings = settings::ProjectSettings::load(&root);
         let file_tree = FileTree::new(root.clone(), settings.show_hidden_files);
@@ -3865,6 +3888,11 @@ impl App {
             update_attempted: false,
             update_tx,
             update_rx,
+            font_prompt: false,
+            font_pending,
+            font_tx,
+            font_rx,
+            extras_menu: None,
             pending_upload: None,
             agent_edit_ask: None,
             agent_edit_queue: std::collections::VecDeque::new(),
@@ -4066,6 +4094,27 @@ impl App {
                     };
                 }
             }
+            self.redraw = true;
+        }
+        // The font offer, held since construction, goes up the moment the splash is down — a
+        // modal raised under the splash would be answered by the keypress that dismisses it.
+        // The state is marked *now*, not on the answer: "asked once, ever" is a promise about
+        // the question appearing, and it is appearing.
+        if self.font_pending && !self.show_splash {
+            self.font_pending = false;
+            self.font_prompt = true;
+            let mut state = crate::update::load_state();
+            state.font_offered = true;
+            crate::update::save_state(&state);
+            self.redraw = true;
+        }
+        while let Ok(event) = self.font_rx.try_recv() {
+            self.status_message = match event {
+                crate::font_install::FontEvent::Done { ghostty_updated } => {
+                    i18n::msg_font_done(lang, ghostty_updated).to_string()
+                }
+                crate::font_install::FontEvent::Failed(e) => i18n::msg_font_failed(lang, &e),
+            };
             self.redraw = true;
         }
     }
@@ -4447,6 +4496,7 @@ impl App {
         if self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
             || self.update_prompt.is_some()
+            || self.font_prompt
             || self.pending_upload.is_some()
             || self.agent_edit_ask.is_some()
         {
@@ -4455,7 +4505,7 @@ impl App {
         if self.show_save_as {
             return Some(ModalTextField::SaveAs);
         }
-        if self.run_menu.is_some() || self.theme_menu.is_some() {
+        if self.run_menu.is_some() || self.theme_menu.is_some() || self.extras_menu.is_some() {
             return None;
         }
         if self.venv_register.is_some() {
@@ -14232,6 +14282,8 @@ impl App {
         self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
             || self.update_prompt.is_some()
+            || self.font_prompt
+            || self.extras_menu.is_some()
             || self.pending_upload.is_some()
             || self.agent_edit_ask.is_some()
             || self.show_save_as
@@ -14337,6 +14389,14 @@ impl App {
         }
         if self.update_prompt.is_some() {
             self.handle_update_prompt_key(key);
+            return;
+        }
+        if self.font_prompt {
+            self.handle_font_prompt_key(key);
+            return;
+        }
+        if self.extras_menu.is_some() {
+            self.handle_extras_key(key);
             return;
         }
         if self.show_rename {
@@ -14903,6 +14963,7 @@ impl App {
             MenuAction::OpenWorkspace => self.open_workspace_picker(false),
             MenuAction::DeleteWorkspace => self.open_workspace_picker(true),
             MenuAction::ShowManual => self.manual = Some(crate::manual::ManualState::new()),
+            MenuAction::ShowExtras => self.open_extras_panel(),
             MenuAction::FocusFileTree => {
                 // Focusing a hidden frame would leave the keyboard talking to something
                 // invisible, so show it first — the intent is clearly to work there.
@@ -14995,6 +15056,86 @@ impl App {
                 self.status_message = i18n::msg_update_available(lang, &version, Some(&cmd));
             }
         }
+    }
+
+    /// The font offer's keys — the update offer's rules on the update offer's grounds: it
+    /// arrives on its own schedule, so only Enter installs and everything else is a no. A no
+    /// costs nothing to say twice, but is never asked twice: the state was marked when the
+    /// question went up, and the status line names the CLI road back exactly once.
+    fn handle_font_prompt_key(&mut self, key: KeyEvent) {
+        self.font_prompt = false;
+        let lang = self.settings.lang;
+        match key.code {
+            KeyCode::Enter => {
+                crate::font_install::spawn_install(self.font_tx.clone());
+                self.status_message = i18n::msg_font_installing(lang).to_string();
+            }
+            _ => {
+                self.status_message = i18n::msg_font_declined(lang).to_string();
+            }
+        }
+    }
+
+    /// Opens the Extras panel on its first row. From the Help menu only — the panel is a
+    /// shopfront, not a workflow, and needs no chord.
+    pub fn open_extras_panel(&mut self) {
+        self.extras_menu = Some(0);
+        self.redraw = true;
+    }
+
+    /// The Extras panel's keys, in the theme menu's shape: arrows walk, Esc leaves, Enter
+    /// acts on the row — which for a missing tool means typing its install command at a
+    /// prompt, unsent, and for the font means raising the same offer the first launch makes.
+    fn handle_extras_key(&mut self, key: KeyEvent) {
+        let Some(selected) = self.extras_menu else { return };
+        let len = crate::extras::Extra::all().len();
+        match key.code {
+            KeyCode::Esc => self.extras_menu = None,
+            KeyCode::Up => self.extras_menu = Some((selected + len - 1) % len),
+            KeyCode::Down => self.extras_menu = Some((selected + 1) % len),
+            KeyCode::Enter => self.activate_extras_row(selected),
+            _ => {}
+        }
+        self.redraw = true;
+    }
+
+    /// One row of the Extras panel, chosen. An installed row only answers — acting on it
+    /// would be re-installing something that works. The font's action is our own installer,
+    /// asked for through the same modal as the first launch (explicitly this time, so the
+    /// "asked once" bookkeeping is beside the point). A tool's action is the drawer
+    /// launcher's move, machinery and all: the command goes to a shell prompt and stays
+    /// there, because `sudo apt install` is still a line someone should read before running.
+    pub fn activate_extras_row(&mut self, row: usize) {
+        self.extras_menu = None;
+        let lang = self.settings.lang;
+        let Some(extra) = crate::extras::Extra::all().get(row).copied() else { return };
+        if extra.installed() {
+            self.status_message = i18n::msg_extra_installed(lang, extra.name());
+            return;
+        }
+        if extra == crate::extras::Extra::Font {
+            self.font_prompt = true;
+            return;
+        }
+        let pm = crate::extras::package_manager();
+        let Some(command) = crate::extras::install_command(extra, pm) else {
+            self.status_message = i18n::msg_extra_no_command(lang, extra.name());
+            return;
+        };
+        let Some(at) = self.a_shell_to_type_into() else {
+            self.status_message = i18n::msg_extra_no_shell(lang, extra.name(), command);
+            return;
+        };
+        if let Some(term) = self.window_tab_mut(at) {
+            // Unsent, the drawer launcher's promise kept here too: a package manager line —
+            // sudo included, on apt — is read at the prompt and run by the user's own Enter,
+            // never by a row that was merely chosen.
+            term.queue_line_unsent(command);
+        }
+        self.active_terminal = at;
+        self.settings.show_terminal = true;
+        self.focus = Focus::Terminal;
+        self.status_message = i18n::msg_extra_typed(lang, extra.name(), command);
     }
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
@@ -16508,6 +16649,13 @@ impl App {
                         i18n::msg_update_available(self.settings.lang, &version, Some(&cmd));
                     return;
                 }
+                // The same "any other interaction" as the keys: a click anywhere declines the
+                // font offer, and the status line names the CLI road back.
+                if self.font_prompt {
+                    self.font_prompt = false;
+                    self.status_message = i18n::msg_font_declined(self.settings.lang).to_string();
+                    return;
+                }
                 if self.show_rename {
                     self.show_rename = false;
                     self.rename_target = None;
@@ -16567,6 +16715,18 @@ impl App {
                     match rect.map(ui::inner_rect).filter(|inner| within(*inner, col, row)) {
                         Some(inner) => self.activate_run_row((row - inner.y) as usize),
                         None => self.run_menu = None,
+                    }
+                    return;
+                }
+                if self.extras_menu.is_some() {
+                    // Inside the list acts on the row — the same act as Enter on it — and
+                    // anywhere else dismisses, like the two menus above.
+                    match ui::extras_menu_rect(self, full)
+                        .map(ui::inner_rect)
+                        .filter(|inner| within(*inner, col, row))
+                    {
+                        Some(inner) => self.activate_extras_row((row - inner.y) as usize),
+                        None => self.extras_menu = None,
                     }
                     return;
                 }

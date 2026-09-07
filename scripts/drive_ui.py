@@ -731,6 +731,158 @@ def quitting_ends_the_process_cleanly(binary, root, report):
         session.close()
 
 
+def open_extras_from_help(session):
+    """Clicks Help on the menu bar, then Extras... on the menu it drops. True when the panel
+    is up — anchored on chafa, the one row name that appears nowhere else on screen."""
+    bar = session.full_line(0)
+    if "Help" not in bar:
+        return False
+    click(session, bar.index("Help") + 1, 0)
+    if not session.wait(lambda s: "Extras..." in s.text(), 6):
+        return False
+    spot = next(((y, line.index("Extras...")) for y, line in enumerate(session.lines())
+                 if "Extras..." in line), None)
+    if spot is None:
+        return False
+    click(session, spot[1] + 2, spot[0])
+    return session.wait(lambda s: "chafa" in s.text(), 6)
+
+
+def extras_rows(session):
+    """The panel's rows as {first token of the name: has its ✓}, read from the frame chafa is
+    in. Parsed off the leading mark rather than searched by name, because the names leak into
+    each other's purposes — typst's row says what pandoc leans on."""
+    rows = {}
+    for line in session.frame_of("chafa"):
+        tokens = line.split()
+        if not tokens:
+            continue
+        if tokens[0] == "✓" and len(tokens) > 1:
+            rows[tokens[1]] = True
+        else:
+            rows[tokens[0]] = False
+    return rows
+
+
+def the_extras_panel_and_the_font_offer(binary, report):
+    """Help ▸ Extras, and the first-launch font offer it shares its installer with.
+
+    The offer's whole decision is unit-tested; what only the binary can show is the offer
+    *behaving*: rising once the splash is down, declining on any key, and never rising again
+    on the same config — the state file remembers. So the first two sessions share a root and
+    a virgin HOME (the font check looks in $HOME, and pointing HOME at the fixture is what
+    makes "not installed" true on any machine), with the driver's own kill switch overridden
+    back to on, and SSH_CONNECTION cleared because the offer rightly refuses to install a
+    font on the wrong end of an ssh line — which is where these drivers themselves sometimes
+    run.
+
+    The third session is the panel: opened from the Help menu, a stubbed typst on the PATH so
+    exactly one ✓ is this script's to predict, and the Nerd Font row — missing, HOME being
+    virgin again — chosen and accepted, so the panel's action road and the installer run for
+    real into the throwaway HOME. The install-command road for a missing *tool* is checked
+    only where a machine actually misses one: a ✓ cannot be taken off a row by hiding the
+    PATH, because `tools::tool` looks past it on purpose."""
+    # ---- the offer, on a machine that has never seen the font --------------------------------
+    root = tempfile.mkdtemp(prefix="clee_extras_")
+    offer_env = {"HOME": root, "CLEE_FONT_OFFER": "1", "SSH_CONNECTION": ""}
+    session = Session(binary, root, env=offer_env)
+    try:
+        if session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            session.send(" ")  # the splash takes any key; the offer waits for it to be down
+        offered = session.wait(lambda s: "Icons need a font" in s.text(), 10)
+        report.check("a first launch without the font offers to install it", offered, session,
+                     note="the question waits out the splash and says what the font is for")
+        if offered:
+            session.send("x")
+            declined = session.wait(lambda s: "clee --install-font" in s.text(), 6)
+            report.check("any other key declines, and the status names the road back",
+                         declined, session)
+    finally:
+        session.close()
+
+    session = Session(binary, root, env=offer_env)
+    try:
+        if session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+        session.wait(lambda s: True, 1.5)
+        report.check("the declined offer never returns on the same config",
+                     "Icons need a font" not in session.text(), session,
+                     note="asked once is asked: update.toml remembers the question, not the answer")
+    finally:
+        session.close()
+
+    # ---- the panel ---------------------------------------------------------------------------
+    fakebin = os.path.join(root, "fakebin")
+    os.makedirs(fakebin, exist_ok=True)
+    with open(os.path.join(fakebin, "typst"), "w") as handle:
+        handle.write("#!/bin/sh\nexit 0\n")
+    os.chmod(os.path.join(fakebin, "typst"), 0o755)
+    panel_root = tempfile.mkdtemp(prefix="clee_extras_panel_")
+    panel_env = {
+        "HOME": panel_root,  # virgin again, so the Nerd Font row is missing for sure
+        "PATH": fakebin + os.pathsep + os.environ.get("PATH", ""),
+    }
+    session = Session(binary, panel_root, env=panel_env)
+    try:
+        if session.wait(lambda s: sum(1 for l in s.lines() if l.strip()) > 3, timeout=20):
+            session.send(" ")
+        session.wait(lambda s: "Files" in s.text(), 10)
+
+        opened = open_extras_from_help(session)
+        rows = extras_rows(session) if opened else {}
+        report.check("Help > Extras opens the panel with every row on it",
+                     opened and all(name in rows for name in
+                                    ["Nerd", "poppler", "pandoc", "typst", "chafa"]),
+                     session, note="rows found: %s" % sorted(rows))
+        report.check("the stubbed typst wears its ✓", rows.get("typst") is True, session,
+                     note="presence is asked of tools::tool, which reads the PATH this stub is on")
+        report.check("and the virgin HOME leaves the Nerd Font row missing",
+                     rows.get("Nerd") is False, session)
+
+        session.press("\x1b", lambda s: "chafa" not in s.text(), 4)
+        report.check("Esc puts the panel away", "chafa" not in session.text(), session)
+
+        # The Nerd Font row, chosen and accepted: the panel's action road, the same modal the
+        # first launch raises, and the real installer — into the throwaway HOME.
+        installed = False
+        if open_extras_from_help(session):
+            session.send("\r")  # row 0 is the font
+            if session.wait(lambda s: "Icons need a font" in s.text(), 6):
+                session.send("\r")
+                installed = session.wait(lambda s: "Font installed" in s.text(), 15)
+        report.check("choosing the missing font row asks, and Enter installs for real",
+                     installed, session,
+                     note="the .ttf lands in the fixture's own HOME, nobody's real one")
+        if installed:
+            reopened = open_extras_from_help(session)
+            report.check("and the row wears its ✓ the next time the panel opens",
+                         reopened and extras_rows(session).get("Nerd") is True, session)
+            session.press("\x1b", lambda s: "chafa" not in s.text(), 4)
+
+        # A missing tool row types its install command at a prompt, unsent. Only checkable
+        # where a tool is really missing: a ✓ cannot be faked off, tools::tool looks past the
+        # PATH on purpose. CI's runners miss chafa; a developer's machine may miss nothing.
+        rows = extras_rows(session) if open_extras_from_help(session) else {}
+        order = ["Nerd", "poppler", "pandoc", "typst", "chafa"]
+        missing = next((n for n in ["poppler", "pandoc", "chafa"] if rows.get(n) is False), None)
+        if missing is None:
+            session.press("\x1b", lambda s: "chafa" not in s.text(), 4)
+            print("  SKIP  the typed install command: this machine has every tool the panel lists")
+        else:
+            session.send("\x1b[B" * order.index(missing) + "\r")
+            typed = session.wait(lambda s: "unsent" in s.text() or "no shell" in s.text(), 8)
+            report.check("a missing tool's command lands at the prompt unsent", typed, session,
+                         note="chose %s; the same promise the drawer's launcher makes" % missing)
+            if typed and "unsent" in session.text():
+                session.wait(lambda s: True, 1.5)
+                report.check("and it is still sitting there, not run",
+                             "install" in session.text() and "unsent" in session.text(),
+                             session, note="the Enter is the user's, here as everywhere")
+    finally:
+        session.close()
+
+
 def main():
     binary = binary_from_argv(sys.argv)
     root = tempfile.mkdtemp(prefix="clee_drive_")
@@ -769,6 +921,7 @@ def main():
         closing_the_last_tab(binary, root, report)
         a_pane_is_told_what_it_is_talking_to(binary, root, report)
         the_startup_banner_is_scrubbed(binary, root, report)
+        the_extras_panel_and_the_font_offer(binary, report)
         quitting_ends_the_process_cleanly(binary, root, report)
     finally:
         shutil.rmtree(root, ignore_errors=True)

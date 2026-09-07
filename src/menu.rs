@@ -107,6 +107,7 @@ pub enum MenuAction {
     OpenWorkspace,
     DeleteWorkspace,
     ShowManual,
+    ShowExtras,
     FocusFileTree,
     FocusEditor,
     FocusTerminal,
@@ -238,6 +239,7 @@ impl MenuAction {
         MenuAction::OpenWorkspace,
         MenuAction::DeleteWorkspace,
         MenuAction::ShowManual,
+        MenuAction::ShowExtras,
         MenuAction::FocusFileTree,
         MenuAction::FocusEditor,
         MenuAction::FocusTerminal,
@@ -691,6 +693,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuHelp,
             items: vec![
                 item(Key::ItemShowManual, MenuAction::ShowManual, Some("Ctrl+Shift+M")),
+                // The README's "Optional extras", one Enter away: what this machine has, what
+                // it is missing, and the missing one's install command typed at a prompt —
+                // never run — when a row is chosen.
+                item(Key::ItemExtras, MenuAction::ShowExtras, None),
                 // Below the line with About, the other row that is about the program rather
                 // than about the file you are in. The ☕ on the menu bar is the same action
                 // reached the short way; this is the one no width can take away.
