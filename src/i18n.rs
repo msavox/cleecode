@@ -190,6 +190,14 @@ pub enum Key {
     SettingSplash,
     SettingUpdateCheck,
     SettingMouseEnabled,
+    /// Which colour a menu's selected row is painted. Three answers, named for what each one
+    /// looks like rather than for the mechanism behind it — "carousel" is the word a person
+    /// would reach for on seeing the six stripes cycle, long before they would reach for
+    /// `handle_stripes`.
+    SettingMenuHighlight,
+    SettingMenuHighlightCarousel,
+    SettingMenuHighlightAccent,
+    SettingMenuHighlightClassic,
     SettingLanguage,
     On,
     Off,
@@ -743,6 +751,15 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, SettingMouseEnabled) => "Mouse enabled",
         (Lang::It, SettingMouseEnabled) => "Mouse abilitato",
+
+        (Lang::En, SettingMenuHighlight) => "Menu highlight",
+        (Lang::It, SettingMenuHighlight) => "Evidenziazione menu",
+        (Lang::En, SettingMenuHighlightCarousel) => "Carousel",
+        (Lang::It, SettingMenuHighlightCarousel) => "Carosello",
+        (Lang::En, SettingMenuHighlightAccent) => "Accent",
+        (Lang::It, SettingMenuHighlightAccent) => "Accento",
+        (Lang::En, SettingMenuHighlightClassic) => "Classic",
+        (Lang::It, SettingMenuHighlightClassic) => "Classica",
 
         (Lang::En, SettingLanguage) => "Language",
         (Lang::It, SettingLanguage) => "Lingua",
