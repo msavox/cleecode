@@ -331,14 +331,27 @@ def label_spot(session, label):
                  if label in line), None)
 
 
+# The six handle stripes of the default theme, in the hex pyte spells a truecolor
+# background — the same 1977 rainbow theme.rs states in RGB. Quoted rather than asked for,
+# for the reason the theme's own test quotes it: a witness that read the values out of the
+# binary would be testing the theme against itself.
+STRIPES = {"61bb46", "fdb827", "f5821f", "e03a3e", "963d97", "009ddc"}
+
+
 def label_lit(session, label):
-    """Whether the row carrying `label` shows it highlighted — REVERSED cells across the
-    label's own span, which is how every menu's selection reads at this resolution."""
+    """Whether the row carrying `label` shows it highlighted. Two honest spellings: the
+    classic setting is a run of REVERSED cells, and the default carousel paints the row's
+    background with one of the six stripes — one stripe, the whole label, which is what
+    tells a highlight from a menu that happens to sit near coloured text."""
     spot = label_spot(session, label)
     if spot is None:
         return False
     y, x = spot
-    return all(cell.reverse for cell in session.cells(y)[x:x + len(label)])
+    cells = session.cells(y)[x:x + len(label)]
+    if all(cell.reverse for cell in cells):
+        return True
+    bgs = {cell.bg for cell in cells}
+    return len(bgs) == 1 and next(iter(bgs)) in STRIPES
 
 
 def selecting_with_clicks(binary, report):
@@ -915,10 +928,11 @@ def the_extras_panel_and_the_font_offer(binary, report):
 def the_highlight_follows_the_pointer(binary, report):
     """Pop-up lists follow the pointer now: resting it on a row moves the highlight, no click.
     The arrows always did this; the mouse needed a press to be believed, which left the menus
-    reading as dead under a moving pointer. Colour is the witness again: a menu's selection is
-    a run of REVERSED cells, so every check is which label wears them after the pointer has
-    rested where — and the separator case is the negative that keeps the rule honest, because
-    walking off a row must not be a choice.
+    reading as dead under a moving pointer. Colour is the witness again: a menu's selection
+    wears one of the carousel's stripes (or reverse video, under the classic setting — see
+    `label_lit`), so every check is which label wears it after the pointer has rested where —
+    and the separator case is the negative that keeps the rule honest, because walking off a
+    row must not be a choice.
 
     Its own session, like every section that clicks by coordinates."""
     root = tempfile.mkdtemp(prefix="clee_hover_")
