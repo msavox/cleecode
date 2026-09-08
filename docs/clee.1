@@ -15,6 +15,9 @@ clee \- terminal IDE with a file tree, embedded terminals and syntax highlightin
 .BR \-e " " \fIFILE\fR
 .br
 .B clee
+.BR \-\-reuse " " \fIFILE\fR ...
+.br
+.B clee
 .RB [ \-\-install\-font ]
 .RB [ \-\-install\-app ]
 .RB [ \-\-mcp ]
@@ -90,6 +93,19 @@ The server finds the editor through
 .BR CLEE_SESSION ,
 which every shell CleeCode starts carries and an agent launched in a pane inherits; run outside a
 CleeCode terminal, every tool answers that it is not inside a session.
+.TP
+.BR \-\-reuse " " \fIFILE\fR ...
+Hand the files to a CleeCode that is already running and exit at once, without drawing anything or
+touching the terminal. Each one is opened in the running editor as though an
+.B open_file
+had asked for it, made absolute first, so it is found from wherever this was run.
+.IP
+Meant for a launcher rather than for the keyboard: a wrapper handling a double click tries this
+first and starts a real editor only when it fails, so a file opened from Finder lands in the
+window already on screen instead of a second CleeCode beside it. With several windows open, the
+files go to the one whose editor was doing something most recently. Exit status 3 means no
+CleeCode was running to take them \(em the signal the wrapper acts on \(em and is not an error
+worth reporting.
 .TP
 .B \-\-resume
 Start in the project last worked in, whatever directory the command was run from. This is what
@@ -475,6 +491,11 @@ The shell each terminal runs.
 .SH EXIT STATUS
 .B clee
 exits 0 on a normal quit, including after an internal error it had to give up on.
+.PP
+.B \-\-reuse
+has two endings of its own: 2 when it was given no file to hand over, and 3 when no CleeCode was
+running to take one \(em which is an answer, not a failure, and what tells a launcher to start the
+editor itself.
 .SH SEE ALSO
 .BR micro (1),
 .BR tmux (1),
