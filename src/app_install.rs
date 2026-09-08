@@ -183,6 +183,13 @@ mod macos {
     /// in a bundle never sees — so a shell launcher would open an empty editor every time.
     /// `on open` is the handler that receives it.
     ///
+    /// A dropped *file* is offered to the editor already running before any window is asked
+    /// for at all: `clee --reuse` writes it into the live session's directory and exits 3 when
+    /// there is no session to write to, which is the launcher's cue to start a real editor. So
+    /// double-clicking a file lands it in the window the user is already working in, and the
+    /// only thing left to do is raise that window. A dropped *folder* is untouched by this — a
+    /// folder is a project root, and a new root is a new editor whatever else is running.
+    ///
     /// A running Ghostty is asked for a window through its scripting dictionary rather than
     /// launched again. `open -n` would work too, and was the obvious way to do it, but it
     /// starts a *second* Ghostty: a second icon in the Dock next to the one already pinned
@@ -215,10 +222,67 @@ on run
 end run
 
 on open theItems
+	-- Sorted before anything is started, because the two kinds of drop want opposite things.
+	-- A folder *is* a project root, and a new project root is a new editor by definition, so
+	-- folders go on doing exactly what they always did. A file is something the CleeCode
+	-- already on screen can simply open, and starting a second window for it is the annoyance
+	-- this whole branch exists to remove.
+	set theFiles to {{}}
+	set theFolders to {{}}
 	repeat with anItem in theItems
-		launchClee(POSIX path of anItem)
+		set t to POSIX path of anItem
+		-- The trailing slash goes here for the reason it goes in `launchClee`: it is what
+		-- tells a folder from a file below, and what `dirname` would otherwise misread.
+		if t ends with "/" and length of t is greater than 1 then set t to text 1 thru -2 of t
+		if isFolder(t) then
+			set end of theFolders to t
+		else
+			set end of theFiles to t
+		end if
+	end repeat
+
+	if (count of theFiles) is greater than 0 then
+		-- One command for the whole selection, and this is deliberate rather than tidy.
+		-- Finder hands a multiple selection to `on open` as a single list, and the handover
+		-- only succeeds while a CleeCode is already running. With one `--reuse` per file the
+		-- first would find nobody, start an editor, and the second would be asked before that
+		-- editor had created its session directory — so it would find nobody either, and five
+		-- selected files would become five windows racing each other. Asked once, the answer
+		-- covers the lot: they all go to the editor that is there, or they all start one.
+		set handover to quoted form of cleePath & " --reuse"
+		repeat with aFile in theFiles
+			set handover to handover & " " & quoted form of (contents of aFile)
+		end repeat
+		try
+			do shell script handover
+			-- Taken. All that is left is to bring the window they landed in to the front,
+			-- and that is done with `open` rather than with `tell application "{TERMINAL}"
+			-- to activate`: raising an application this way is not automation, so it works
+			-- on the very first double click, before macOS has asked anybody for permission
+			-- to control another application — and it still works if that was refused.
+			do shell script "open -a " & quoted form of "{TERMINAL}"
+		on error
+			-- No CleeCode running to take them. `do shell script` turns any non-zero status
+			-- into an error, which is the whole of the protocol: `clee --reuse` exits 3 when
+			-- it found no editor, and this is where that answer is acted on — by doing what
+			-- the launcher did before any of this existed.
+			repeat with aFile in theFiles
+				launchClee(contents of aFile)
+			end repeat
+		end try
+	end if
+
+	repeat with aFolder in theFolders
+		launchClee(contents of aFolder)
 	end repeat
 end open
+
+on isFolder(t)
+	-- The same question `launchClee` asks of the shell, and asked the same way. Finder could
+	-- answer it too, but only as one more application this applet would have to be allowed to
+	-- talk to before a double click did anything.
+	return (do shell script "t=" & quoted form of t & "; if [ -d \"$t\" ]; then echo yes; else echo no; fi") is "yes"
+end isFolder
 
 on launchClee(target)
 	if target is missing value then
@@ -439,6 +503,50 @@ end openNewInstance
             assert!(script.contains("on run"));
             assert!(script.contains("--resume"));
             assert!(script.contains("/opt/homebrew/bin/clee"));
+        }
+
+        /// A double-clicked file is offered to the CleeCode already running before either way
+        /// of asking for a window is reached, and the window that took it is raised with `open`
+        /// rather than by telling the terminal to activate — which would be automation, and so
+        /// a permission dialog standing between a person and the file they double-clicked.
+        #[test]
+        fn a_dropped_file_is_offered_to_the_running_editor_before_a_window_is_asked_for() {
+            let script = applescript(Path::new("/opt/homebrew/bin/clee"));
+            // The command itself and not merely the flag, which the script's own comments talk
+            // about as well.
+            let reuse = script.find(r#"cleePath & " --reuse""#).expect("the handover is attempted");
+            let scripted = script.find("new window with configuration").expect("the asked window");
+            let spawned = script.find("open -na").expect("the fallback window");
+            assert!(reuse < scripted && reuse < spawned, "the handover comes first or not at all");
+            // Once for the whole drop, built up in a loop rather than sent per file: see the
+            // script's own comment for the race N separate attempts would lose. Counted over
+            // the lines that are not comments, for the same reason.
+            let built = script
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .filter(|line| line.contains("--reuse"))
+                .count();
+            assert_eq!(built, 1, "one command for the whole selection");
+            assert!(script.contains(r#"set handover to handover & " " & quoted form of"#));
+            // What each of the two answers leads to. The raise belongs to the delivery that
+            // worked; `launchClee` is what the error branch falls back to.
+            let after = &script[reuse..];
+            let raised = after.find("open -a ").expect("the window is brought forward");
+            let failed = after.find("on error").expect("and a refusal has somewhere to go");
+            assert!(raised < failed, "the raise is the success branch, not the fallback");
+            assert!(after[failed..].contains("launchClee"), "nobody home means a new editor");
+        }
+
+        /// A folder names a project root, and a project root is a new editor whatever is already
+        /// running — so folders never go through the handover, and are still started one apiece.
+        #[test]
+        fn a_dropped_folder_still_starts_an_editor_of_its_own() {
+            let script = applescript(Path::new("/opt/homebrew/bin/clee"));
+            let sorted = script.find("set end of theFolders to t").expect("folders are told apart");
+            let reuse = script.find("--reuse").expect("the handover");
+            assert!(sorted < reuse, "the sorting happens before anything is handed anywhere");
+            assert!(script.contains("repeat with aFolder in theFolders"));
+            assert!(script.contains("launchClee(contents of aFolder)"));
         }
 
         /// Both ways of asking for a window have to say the window closes with the editor.

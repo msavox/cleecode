@@ -138,6 +138,10 @@ OPTIONS:
                           CleeCode terminal can ask what is open, where the cursor is and
                           what the language server said. Not typed by hand: it goes in the
                           agent's own config — `claude mcp add clee -- clee --mcp`.
+    --reuse FILE...       Hand the files to a CleeCode already running and exit, without
+                          drawing anything; exits 3 when none is. What the macOS launcher
+                          tries first, so a double-clicked file opens in the window you
+                          are already working in.
     --resume              Start in the project last worked in, wherever this was run from.
                           What the Dock launcher uses; a bare `clee` still uses the
                           directory you are standing in.
@@ -262,6 +266,31 @@ fn main() -> Result<()> {
     // stdout by the TUI would be a protocol violation the client could never recover from.
     if args.iter().any(|a| a == "--mcp") {
         mcp::serve_stdio();
+        return Ok(());
+    }
+    // Give the files to the CleeCode already running and say nothing. The third program in this
+    // binary, and the one that draws least: it writes a request into a live session's directory
+    // and exits before anything has been taken over. The macOS launcher runs it on every double
+    // click, so a file opened from Finder goes to the window the user is already in; exit 3 is
+    // "nobody is home", and the launcher answers that by starting a real editor instead.
+    if let Some(i) = args.iter().position(|a| a == "--reuse") {
+        // Everything after it, because Finder hands over a whole selection at once. Arguments
+        // that look like flags are left out rather than opened: a file whose name begins with a
+        // dash is vanishingly rare next to a flag typed after `--reuse`, and opening a buffer
+        // called `--resume` is the worse of the two mistakes.
+        let files: Vec<std::path::PathBuf> = args[i + 1..]
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(std::path::PathBuf::from)
+            .collect();
+        if files.is_empty() {
+            eprintln!("clee --reuse needs at least one file to hand over");
+            std::process::exit(2);
+        }
+        if !mcp::hand_to_running(&files) {
+            eprintln!("clee --reuse: no CleeCode is running to take these files");
+            std::process::exit(3);
+        }
         return Ok(());
     }
     let resume = args.iter().any(|a| a == "--resume");

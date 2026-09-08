@@ -316,6 +316,100 @@ pub fn session_dir() -> Option<PathBuf> {
     sessions_root().map(|dir| dir.join(std::process::id().to_string()))
 }
 
+// ---- Handing files to a CleeCode that is already running ------------------------------------
+
+// The same directories read from the outside, by something that is neither the editor nor an
+// agent: `clee --reuse FILE...`, which gives a file to the CleeCode already on screen and exits.
+// It exists for the double click. A macOS launcher has no way to say "the window I already have",
+// so it runs this first and starts a real editor only when it comes back empty-handed — otherwise
+// opening a file from Finder means a second CleeCode beside the one the user was working in.
+//
+// Nothing new travels: it is the same [`Request::Open`] the MCP server writes, so the editor's
+// poll loop cannot tell — and does not need to tell — who left it there.
+//
+// Read-only apart from the requests it writes. `sweep_orphans` is deliberately *not* called here:
+// this runs on a double click, in front of somebody waiting for a window, and removing another
+// process's leftovers is the editor's own housekeeping, not something a fast path should stop for.
+
+/// The directory of the live CleeCode touched most recently, or `None` when none is running.
+///
+/// Two things make a session, and a directory has to pass both. Its name is the pid of a process
+/// that is still alive — a CleeCode killed with `SIGKILL` never runs its `Drop` and leaves the
+/// directory behind, which is what `sweep_orphans` exists to clear — and it holds a `state.json`,
+/// because an editor that has published nothing yet is not one that can be asked for anything.
+///
+/// Freshest by that state file's mtime. The state is rewritten only when something actually
+/// changed, so with several windows open the one that touched it last is the one being worked in,
+/// and that is the window a file double-clicked in Finder is meant to land in.
+pub fn freshest_live_session() -> Option<PathBuf> {
+    freshest_live_session_in(&sessions_root()?)
+}
+
+/// The above with the root named, so a test can build a set of sessions without racing every other
+/// test over the one real root — which is shared, global, and full of directories this process
+/// does not own.
+fn freshest_live_session_in(root: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    // The process table read the way `sweep_orphans` reads it, and once rather than per directory.
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    let mut freshest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|text| text.parse::<u32>().ok()) else { continue };
+        if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
+            continue;
+        }
+        let dir = entry.path();
+        // "Is there a state file" and "when was it written" are one question asked once: a state
+        // file that cannot be stat'd is a session with nothing published in it.
+        let Ok(touched) = std::fs::metadata(dir.join(STATE_FILE)).and_then(|meta| meta.modified())
+        else {
+            continue;
+        };
+        if freshest.as_ref().is_none_or(|(best, _)| touched > *best) {
+            freshest = Some((touched, dir));
+        }
+    }
+    freshest.map(|(_, dir)| dir)
+}
+
+/// Asks the CleeCode already running to open these files. `false` when nobody took them.
+///
+/// One answer for both ways this comes to nothing — no editor running, and an editor whose
+/// directory refused the request — because the caller does the same thing either way: start a
+/// CleeCode of its own. A second window is a far better ending for a double click than a launcher
+/// that appears to do nothing at all.
+pub fn hand_to_running(paths: &[PathBuf]) -> bool {
+    let Some(dir) = freshest_live_session() else { return false };
+    hand_to_session(&dir, paths)
+}
+
+fn hand_to_session(dir: &Path, paths: &[PathBuf]) -> bool {
+    for path in paths {
+        // Absolute, because the editor resolves what it is handed against *its* current directory
+        // — the project it was started in, which has nothing to do with wherever this command was
+        // run from. `absolute` rather than `canonicalize`: it is path arithmetic and touches no
+        // disk, so it also answers for a file that does not exist yet, which is a name somebody
+        // meant the editor to create. A path that cannot be made absolute is passed on as it came,
+        // since the editor's own guess at it beats refusing to open anything.
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        let open = Request::Open {
+            path: path.to_string_lossy().into_owned(),
+            line: None,
+            end_line: None,
+        };
+        if write_request(dir, next_request_number(), &open).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 // ---- The editor's side ---------------------------------------------------------------------
 
 /// The editor's end of the bridge: a directory, a throttle, and the memory of what was last said.
@@ -2150,5 +2244,152 @@ mod tests {
 
         let many: Vec<Diagnostic> = (0..MAX_DIAGNOSTICS + 50).map(|n| diag("a.rs", n)).collect();
         assert_eq!(tidy_diagnostics(many).len(), MAX_DIAGNOSTICS);
+    }
+
+    // ---- Handing files to a CleeCode already running -----------------------------------------
+
+    /// A sessions root belonging to this test alone.
+    ///
+    /// Never the real one: that is shared and global, it holds the directory of every CleeCode
+    /// the developer has open, and these tests run in parallel beside each other. Named for the
+    /// process and the case, so two of them can never meet.
+    fn a_sessions_root(case: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("clee-reuse-{case}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root must be creatable");
+        root
+    }
+
+    /// A session directory named for `pid`, with a state file in it when `published`.
+    fn a_session_under(root: &Path, pid: u32, published: bool) -> PathBuf {
+        let dir = root.join(pid.to_string());
+        std::fs::create_dir_all(&dir).expect("a session directory must be creatable");
+        if published {
+            let state = a_state();
+            let envelope = Envelope { version: STATE_VERSION, generation: 1, state: &state };
+            let text = serde_json::to_string(&envelope).expect("the state must serialise");
+            std::fs::write(dir.join(STATE_FILE), text).expect("the state file must be writable");
+        }
+        dir
+    }
+
+    /// Moves a session's state file back in time, so "which was touched last" can be asked without
+    /// a test sleeping to arrange it.
+    fn touched_seconds_ago(dir: &Path, seconds: u64) {
+        let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
+        let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(STATE_FILE))
+            .and_then(|file| file.set_times(times))
+            .expect("a scratch file's times must be settable");
+    }
+
+    /// Every request lying in a session directory, oldest first.
+    fn requests_in(dir: &Path) -> Vec<Request> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join(REQUESTS_DIR))
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files
+            .iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(path).expect("a request that was just written");
+                serde_json::from_str(&text).expect("and that the editor can read back")
+            })
+            .collect()
+    }
+
+    /// A pid no process has. `u32::MAX` is above every system's pid ceiling, so this is a dead
+    /// session on every platform without a test having to kill something to make one.
+    const DEAD_PID: u32 = u32::MAX;
+
+    /// A CleeCode killed with `SIGKILL` leaves its directory behind, state file and all. Handing a
+    /// file to it would be handing it to nobody: the launcher has to be told to start an editor.
+    #[test]
+    fn a_session_left_by_a_dead_process_is_not_handed_anything() {
+        let root = a_sessions_root("dead");
+        a_session_under(&root, DEAD_PID, true);
+        assert_eq!(freshest_live_session_in(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The process is alive but has published no state, which is the shape of a CleeCode still
+    /// starting up. There is nothing there yet that would notice a request.
+    #[test]
+    fn a_live_session_that_has_published_nothing_is_not_handed_anything() {
+        let root = a_sessions_root("unpublished");
+        a_session_under(&root, std::process::id(), false);
+        assert_eq!(freshest_live_session_in(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Several windows open, one of them being typed in. The state file only moves when something
+    /// changed, so its mtime is the closest thing to "the window the user is in".
+    #[test]
+    fn between_two_live_sessions_the_one_touched_last_gets_the_files() {
+        let root = a_sessions_root("two");
+        // Two pids that are alive right now: ours, which certainly is, and one more read out of
+        // the same process table the discovery reads.
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        let mine = std::process::id();
+        let other = sys
+            .processes()
+            .keys()
+            .map(|pid| pid.as_u32())
+            .find(|pid| *pid != mine)
+            .expect("this machine is running more than one process");
+
+        let stale = a_session_under(&root, mine, true);
+        let fresh = a_session_under(&root, other, true);
+        touched_seconds_ago(&stale, 60);
+        assert_eq!(freshest_live_session_in(&root), Some(fresh.clone()));
+
+        // And the other way round, so the answer is the mtime rather than the order a directory
+        // happens to be read in.
+        touched_seconds_ago(&fresh, 120);
+        assert_eq!(freshest_live_session_in(&root), Some(stale));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What actually arrives: the same `open` the MCP server writes, one per file, carrying a path
+    /// the editor can find from the project directory it was started in.
+    #[test]
+    fn a_handed_over_file_arrives_as_an_open_request_with_an_absolute_path() {
+        let root = a_sessions_root("handover");
+        let dir = a_session_under(&root, std::process::id(), true);
+        let handed = hand_to_session(
+            &dir,
+            &[PathBuf::from("notes.md"), PathBuf::from("src/never-created-yet.rs")],
+        );
+        assert!(handed, "a session that is there takes what it is given");
+
+        let requests = requests_in(&dir);
+        assert_eq!(requests.len(), 2, "one request per file, not one for the lot");
+        for request in &requests {
+            let Request::Open { path, line, end_line } = request else {
+                panic!("a handover is an open and nothing else: {request:?}");
+            };
+            assert!(Path::new(path).is_absolute(), "the editor cannot resolve {path} itself");
+            assert_eq!((*line, *end_line), (None, None), "a handover names no line");
+        }
+        let names: Vec<String> = requests
+            .iter()
+            .map(|r| match r {
+                Request::Open { path, .. } => path.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(names[0].ends_with("notes.md"), "{names:?}");
+        // A file that does not exist is still handed over: `absolute` is arithmetic, and a name
+        // somebody meant the editor to create must survive the trip.
+        assert!(names[1].ends_with("never-created-yet.rs"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
