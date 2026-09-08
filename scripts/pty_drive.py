@@ -306,6 +306,19 @@ class Session:
             time.sleep(0.05)
 
 
+# The six handle stripes of the default theme, in the hex pyte spells a truecolor
+# background — the 1977 rainbow theme.rs states in RGB. A menu's selected row wears one of
+# them by default (the carousel); under the classic setting it is REVERSED instead. The set
+# lives here so every driver reads a highlight the same way: two spellings of "lit" in two
+# scripts is how one of them goes stale the next time the selection changes its clothes.
+STRIPES = {"61bb46", "fdb827", "f5821f", "e03a3e", "963d97", "009ddc"}
+
+
+def cell_lit(cell):
+    """Whether one cell reads as part of a menu highlight — reverse video, or a stripe."""
+    return cell.reverse or cell.bg in STRIPES
+
+
 class Report:
     def __init__(self):
         self.failed = []
