@@ -90,6 +90,32 @@ echo "  page   it/index.html, $css_name"
 cp "$here/_headers" "$dist/_headers"
 echo "  page   _headers"
 
+# The 404 page. Its presence is what matters: with a 404.html at the root,
+# Cloudflare Pages answers unknown paths with it and a real 404 status, instead
+# of serving the homepage with a 200 for every path — which made /sitemap.xml
+# "exist" as a copy of the homepage and every typo look like a page to a
+# crawler. Absolute references, same hash substitution as the Italian page.
+sed "s|href=\"/style\.css\"|href=\"/$css_name\"|" "$here/404.html" > "$dist/404.html"
+echo "  page   404.html, $css_name"
+
+# What tells search engines the site is there: the crawl policy, carrying the
+# sitemap's address, and the sitemap naming both language versions.
+cp "$here/robots.txt" "$dist/robots.txt"
+cp "$here/sitemap.xml" "$dist/sitemap.xml"
+echo "  page   robots.txt, sitemap.xml"
+
+# Google Search Console's ownership proof. Google fetches it at the root when
+# asked to verify — and keeps re-fetching it, so it must survive every deploy
+# for the property to stay verified.
+cp "$here/googled2d8ee332edb021b.html" "$dist/googled2d8ee332edb021b.html"
+echo "  page   googled2d8ee332edb021b.html"
+
+# The social card the og:image meta points at — 1200×630 cut from
+# docs/screenshots/preview-image.jpg, committed as-is so building the site
+# never needs an image tool.
+cp "$here/og-image.jpg" "$dist/og-image.jpg"
+echo "  asset  og-image.jpg"
+
 echo "$ASSETS" | while read -r src dest; do
   [ -n "${src:-}" ] || continue
   if [ ! -f "$docs/$src" ]; then
@@ -144,7 +170,7 @@ echo "  font   fonts/OFL-NOTICE.txt"
 # inside dist/. Absolute URLs and in-page anchors are somebody else's problem;
 # everything else is ours.
 missing=0
-for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" "$dist/it/index.html" \
+for ref in $( { grep -oE '(src|href)="[^"]*"' "$dist/index.html" "$dist/it/index.html" "$dist/404.html" \
                 | sed -e 's/^[^"]*"//' -e 's/"$//'; \
                 grep -oE "url\([^)]*\)" "$dist/$css_name" \
                 | sed -e "s/^url(//" -e "s/)$//" -e "s/^['\"]//" -e "s/['\"]$//"; } \
