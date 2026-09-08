@@ -1,3 +1,16 @@
+## What's new in 0.26.0
+
+**A double-clicked file lands in the window you're already in.** Opening a file from Finder —
+double click, a drop on the Dock icon, *Open with* — used to mean a second CleeCode beside the
+one you were working in. The launcher now hands the file to the editor already running and
+raises its window, starting a new editor only when none is there. A whole selection goes over
+in one ask, so five files can't race each other into five windows; with several windows open,
+the files land in the one you touched last. Dropping a *folder* still opens a new editor —
+a folder is a project root, and a new root is a new editor. The handover is `clee --reuse`,
+which any launcher can use: it writes the same open requests agents send over MCP, and exits 3
+when no editor is running — an answer, not an error. The launcher is a bundle built on your
+machine, and this behaviour lives inside it: run `clee --install-app` once after upgrading.
+
 ## What's new in 0.25.0
 
 **The name, written the way it's written.** The splash banner is now *CleeCode* — half-block

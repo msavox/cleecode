@@ -218,7 +218,9 @@ clee --install-app
 That builds `CleeCode.app` in `/Applications` (or `~/Applications`, if the first is not
 writable) and registers it. Clicking it opens the project you were last in; dropping a file
 or a folder on it — or picking CleeCode under *Open with* in Finder's Get Info — opens that,
-with its folder as the project root. To keep it in the Dock, open it once and choose
+with its folder as the project root. A file lands in the CleeCode already on screen when one
+is running, rather than in a second window; a folder always opens an editor of its own, since
+a folder names a project root. To keep it in the Dock, open it once and choose
 *Options ▸ Keep in Dock*; to uninstall, drag the app to the Bin.
 
 <details>
