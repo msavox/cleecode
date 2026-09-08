@@ -1,3 +1,15 @@
+## What's new in 0.26.1
+
+**Menus wear the carousel.** The row under the cursor — in the bar's dropdowns, the
+right-click menu, the theme picker, Extras and the run menu — is now painted with one of the
+six stripes the agent drawer's handle already wears: on the house theme, the 1977 Apple
+rainbow. Each item keeps its own stripe, so walking the pointer down a menu cycles the six
+colours one row at a time — and only one row is ever lit, so the screen never shows the whole
+rainbow at once; you only see it turn. The text on top picks black or white by the same
+measure that decides when a theme must paint its own background, so a yellow stripe reads as
+well as a purple one. And it stays a choice: *Menu highlight* in the settings cycles
+Carousel, Accent, and the plain reverse-video the menus wore before.
+
 ## What's new in 0.26.0
 
 **A double-clicked file lands in the window you're already in.** Opening a file from Finder —
