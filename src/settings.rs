@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 18;
+pub const SETTINGS_COUNT: usize = 19;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
@@ -41,6 +41,17 @@ pub struct Settings {
     pub show_whitespace: bool,
     pub auto_indent: bool,
     pub mouse_enabled: bool,
+    /// Which colour a menu paints the row the cursor is on: `"carousel"`, `"accent"` or
+    /// `"classic"`. See [`MenuHighlight`], which is this string as the three answers it means.
+    ///
+    /// `"carousel"` by default — the six `handle_stripes` cycling under the cursor as it moves —
+    /// because it is the look this editor already wears everywhere else a theme gets to leave a
+    /// mark, and a menu is one more surface for the same six colours rather than a reason to
+    /// reach for a seventh. A string for the reason `agent_edits` is one: three answers, and an
+    /// unrecognised value in a hand-edited file reads as the default rather than as whichever of
+    /// the other two happens to sort first.
+    #[serde(default = "default_menu_highlight")]
+    pub menu_highlight: String,
     #[serde(default, deserialize_with = "lang_however_it_is_spelled")]
     pub lang: Lang,
     // Layout: persisted alongside the rest so a preferred workspace shape survives restarts.
@@ -438,6 +449,58 @@ impl AgentEdits {
     }
 }
 
+fn default_menu_highlight() -> String {
+    MenuHighlight::Carousel.word().to_string()
+}
+
+/// How a menu paints the row the cursor is on, kept as a type for the reason `AgentEdits` is:
+/// the string is what settings.toml holds and what a person hand-edits, and every reader of it
+/// goes through [`MenuHighlight::of`] — which answers `Carousel` to anything it does not
+/// recognise, so a typo in a hand-edited file costs nothing but the extra colours, never the
+/// look the editor ships with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuHighlight {
+    Carousel,
+    Accent,
+    Classic,
+}
+
+impl MenuHighlight {
+    pub fn of(text: &str) -> MenuHighlight {
+        match text {
+            "accent" => MenuHighlight::Accent,
+            "classic" => MenuHighlight::Classic,
+            _ => MenuHighlight::Carousel,
+        }
+    }
+
+    /// How it is spelled in settings.toml.
+    pub fn word(self) -> &'static str {
+        match self {
+            MenuHighlight::Carousel => "carousel",
+            MenuHighlight::Accent => "accent",
+            MenuHighlight::Classic => "classic",
+        }
+    }
+
+    /// The next one round, which is what picking the settings row does.
+    pub fn next(self) -> MenuHighlight {
+        match self {
+            MenuHighlight::Carousel => MenuHighlight::Accent,
+            MenuHighlight::Accent => MenuHighlight::Classic,
+            MenuHighlight::Classic => MenuHighlight::Carousel,
+        }
+    }
+
+    fn label(self) -> Key {
+        match self {
+            MenuHighlight::Carousel => Key::SettingMenuHighlightCarousel,
+            MenuHighlight::Accent => Key::SettingMenuHighlightAccent,
+            MenuHighlight::Classic => Key::SettingMenuHighlightClassic,
+        }
+    }
+}
+
 fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
@@ -516,6 +579,7 @@ impl Default for Settings {
             show_whitespace: false,
             auto_indent: true,
             mouse_enabled: true,
+            menu_highlight: default_menu_highlight(),
             lang: Lang::default(),
             show_sidebar: true,
             show_terminal: true,
@@ -968,6 +1032,35 @@ mod tests {
         }
     }
 
+    /// A typo in a hand-edited settings.toml must never buy more colour than the default: the
+    /// only two words `of` answers with anything other than `Carousel` are the two it was
+    /// actually told to recognise.
+    #[test]
+    fn menu_highlight_of_answers_carousel_to_anything_it_does_not_know() {
+        assert_eq!(MenuHighlight::of("accent"), MenuHighlight::Accent);
+        assert_eq!(MenuHighlight::of("classic"), MenuHighlight::Classic);
+        for typo in ["Accent", "CLASSIC", "carousel", "", "rainbow"] {
+            assert_eq!(MenuHighlight::of(typo), MenuHighlight::Carousel, "{typo:?} should fall back");
+        }
+    }
+
+    /// The menu highlight row cycles the same way `agent_edits`'s does: found by its label so the
+    /// test fails if the row and the arm in `activate` ever come apart, then round the ring and
+    /// back to where it started.
+    #[test]
+    fn the_menu_highlight_row_cycles_carousel_accent_classic() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.menu_highlight, "carousel");
+        let label = i18n::t(settings.lang, Key::SettingMenuHighlight);
+        let idx = settings.rows().iter().position(|r| r.label == label).expect("menu highlight has a row");
+        settings.activate(idx);
+        assert_eq!(settings.menu_highlight, "accent");
+        settings.activate(idx);
+        assert_eq!(settings.menu_highlight, "classic");
+        settings.activate(idx);
+        assert_eq!(settings.menu_highlight, "carousel", "three states, a ring");
+    }
+
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
     /// The modal is sized from `SETTINGS_COUNT` and the cursor wraps on it, so a row past that
@@ -1382,6 +1475,10 @@ impl Settings {
             SettingRow { label: i18n::t(lang, Key::SettingSplash), value: b(self.show_splash) },
             SettingRow { label: i18n::t(lang, Key::SettingUpdateCheck), value: b(self.update_check) },
             SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingMenuHighlight),
+                value: i18n::t(lang, MenuHighlight::of(&self.menu_highlight).label()).to_string(),
+            },
             SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
         ]
     }
@@ -1420,7 +1517,9 @@ impl Settings {
             // already in flight this session is one status line at worst.
             15 => self.update_check = !self.update_check,
             16 => self.mouse_enabled = !self.mouse_enabled,
-            17 => self.lang = self.lang.next(),
+            // Three states, so picking the row is walking round them. See `MenuHighlight::next`.
+            17 => self.menu_highlight = MenuHighlight::of(&self.menu_highlight).next().word().to_string(),
+            18 => self.lang = self.lang.next(),
             _ => {}
         }
     }

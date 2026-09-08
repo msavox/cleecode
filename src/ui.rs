@@ -1744,7 +1744,7 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
         .border_style(Style::default().fg(pal.accent));
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(menu_highlight_style(pal, &app.settings, app.menu.item_index));
     f.render_widget(Clear, rect);
     f.render_stateful_widget(list, rect, &mut state);
 }
@@ -1753,6 +1753,30 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
 /// line cannot drift apart on the question of how heavy the frame is.
 fn chrome(pal: Palette, style: Style) -> Style {
     if pal.bold_chrome { style.add_modifier(Modifier::BOLD) } else { style }
+}
+
+/// The one place every menu asks how to paint the row the cursor is on, so the drop-down bar,
+/// the right-click menu, the theme picker, Extras and the run menu cannot drift into five
+/// slightly different answers to the same question.
+///
+/// Carousel is the setting's own idea and the reason this function exists rather than a plain
+/// `if pal.bold_chrome`-style branch inline at each call site: the six colours are
+/// `Palette::handle_stripes` — the same quotation the agent drawer's handle wears — indexed by
+/// the *item*, so walking the cursor down the menu cycles them one row at a time. Only one row
+/// is ever lit, so the screen never shows the whole rainbow at once; you only see it turn. The
+/// foreground is computed rather than fixed for the reason `theme::readable_on` exists at all: a
+/// list's highlight style overrides whatever colour a cell asked for on its own, accelerator
+/// included, so without this a menu could hand you a red initial on the red stripe and call it
+/// legible.
+fn menu_highlight_style(pal: Palette, settings: &settings::Settings, item_idx: usize) -> Style {
+    match settings::MenuHighlight::of(&settings.menu_highlight) {
+        settings::MenuHighlight::Carousel => {
+            let bg = pal.handle_stripes[item_idx % pal.handle_stripes.len()];
+            Style::default().fg(crate::theme::readable_on(bg)).bg(bg)
+        }
+        settings::MenuHighlight::Accent => Style::default().fg(pal.on_accent).bg(pal.accent),
+        settings::MenuHighlight::Classic => Style::default().add_modifier(Modifier::REVERSED),
+    }
 }
 
 /// A drop-down row with its initial in the accelerator colour, for the themes that have one.
@@ -1824,7 +1848,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
         .border_style(Style::default().fg(pal.accent));
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(menu_highlight_style(pal, &app.settings, menu.selected));
     f.render_widget(Clear, rect);
     f.render_stateful_widget(list, rect, &mut state);
 }
@@ -3271,7 +3295,7 @@ fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
     let mut state = ListState::default();
     state.select(Some(selected));
     let list = List::new(items)
-        .highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
+        .highlight_style(menu_highlight_style(pal, &app.settings, selected));
     f.render_stateful_widget(list, inner, &mut state);
 }
 
@@ -3330,7 +3354,7 @@ fn draw_extras_menu(f: &mut Frame, app: &App, full: Rect) {
     let mut state = ListState::default();
     state.select(Some(selected));
     let list = List::new(items)
-        .highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
+        .highlight_style(menu_highlight_style(pal, &app.settings, selected));
     f.render_stateful_widget(list, inner, &mut state);
 }
 
@@ -3361,7 +3385,7 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
         })
         .collect();
 
-    let list = List::new(items).highlight_style(Style::default().fg(pal.on_accent).bg(pal.accent));
+    let list = List::new(items).highlight_style(menu_highlight_style(pal, &app.settings, menu.selected));
     let mut state = ListState::default();
     state.select(Some(menu.selected));
     f.render_stateful_widget(list, inner, &mut state);
@@ -6374,6 +6398,34 @@ mod tests {
         }
     }
     use super::*;
+
+    /// Carousel on the default theme: item 0 and item 6 land on the same stripe — six colours,
+    /// wrapping — every one of items 0..6 is its own colour, and Classic ignores all of it for
+    /// the plain reverse-video this menu wore before the setting existed.
+    #[test]
+    fn the_menu_carousel_wraps_every_six_items_and_classic_stays_reversed() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let carousel = settings::Settings { menu_highlight: "carousel".to_string(), ..Default::default() };
+        assert_eq!(
+            menu_highlight_style(pal, &carousel, 0).bg,
+            menu_highlight_style(pal, &carousel, 6).bg,
+            "the seventh item is the first stripe again"
+        );
+        let backgrounds: Vec<Color> =
+            (0..6).map(|i| menu_highlight_style(pal, &carousel, i).bg.expect("carousel paints a bg")).collect();
+        for (i, a) in backgrounds.iter().enumerate() {
+            for (j, b) in backgrounds.iter().enumerate() {
+                assert!(i == j || a != b, "items {i} and {j} share a stripe inside one lap");
+            }
+        }
+
+        let classic = settings::Settings { menu_highlight: "classic".to_string(), ..Default::default() };
+        assert_eq!(
+            menu_highlight_style(pal, &classic, 0),
+            Style::default().add_modifier(Modifier::REVERSED),
+            "classic is exactly today's dropdown look"
+        );
+    }
 
     /// Five tabs of 10 columns each.
     const W: [u16; 5] = [10, 10, 10, 10, 10];

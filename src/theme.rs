@@ -135,6 +135,15 @@ pub struct Palette {
     pub handle_stripes: [Color; 6],
 }
 
+/// Rec. 601 luma, integer arithmetic so this stays usable in a const context later if it needs
+/// to be. Written once and read by both `Palette::needs_its_own_background` and `readable_on`,
+/// because "how light is this colour" is one question and the two of them asking it slightly
+/// differently — a rounding tweak in one, forgotten in the other — is exactly how a theme ends up
+/// dark text on dark stripes on somebody's screen and not on the author's.
+fn luma(r: u8, g: u8, b: u8) -> u32 {
+    (299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000
+}
+
 impl Palette {
     /// Whether this palette's text can be read on a background that is not its own.
     ///
@@ -145,14 +154,28 @@ impl Palette {
     pub fn needs_its_own_background(self) -> bool {
         match self.text {
             // Named colours are the terminal's own, and follow it wherever it goes.
-            Color::Rgb(r, g, b) => {
-                // Rec. 601 luma, integer arithmetic so this stays usable in a const context
-                // later if it needs to be. Half-bright is the line: below it the text is being
-                // drawn for paper.
-                (299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000 < 128
-            }
+            // Half-bright is the line: below it the text is being drawn for paper.
+            Color::Rgb(r, g, b) => luma(r, g, b) < 128,
             _ => false,
         }
+    }
+}
+
+/// The other end of the same question `needs_its_own_background` asks: given a colour someone
+/// else chose — not a theme's own text over its own surface, but a background picked at
+/// runtime, such as one of the six `handle_stripes` under the menu carousel's cursor — what text
+/// colour reads on it.
+///
+/// Same formula, same half-bright line at 128, so a stripe that counts as "light" here is the
+/// same stripe that would have made a theme paint its own background above. Every stripe this
+/// editor ships is stated in RGB, so the fallback below is a guard against a colour nobody has
+/// written yet, not a path anything takes today.
+pub fn readable_on(colour: Color) -> Color {
+    match colour {
+        Color::Rgb(r, g, b) => {
+            if luma(r, g, b) >= 128 { Color::Black } else { Color::White }
+        }
+        _ => Color::White,
     }
 }
 
@@ -868,6 +891,16 @@ mod tests {
                 Color::Rgb(0x00, 0x9D, 0xDC),
             ]
         );
+    }
+
+    /// The two stripes the menu carousel test leans on hardest: the default theme's yellow, light
+    /// enough that white text on it would be the classic contrast failure, and its purple, dark
+    /// enough that black text on it would be the same failure the other way round.
+    #[test]
+    fn readable_on_picks_black_for_yellow_and_white_for_purple() {
+        let stripes = Theme::CleeCode.palette().handle_stripes;
+        assert_eq!(readable_on(stripes[1]), Color::Black, "the yellow stripe wants black text");
+        assert_eq!(readable_on(stripes[4]), Color::White, "the purple stripe wants white text");
     }
 
     /// Every theme names a syntect theme that syntect actually has. A typo here would fall back
