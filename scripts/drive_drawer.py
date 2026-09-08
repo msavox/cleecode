@@ -42,7 +42,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pty_drive import Report, Session, binary_from_argv  # noqa: E402
+from pty_drive import Report, Session, cell_lit, binary_from_argv  # noqa: E402
 
 # Stubbed, so the launcher can start them and the process table can be asked about them.
 INSTALLED = ["claude", "codex"]
@@ -452,9 +452,10 @@ def menu_action(session, menu_letter, label, report, note):
     """Runs a menu item by name: open the bar, jump to the menu by its first letter, walk down to
     the row and press Enter.
 
-    The walk is measured against the highlight actually on screen — the selected row is drawn
-    reversed — rather than by counting items in the source, so a menu that grows an entry does
-    not silently make this press the wrong one."""
+    The walk is measured against the highlight actually on screen — the selected row wears a
+    carousel stripe, or reverse video under the classic setting (see `pty_drive.cell_lit`) —
+    rather than by counting items in the source, so a menu that grows an entry does not
+    silently make this press the wrong one."""
     if not session.press(session.chord("b"), lambda s: "View" in s.text(), 4):
         report.check(f"the menu bar opens for {label}", False, session)
         return False
@@ -467,14 +468,20 @@ def menu_action(session, menu_letter, label, report, note):
         want = session.row_of(label)
         if want is None:
             break
-        # Only inside the dropdown. The open menu's own title on the top row is drawn reversed
-        # too, and taking the first reversed row on screen found that one every time — a walk
-        # that never arrived because it was measuring from somewhere else entirely.
+        # Only inside the dropdown, bounded on both sides. The open menu's own title on the
+        # top row is lit too, and taking the first lit row on screen found that one every
+        # time — a walk that never arrived because it was measuring from somewhere else
+        # entirely. The right border matters now for the same reason: the drawer's handle at
+        # the screen's edge wears the very stripes the carousel highlight is read by, and a
+        # scan that ran to the end of the row would find a band of the handle on every line.
         row = session.full_line(want)
         left = row.rfind("\u2502", 0, row.index(label))
+        right = row.find("\u2502", row.index(label) + len(label))
+        if right < 0:
+            right = session.cols
         here = next(
             (y for y in range(1, session.rows)
-             if any(c.reverse for c in session.cells(y)[max(left, 0):])),
+             if any(cell_lit(c) for c in session.cells(y)[max(left, 0) + 1:right])),
             None,
         )
         if here is None:

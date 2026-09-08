@@ -22,7 +22,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pty_drive import Report, Session, binary_from_argv  # noqa: E402
+from pty_drive import Report, Session, STRIPES, binary_from_argv  # noqa: E402
 
 SAMPLE = """fn configure_pipeline() {
     let config_path = 1;
@@ -329,13 +329,6 @@ def label_spot(session, label):
     """Where `label` sits on screen, as (row, col), or None."""
     return next(((y, line.index(label)) for y, line in enumerate(session.lines())
                  if label in line), None)
-
-
-# The six handle stripes of the default theme, in the hex pyte spells a truecolor
-# background — the same 1977 rainbow theme.rs states in RGB. Quoted rather than asked for,
-# for the reason the theme's own test quotes it: a witness that read the values out of the
-# binary would be testing the theme against itself.
-STRIPES = {"61bb46", "fdb827", "f5821f", "e03a3e", "963d97", "009ddc"}
 
 
 def label_lit(session, label):
