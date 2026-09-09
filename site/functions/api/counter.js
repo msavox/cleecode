@@ -27,15 +27,21 @@
  *   4. users = sum of the five family maxima.
  *
  * The GitHub call is slow, rate-limited, and pointless to repeat on every
- * page load, so the result sits in KV for 6 hours (key users_est). A visit
- * inside that window reads the cache; GitHub is only asked when it expires,
- * and if that ask fails, users is simply left out of the response — visits
- * and unique must never depend on GitHub being reachable.
+ * page load, so the result sits in KV (key users_est) with its timestamp.
+ * The entry never expires: past its 6-hour freshness window a refresh is
+ * attempted, but if GitHub can't be reached the stale value is served
+ * anyway — the counter may lag, it must never vanish. visits and unique
+ * never depend on GitHub being reachable.
+ *
+ * Unauthenticated GitHub API calls are limited to 60/hour per IP, and Pages
+ * Functions egress from shared Cloudflare IPs where that budget is always
+ * exhausted — so a GITHUB_TOKEN secret (read-only, public repo) should be
+ * set on the Pages project to get a per-token 5000/hour limit instead.
  */
 
 const GITHUB_REPO = 'msavox/cleecode'
 const USERS_CACHE_KEY = 'users_est'
-const USERS_CACHE_TTL = 6 * 60 * 60 // seconds
+const USERS_FRESH_MS = 6 * 60 * 60 * 1000 // refresh from GitHub past this age
 
 const FAMILY_PATTERNS = {
   linux:   /linux-.*\.tar\.gz$/,
@@ -45,12 +51,14 @@ const FAMILY_PATTERNS = {
   brew:    /-src\.tar\.gz$/,
 }
 
-async function fetchAllReleases() {
+async function fetchAllReleases(env) {
+  const headers = { 'User-Agent': 'cleecode-site' } // GitHub's API 4xxs any request without one
+  if (env.GITHUB_TOKEN) headers['Authorization'] = 'Bearer ' + env.GITHUB_TOKEN
   const releases = []
   for (let page = 1; ; page++) {
     const res = await fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}`,
-      { headers: { 'User-Agent': 'cleecode-site' } } // GitHub's API 4xxs any request without one
+      { headers }
     )
     if (!res.ok) throw new Error('github releases fetch failed: ' + res.status)
     const batch = await res.json()
@@ -84,30 +92,34 @@ function estimateUsers(releases) {
   return users
 }
 
-// Shared by GET and POST. Reads the live cache if KV still holds it;
-// otherwise recomputes from GitHub and refreshes the cache. Never throws —
-// returns undefined when there is no live cache and GitHub can't be reached,
-// so the caller can simply omit users from the response.
+// Shared by GET and POST. Serves the cached value while it's fresh; past the
+// freshness window it asks GitHub again, but a failed refresh falls back to
+// the stale value rather than dropping users. Never throws — returns
+// undefined only when there is no cached value at all AND GitHub can't be
+// reached, so the caller can simply omit users from the response.
 async function getUsersEstimate(env) {
+  let stale
   const cached = await env.COUNTER.get(USERS_CACHE_KEY)
   if (cached) {
     try {
       const parsed = JSON.parse(cached)
-      if (typeof parsed.users === 'number') return parsed.users
+      if (typeof parsed.users === 'number') {
+        if (Date.now() - Date.parse(parsed.at || 0) < USERS_FRESH_MS) return parsed.users
+        stale = parsed.users
+      }
     } catch {
       // corrupt entry — fall through and recompute
     }
   }
   try {
-    const users = estimateUsers(await fetchAllReleases())
+    const users = estimateUsers(await fetchAllReleases(env))
     await env.COUNTER.put(
       USERS_CACHE_KEY,
-      JSON.stringify({ users, at: new Date().toISOString() }),
-      { expirationTtl: USERS_CACHE_TTL }
+      JSON.stringify({ users, at: new Date().toISOString() })
     )
     return users
   } catch {
-    return undefined
+    return stale
   }
 }
 
