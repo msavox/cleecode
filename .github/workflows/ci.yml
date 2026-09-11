@@ -103,7 +103,7 @@ jobs:
           git config --global user.email ci@cleecode.invalid
           git config --global user.name "CleeCode CI"
           git config --global init.defaultBranch master
-      # These eight are the deterministic subset: no Octave, no matplotlib, no display. The rest
+      # These are the deterministic subset: no Octave, no matplotlib, no display. The rest
       # (drive_cells, drive_workspace, drive_figures, drive_presets, drive_inspect, drive_debug,
       # drive_python) need real interpreters and stay manual for now — each is its own step so a
       # failure names itself rather than hiding in a combined log.
@@ -124,6 +124,9 @@ jobs:
       # and on a runner where none of the four is, its "not installed" checks run rather than
       # skip, which is the half a developer's laptop usually cannot exercise.
       - run: python3 scripts/drive_drawer.py target/debug/clee
+      # Two throwaway folders and a workspace file: which one a session opens in is readable off
+      # the file tree, and nothing needs to be installed to read it.
+      - run: python3 scripts/drive_root.py target/debug/clee
       # Debugs a C program it compiles itself, through the real adapter: it skips with a sentence
       # on ubuntu-22.04, whose gdb is 12 and has no DAP in it, and runs for real on macos-14, where
       # Xcode's lldb-dap answers.

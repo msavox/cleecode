@@ -10,6 +10,7 @@ clee \- terminal IDE with a file tree, embedded terminals and syntax highlightin
 .br
 .B clee
 .BR \-w " " \fINAME\fR
+.RI [ DIRECTORY ]
 .br
 .B clee
 .BR \-e " " \fIFILE\fR
@@ -32,8 +33,10 @@ puts an editor, a file tree and real terminals in one window. The terminals are 
 and anything else interactive works inside them.
 .PP
 Everything is reachable from the keyboard; the mouse is an alternative, never the only way. With
-no argument the last project folder and its open files are restored. A directory argument becomes
-the project root; a file argument is opened in the current directory. A bare
+no argument the project is the directory the command was run in, and the files you had open there
+last time come back with it \(em they come back only in the folder they belong to. A directory
+argument becomes the project root, wherever else it sits on the command line; a file argument is
+opened in the current directory. A bare
 .B clee
 never reopens a saved workspace \(em that is always a deliberate act, with
 .B \-w
@@ -50,6 +53,12 @@ Open a saved workspace: its project root, open files, frame sizes and terminals,
 shell's startup command run for it. With no
 .I NAME
 it lists the workspaces you have and exits.
+.IP
+A directory given as well \(em
+.BR "clee \-w work ." ,
+in either order \(em opens that set-up in that directory instead of the root the workspace was
+saved in: the frames, the shells and their startup commands come over, the files do not, since
+they belong to the project you are not in. A file given as well is opened inside the workspace.
 .TP
 .B \-\-install\-font
 Install the bundled CleeCodeMono Nerd Font for the current user, so the file tree's icons render.

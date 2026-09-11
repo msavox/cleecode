@@ -47,7 +47,7 @@ class Session:
     """A CleeCode running in a pty, with a rendered picture of its screen."""
 
     def __init__(self, binary, root, env=None, args=None, cols=COLS, rows=ROWS,
-                 keep_recovery=False):
+                 keep_recovery=False, project="."):
         # Its own config directory, inside the throwaway project. Without this a driver reads the
         # settings of whoever is running it — so a check would depend on whether they happen to
         # have turned the feature off — and CleeCode's resume would reopen their last project
@@ -85,7 +85,13 @@ class Session:
             os.environ.update(env or {})
             os.chdir(root)
             try:
-                os.execv(binary, [binary] + list(args or []) + ["."])
+                # `project` is the path argument, `.` for every driver that wants the fixture it
+                # is standing in — which is all of them but one. `project=None` leaves it off, so
+                # a check can see what CleeCode does when nobody said where: that is a different
+                # question from "the current directory", and the two have different answers next
+                # to `-w`.
+                tail = [] if project is None else [project]
+                os.execv(binary, [binary] + list(args or []) + tail)
             finally:
                 # execv only returns if it failed, and a child falling through here would go on
                 # running the rest of the driver as though it were the driver.
