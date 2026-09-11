@@ -118,10 +118,12 @@ const USAGE: &str = "\
 clee — CleeCode, a terminal IDE: an editor, a file tree and real terminals in one window.
 
 USAGE:
-    clee [FILE|DIRECTORY]   a directory becomes the project root; a file opens in the
-                            current one. With no argument, the last project and its open
-                            files come back.
-    clee -w NAME            open a saved workspace
+    clee [FILE|DIRECTORY]   a directory becomes the project root, wherever it sits on the
+                            line; a file opens in the current one. With no argument, the
+                            project is the directory you are standing in, and the files
+                            you had open there come back with it.
+    clee -w NAME            open a saved workspace, in the folder it was saved in
+    clee -w NAME .          the same set-up, in the folder you are standing in
     clee -e FILE            open just that file, with everything else hidden
 
 OPTIONS:
@@ -130,7 +132,9 @@ OPTIONS:
                           become the state you come back to.
     -w, --workspace NAME  Open a workspace: its root, files, frame sizes and terminals,
                           each shell running the command it was given. With no NAME,
-                          lists the ones you have.
+                          lists the ones you have. A directory on the same line — in
+                          either position — opens that set-up there instead, keeping the
+                          frames and the shells and leaving the saved root behind.
     --install-font        Install the bundled Nerd Font, so the file tree icons render.
     --install-app         macOS: put a CleeCode launcher in /Applications, so it can live
                           in the Dock and be the app that opens a file or a folder.
@@ -337,6 +341,10 @@ fn main() -> Result<()> {
             }
         }
     }
+    // Read here, next to the flags, rather than from `env::args` down in `run`: the flag values
+    // are known here, and a path is only a path once `-w`'s name and `-e`'s file are out of the
+    // way.
+    let path_arg = positional_path(&args);
     install_panic_hook();
     // Not `ratatui::init()`, which writes to a bare `Stdout` — and Rust's `Stdout` is line
     // buffered, so a payload with no newlines in it leaves in 8 KB pieces. That is exactly
@@ -403,7 +411,7 @@ fn main() -> Result<()> {
     let _ = stdout().flush();
     // Even a panic the loop couldn't shield must not skip the teardown below: leaving the
     // terminal in raw mode on the alternate screen hands the user an unusable shell.
-    let result = shielded(|| run(&mut terminal, open_workspace, edit_file, resume));
+    let result = shielded(|| run(&mut terminal, open_workspace, edit_file, path_arg, resume));
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.
@@ -422,30 +430,73 @@ fn main() -> Result<()> {
     }
 }
 
+/// The path typed on the command line, wherever it sits among the flags.
+///
+/// Not `args[0]`: `clee -w work .` and `clee . -w work` are the same request, and the first
+/// spelling is the one that reads naturally — the flag, then where to apply it. Only the values
+/// of the two flags that take one are stepped over, so `-e notes.md` is not also read as a
+/// project directory; everything beginning with a dash is a flag and none of our business here.
+fn positional_path(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut is_value = false;
+    for a in args {
+        if std::mem::take(&mut is_value) {
+            continue;
+        }
+        if matches!(a.as_str(), "-e" | "--edit" | "-edit" | "-w" | "--workspace") {
+            is_value = true;
+            continue;
+        }
+        if !a.starts_with('-') {
+            return Some(std::path::PathBuf::from(a));
+        }
+    }
+    None
+}
+
+/// A saved workspace as it applies in `root`.
+///
+/// A workspace file pins the project it was saved in, and that is usually the point: `clee -w
+/// work` from anywhere is how you get back to it. A directory typed alongside says otherwise —
+/// open this set-up *here* — and then the files the workspace remembers belong to a project you
+/// are not in. They stay behind, along with the root; the shape comes over: frames, shells and
+/// their startup commands, the drawer.
+///
+/// Paths are compared after resolving symlinks, since the saved root was written that way and the
+/// one you typed may not be — `.` least of all.
+fn rerooted(mut ws: workspace::Workspace, root: &std::path::Path) -> workspace::Workspace {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    let here = real(root);
+    if real(&ws.root) == here {
+        return ws;
+    }
+    ws.root = root.to_path_buf();
+    ws.open_files.retain(|p| real(p).starts_with(&here));
+    ws.active_file = ws.active_file.filter(|p| real(p).starts_with(&here));
+    // The same question the files answer: a debuggee is a path in the old project.
+    ws.debuggee = ws.debuggee.filter(|p| real(p).starts_with(&here));
+    ws
+}
+
 fn run(
     terminal: &mut BufferedTerminal,
     open_workspace: Option<String>,
     edit_file: Option<std::path::PathBuf>,
+    path_arg: Option<std::path::PathBuf>,
     resume: bool,
 ) -> Result<()> {
     let size = terminal.size()?;
     let cwd = std::env::current_dir()?;
-    // Only a real path counts. Without the filter `clee --resume` would take its own flag
-    // for a file name and try to open it — the other flags never get this far, but this one
-    // is passed through to here.
-    let arg = std::env::args()
-        .nth(1)
-        .filter(|a| !a.starts_with('-'))
-        .map(std::path::PathBuf::from);
+    let arg = path_arg;
     let arg_is_dir = arg.as_ref().map(|p| p.is_dir()).unwrap_or(false);
 
     // Resume the last workspace (project folder + open tabs) when launched with no
     // explicit argument; an argument always takes precedence and starts fresh. A directory
     // argument becomes the project root; a file argument is opened within the current dir.
     let saved = Settings::load();
-    // `-w name` is an explicit request, so it beats both the resume and a path argument. Falling
-    // back to the resume when the name is unknown would silently open the wrong thing, so a bad
-    // name simply opens nothing and says so once the UI is up.
+    // `-w name` is an explicit request, so it beats the resume. A directory typed alongside it
+    // is more explicit still and wins over the root the workspace file pins — see `rerooted`.
+    // Falling back to the resume when the name is unknown would silently open the wrong thing,
+    // so a bad name simply opens nothing and says so once the UI is up.
     // Looked up on disk whatever the name is, built-ins included: a file of the user's own wins,
     // and the built-in answers only when there is no file. A built-in is documented and can be
     // had again; a workspace somebody saved cannot. Built-ins are not files anyway, so the one
@@ -467,10 +518,15 @@ fn run(
             .and_then(|f| f.parent().map(|p| p.to_path_buf()))
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| cwd.clone()),
+        // A directory you typed is the project, whatever else is on the line. It comes before the
+        // workspace arm on purpose: `clee -w work .` says open that set-up *here*, and a
+        // workspace that dragged its saved root along would land you in yesterday's project with
+        // the directory you were standing in ignored. `.` is how you say it, and it works in any
+        // position — `clee . -w work` too.
+        Some(p) if p.is_dir() => p.clone(),
         _ if resumed.is_some() && named.is_some() => {
             resumed.as_ref().map(|w| w.root.clone()).filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
         }
-        Some(p) if p.is_dir() => p.clone(),
         Some(_) => cwd.clone(),
         // Started from the Dock, where there is no directory you were standing in: the last
         // project is the only sensible answer, and it makes the restore below match.
@@ -511,7 +567,11 @@ fn run(
         Some((name, found)) => {
             match found {
                 Some(ws) => {
-                    app.apply_workspace(ws);
+                    // `app.root` is already the answer the match above settled — the workspace's
+                    // own root, or the directory typed next to `-w`. Handing the workspace over
+                    // as it came would undo that: `apply_workspace` sets the root from the file.
+                    let here = app.root.clone();
+                    app.apply_workspace(rerooted(ws, &here));
                     if let Some(built_in) = workspace::built_in_named(&name) {
                         app.status_message = i18n::msg_workspace_shadows(app.settings.lang, built_in);
                     }
@@ -538,6 +598,15 @@ fn run(
         }
         None => false,
     };
+
+    // A file typed next to `-w` is still a file to open: the workspace decided the shape and the
+    // project, and the argument is what you want in front of you inside it. Not in minimal mode,
+    // where `-e` has already opened the one file the session is about.
+    if opened_by_name && edit_file.is_none() && !arg_is_dir {
+        if let Some(path) = arg.clone() {
+            app.open_file_in_tab(path);
+        }
+    }
 
     if !opened_by_name {
         match arg {
@@ -774,6 +843,64 @@ mod tests {
 
         // The step after a caught panic still runs: this is what "the session survives" means.
         assert_eq!(shielded(|| "still here"), Ok("still here"));
+    }
+
+    fn argv(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// The whole point of reading the path separately from the flags: `clee -w work .` is a
+    /// sentence, and the directory in it is the directory — not the workspace's name, and not
+    /// something only `args[0]` is allowed to be.
+    #[test]
+    fn the_path_is_found_wherever_it_sits_among_the_flags() {
+        assert_eq!(positional_path(&argv("-w work .")), Some(".".into()));
+        assert_eq!(positional_path(&argv(". -w work")), Some(".".into()));
+        assert_eq!(positional_path(&argv("src/main.rs")), Some("src/main.rs".into()));
+        assert_eq!(positional_path(&argv("--resume")), None);
+        // `-w`'s name and `-e`'s file are values, not paths: reading either as a project
+        // directory is how `clee -w work` used to open a folder called "work".
+        assert_eq!(positional_path(&argv("-w work")), None);
+        assert_eq!(positional_path(&argv("-e notes.md")), None);
+        assert_eq!(positional_path(&argv("-e notes.md .")), Some(".".into()));
+    }
+
+    /// A workspace applied somewhere else brings its shape and leaves the old project's files
+    /// behind — they are not in the folder you asked for, and opening them would put somebody
+    /// else's work in front of you under this project's name.
+    #[test]
+    fn a_workspace_opened_elsewhere_keeps_the_shape_and_drops_the_files() {
+        let dir = std::env::temp_dir();
+        let ws = workspace::Workspace {
+            root: std::path::PathBuf::from("/nowhere/old-project"),
+            open_files: vec!["/nowhere/old-project/a.rs".into()],
+            active_file: Some("/nowhere/old-project/a.rs".into()),
+            debuggee: Some("/nowhere/old-project/target/app".into()),
+            ..workspace::built_in(
+                "octave",
+                &workspace::Shape {
+                    root: std::path::PathBuf::from("/nowhere/old-project"),
+                    cols: 120,
+                    python: "python3".into(),
+                    workspace_view: None,
+                },
+            )
+            .expect("built-in")
+        };
+        let terminals = ws.terminals.clone();
+
+        let moved = rerooted(ws.clone(), &dir);
+        assert_eq!(moved.root, dir);
+        assert!(moved.open_files.is_empty(), "the old project's files stay behind");
+        assert_eq!(moved.active_file, None);
+        assert_eq!(moved.debuggee, None);
+        assert_eq!(moved.terminals, terminals, "the shells come over");
+        assert_eq!(moved.layout, ws.layout);
+
+        // Same root, nothing to move: the files are the ones that belong here.
+        let home = rerooted(ws.clone(), &ws.root);
+        assert_eq!(home.open_files, ws.open_files);
+        assert_eq!(home.active_file, ws.active_file);
     }
 
     /// `shielded` reads what the hook recorded; with no hook installed there is nothing to read,
