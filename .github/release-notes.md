@@ -1,3 +1,15 @@
+## What's new in 0.26.2
+
+**A workspace can be opened where you are standing.** A saved workspace remembers the project
+it was saved in, and `clee -w work` still goes back to it — that is what makes a workspace a
+way to return to a project. What was missing was the other half: `clee -w work .` now opens
+that set-up *here*, in the directory you typed the command in. The shape comes over — the
+frames, the terminal windows and each shell's startup command, the agent drawer — and the
+saved project's files stay behind, because they are files in a folder you are not in. The
+directory can go in either position: `clee . -w work` is the same request. Until now the path
+was only read as the first argument, so anything typed alongside a flag was silently ignored
+and the workspace's own root always won.
+
 ## What's new in 0.26.1
 
 **Menus wear the carousel.** The row under the cursor — in the bar's dropdowns, the
