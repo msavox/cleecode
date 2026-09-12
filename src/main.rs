@@ -539,6 +539,17 @@ fn run(
         None => cwd.clone(),
     };
 
+    // Resolved once, here, before anything is built on it. A root typed as `.` or `./` — or as any
+    // relative name, `clee src` — is the right folder with a spelling that cannot name what is
+    // above it: `Path::new(".").parent()` is the empty path, so the drawer showed its ".." row,
+    // walked into nothing and left the tree blank, the project apparently sealed inside the folder
+    // it was opened in. Everything downstream reads this one value — the tree's parent, git, the
+    // project settings, the root a workspace writes down — so the fix belongs where the answer is
+    // settled and not at each of them. `canonicalize` rather than `absolute`: every arm above
+    // yields a directory that exists, and the saved roots this is later compared against were
+    // written resolved the same way.
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+
     let mut app = App::new(root, size.height, size.width)?;
 
     // Launched with an explicit file/folder: skip the splash and go straight to work. A named

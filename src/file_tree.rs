@@ -175,11 +175,20 @@ impl FileTree {
     }
 
     pub fn has_parent(&self) -> bool {
-        self.root.path.parent().is_some()
+        self.parent_dir().is_some()
     }
 
+    /// The folder one level up, or None at the top — and None, too, for a root whose spelling has
+    /// no level up to name. `Path::parent` answers the empty path for a relative root of a single
+    /// component (`.`, `src`), which is not a directory anyone can read: offered as a ".." row it
+    /// gave a tree with no root and no way back. Asked through here by `has_parent`, so the row
+    /// only ever appears where it leads somewhere.
     pub fn parent_dir(&self) -> Option<PathBuf> {
-        self.root.path.parent().map(|p| p.to_path_buf())
+        self.root
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
     }
 
     pub fn rebuild_visible(&mut self) {
@@ -484,5 +493,19 @@ mod tests {
         assert!(tree.visible[0].is_up);
         assert_eq!(tree.parent_dir(), dir.parent().map(|p| p.to_path_buf()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `.` and a bare folder name have the empty path as their parent, which reads as no
+    /// directory at all. The row offering to walk up there must not be drawn: following it
+    /// emptied the drawer and left no way back into the project.
+    #[test]
+    fn no_up_row_for_a_relative_root_with_nothing_above_it() {
+        for root in [".", "./", "src"] {
+            let tree = FileTree::new(PathBuf::from(root), true);
+            assert!(!tree.has_parent(), "{root:?} claims a parent");
+            assert_eq!(tree.parent_dir(), None, "{root:?}");
+            assert!(!tree.visible.iter().any(|e| e.is_up), "{root:?} drew a \"..\" row");
+            assert!(!tree.visible.is_empty(), "{root:?} listed nothing");
+        }
     }
 }
