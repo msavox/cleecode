@@ -1,3 +1,16 @@
+## What's new in 0.26.3
+
+**`..` leads somewhere again.** A session started as `clee .` — which is how you open the folder
+you are standing in, and how the launcher and every shell alias open one — arrived at a project
+that could not be left: the drawer showed its `..` row, and following it emptied the tree and took
+the row away with it, so the sidebar sat blank with no way back into the folder. A root spelled
+relatively is the right folder under a name that cannot say what is above it, and the parent of
+`.` is not a directory at all. The folder typed on the command line is now resolved once, where it
+is decided, so everything built on it — the tree's way up, git, the project settings, the root a
+workspace writes down — is given a path that can be climbed. The same goes for `clee src` and any
+other relative name. And the `..` row is now only drawn where it leads somewhere, whoever handed
+the tree its root.
+
 ## What's new in 0.26.2
 
 **A workspace can be opened where you are standing.** A saved workspace remembers the project
