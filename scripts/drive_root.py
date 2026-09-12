@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Which folder a session opens in, when a workspace has an opinion about it.
+"""Which folder a session opens in, and whether it can be left.
 
     python3 scripts/drive_root.py [path/to/clee]
 
 A saved workspace pins the project it was saved in, and `clee -w work` from anywhere is how you
 get back to it. A directory typed on the same line says otherwise — open this set-up *here* — and
 the two must not be the same command: the shape comes over either way, the root does not.
+
+Then the way out of whatever root was settled on. `clee .` is how a session is started from the
+folder you are in — it is how every driver here starts one — and the root it arrived at has to be
+a folder that knows what is above it: the drawer's ".." row is the door, and a door that opens
+onto an empty tree is a project sealed in the directory it was opened from.
 
 Needs nothing installed. The fixture is two throwaway folders with one file each, so which root
 won is readable straight off the file tree.
@@ -92,7 +97,44 @@ def main():
     finally:
         session.close()
 
+    # `clee .` — and then back out of it through the drawer. A root spelled relatively is the
+    # same folder by a name with nothing above it, which is how ".." came to lead nowhere.
+    saved, here = fixture()
+    session = Session(binary, here, project=".")
+    try:
+        session.wait(tree_settled, timeout=20)
+        report.check("the folder typed as `.` is the project", "mine.rs" in session.text(), session)
+        row = up_row(session)
+        report.check("the drawer offers the way up", row is not None, session)
+        if row is not None:
+            double_click(session, 4, row)
+            # Up one level is the folder holding both projects, so the sibling is the proof: it
+            # is the one name that cannot be on screen while the old root still stands.
+            climbed = session.wait(lambda s: "saved-project" in s.text(), 10)
+            report.check("\"..\" walks up to the folder above", climbed, session)
+            report.check("and the tree is still a tree", "where-i-stand" in session.text(), session)
+    finally:
+        session.close()
+
     return report.finish()
+
+
+def up_row(session):
+    """Screen row of the drawer's ".." entry, or None if it is not being offered."""
+    for i, line in enumerate(session.lines()):
+        # Past the drawer's own border, and no further than its column: a "`..`" anywhere else on
+        # screen — in a terminal, in a file — is not the row being looked for.
+        if line[1:24].strip().startswith(".."):
+            return i
+    return None
+
+
+def double_click(session, col, row):
+    """Two presses inside `DOUBLE_CLICK_THRESHOLD` — what reroots the tree, single click toggles."""
+    for _ in range(2):
+        session.send(f"\x1b[<0;{col + 1};{row + 1}M")
+        session.send(f"\x1b[<0;{col + 1};{row + 1}m")
+        session.drain()
 
 
 if __name__ == "__main__":
