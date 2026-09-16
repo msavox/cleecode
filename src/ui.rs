@@ -1,4 +1,4 @@
-use crate::app::{App, EditorPane, Focus};
+use crate::app::{App, EditorPane, Focus, SidebarPane};
 use crate::i18n::{self, Key, Lang};
 use crate::keymap::{self, Keymap};
 use crate::menu::{self, ContextMenu, MenuBar};
@@ -19,6 +19,20 @@ use std::time::Duration;
 pub struct Areas {
     pub menu_bar: Rect,
     pub sidebar: Option<Rect>,
+    /// The handle that brings the shell half back, on the sidebar's bottom border while the half
+    /// is put away.
+    ///
+    /// A closed pane with no way back on screen is not closed, it is gone: the row that hides it
+    /// lives in its own context menu, and once it is hidden there is nothing left to right-click.
+    /// The agent drawer answers this with its ribbon; this is the same answer, one row tall.
+    pub shell_handle: Option<Rect>,
+    /// The shell half, carved off the bottom of `sidebar`.
+    ///
+    /// `sidebar` stays the whole column rather than shrinking to the tree: everything that asks
+    /// "did this happen in the sidebar" — the context menu, the width seam, the focus click —
+    /// means the column, and a field that quietly stopped covering its own bottom rows would
+    /// have made each of those wrong in a different way.
+    pub shell: Option<Rect>,
     pub editor: Rect,
     pub terminals: Option<Vec<Rect>>,
     /// The agent drawer's column, when it is open **and pinned**. Always the rightmost thing in
@@ -95,6 +109,9 @@ pub struct LayoutParams {
     /// dragged. Its length is the window count.
     pub terminal_weights: Vec<u16>,
     pub sidebar_width: u16,
+    /// Whether the sidebar carries its shell half, and how many rows it takes when it does.
+    pub show_shell_pane: bool,
+    pub shell_pane_rows: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
     /// Whether the agent drawer has a column of its own right now.
@@ -117,6 +134,8 @@ impl LayoutParams {
             menu_active: app.menu.active,
             terminal_weights: app.terminals.iter().map(|w| w.weight).collect(),
             sidebar_width: app.settings.sidebar_width,
+            show_shell_pane: app.settings.show_shell_pane,
+            shell_pane_rows: app.settings.shell_pane_rows,
             terminal_pct: app.settings.terminal_pct,
             terminal_on_right: app.settings.terminal_on_right,
             drawer_open: app.drawer.as_ref().is_some_and(|d| d.open),
@@ -157,6 +176,48 @@ fn debug_split(main: Rect) -> (Rect, Option<Rect>) {
 
 /// Tiles the terminal region into one pane per window, sized by relative weight so a dragged seam
 /// can give one window more room than its neighbours.
+/// The shell half, carved off the bottom of the sidebar column.
+///
+/// It gives way rather than insisting. In a short window an insistent pane would leave the tree
+/// above it a border, a border and nothing in between — and a pane that squeezes the thing it is
+/// beside out of existence is worse than one that waits for the window to be tall enough. The
+/// floor it leaves the tree is the same three rows it needs itself: border, one name, border.
+fn shell_half(sidebar: Option<Rect>, show: bool, rows: u16) -> Option<Rect> {
+    let sidebar = sidebar?;
+    if !show {
+        return None;
+    }
+    let rows = rows.min(sidebar.height.saturating_sub(3));
+    if rows < 3 {
+        return None;
+    }
+    Some(Rect::new(sidebar.x, sidebar.y + sidebar.height - rows, sidebar.width, rows))
+}
+
+/// The three cells on the sidebar's bottom border that bring the shell half back.
+///
+/// Only while it is away — with the half up, that border belongs to the half and the seam above
+/// it is what a hand reaches for. Centred, and the same three cells are what gets drawn and what
+/// gets clicked, so there is nothing to keep in step between the two.
+fn shell_handle(sidebar: Option<Rect>, show: bool) -> Option<Rect> {
+    let sidebar = sidebar?;
+    if show || sidebar.height < 3 || sidebar.width < HANDLE_WIDTH + 2 {
+        return None;
+    }
+    Some(Rect::new(
+        sidebar.x + (sidebar.width - HANDLE_WIDTH) / 2,
+        sidebar.y + sidebar.height - 1,
+        HANDLE_WIDTH,
+        1,
+    ))
+}
+
+/// What the handle says, and therefore how wide it is: the same cells are drawn and clicked, so
+/// there is nothing to keep in step between the two. The mark is the direction the half opens
+/// from that edge — upward, into the room the tree is holding.
+const HANDLE_LABEL: &str = " \u{25b4} Shell ";
+const HANDLE_WIDTH: u16 = 9;
+
 fn terminal_panes(area: Rect, weights: &[u16], direction: Direction) -> Vec<Rect> {
     let constraints: Vec<Constraint> = if weights.is_empty() {
         vec![Constraint::Fill(1)]
@@ -395,6 +456,8 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         Areas {
             menu_bar,
             sidebar,
+            shell: shell_half(sidebar, p.show_shell_pane, p.shell_pane_rows),
+            shell_handle: shell_handle(sidebar, p.show_shell_pane),
             editor,
             terminals,
             drawer,
@@ -427,6 +490,8 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         Areas {
             menu_bar,
             sidebar,
+            shell: shell_half(sidebar, p.show_shell_pane, p.shell_pane_rows),
+            shell_handle: shell_handle(sidebar, p.show_shell_pane),
             editor,
             terminals,
             drawer,
@@ -1390,7 +1455,23 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     let areas = compute_layout(f.area(), &params);
 
     if let Some(sidebar_area) = areas.sidebar {
-        draw_file_tree(f, app, sidebar_area);
+        // The layout is the authority on which halves exist: in a short window the shell half
+        // stands down, and the keyboard cannot be left in a pane that is not being drawn.
+        if areas.shell.is_none() {
+            app.sidebar_pane_focus = SidebarPane::Tree;
+        }
+        // The tree keeps the column minus whatever the shell half took off the bottom of it.
+        let tree_area = match areas.shell {
+            Some(shell) => Rect { height: sidebar_area.height - shell.height, ..sidebar_area },
+            None => sidebar_area,
+        };
+        draw_file_tree(f, app, tree_area);
+        if let Some(shell) = areas.shell {
+            draw_shell_list(f, app, shell);
+        }
+        if let Some(handle) = areas.shell_handle {
+            draw_shell_handle(f, app.palette(), handle, app.layout_resize_active());
+        }
     }
 
     draw_editor(f, app, areas.editor);
@@ -3845,7 +3926,9 @@ fn tree_row_name(indent: &str, name: &str, inner_width: usize) -> (String, usize
 
 fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let pal = app.palette();
-    let focused = app.focus == Focus::FileTree;
+    // The sidebar holds the keyboard, and one of its two halves holds it in turn. Only the half
+    // the arrows are actually moving wears the lit border, or both would claim it at once.
+    let focused = app.focus == Focus::FileTree && app.sidebar_pane_focus == SidebarPane::Tree;
     let block = Block::default()
         .title(format!(" {} ", i18n::t(app.settings.lang, Key::PanelFile)))
         .borders(Borders::ALL)
@@ -3895,6 +3978,114 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// The handle that brings the shell half back: its name written into the sidebar's bottom
+/// border, the way every panel here wears its name on the border above it.
+///
+/// A title rather than a button, and in the border's own colour rather than in the accent. It
+/// was a coloured pill first, which is the shape the agent drawer's ribbon uses — but that one
+/// rides a column of its own, with nothing around it to clash with, while this sits in the
+/// middle of a line the eye reads as an edge. What belongs on a border in this app is a name.
+fn draw_shell_handle(f: &mut Frame, pal: Palette, rect: Rect, resizing: bool) {
+    let style = focused_border_style(pal, false, resizing);
+    f.render_widget(Paragraph::new(Line::from(Span::styled(HANDLE_LABEL, style))), rect);
+}
+
+/// The sidebar's shell half: one folder, listed flat, the way `ls` lists it.
+///
+/// What it is for is the `ls` nobody should have to keep typing — and, before that, simply being
+/// able to see where a shell is at all, which until this pane existed you could only find out by
+/// asking the shell. The title carries the folder's own name for that reason: it is the answer
+/// to the question, and the list underneath is only the detail.
+fn draw_shell_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let pal = app.palette();
+    let lang = app.settings.lang;
+    let focused = app.focus == Focus::FileTree && app.sidebar_pane_focus == SidebarPane::Shell;
+    // The folder's own name rather than its path: the column is thirty cells wide, and a path
+    // clipped to fit ends up showing the part that is the same for every folder in the project.
+    let here = app
+        .shell_list
+        .dir
+        .as_ref()
+        .map(|dir| match dir.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => dir.display().to_string(),
+        })
+        .unwrap_or_default();
+    // The pane's own name rather than the word "Shell": with three terminals open, which one
+    // this is showing is the question the title is there to answer, and "Shell" answers it for
+    // none of them. The generic word is left for the case where there is no pane to name.
+    let who = app
+        .shell_pane_label(lang)
+        .unwrap_or_else(|| i18n::t(lang, Key::PanelShell).to_string());
+    let title = if here.is_empty() {
+        format!(" {who} ")
+    } else {
+        format!(" {who} · {here} ")
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+
+    let inner_width = inner_rect(area).width as usize;
+    let mut items: Vec<ListItem> = app
+        .shell_list
+        .rows
+        .iter()
+        .map(|row| {
+            if row.is_up {
+                return ListItem::new(Line::from("  .."));
+            }
+            let (icon, icon_color) = if row.is_dir {
+                ("\u{f07b}", pal.folder)
+            } else {
+                file_icon(&row.name)
+            };
+            // The dots come from the sweep the tree's already use, so a folder inside the project
+            // is annotated here too — and one outside it simply has nothing to say, which is the
+            // truthful answer rather than a missing feature.
+            let dot = app.git_status.get(&row.path);
+            let (name, pad) = tree_row_name("", &row.name, inner_width);
+            let mut spans = vec![
+                Span::styled(icon, Style::default().fg(icon_color)),
+                Span::raw(format!(" {name}")),
+            ];
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(match dot {
+                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status))),
+                None => Span::raw(" "),
+            });
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    // What was left out is said rather than silently cut off: a list that simply stops looks
+    // exactly like a folder that ends there.
+    if app.shell_list.overflow > 0 {
+        items.push(ListItem::new(Line::from(Span::styled(
+            i18n::shell_list_more(lang, app.shell_list.overflow),
+            Style::default().fg(pal.text_dim),
+        ))));
+    }
+    // Nothing has said where it is yet — no shell has been typed in, or the one that was is gone.
+    if app.shell_list.dir.is_none() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {}", i18n::msg_no_shell_folder(lang)),
+            Style::default().fg(pal.text_dim),
+        ))));
+    }
+
+    let mut state = ListState::default();
+    if !app.shell_list.rows.is_empty() {
+        state.select(Some(app.shell_list.selected));
+    }
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -6755,6 +6946,8 @@ mod tests {
             menu_active: false,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right: false,
             drawer_open,
@@ -7148,6 +7341,8 @@ mod tests {
             menu_active: false,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right,
             drawer_open,
@@ -7198,6 +7393,8 @@ mod tests {
             menu_active: false,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right,
             drawer_open,
@@ -7250,6 +7447,8 @@ mod tests {
             menu_active: false,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right,
             drawer_open,
@@ -7399,6 +7598,8 @@ mod tests {
             menu_active: false,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right,
             drawer_open,
@@ -7515,6 +7716,8 @@ mod tests {
             menu_active,
             terminal_weights: vec![crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT],
             sidebar_width: 30,
+            show_shell_pane: false,
+            shell_pane_rows: 10,
             terminal_pct: 35,
             terminal_on_right: false,
             drawer_open: false,
@@ -7699,6 +7902,38 @@ mod tests {
         assert_eq!(strip.tabs.len(), 2);
         assert_eq!(strip.left_arrow, None);
         assert_eq!(strip.right_arrow, Some((24, 25)));
+    }
+
+    /// A pane that can be put away has to have something left to press. The handle and the half
+    /// are never both there: with the half up, that border is the half's own and the seam above
+    /// it is the control.
+    #[test]
+    fn the_handle_is_there_exactly_while_the_half_is_away() {
+        let column = Some(Rect::new(0, 1, 30, 40));
+        assert_eq!(shell_handle(column, false), Some(Rect::new(10, 40, 9, 1)), "on the bottom border");
+        assert_eq!(shell_handle(column, true), None, "not while the half is up");
+        assert_eq!(shell_handle(None, false), None, "no sidebar, no handle");
+        // Both answers for one column: never two controls on the same row.
+        assert!(shell_half(column, true, 10).is_some() && shell_handle(column, true).is_none());
+        assert!(shell_half(column, false, 10).is_none() && shell_handle(column, false).is_some());
+    }
+
+    /// The shell half is carved off the bottom of the sidebar column, and gives way rather than
+    /// squeezing the tree above it out of existence in a short window.
+    #[test]
+    fn the_shell_half_takes_the_bottom_of_the_column_and_yields_when_there_is_no_room() {
+        let column = Some(Rect::new(0, 1, 30, 40));
+        let half = shell_half(column, true, 10).expect("room enough");
+        assert_eq!(half, Rect::new(0, 31, 30, 10), "anchored to the bottom, full width");
+
+        assert_eq!(shell_half(column, false, 10), None, "off is off");
+        assert_eq!(shell_half(None, true, 10), None, "no sidebar, no half");
+
+        // Six rows of column: the half asks for ten, is offered three, and the tree keeps three.
+        let short = Some(Rect::new(0, 1, 30, 6));
+        assert_eq!(shell_half(short, true, 10), Some(Rect::new(0, 4, 30, 3)));
+        // Five rows: what is left for the half is under its own floor, so it stands down whole.
+        assert_eq!(shell_half(Some(Rect::new(0, 1, 30, 5)), true, 10), None);
     }
 
     #[test]

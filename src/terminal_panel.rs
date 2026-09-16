@@ -1,7 +1,7 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -152,6 +152,14 @@ pub struct TerminalPanel {
     pending_unsent: Option<String>,
     /// Whether the banner has been scrubbed since this shell started. See `flush_pending`.
     cleared: bool,
+    /// Where the shell in this pane says it is. Written by the reader thread when OSC 7 arrives
+    /// and read by the sidebar's shell half; `None` until something has said, which is the honest
+    /// answer for a shell nobody has heard from yet.
+    cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// Whether this shell reports its own folder. Until it has once, the folder is asked of the
+    /// process table instead — and after it has, it never is again: a shell that reports is both
+    /// exact and free, and the question put to the operating system is neither.
+    reports_cwd: Arc<AtomicBool>,
     /// When the history was last scrolled through. The scrollbar is a hint rather than
     /// furniture: it appears while it is being used and fades back out, so an idle pane stays
     /// all output and no chrome.
@@ -458,6 +466,191 @@ impl CsiScanner {
     }
 }
 
+/// Watches a shell's output for OSC 7 — `ESC ] 7 ; file://host/path ST` — which is how a shell
+/// says where it has just moved to.
+///
+/// It is the one answer that is both exact and free: the shell emits it at every prompt, the
+/// bytes are already flowing past this thread, and nothing has to be asked of the operating
+/// system.
+///
+/// Who actually sends it is narrower than it looks. fish sends it unprompted, from its own
+/// interactive config. macOS ships the code for zsh and bash in `/etc/zshrc` and `/etc/bashrc`
+/// — and gates the whole block on `TERM_PROGRAM` being `Apple_Terminal`, which a pane here is
+/// not and must not claim to be. So for a great many shells nothing arrives at all, and
+/// `crate::dnd::shell_cwd` asks the process table instead: not a fallback for the exotic case
+/// but the ordinary road for anybody whose shell is zsh.
+///
+/// The host half of the URI is not decoration. Over ssh the shell reporting a path is on another
+/// machine, and that path taken for a local one points the sidebar at a folder that either does
+/// not exist here or — worse — does, and belongs to something else entirely. A sequence from
+/// anywhere but this host is dropped.
+#[derive(Default)]
+struct Osc7Scanner {
+    /// 0 = ground, 1 = saw ESC, 2 = collecting the OSC payload, 3 = saw ESC inside it, which is
+    /// the first half of a string terminator.
+    state: u8,
+    payload: Vec<u8>,
+}
+
+/// A cap on the payload. An OSC that never terminates would otherwise grow this buffer for as
+/// long as the shell keeps talking; paths are orders of magnitude shorter, and anything longer
+/// is not one.
+const OSC_MAX: usize = 4096;
+
+impl Osc7Scanner {
+    /// Feeds this chunk of output, answering with the folder if the chunk completed an OSC 7
+    /// naming one. The last such sequence in the chunk wins: a burst carrying two prompts has
+    /// been in two places, and where it ended up is the later one.
+    fn feed(&mut self, data: &[u8]) -> Option<PathBuf> {
+        let mut found = None;
+        for &b in data {
+            match self.state {
+                1 => match b {
+                    b']' => {
+                        self.state = 2;
+                        self.payload.clear();
+                    }
+                    0x1b => {}
+                    _ => self.state = 0,
+                },
+                2 => match b {
+                    // BEL and `ESC \` both end an OSC string, and shells in the wild use either.
+                    0x07 => found = self.finish().or(found),
+                    0x1b => self.state = 3,
+                    _ => {
+                        if self.payload.len() < OSC_MAX {
+                            self.payload.push(b);
+                        }
+                    }
+                },
+                3 => {
+                    if b == b'\\' {
+                        found = self.finish().or(found);
+                    } else {
+                        // An ESC that turned out not to be a terminator still ends the string:
+                        // what follows is a new sequence, and a payload carried across it would
+                        // be two halves of different messages read as one.
+                        self.state = if b == 0x1b { 1 } else { 0 };
+                        self.payload.clear();
+                    }
+                }
+                _ => {
+                    if b == 0x1b {
+                        self.state = 1;
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Ends the string in hand and reads a folder out of it, if it was one of ours.
+    fn finish(&mut self) -> Option<PathBuf> {
+        self.state = 0;
+        let payload = std::mem::take(&mut self.payload);
+        let body = payload.strip_prefix(b"7;")?;
+        parse_cwd_uri(std::str::from_utf8(body).ok()?)
+    }
+}
+
+/// The folder an OSC 7 body names, when it names one on this machine.
+fn parse_cwd_uri(uri: &str) -> Option<PathBuf> {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        // Some shells send a bare path instead of a URI. There is no host to disagree with, so
+        // it can only mean here.
+        return uri.starts_with('/').then(|| PathBuf::from(percent_decoded(uri)));
+    };
+    // `file://host` with no slash after it names a machine and no folder on it.
+    let at = rest.find('/')?;
+    let (host, path) = rest.split_at(at);
+    if !host_is_this_machine(host) {
+        return None;
+    }
+    let path = percent_decoded(path);
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(drive_path(path)))
+}
+
+/// On Windows the URI's path begins with the separator that follows the authority — `/C:/Users`
+/// — and the drive letter underneath it is where the real path starts.
+#[cfg(windows)]
+fn drive_path(path: String) -> String {
+    let rest = path.strip_prefix('/').unwrap_or(&path);
+    let mut chars = rest.chars();
+    let drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    if drive && chars.next() == Some(':') {
+        return rest.to_string();
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn drive_path(path: String) -> String {
+    path
+}
+
+/// Whether a host named in an OSC 7 is the machine CleeCode is running on.
+///
+/// The short name and the fully-qualified one are both this machine, and which of the two a
+/// shell writes is not ours to decide: macOS reports itself as `name.local` while the shell
+/// says `name`, and on a server it is often the other way round. Both ends are cut to their
+/// first label and compared there, which accepts either spelling and still refuses a different
+/// machine.
+fn host_is_this_machine(host: &str) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    static SHORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ours = SHORT.get_or_init(|| {
+        sysinfo::System::host_name()
+            .unwrap_or_default()
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    });
+    if ours.is_empty() {
+        return false;
+    }
+    host.split('.').next().is_some_and(|label| label.eq_ignore_ascii_case(ours))
+}
+
+/// Percent-decoding, which is what makes a folder with a space in its name arrive as one folder.
+/// A `%` that is not followed by two hex digits is left alone rather than dropped: it is a
+/// literal in a path that was never encoded, and eating it would rename the folder.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(byte) = hex_pair(bytes[i + 1], bytes[i + 2]) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_pair(hi: u8, lo: u8) -> Option<u8> {
+    Some((hex_digit(hi)? << 4) | hex_digit(lo)?)
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// A size a terminal grid can actually be driven at. Both floors are there to stop vt100 doing
 /// unsigned arithmetic that goes below zero — which panics in debug, wraps to 65535 in release,
 /// and either way used to take the whole editor and every shell in it down:
@@ -617,10 +810,15 @@ impl TerminalPanel {
         let last_output_clone = Arc::clone(&last_output_ms);
         let produced_clone = Arc::clone(&produced_output);
         let input_clone = input.clone();
+        let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let cwd_clone = Arc::clone(&cwd);
+        let reports_cwd = Arc::new(AtomicBool::new(false));
+        let reports_clone = Arc::clone(&reports_cwd);
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut scanner = CsiScanner::default();
+            let mut osc = Osc7Scanner::default();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -647,6 +845,14 @@ impl TerminalPanel {
                         generation_clone.fetch_add(1, Ordering::Release);
                         last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
                         produced_clone.store(true, Ordering::Relaxed);
+
+                        // Where the shell says it is, if it said so in this chunk. Read off the
+                        // same bytes the screen was drawn from, so the sidebar's shell half and
+                        // the prompt underneath it can never be looking at different folders.
+                        if let Some(dir) = osc.feed(data) {
+                            reports_clone.store(true, Ordering::Relaxed);
+                            *lock_poisoned(&cwd_clone) = Some(dir);
+                        }
 
                         // Answer terminal capability/status queries so probing programs
                         // (fastfetch, vim, etc.) don't stall for seconds waiting for a reply.
@@ -696,6 +902,8 @@ impl TerminalPanel {
             pending_unsent: None,
             cleared: false,
             last_scroll: None,
+            cwd,
+            reports_cwd,
         })
     }
 
@@ -904,6 +1112,25 @@ impl TerminalPanel {
     /// pid of the shell process running in this pane, used for best-effort ssh-session detection.
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    /// The folder this pane's shell is in, as far as anyone here knows — `None` while nobody
+    /// has said and nobody has asked.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        lock_poisoned(&self.cwd).clone()
+    }
+
+    /// Whether this shell reports its own folder, in which case the operating system never has
+    /// to be asked.
+    pub fn reports_cwd(&self) -> bool {
+        self.reports_cwd.load(Ordering::Relaxed)
+    }
+
+    /// Records a folder found some way other than the shell saying so. Never raises
+    /// `reports_cwd`: that flag means "this shell speaks for itself", and an answer prised out
+    /// of the process table is not the shell speaking.
+    pub fn note_cwd(&self, dir: PathBuf) {
+        *lock_poisoned(&self.cwd) = Some(dir);
     }
 
     /// Ends the shell in this pane and collects it.
@@ -1339,6 +1566,75 @@ impl TerminalWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything a shell can put in front of a path on the way to saying where it is.
+    #[test]
+    fn a_shell_saying_where_it_is_is_understood_however_it_says_it() {
+        let cases: [(&[u8], Option<&str>); 6] = [
+            // Terminated with BEL, and with `ESC \` — both are string terminators and shells
+            // in the wild pick either.
+            (b"\x1b]7;file://localhost/tmp/here\x07", Some("/tmp/here")),
+            (b"\x1b]7;file://localhost/tmp/here\x1b\\", Some("/tmp/here")),
+            // No host at all: `file:///path`, which is what fish sends.
+            (b"\x1b]7;file:///usr/local\x07", Some("/usr/local")),
+            // A space in a folder name arrives encoded and must come back as one folder.
+            (b"\x1b]7;file:///tmp/two%20words\x07", Some("/tmp/two words")),
+            // A bare path, sent by shells that skip the URI.
+            (b"\x1b]7;/tmp/bare\x07", Some("/tmp/bare")),
+            // Another machine's folder is not this machine's folder. See `host_is_this_machine`.
+            (b"\x1b]7;file://elsewhere/tmp/there\x07", None),
+        ];
+        for (input, want) in cases {
+            let mut osc = Osc7Scanner::default();
+            assert_eq!(
+                osc.feed(input).as_deref(),
+                want.map(std::path::Path::new),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    /// The sequence arrives split across reads, because a pty hands over whatever happened to be
+    /// in the buffer and a prompt is written in more than one write.
+    #[test]
+    fn a_folder_split_across_two_reads_still_arrives_whole() {
+        let mut osc = Osc7Scanner::default();
+        assert_eq!(osc.feed(b"\x1b]7;file:///tmp/sp"), None);
+        assert_eq!(osc.feed(b"lit\x07").as_deref(), Some(std::path::Path::new("/tmp/split")));
+    }
+
+    /// One read holding two prompts has been in two folders, and the one it ended in is the one
+    /// the sidebar should show.
+    #[test]
+    fn the_last_folder_in_a_burst_is_the_one_that_counts() {
+        let mut osc = Osc7Scanner::default();
+        let found = osc.feed(b"\x1b]7;file:///one\x07ls\r\n\x1b]7;file:///two\x07");
+        assert_eq!(found.as_deref(), Some(std::path::Path::new("/two")));
+    }
+
+    /// Other OSC strings go past constantly — OSC 0 and 2 set the window title on every prompt —
+    /// and none of them names a folder.
+    #[test]
+    fn an_osc_that_is_not_a_folder_is_left_alone() {
+        let mut osc = Osc7Scanner::default();
+        assert_eq!(osc.feed(b"\x1b]0;a title\x07"), None);
+        assert_eq!(osc.feed(b"\x1b]2;another\x1b\\"), None);
+        // And the scanner is still in working order afterwards.
+        assert_eq!(osc.feed(b"\x1b]7;file:///after\x07").as_deref(), Some(std::path::Path::new("/after")));
+    }
+
+    /// A `%` in a path that was never encoded is a literal, and eating it would rename the
+    /// folder. An OSC left unterminated must not grow the buffer without end either.
+    #[test]
+    fn a_stray_percent_survives_and_a_runaway_string_is_capped() {
+        assert_eq!(percent_decoded("/tmp/100%/x"), "/tmp/100%/x");
+        assert_eq!(percent_decoded("/tmp/%zz"), "/tmp/%zz");
+        let mut osc = Osc7Scanner::default();
+        osc.feed(b"\x1b]7;");
+        osc.feed(&vec![b'a'; OSC_MAX * 2]);
+        assert_eq!(osc.payload.len(), OSC_MAX);
+    }
 
     /// A 4x5 screen whose cell contents encode their position, with a blank column so
     /// trailing-space trimming is exercised.
@@ -2024,4 +2320,5 @@ mod tests {
         assert!(held_lines(&mut parser) > 0, "the real screen keeps its history");
     }
 }
+
 

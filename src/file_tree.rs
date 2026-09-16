@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct FileNode {
     pub path: PathBuf,
@@ -114,6 +114,22 @@ impl FileNode {
     }
 }
 
+/// `path` written relative to `root`, when it is inside it — the question "is this folder part
+/// of the project", answered with the way down to it.
+///
+/// Tried plainly first and then with both sides resolved, because two spellings of one folder are
+/// ordinary on macOS: a shell sitting in `/tmp` reports `/private/tmp`, `/tmp` being a symlink to
+/// it, and a plain prefix test would call the project's own folder somewhere else. Resolving
+/// asks the disk, so it is the second question rather than the first.
+pub fn relative_to(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(rest) = path.strip_prefix(root) {
+        return Some(rest.to_path_buf());
+    }
+    let root = fs::canonicalize(root).ok()?;
+    let path = fs::canonicalize(path).ok()?;
+    path.strip_prefix(&root).ok().map(|rest| rest.to_path_buf())
+}
+
 pub struct VisibleEntry {
     pub depth: usize,
     pub name: String,
@@ -215,6 +231,70 @@ impl FileTree {
     pub fn set_show_hidden(&mut self, show_hidden: bool) {
         self.show_hidden = show_hidden;
         self.rebuild_visible();
+    }
+
+    /// Opens the tree down to `path` and puts the selection on it, so somewhere inside the
+    /// project can be shown without the root moving.
+    ///
+    /// This is the cheap half of "go there". Changing the root is a change of *project* —
+    /// `App::set_root` reloads the project's settings, restarts its git baseline and lets go of
+    /// the workspace — and none of that has any business happening because somebody wanted to
+    /// look in `src/`. Revealing touches only which rows are on screen, and is undone by
+    /// collapsing them again.
+    ///
+    /// Answers whether it landed on the path itself. It can fail to: a folder whose name starts
+    /// with a dot has no row at all while hidden files are off, and the honest thing then is to
+    /// stop at the nearest ancestor that *is* on screen and say so, rather than to move the
+    /// selection somewhere arbitrary and report success.
+    pub fn reveal(&mut self, path: &Path) -> bool {
+        let Some(rest) = relative_to(&self.root.path, path) else {
+            return false;
+        };
+        let mut index: Vec<usize> = Vec::new();
+        for name in rest.iter() {
+            // Walked from the top each time rather than held as a borrow: the depth of a path is
+            // a handful of steps, and the alternative is a mutable borrow that has to outlive
+            // the loop it is being reseated in.
+            let parent = self.node_at_mut(&index);
+            // A folder on the way down has to be open for the one below it to exist as a node.
+            // Already-open folders and files alike take this as a no-op.
+            parent.expand();
+            let Some(at) = parent.children.iter().position(|child| child.path.file_name() == Some(name)) else {
+                // The path names something this tree does not have — deleted since, or never
+                // there. What was opened on the way stays open; it is a folder of the project
+                // either way.
+                self.rebuild_visible();
+                return false;
+            };
+            index.push(at);
+        }
+        // The folder that was asked for is opened too, because revealing a folder and not
+        // showing what is in it answers a question nobody asked.
+        let target = self.node_at_mut(&index);
+        if target.is_dir {
+            target.expand();
+        }
+        self.rebuild_visible();
+        if let Some(row) = self.row_of(&index) {
+            self.selected = row;
+            return true;
+        }
+        // Hidden, and hidden files are off. Land as close to it as the tree can actually show.
+        while index.pop().is_some() {
+            if let Some(row) = self.row_of(&index) {
+                self.selected = row;
+                break;
+            }
+        }
+        false
+    }
+
+    /// Which visible row a node sits on, if it is on screen at all.
+    fn row_of(&self, index: &[usize]) -> Option<usize> {
+        if index.is_empty() {
+            return None;
+        }
+        self.visible.iter().position(|entry| !entry.is_up && entry.node_index == index)
     }
 
     fn walk(node: &FileNode, depth: usize, path: &mut Vec<usize>, out: &mut Vec<VisibleEntry>, show_hidden: bool) {
@@ -364,6 +444,125 @@ impl FileTree {
     }
 }
 
+/// How many names the shell half will list. A folder can hold thousands — `node_modules`, a
+/// build directory — and reading all of them on every `cd`, to draw a pane eight rows tall, is a
+/// cost nobody asked for. What is past the cap is counted and said, never silently dropped.
+const SHELL_LIST_MAX: usize = 500;
+
+/// One row of the shell half of the sidebar.
+pub struct ShellRow {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    /// True for the ".." row, which is how walking up looks here as well.
+    pub is_up: bool,
+}
+
+/// What one folder holds, listed flat: the sidebar's answer to the `ls` somebody types to see
+/// where they are.
+///
+/// Not a `FileTree` with a single level open, and deliberately not. A tree carries which of its
+/// folders are expanded, and that state has no meaning in a pane whose folder moves out from
+/// under it — every `cd` would invalidate it, and the pane would spend its life forgetting
+/// things the user never opened. So this holds exactly what the question is worth: the names in
+/// one folder, folders first, re-read when the folder changes.
+pub struct ShellList {
+    /// The folder being shown, or `None` while no shell has said where it is.
+    pub dir: Option<PathBuf>,
+    pub rows: Vec<ShellRow>,
+    pub selected: usize,
+    /// How many names the folder held beyond the ones listed. See `SHELL_LIST_MAX`.
+    pub overflow: usize,
+    show_hidden: bool,
+}
+
+impl ShellList {
+    /// `show_hidden` is required rather than defaulted for the same reason `FileTree::new`
+    /// requires it: the preference is one thing, and two panes disagreeing about it is a bug
+    /// that looks like a missing file.
+    pub fn new(show_hidden: bool) -> Self {
+        ShellList {
+            dir: None,
+            rows: Vec::new(),
+            selected: 0,
+            overflow: 0,
+            show_hidden,
+        }
+    }
+
+    /// Shows another folder, from the top. The selection does not travel: it belonged to the
+    /// folder that has just been left.
+    pub fn show(&mut self, dir: PathBuf) {
+        self.dir = Some(dir);
+        self.selected = 0;
+        self.reread();
+    }
+
+    /// Re-reads the folder in place, keeping the selection where it can. What this catches is
+    /// the same thing the tree's refresh catches: files another process wrote while the pane sat
+    /// there, which for this pane is most of what it is for.
+    pub fn refresh(&mut self) {
+        self.reread();
+    }
+
+    pub fn set_show_hidden(&mut self, show_hidden: bool) {
+        self.show_hidden = show_hidden;
+        self.reread();
+    }
+
+    fn reread(&mut self) {
+        self.rows.clear();
+        self.overflow = 0;
+        let Some(dir) = self.dir.clone() else {
+            self.selected = 0;
+            return;
+        };
+        // The way up, offered the way the tree offers it — and only where it leads somewhere.
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            self.rows.push(ShellRow {
+                name: "..".to_string(),
+                path: parent.to_path_buf(),
+                is_dir: true,
+                is_up: true,
+            });
+        }
+        for (path, is_dir) in FileNode::read_sorted_entries(&dir) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            if !self.show_hidden && name.starts_with('.') {
+                continue;
+            }
+            if self.rows.len() >= SHELL_LIST_MAX {
+                self.overflow += 1;
+                continue;
+            }
+            self.rows.push(ShellRow {
+                name,
+                path,
+                is_dir,
+                is_up: false,
+            });
+        }
+        if self.selected >= self.rows.len() {
+            self.selected = self.rows.len().saturating_sub(1);
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let last = self.rows.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+    }
+
+    pub fn selected_row(&self) -> Option<&ShellRow> {
+        self.rows.get(self.selected)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +574,115 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         std::fs::write(dir.join("sub").join("b.txt"), "b").unwrap();
         dir
+    }
+
+    /// Revealing walks the tree open to a folder deeper in the project and lands the selection
+    /// on it — without the root moving, which is the whole point of it existing.
+    #[test]
+    fn revealing_opens_the_way_down_and_leaves_the_root_alone() {
+        let dir = setup_dir("reveal_down");
+        std::fs::create_dir_all(dir.join("sub").join("deep")).unwrap();
+        std::fs::write(dir.join("sub").join("deep").join("c.txt"), "c").unwrap();
+        let mut tree = FileTree::new(dir.clone(), true);
+
+        assert!(tree.reveal(&dir.join("sub").join("deep")));
+        assert_eq!(tree.root.path, dir, "revealing is not a change of project");
+        let row = &tree.visible[tree.selected];
+        assert_eq!(row.name, "deep");
+        assert!(row.expanded, "the folder revealed shows what is in it");
+        assert_eq!(tree.selected_path().as_deref(), Some(dir.join("sub").join("deep").as_path()));
+    }
+
+    /// A file is revealed the same way a folder is: what you asked to see is the row, and the
+    /// folders above it are only the way there.
+    #[test]
+    fn revealing_a_file_selects_the_file() {
+        let dir = setup_dir("reveal_file");
+        let mut tree = FileTree::new(dir.clone(), true);
+        assert!(tree.reveal(&dir.join("sub").join("b.txt")));
+        assert_eq!(tree.visible[tree.selected].name, "b.txt");
+    }
+
+    /// Outside the project there is nothing to reveal — that is `set_root`'s errand, and it is a
+    /// different one. Nothing moves, and the answer says so.
+    #[test]
+    fn revealing_refuses_anything_outside_the_project() {
+        let dir = setup_dir("reveal_outside");
+        let mut tree = FileTree::new(dir.join("sub"), true);
+        let before = tree.selected;
+        assert!(!tree.reveal(&dir));
+        assert!(!tree.reveal(std::path::Path::new("/definitely/not/here")));
+        assert_eq!(tree.root.path, dir.join("sub"));
+        assert_eq!(tree.selected, before);
+    }
+
+    /// A folder whose name starts with a dot has no row while hidden files are off. Revealing
+    /// into one lands on the nearest row that is actually on screen and reports that it did not
+    /// get all the way — the alternative is a selection somewhere arbitrary, reported as success.
+    #[test]
+    fn revealing_into_a_hidden_folder_stops_where_the_tree_can_show_it() {
+        let dir = setup_dir("reveal_hidden");
+        std::fs::create_dir_all(dir.join("sub").join(".secret")).unwrap();
+        let mut tree = FileTree::new(dir.clone(), false);
+
+        assert!(!tree.reveal(&dir.join("sub").join(".secret")));
+        assert_eq!(tree.visible[tree.selected].name, "sub", "as close as it can be shown");
+
+        // With hidden files on, the same call arrives.
+        tree.set_show_hidden(true);
+        assert!(tree.reveal(&dir.join("sub").join(".secret")));
+        assert_eq!(tree.visible[tree.selected].name, ".secret");
+    }
+
+    /// The shell half lists one folder flat, folders first, with the way up offered the way the
+    /// tree offers it — and it obeys the hidden-files preference like everything else.
+    #[test]
+    fn the_shell_half_lists_one_folder_the_way_ls_does() {
+        let dir = setup_dir("shell_list");
+        std::fs::write(dir.join(".rc"), "x").unwrap();
+        let mut list = ShellList::new(false);
+        list.show(dir.clone());
+
+        let names: Vec<&str> = list.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["..", "sub", "a.txt"]);
+        assert!(list.rows[0].is_up);
+        assert_eq!(list.rows[0].path, dir.parent().unwrap());
+
+        list.set_show_hidden(true);
+        let names: Vec<&str> = list.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["..", "sub", ".rc", "a.txt"]);
+    }
+
+    /// Moving to another folder is a fresh listing, not the old one scrolled: the selection
+    /// belonged to the folder that has been left.
+    #[test]
+    fn the_shell_half_starts_from_the_top_in_a_new_folder() {
+        let dir = setup_dir("shell_moves");
+        let mut list = ShellList::new(true);
+        list.show(dir.clone());
+        list.move_selection(2);
+        assert_eq!(list.selected, 2);
+
+        list.show(dir.join("sub"));
+        assert_eq!(list.selected, 0);
+        assert_eq!(list.selected_row().map(|r| r.name.as_str()), Some(".."));
+        assert_eq!(list.dir.as_deref(), Some(dir.join("sub").as_path()));
+    }
+
+    /// A folder with more names than the pane will list says how many it is not showing, rather
+    /// than quietly ending the list early.
+    #[test]
+    fn a_crowded_folder_says_how_much_it_is_not_showing() {
+        let dir = setup_dir("shell_crowded");
+        let many = dir.join("many");
+        std::fs::create_dir_all(&many).unwrap();
+        for i in 0..SHELL_LIST_MAX + 10 {
+            std::fs::write(many.join(format!("f{i:04}")), "x").unwrap();
+        }
+        let mut list = ShellList::new(true);
+        list.show(many);
+        assert_eq!(list.rows.len(), SHELL_LIST_MAX);
+        assert_eq!(list.overflow, 11, "the ten past the cap, plus the one the way-up row took");
     }
 
     /// A single click on a folder toggles it, and must not move the selection the way

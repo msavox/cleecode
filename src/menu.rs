@@ -3,6 +3,14 @@ use crate::i18n::{self, Key, Lang};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     ToggleSidebar,
+    /// Show or hide the sidebar's shell half.
+    ToggleShellPane,
+    /// Point the project's tree at the folder the shell half has selected, without moving the
+    /// root. See `App::show_shell_selection_in_tree`.
+    ShowInTree,
+    /// Open that folder as the project instead, which is a different act with different
+    /// consequences and so has a verb of its own.
+    OpenAsProject,
     ToggleTerminal,
     ToggleDrawer,
     NewAgentTab,
@@ -135,6 +143,9 @@ impl MenuAction {
     #[allow(dead_code, reason = "the checklist the reachability tests are written against")]
     pub const ALL: &'static [MenuAction] = &[
         MenuAction::ToggleSidebar,
+        MenuAction::ToggleShellPane,
+        MenuAction::ShowInTree,
+        MenuAction::OpenAsProject,
         MenuAction::ToggleTerminal,
         MenuAction::ToggleDrawer,
         MenuAction::NewAgentTab,
@@ -528,6 +539,9 @@ pub fn menu_defs() -> Vec<MenuDef> {
             title_key: Key::MenuView,
             items: vec![
                 item(Key::ItemToggleSidebar, MenuAction::ToggleSidebar, Some("Ctrl+E")),
+                // Under the row that shows the column it lives in, because that is the order the
+                // question is asked in: the sidebar first, and then what is in it.
+                item(Key::ItemToggleShellPane, MenuAction::ToggleShellPane, None),
                 item(Key::ItemToggleTerminal, MenuAction::ToggleTerminal, Some("Ctrl+J")),
                 // No chord of its own, and not for want of looking: every Ctrl+Shift letter is
                 // spoken for. `Ctrl+Shift+A` summons the drawer when there is no agent anywhere
@@ -721,12 +735,14 @@ pub fn command_entries() -> Vec<(Key, MenuItemDef)> {
     }
     for target in [
         ContextTarget::Sidebar,
+        ContextTarget::Shell,
         ContextTarget::Editor,
         ContextTarget::Terminal,
         ContextTarget::Drawer,
     ] {
         let group_key = match target {
             ContextTarget::Sidebar => Key::PanelFile,
+            ContextTarget::Shell => Key::PanelShell,
             ContextTarget::Editor => Key::MenuEdit,
             ContextTarget::Terminal => Key::MenuTerminal,
             // The drawer has no menu of its own on the bar; its View item is the name people
@@ -754,6 +770,8 @@ pub fn command_entries() -> Vec<(Key, MenuItemDef)> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContextTarget {
     Sidebar,
+    /// The sidebar's shell half.
+    Shell,
     Editor,
     Terminal,
     Drawer,
@@ -860,6 +878,21 @@ fn context_items(target: ContextTarget, versioned: bool) -> Vec<MenuItemDef> {
             }
             items
         }
+        // Two rows for going to the same folder, always both, and the difference between them
+        // spelled out in words rather than decided for you. Revealing opens rows in the tree and
+        // leaves the project where it is; opening as project reloads the settings, starts the git
+        // history over and lets go of the workspace. They are not degrees of the same thing, and
+        // a single row whose meaning changed with where you happened to be pointing would have
+        // made the heavier of the two arrive unannounced.
+        // Walking the shell into a folder is not among these. Enter does it, and so does a
+        // double click, and a row that only repeats the gesture you already made to open the
+        // menu is a row to read past every time.
+        ContextTarget::Shell => vec![
+            item(Key::ItemShowInTree, MenuAction::ShowInTree, None),
+            item(Key::ItemOpenAsProject, MenuAction::OpenAsProject, None),
+            group(Key::ItemOpenOutside, MenuAction::OpenOutside, None),
+            item(Key::ItemToggleShellPane, MenuAction::ToggleShellPane, None),
+        ],
         ContextTarget::Editor => vec![
             item(Key::ItemCut, MenuAction::Cut, Some("Ctrl+X")),
             item(Key::ItemCopy, MenuAction::Copy, Some("Ctrl+C")),

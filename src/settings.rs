@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 pub const SETTINGS_COUNT: usize = 19;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
+/// How tall the sidebar's shell half may be dragged, borders included. The floor is a border, a
+/// row and a border — enough to see the folder you are in and one name in it — and the ceiling
+/// leaves the tree above room to still be a tree.
+pub const SHELL_PANE_ROWS_RANGE: (u16, u16) = (3, 30);
+
+fn default_show_shell_pane() -> bool {
+    true
+}
+
+fn default_shell_pane_rows() -> u16 {
+    10
+}
 pub const TERMINAL_PCT_RANGE: (u16, u16) = (15, 70);
 /// Left pane's share of the editor region when split. Kept away from the extremes so neither
 /// pane can be squeezed to nothing.
@@ -58,6 +70,17 @@ pub struct Settings {
     pub show_sidebar: bool,
     pub show_terminal: bool,
     pub sidebar_width: u16,
+    /// Whether the sidebar carries its shell half — the folder the shell you were last typing in
+    /// is sitting in, listed the way `ls` lists it. Defaulted so a settings file written before
+    /// it existed still loads.
+    #[serde(default = "default_show_shell_pane")]
+    pub show_shell_pane: bool,
+    /// How many rows of the sidebar that half takes, borders included. Rows rather than a
+    /// percentage, unlike every other seam here: what it holds is a short list read at a glance,
+    /// and a percentage would make it grow with the window for no reason — the tree above is
+    /// what wants the rest of the height.
+    #[serde(default = "default_shell_pane_rows")]
+    pub shell_pane_rows: u16,
     pub terminal_pct: u16,
     pub terminal_on_right: bool,
     // Left pane's percentage of the editor region in split view. Defaulted so configs written
@@ -584,6 +607,8 @@ impl Default for Settings {
             show_sidebar: true,
             show_terminal: true,
             sidebar_width: 30,
+            show_shell_pane: default_show_shell_pane(),
+            shell_pane_rows: default_shell_pane_rows(),
             terminal_pct: 35,
             terminal_on_right: false,
             split_pct: default_split_pct(),
@@ -822,6 +847,7 @@ impl Settings {
 
     pub fn clamp_layout(&mut self) {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
+        self.shell_pane_rows = self.shell_pane_rows.clamp(SHELL_PANE_ROWS_RANGE.0, SHELL_PANE_ROWS_RANGE.1);
         self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
         self.split_pct = self.split_pct.clamp(SPLIT_PCT_RANGE.0, SPLIT_PCT_RANGE.1);
         self.drawer_pct = self.drawer_pct.clamp(DRAWER_PCT_RANGE.0, DRAWER_PCT_RANGE.1);

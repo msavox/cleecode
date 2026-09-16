@@ -771,6 +771,7 @@ fn run(
             app.refresh_rendered_previews();
             app.poll_terminal_exits();
             app.poll_git_status();
+            app.poll_shell_cwd();
             app.poll_search();
             app.poll_git_panel();
             app.poll_lsp();

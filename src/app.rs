@@ -1,7 +1,7 @@
 use crate::clipboard::Clipboard;
 use crate::dnd;
 use crate::editor::Editor;
-use crate::file_tree::{Activation, FileTree};
+use crate::file_tree::{Activation, FileTree, ShellList};
 use crate::highlight::Highlighter;
 use crate::i18n::{self, Key, Lang};
 // Renamed on the way in: `MenuAction` is already here and the two are different alphabets — one
@@ -42,6 +42,19 @@ pub enum Focus {
 pub enum EditorPane {
     Left,
     Right,
+}
+
+/// Which half of the sidebar the keyboard is in.
+///
+/// A half rather than a frame of its own, in the shape `EditorPane` already uses for the editor
+/// split: the sidebar is one frame with two things inside it, the focus ring goes round it once,
+/// and only once the keyboard is already there does the question of which half arise.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum SidebarPane {
+    /// The project's tree, anchored to the root.
+    Tree,
+    /// What the focused shell's folder holds.
+    Shell,
 }
 
 /// One row of the run-target drop-down.
@@ -562,6 +575,32 @@ struct FindText {
 pub struct App {
     pub root: PathBuf,
     pub file_tree: FileTree,
+    /// The sidebar's shell half: what the folder of the shell you were last typing in holds,
+    /// listed flat. Pointed at that folder by `poll_shell_cwd`, and never by anything else —
+    /// walking it walks the shell, which is what keeps the two from ever disagreeing.
+    pub shell_list: ShellList,
+    /// Which half of the sidebar has the keyboard, while the sidebar has it.
+    pub sidebar_pane_focus: SidebarPane,
+    /// The pane the shell half is following, as (window, tab).
+    ///
+    /// Remembered rather than read from the focus each time: the keyboard leaving the terminals
+    /// is not a reason for the half to go blank, and the moment somebody looks away from a shell
+    /// is exactly the moment they go to open the file they just watched it write.
+    shell_source: Option<(usize, usize)>,
+    /// The folder the shell half is currently showing, so a `cd` can be told from a redraw.
+    shell_cwd: Option<PathBuf>,
+    /// When the process table was last asked where a shell is. Only shells that do not report
+    /// their own folder are ever asked, and never more often than `SHELL_CWD_INTERVAL`.
+    shell_cwd_asked: Option<Instant>,
+    /// The last folder the process table answered for a pane, and whether that answer was refused
+    /// for belonging to an ssh session rather than to this machine. Kept so the expensive half of
+    /// that question is asked once per answer instead of once per tick — see `poll_shell_cwd`.
+    shell_asked: Option<((usize, usize), PathBuf, bool)>,
+    /// The last row clicked in the shell half and when, so the second click on the same row is a
+    /// double one. Its own field rather than the tree's: the two halves are two lists, and a
+    /// click on row three of one is not the first half of a double click on row three of the
+    /// other.
+    last_shell_click: Option<(usize, Instant)>,
     pub editors: Vec<Editor>,
     pub active_editor: usize,
     pub split_view: bool,
@@ -2384,6 +2423,9 @@ fn copy_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Res
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DragTarget {
     Sidebar,
+    /// The horizontal seam inside the sidebar, between the project's tree and the shell half
+    /// below it.
+    ShellPaneHeight,
     TerminalHeight,
     /// Dragging the vertical seam between the two editor panes in split view.
     EditorSplit,
@@ -2470,6 +2512,7 @@ impl DragTarget {
         matches!(
             self,
             DragTarget::Sidebar
+                | DragTarget::ShellPaneHeight
                 | DragTarget::TerminalHeight
                 | DragTarget::EditorSplit
                 | DragTarget::TerminalSplit(_)
@@ -2944,6 +2987,11 @@ fn the_users_tab_stays_in_front(layout: BesideLayout, split_view: bool, was: Foc
 
 /// How many tabs follow mode may open in one session.
 ///
+/// The folder a path is in, for the actions that take a folder and were handed a file.
+fn continue_from_parent(path: &Path) -> PathBuf {
+    path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+}
+
 /// A ceiling rather than a rotation: none of them is ever closed again by the editor. An agent
 /// working through a refactor touches thirty files, and a strip of thirty tabs — one of which
 /// you were reading — is not a view of anything. Five is about what fits in a tab strip and
@@ -2955,6 +3003,14 @@ const FOLLOW_TAB_LIMIT: usize = 5;
 /// drains every sweep and can only ever produce `FOLLOW_TAB_LIMIT` tabs, but a `git checkout` of
 /// a branch that differs by ten thousand files should not be held in memory to be ignored.
 const FOLLOW_QUEUE_LIMIT: usize = 64;
+
+/// How often the operating system may be asked where a shell is.
+///
+/// Only shells that do not report their own folder are ever asked — see `Osc7Scanner` — and the
+/// asking is a snapshot of the process table, which is not a thing to take on every frame. What
+/// it is racing is somebody typing `cd` and looking at the sidebar, so it is short enough to
+/// feel immediate and long enough to be invisible in a process list.
+const SHELL_CWD_INTERVAL: Duration = Duration::from_millis(1200);
 
 /// Whether two paths name the same file, allowing for the several spellings one file has here:
 /// `git status` is keyed the way the file tree spells its rows (`./src/main.rs` when the project
@@ -3813,6 +3869,13 @@ impl App {
         let file_tree = FileTree::new(root.clone(), settings.show_hidden_files);
         Ok(App {
             file_tree,
+            shell_list: ShellList::new(settings.show_hidden_files),
+            sidebar_pane_focus: SidebarPane::Tree,
+            shell_source: None,
+            shell_cwd: None,
+            shell_cwd_asked: None,
+            shell_asked: None,
+            last_shell_click: None,
             root,
             editors: vec![Editor::empty()],
             active_editor: 0,
@@ -4820,6 +4883,10 @@ impl App {
         }
         self.reload_changed_previews();
         self.file_tree.refresh();
+        // The shell half catches the same thing the tree does — files another process wrote — and
+        // for that half it is most of what it is for: the folder a build or an agent is working in
+        // is precisely the one somebody is watching.
+        self.shell_list.refresh();
         spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
     }
 
@@ -5129,6 +5196,208 @@ impl App {
         } else {
             i18n::msg_follow_mode(lang, now).to_string()
         };
+    }
+
+    // ---- The sidebar's shell half ---------------------------------------------------------
+
+    /// Keeps the sidebar's shell half pointed at the folder the shell you were last typing in is
+    /// sitting in.
+    ///
+    /// Two sources, in this order. A shell that emits OSC 7 has already said where it is by the
+    /// time this runs: its own reader thread took the bytes off the pty, so the answer is exact
+    /// and costs a lock. A shell that says nothing is asked of the process table instead, on a
+    /// tick rather than every frame, because that question is a snapshot of every process on the
+    /// machine and the answer only changes when somebody types `cd`.
+    ///
+    /// Nothing here ever moves the project. The tree above keeps its root through every `cd` in
+    /// every pane; this half is a second answer to "where are we", which is the whole reason
+    /// there are two of them.
+    pub fn poll_shell_cwd(&mut self) {
+        // Nothing is asked of anybody while the half is not on screen. That is the whole cost of
+        // the feature when it is put away, and with the column hidden it is put away too.
+        if !self.settings.show_shell_pane || !self.settings.show_sidebar {
+            return;
+        }
+        // Which pane is followed is decided while the keyboard is in one, and then remembered.
+        // Before anybody has typed in one at all — the first seconds of a session — the half
+        // follows whichever pane would take the next keystroke, so it opens on the project
+        // instead of on a sentence explaining that it is empty.
+        if self.focus == Focus::Terminal || self.shell_source.is_none() {
+            if let Some(window) = self.terminals.get(self.active_terminal) {
+                self.shell_source = Some((self.active_terminal, window.active));
+            }
+        }
+        // A pane that has been closed since takes the half's folder with it, rather than leaving
+        // it showing a listing that belongs to a shell nobody can reach.
+        if self.shell_panel().is_none() {
+            self.shell_source = None;
+            return;
+        }
+        let Some((said, reports, pid)) =
+            self.shell_panel().map(|panel| (panel.cwd(), panel.reports_cwd(), panel.child_pid()))
+        else {
+            return;
+        };
+        let mut found = said;
+        if !reports {
+            let due = self.shell_cwd_asked.is_none_or(|at| at.elapsed() >= SHELL_CWD_INTERVAL);
+            if due {
+                self.shell_cwd_asked = Some(Instant::now());
+                if let Some((pid, dir)) = pid.zip(pid.and_then(dnd::shell_cwd)) {
+                    // Over ssh the process the table describes is the local `ssh`, still sitting
+                    // where it was started: a real folder on this machine with nothing to do with
+                    // the prompt on screen, which is the worst kind of wrong answer. OSC 7 carries
+                    // a host and is filtered on it; this is the same guard for the answer that
+                    // cannot carry one.
+                    //
+                    // Asked once per answer rather than once per tick, and that is the whole
+                    // reason this is remembered. Reading one pid's folder is a single system
+                    // call; finding out whether that pid has an ssh under it is a snapshot of
+                    // every process on the machine, and this runs every second or so for as long
+                    // as a zsh pane is on screen.
+                    let known = self
+                        .shell_asked
+                        .as_ref()
+                        .is_some_and(|(pane, seen, _)| Some(*pane) == self.shell_source && seen == &dir);
+                    if !known {
+                        let remote = dnd::detect_ssh_target(pid).is_some();
+                        self.shell_asked = self.shell_source.map(|pane| (pane, dir.clone(), remote));
+                    }
+                    let remote = self.shell_asked.as_ref().is_some_and(|(_, _, remote)| *remote);
+                    if !remote {
+                        // Handed back to the pane as well, so a shell that never speaks for
+                        // itself still has an answer ready the next time the sidebar asks it.
+                        if let Some(panel) = self.shell_panel() {
+                            panel.note_cwd(dir.clone());
+                        }
+                        found = Some(dir);
+                    }
+                }
+            }
+        }
+        let Some(dir) = found else { return };
+        if self.shell_cwd.as_deref() == Some(dir.as_path()) {
+            return;
+        }
+        // A folder that is not there is not shown. A shell can be sitting in one somebody deleted
+        // underneath it, and `ls` in that pane would answer nothing either.
+        if !dir.is_dir() {
+            return;
+        }
+        self.shell_cwd = Some(dir.clone());
+        self.shell_list.show(dir);
+        self.redraw = true;
+    }
+
+    /// What the pane the shell half is following calls itself.
+    ///
+    /// The label off its own tab strip, not a name built here: a pane renamed to `build` is
+    /// called `build` on its chip, and a sidebar calling the same shell `Terminal 2` would be a
+    /// second name for one thing. `None` while no pane is being followed.
+    pub fn shell_pane_label(&self, lang: Lang) -> Option<String> {
+        let (window, tab) = self.shell_source?;
+        let labels = ui::terminal_tab_labels(self.terminals.get(window)?, window, lang);
+        labels.get(tab).cloned()
+    }
+
+    /// The pane the shell half is following.
+    fn shell_panel(&self) -> Option<&TerminalPanel> {
+        let (window, tab) = self.shell_source?;
+        self.terminals.get(window)?.tabs.get(tab)
+    }
+
+    /// Puts a `cd` at that pane's prompt.
+    ///
+    /// This is how the shell half moves. It does not walk into a folder and then tell the shell
+    /// about it; it asks the shell to walk, and follows once the shell says it has — which is
+    /// the same road a `cd` typed by hand takes. The two cannot end up in different folders
+    /// because only one of them is ever deciding.
+    fn cd_shell_pane(&mut self, dir: &Path) {
+        let Some((window, tab)) = self.shell_source else {
+            self.status_message = i18n::msg_no_shell_folder(self.settings.lang).to_string();
+            return;
+        };
+        let Some(pid) = self.terminals.get(window).and_then(|w| w.tabs.get(tab)).and_then(|p| p.child_pid())
+        else {
+            return;
+        };
+        // Nothing is typed into a shell that is running something. At a prompt a `cd` is a `cd`;
+        // inside `vim` it is four characters in somebody's buffer, and inside `npm run dev` it is
+        // a line sitting in a program's stdin waiting to surprise them later. The question is the
+        // one the Run button already asks of a pane before handing it a script.
+        if dnd::shell_is_busy(pid) {
+            self.status_message = i18n::msg_shell_busy(self.settings.lang).to_string();
+            return;
+        }
+        let Some(panel) = self.terminals.get_mut(window).and_then(|w| w.tabs.get_mut(tab)) else {
+            return;
+        };
+        panel.type_line(&format!("cd {}", shell_words::quote(&dir.to_string_lossy())));
+    }
+
+    /// Enter on a row of the shell half: a folder is walked into, a file is opened.
+    fn activate_shell_selection(&mut self) {
+        let Some(row) = self.shell_list.selected_row() else { return };
+        let path = row.path.clone();
+        if row.is_dir {
+            self.cd_shell_pane(&path);
+        } else {
+            self.open_file_in_tab(path);
+        }
+    }
+
+    /// "Show in the tree": points the tree above at a folder the shell half is showing.
+    ///
+    /// Inside the project this only opens rows — the root, and everything that hangs off it,
+    /// stays exactly as it was. Outside it there is nothing to open, and the honest answer is to
+    /// say so and name the other door rather than to silently take it: opening another folder as
+    /// the project reloads its settings, restarts its git baseline and lets go of the workspace,
+    /// which is not what "navigate" means anywhere.
+    fn show_shell_selection_in_tree(&mut self) {
+        let Some(path) = self.shell_selection() else { return };
+        let dir = if path.is_dir() { path } else { continue_from_parent(&path) };
+        if self.file_tree.reveal(&dir) {
+            self.sidebar_pane_focus = SidebarPane::Tree;
+            self.redraw = true;
+            return;
+        }
+        let lang = self.settings.lang;
+        self.status_message = if crate::file_tree::relative_to(&self.root, &dir).is_some() {
+            // Inside the project, but with no row to land on: a dot-folder while hidden files
+            // are off. The tree went as close as it could; saying which switch is in the way is
+            // more use than reporting a failure.
+            i18n::msg_navigate_hidden(lang, &dir.display().to_string())
+        } else {
+            i18n::msg_navigate_outside(lang, &dir.display().to_string())
+        };
+    }
+
+    /// "Open as project": the other door, taken deliberately.
+    fn open_shell_selection_as_project(&mut self) {
+        let Some(path) = self.shell_selection() else { return };
+        let dir = if path.is_dir() { path } else { continue_from_parent(&path) };
+        if dir.is_dir() {
+            self.set_root(dir);
+            self.sidebar_pane_focus = SidebarPane::Tree;
+        }
+    }
+
+    /// The row the shell half's actions act on.
+    fn shell_selection(&self) -> Option<PathBuf> {
+        self.shell_list.selected_row().map(|row| row.path.clone())
+    }
+
+    /// Whether the shell half is actually on screen.
+    ///
+    /// Asked of the layout rather than of the two settings, because the layout is where the third
+    /// answer lives: in a short window the half stands down so the tree is not squeezed to
+    /// nothing (see `ui::shell_half`), and the arrows must not then be moving a selection in a
+    /// pane that is not being drawn.
+    pub fn shell_pane_live(&self) -> bool {
+        if !self.settings.show_sidebar || !self.settings.show_shell_pane {
+            return false;
+        }
+        ui::compute_layout(self.last_full, &ui::LayoutParams::from_app(self)).shell.is_some()
     }
 
     // ---- Project search -------------------------------------------------------------------
@@ -12207,6 +12476,7 @@ impl App {
         // independently let them drift apart.
         self.settings.show_hidden_files = !self.settings.show_hidden_files;
         self.file_tree.set_show_hidden(self.settings.show_hidden_files);
+        self.shell_list.set_show_hidden(self.settings.show_hidden_files);
     }
 
     /// New terminal *window*: another tiled pane, focused.
@@ -14774,6 +15044,9 @@ impl App {
                 }
             }
             MenuAction::ToggleDrawer => self.toggle_drawer(),
+            MenuAction::ToggleShellPane => self.toggle_shell_pane(),
+            MenuAction::ShowInTree => self.show_shell_selection_in_tree(),
+            MenuAction::OpenAsProject => self.open_shell_selection_as_project(),
             // Opens the column first if it is away — a launcher nobody can see is a question
             // nobody was asked — and then puts the list up over whatever is running.
             MenuAction::NewAgentTab => self.new_drawer_tab(),
@@ -15589,6 +15862,20 @@ impl App {
                 return true;
             }
         }
+        // The shell half's top border, which is the seam it shares with the tree. Asked after the
+        // column's own right edge so the one cell where the two seams cross still means the
+        // width — that edge runs the whole height of the window and this one is three cells of
+        // it, and the longer control is the one a hand is aiming at there.
+        if let Some(shell) = areas.shell {
+            // Either side of the seam, the way the width seam takes both of its columns: the two
+            // frames each draw their own border, so the line between them is two rows and a hand
+            // aiming at it should not have to know which.
+            let on_seam = row == shell.y || row + 1 == shell.y;
+            if on_seam && col >= shell.x && col < shell.x + shell.width {
+                self.dragging = Some(DragTarget::ShellPaneHeight);
+                return true;
+            }
+        }
         if let Some(term_areas) = &areas.terminals {
             if let Some(first) = term_areas.first() {
                 if self.settings.terminal_on_right {
@@ -15651,6 +15938,16 @@ impl App {
             Some(DragTarget::Sidebar) => {
                 self.settings.sidebar_width = col;
                 self.settings.clamp_layout();
+            }
+            Some(DragTarget::ShellPaneHeight) => {
+                // Measured from the bottom of the column: the shell half is anchored there and
+                // the tree takes what is left, so the drag is about how many rows the half keeps
+                // rather than where the tree happens to end.
+                let areas = ui::compute_layout(full, &ui::LayoutParams::from_app(self));
+                if let Some(sidebar) = areas.sidebar {
+                    self.settings.shell_pane_rows = (sidebar.y + sidebar.height).saturating_sub(row);
+                    self.settings.clamp_layout();
+                }
             }
             Some(DragTarget::TerminalHeight) => {
                 let main_top = 1u16;
@@ -15906,8 +16203,26 @@ impl App {
     }
 
     fn handle_file_tree_key(&mut self, key: KeyEvent) {
+        if self.sidebar_pane_focus == SidebarPane::Shell {
+            // A half that is not on screen cannot be the one the arrows are in. This is where a
+            // window dragged short puts the keyboard back, rather than leaving it moving a
+            // selection nobody can see.
+            if self.shell_pane_live() {
+                self.handle_shell_pane_key(key);
+                return;
+            }
+            self.sidebar_pane_focus = SidebarPane::Tree;
+        }
         match key.code {
             KeyCode::Up => self.file_tree.move_selection(-1),
+            // Down off the bottom of the tree steps into the half below it, and Up off the top of
+            // that one steps back. The sidebar is one column with two lists in it, so the arrows
+            // already mean "further down the column" — there was no key left worth spending, and
+            // a key that has to be discovered is worse than an edge that simply gives way.
+            KeyCode::Down if self.at_tree_bottom() && self.shell_pane_live() => {
+                self.sidebar_pane_focus = SidebarPane::Shell;
+                self.shell_list.selected = 0;
+            }
             KeyCode::Down => self.file_tree.move_selection(1),
             KeyCode::Left => self.file_tree.collapse_selected(),
             KeyCode::Right => self.file_tree.expand_selected(),
@@ -15922,6 +16237,77 @@ impl App {
             KeyCode::Char('e') | KeyCode::Char('E') => self.start_rename(),
             KeyCode::Char('n') => self.open_new_entry(false),
             KeyCode::Char('N') => self.open_new_entry(true),
+            _ => {}
+        }
+    }
+
+    /// Shows or hides the sidebar's shell half.
+    ///
+    /// Hiding it takes the keyboard back to the tree if it was down there — a half that is not on
+    /// screen must not be the one the arrows are moving — and stops `poll_shell_cwd` asking
+    /// anything of anybody, which is the whole cost of the feature when it is put away.
+    fn toggle_shell_pane(&mut self) {
+        self.settings.show_shell_pane = !self.settings.show_shell_pane;
+        if !self.settings.show_shell_pane {
+            self.sidebar_pane_focus = SidebarPane::Tree;
+        }
+        self.settings.save();
+        self.redraw = true;
+    }
+
+    /// A click in the sidebar's shell half: the row under the pointer, and on a second click the
+    /// thing that row names.
+    ///
+    /// Two clicks to act rather than one, the way the tree works, and here for a sharper reason:
+    /// going into a folder types a `cd` at somebody's prompt. A stray click may say which row you
+    /// meant; it may not put a line into a running shell.
+    fn click_shell_pane(&mut self, rect: Rect, row: u16) {
+        self.focus = Focus::FileTree;
+        self.sidebar_pane_focus = SidebarPane::Shell;
+        let inner = ui::inner_rect(rect);
+        if row < inner.y {
+            return;
+        }
+        let idx = (row - inner.y) as usize;
+        if idx >= self.shell_list.rows.len() {
+            return;
+        }
+        let double = matches!(
+            self.last_shell_click,
+            Some((last, at)) if last == idx && at.elapsed() < DOUBLE_CLICK_THRESHOLD
+        );
+        self.shell_list.selected = idx;
+        if double {
+            self.last_shell_click = None;
+            self.activate_shell_selection();
+        } else {
+            self.last_shell_click = Some((idx, Instant::now()));
+        }
+    }
+
+    /// Whether the tree's selection is on its last row, which is the edge the arrows spill over.
+    fn at_tree_bottom(&self) -> bool {
+        !self.file_tree.visible.is_empty() && self.file_tree.selected + 1 >= self.file_tree.visible.len()
+    }
+
+    /// Keys in the sidebar's shell half.
+    ///
+    /// Short on purpose. This half has one verb — go into the thing under the cursor — and the
+    /// two that move the tree from it are on the context menu, where the difference between
+    /// revealing a folder and opening it as the project can be spelled out in words rather than
+    /// hidden behind a letter. What is not bound here is deliberate: renaming, deleting and
+    /// making files belong to the project's tree above, which is the pane that is anchored.
+    fn handle_shell_pane_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up if self.shell_list.selected == 0 => {
+                self.sidebar_pane_focus = SidebarPane::Tree;
+            }
+            KeyCode::Up => self.shell_list.move_selection(-1),
+            KeyCode::Down => self.shell_list.move_selection(1),
+            KeyCode::Enter => self.activate_shell_selection(),
+            // The same letter the tree binds, meaning the same thing in both halves: the
+            // preference is one preference.
+            KeyCode::Char('h') | KeyCode::Char('H') => self.toggle_hidden_files(),
             _ => {}
         }
     }
@@ -16813,6 +17199,14 @@ impl App {
                 if self.handle_terminal_titlebar_click(col, row, areas) {
                     return;
                 }
+                // And the handle that brings the shell half back, for exactly the same reason
+                // one line up. It sits on the sidebar's bottom border, and in the ordinary
+                // layout that row is also the seam above the terminals — so a press on it was
+                // starting a resize and the handle looked broken rather than busy.
+                if areas.shell_handle.is_some_and(|r| within(r, col, row)) {
+                    self.toggle_shell_pane();
+                    return;
+                }
                 if self.try_start_drag(col, row, areas) {
                     return;
                 }
@@ -16821,6 +17215,13 @@ impl App {
                 // so this is only about order, not about a conflict.
                 if let Some(rect) = areas.debug.filter(|r| within(*r, col, row)) {
                     self.click_debug_panel(rect, col, row);
+                    return;
+                }
+                // The shell half sits inside the sidebar's rectangle, so it is asked first:
+                // the test below would otherwise claim these rows for the tree and select
+                // whichever of its rows happens to share the line.
+                if let Some(shell) = areas.shell.filter(|r| within(*r, col, row)) {
+                    self.click_shell_pane(shell, row);
                     return;
                 }
                 if let Some(sidebar) = areas.sidebar {
@@ -17043,6 +17444,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.dragging {
                 Some(DragTarget::Sidebar)
+                | Some(DragTarget::ShellPaneHeight)
                 | Some(DragTarget::TerminalHeight)
                 | Some(DragTarget::EditorSplit)
                 | Some(DragTarget::DrawerWidth)
@@ -17207,6 +17609,10 @@ impl App {
         // test below would claim every notch dropped on the agent's conversation.
         if let Some(rect) = areas.drawer_overlay.filter(|r| within(*r, col, row)) {
             self.wheel_over_drawer(rect, col, row, delta);
+            return;
+        }
+        if areas.shell.is_some_and(|r| within(r, col, row)) {
+            self.shell_list.move_selection(delta);
             return;
         }
         if let Some(sidebar) = areas.sidebar {
@@ -17688,6 +18094,9 @@ impl App {
     fn open_context_menu_for_focus(&mut self) {
         let areas = ui::compute_layout(self.last_full, &ui::LayoutParams::from_app(self));
         let (target, rect) = match self.focus {
+            Focus::FileTree if self.sidebar_pane_focus == SidebarPane::Shell && self.shell_pane_live() => {
+                (ContextTarget::Shell, areas.shell.unwrap_or(self.last_full))
+            }
             Focus::FileTree => (ContextTarget::Sidebar, areas.sidebar.unwrap_or(self.last_full)),
             Focus::Terminal => {
                 let rect = areas
@@ -17747,6 +18156,19 @@ impl App {
                     Some(ContextMenu::new(ContextTarget::Drawer, (col, row), false));
                 return;
             }
+        }
+        if let Some(shell) = areas.shell.filter(|r| within(*r, col, row)) {
+            self.focus = Focus::FileTree;
+            self.sidebar_pane_focus = SidebarPane::Shell;
+            let inner = ui::inner_rect(shell);
+            if row >= inner.y {
+                let idx = (row - inner.y) as usize;
+                if idx < self.shell_list.rows.len() {
+                    self.shell_list.selected = idx;
+                }
+            }
+            self.context_menu = Some(ContextMenu::new(ContextTarget::Shell, (col, row), false));
+            return;
         }
         if let Some(sidebar) = areas.sidebar {
             if within(sidebar, col, row) {

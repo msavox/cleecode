@@ -180,6 +180,30 @@ pub fn detect_ssh_target(shell_pid: u32) -> Option<String> {
     None
 }
 
+/// The folder a shell is sitting in, asked of the operating system.
+///
+/// The other half of the question, and in practice the half that answers it. OSC 7 is exact and
+/// costs nothing, but it only arrives where the shell sends it: fish does, and Apple's zsh and
+/// bash blocks send it only inside Terminal.app — so on a Mac whose shell is zsh, which is the
+/// default one, nothing ever arrives. `sysinfo` reads the working directory the same way on all
+/// three platforms, and like everything else in this file it promises nothing: a process that
+/// has just exited, or one the system declines to describe, simply has no answer.
+///
+/// Only the named pid is refreshed. The snapshots above enumerate the whole process table
+/// because they are looking for children whose pids nobody knows in advance; this knows exactly
+/// which process it is asking about, and sweeping the table to read one field would be paid for
+/// on every sample.
+pub fn shell_cwd(shell_pid: u32) -> Option<PathBuf> {
+    let pid = sysinfo::Pid::from_u32(shell_pid);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cwd(sysinfo::UpdateKind::Always),
+    );
+    sys.process(pid).and_then(|process| process.cwd()).map(|dir| dir.to_path_buf())
+}
+
 /// Best-effort check for whether a shell has a direct child process running (i.e. is
 /// busy at something other than its prompt). Used to pick an idle terminal for the
 /// editor's Run button; enumerates the process table the same way `detect_ssh_target`
@@ -278,6 +302,20 @@ fn parse_ssh_command(cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The fallback for shells that never say where they are, checked against the one process
+    /// this test can be sure about: itself.
+    #[test]
+    fn the_process_table_can_be_asked_where_a_process_is() {
+        let here = std::env::current_dir().unwrap();
+        let found = super::shell_cwd(std::process::id()).expect("a live process has a folder");
+        // Compared resolved: the answer comes back from the kernel fully resolved, and a test run
+        // from a symlinked path would otherwise disagree with itself.
+        assert_eq!(
+            std::fs::canonicalize(found).unwrap(),
+            std::fs::canonicalize(here).unwrap()
+        );
+    }
 
     /// The opener is the platform's, and on Windows it is a shell builtin with an empty window
     /// title in front of the path — leave that out and the path becomes the title, so nothing
@@ -537,6 +575,7 @@ fn url_opener() -> (&'static str, &'static [&'static str]) {
 /// of over ssh are three places that must all mean the same page — and a second copy of an
 /// address is a second address the day one of them is edited.
 pub const KOFI_URL: &str = "https://ko-fi.com/msavox";
+
 
 /// Hands a URL to the desktop's browser.
 ///

@@ -409,6 +409,13 @@ There is also a `man clee`.
 
 A file tree with per-type Nerd Font icons and git status dots, live refresh, create/rename/delete
 and drag & drop (dropped onto a terminal inside an `ssh` session, files go up with `scp`).
+Under it, a shell half that lists the folder the shell you were last typing in is sitting in —
+the `ls` you would otherwise keep typing, and the only way to see where a shell is without asking
+it. It follows every `cd` on its own, from the shell's own OSC 7 where one is sent and from the
+process table where none is. `Enter` on a folder walks the shell into it (it types the `cd` at
+that prompt, so the two can never disagree), and right-click offers **Show in the tree** — which
+points the tree above at that folder without moving the project root — beside **Open as project**,
+which moves it.
 Three layout presets, a resizable everything, and a settings panel that applies changes live.
 English and Italian throughout, including the manual. CleeCode paints its own background: a theme
 is a set of colours and the surface they were chosen against, and it arrives with both. The `●`
@@ -531,6 +538,11 @@ rather than ending the process: a broken terminal costs you that terminal, at mo
 In the file tree: `↑↓` move, `→` expand, `←` collapse or jump to parent, `Enter` / double-click
 opens a file or reroots a folder (`..` walks up), `n` / `N` create a file / folder, `e` renames,
 `Delete` removes with confirmation, `H` toggles hidden files.
+
+In the shell half below it: `↑↓` move — `↓` off the bottom of the tree comes down here and `↑` off
+the top goes back up — `Enter` / double-click walks the shell into a folder or opens a file, `H`
+toggles hidden files. Its top border is a seam: drag it to resize. **View › Shell pane** puts it
+away, leaving its name on the sidebar's bottom border — click that to bring it back.
 
 There are deliberately **no function keys and no `PageUp`/`PageDown`** — on a laptop both need
 `Fn` — and **no `Alt`+letter chords**, because macOS only sends Option as Meta on US keyboard

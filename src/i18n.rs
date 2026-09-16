@@ -41,6 +41,9 @@ pub enum Key {
     ItemToggleSidebar,
     ItemToggleTerminal,
     ItemToggleDrawer,
+    ItemToggleShellPane,
+    ItemShowInTree,
+    ItemOpenAsProject,
     /// Another agent beside the ones in the drawer. Ellipsised because it opens the launcher and
     /// stops there: what starts a process is choosing a name on it, not this row.
     ItemNewAgentTab,
@@ -151,6 +154,7 @@ pub enum Key {
     ToolbarVenvNone,
     ToolbarRunNone,
     PanelFile,
+    PanelShell,
     SettingsTitle,
     AboutTitle,
     AboutTagline,
@@ -356,6 +360,19 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (Lang::En, ItemToggleDrawer) => "Agent drawer",
         (Lang::It, ItemToggleDrawer) => "Cassetto agente",
+        // Named after the pane it shows and hides, like Sidebar and Agent drawer above it. It
+        // read "Shell folder" first, which is what the pane *contains* — and a row in a list of
+        // panes that names a folder sounds like somewhere it is about to take you.
+        (Lang::En, ItemToggleShellPane) => "Shell pane",
+        (Lang::It, ItemToggleShellPane) => "Riquadro shell",
+        // Both name the pane that moves, which is the only thing that tells them apart: one
+        // opens rows in the tree above and leaves the project where it is, the other moves the
+        // project. They read "Navigate here" and "Open as project" first, and only the second
+        // half of that pair said what it would do.
+        (Lang::En, ItemShowInTree) => "Show in the tree",
+        (Lang::It, ItemShowInTree) => "Mostra nell'albero",
+        (Lang::En, ItemOpenAsProject) => "Open as project",
+        (Lang::It, ItemOpenAsProject) => "Apri come progetto",
         (Lang::En, ItemNewAgentTab) => "New agent tab...",
         (Lang::It, ItemNewAgentTab) => "Nuovo tab agente...",
         (Lang::En, ItemCloseAgentTab) => "Close agent tab",
@@ -642,8 +659,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ToolbarRunNone) => "no command",
         (Lang::It, ToolbarRunNone) => "nessun comando",
 
-        (Lang::En, PanelFile) => "Files",
-        (Lang::It, PanelFile) => "File",
+        (Lang::En, PanelFile) => "Project Files",
+        (Lang::It, PanelFile) => "File progetto",
+        (Lang::En, PanelShell) => "Shell",
+        (Lang::It, PanelShell) => "Shell",
 
         (Lang::En, SettingsTitle) => "Settings (Esc closes, Enter/arrows change value)",
         (Lang::It, SettingsTitle) => "Impostazioni (Esc chiude, Invio/frecce cambiano valore)",
@@ -3168,6 +3187,55 @@ pub fn msg_follow_full(lang: Lang, limit: usize) -> String {
     match lang {
         Lang::En => format!("Follow mode has opened its {limit} tabs; close some to see more"),
         Lang::It => format!("Il modo segui ha aperto le sue {limit} schede; chiudine per vederne altre"),
+    }
+}
+
+/// Said when "Navigate here" was asked of a folder that is in the project but has no row on
+/// screen — one whose name starts with a dot, while hidden files are off. The tree went as close
+/// as it could; naming the switch that is in the way is more use than reporting a failure.
+pub fn msg_navigate_hidden(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("{path} is hidden; turn hidden files on to see it in the tree"),
+        Lang::It => format!("{path} è nascosta; accendi i file nascosti per vederla nell'albero"),
+    }
+}
+
+/// Said when "Navigate here" was asked of a folder outside the project. Refused rather than
+/// obeyed: getting there means opening it *as the project*, which reloads its settings, starts
+/// its git history over and lets go of the workspace — and the menu has a row that says so.
+pub fn msg_navigate_outside(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::En => format!("{path} is outside this project — use Open as project to go there"),
+        Lang::It => format!("{path} è fuori da questo progetto — usa Apri come progetto per andarci"),
+    }
+}
+
+/// Said when a `cd` was asked of a shell that is running something. Refused rather than sent:
+/// at a prompt the line is a command, and inside a program it is four characters typed into
+/// somebody's editor.
+pub fn msg_shell_busy(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "That shell is busy — nothing was typed into it",
+        Lang::It => "Quella shell è occupata — non le è stato scritto niente",
+    }
+}
+
+/// Said when something was asked of the shell half while no shell has said where it is: none has
+/// been typed in yet, or the one that was has been closed.
+/// The tail of the shell half's listing when the folder held more names than it will show. See
+/// `SHELL_LIST_MAX`: the cap exists so a `cd` into `node_modules` does not read a folder of
+/// thousands to draw a pane of ten, and what it left out is said rather than quietly cut off.
+pub fn shell_list_more(lang: Lang, more: usize) -> String {
+    match lang {
+        Lang::En => format!("  … {more} more"),
+        Lang::It => format!("  … altri {more}"),
+    }
+}
+
+pub fn msg_no_shell_folder(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No shell has said where it is yet",
+        Lang::It => "Nessuna shell ha ancora detto dov'è",
     }
 }
 
