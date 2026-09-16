@@ -1,3 +1,19 @@
+## What's new in 0.27.1
+
+**Follow mode takes the view to what arrived.** A file you already had open, rewritten from
+outside while you were reading somewhere else in it, lit the lines that changed and left them
+where nobody was looking — a light switched on in a room you are not in. Now it goes to the first
+of them. The lines were never the hard part: a reload already works out which ones arrived, by
+comparing the text leaving with the text coming in, and that is where the green line numbers come
+from. Nothing has to be asked of git.
+
+It is the cursor that moves rather than the view alone, because the view would be dragged
+straight back to wherever the cursor still was — and because it is already what an agent's
+`edit_buffer` does when it changes a buffer through the front door. A change that arrived through
+the filesystem instead is the same event from the other side. Nothing is lost by moving it: a
+buffer with unsaved edits is never reloaded in the first place. With follow mode off the lines
+still light up and nothing moves.
+
 ## What's new in 0.27.0
 
 **The sidebar knows where your shell is.** Under the project tree there is now a second half,
