@@ -1,3 +1,38 @@
+## What's new in 0.27.0
+
+**The sidebar knows where your shell is.** Under the project tree there is now a second half,
+listing the folder the terminal you were last typing in is sitting in — the `ls` you would
+otherwise keep typing, and before that the only way to see where a shell is at all without asking
+it. It follows every `cd` on its own: a shell that emits OSC 7 has already said where it is, and
+one that says nothing is asked of the process table instead — which is not the exotic case but
+the ordinary one, since the block macOS ships for zsh and bash only sends it inside Terminal.app.
+Inside `ssh` the half stays put, because the folder being announced is on another machine.
+
+Enter on a folder does not walk the listing on its own: it types the `cd` at that shell's prompt
+and moves once the shell says it has, so the two can never end up in different folders. Not into a
+shell that is running something, though — at a prompt that line is a command, inside `vim` it is
+four characters in somebody's buffer.
+
+The project tree above never moves for any of this. Right-click offers **Show in the tree**, which
+opens the rows down to a folder and leaves the project root exactly where it is, beside **Open as
+project**, which moves the root with everything that implies — two rows, always both, so the
+heavier of the two never arrives unannounced. **View › Shell pane** puts the half away and leaves
+its name on the sidebar's bottom border to bring it back; its top border is a seam you can drag.
+
+**Check for updates, under the CleeCode menu.** The version check has always run on its own —
+six seconds after startup, once a day, once per version, never on a build from source — and all
+of that restraint left nowhere to ask. This is the asking: it goes now, skips the rules that
+belong to the notice rather than to you, and always answers, which the quiet one deliberately
+does not. The answer arrives in a dialog of its own, saying so while it is still out asking, and
+"could not reach GitHub" is kept apart from "nothing is newer" — those are different facts, and
+reporting the second for the first is how a machine that cannot see tells you the road is clear.
+
+**A wrapped pane scrolls far enough to show the cursor.** With word wrap on, the view was moved
+by counting whole lines while the screen was counting rows, so a line twice the pane's width
+counted once and took two — and the line the view was moving *for* ended up just past the bottom
+edge. A change made by an agent could arrive highlighted and invisible: the view did scroll, only
+not far enough, and from the outside those look the same.
+
 ## What's new in 0.26.3
 
 **`..` leads somewhere again.** A session started as `clee .` — which is how you open the folder
