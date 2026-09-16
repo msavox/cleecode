@@ -49,6 +49,29 @@ pub enum EditorPane {
 /// A half rather than a frame of its own, in the shape `EditorPane` already uses for the editor
 /// split: the sidebar is one frame with two things inside it, the focus ring goes round it once,
 /// and only once the keyboard is already there does the question of which half arise.
+/// What an update check somebody *asked for* has to say, while it is being said in a modal.
+///
+/// The automatic check keeps to the status line, and must: nobody asked it anything, and a
+/// dialog in the middle of the screen is not a footnote. A check you clicked is the opposite
+/// case — it is the answer to something you just did, and it belongs where you are looking.
+///
+/// Good news with an upgrade we can run is not here: that one is `update_prompt`, which has a
+/// modal of its own because it asks a question rather than reports a fact.
+pub enum UpdateAnswer {
+    /// Out asking. Put up at once rather than when the answer lands: a dialog that appears by
+    /// itself five seconds after a click reads as something that happened *to* you, not as the
+    /// answer to what you did.
+    Asking,
+    UpToDate(String),
+    /// Something newer, on an install whose upgrade cannot be run for you — a tarball, a .deb,
+    /// or a build from source. The version, and the site, and nothing to press.
+    Found(String),
+    Failed,
+    /// Switched off for good by the environment rather than by a preference. See
+    /// `update::disabled_by_env`.
+    Off,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SidebarPane {
     /// The project's tree, anchored to the root.
@@ -601,6 +624,11 @@ pub struct App {
     /// click on row three of one is not the first half of a double click on row three of the
     /// other.
     last_shell_click: Option<(usize, Instant)>,
+    /// Whether an asked-for update check is out asking, so a second click does not put the
+    /// same question twice.
+    update_checking: bool,
+    /// The asked-for check's answer, while its modal is up.
+    pub update_answer: Option<UpdateAnswer>,
     pub editors: Vec<Editor>,
     pub active_editor: usize,
     pub split_view: bool,
@@ -3876,6 +3904,8 @@ impl App {
             shell_cwd_asked: None,
             shell_asked: None,
             last_shell_click: None,
+            update_checking: false,
+            update_answer: None,
             root,
             editors: vec![Editor::empty()],
             active_editor: 0,
@@ -4139,13 +4169,26 @@ impl App {
         while let Ok(event) = self.update_rx.try_recv() {
             match event {
                 crate::update::UpdateEvent::Available { version, method } => {
+                    // Asked for or not, the offer is the same modal and the same question. What
+                    // differs is only where the *other* answers go, and there are none here.
+                    let asked = std::mem::take(&mut self.update_checking);
+                    self.update_answer = None;
                     match crate::update::upgrade_command_line(method) {
                         Some(_) => self.update_prompt = Some((version, method)),
+                        None if asked => self.update_answer = Some(UpdateAnswer::Found(version)),
                         None => {
                             self.status_message =
                                 i18n::msg_update_available(lang, &version, None);
                         }
                     }
+                }
+                crate::update::UpdateEvent::UpToDate { version } => {
+                    self.update_checking = false;
+                    self.update_answer = Some(UpdateAnswer::UpToDate(version));
+                }
+                crate::update::UpdateEvent::CheckFailed => {
+                    self.update_checking = false;
+                    self.update_answer = Some(UpdateAnswer::Failed);
                 }
                 crate::update::UpdateEvent::UpgradeFinished { ok, version, method } => {
                     self.status_message = if ok {
@@ -14552,6 +14595,7 @@ impl App {
         self.context_menu.is_some()
             || self.unsaved_prompt.is_some()
             || self.update_prompt.is_some()
+            || self.update_answer.is_some()
             || self.font_prompt
             || self.extras_menu.is_some()
             || self.pending_upload.is_some()
@@ -14655,6 +14699,13 @@ impl App {
         }
         if self.show_delete_confirm {
             self.handle_delete_confirm_key(key);
+            return;
+        }
+        if self.update_answer.is_some() {
+            // A report, not a question: whatever you press, you have read it. The one modal here
+            // that *asks* something is `update_prompt` below, where only Enter means yes.
+            self.update_answer = None;
+            self.redraw = true;
             return;
         }
         if self.update_prompt.is_some() {
@@ -15045,6 +15096,7 @@ impl App {
             }
             MenuAction::ToggleDrawer => self.toggle_drawer(),
             MenuAction::ToggleShellPane => self.toggle_shell_pane(),
+            MenuAction::CheckForUpdates => self.check_for_updates(),
             MenuAction::ShowInTree => self.show_shell_selection_in_tree(),
             MenuAction::OpenAsProject => self.open_shell_selection_as_project(),
             // Opens the column first if it is away — a launcher nobody can see is a question
@@ -15241,7 +15293,7 @@ impl App {
                 // Focusing a hidden frame would leave the keyboard talking to something
                 // invisible, so show it first — the intent is clearly to work there.
                 self.settings.show_sidebar = true;
-                self.focus = Focus::FileTree;
+                self.focus_tree();
             }
             MenuAction::FocusEditor => self.focus = Focus::Editor,
             MenuAction::FocusTerminal => {
@@ -15443,7 +15495,7 @@ impl App {
     fn focus_in_direction(&mut self, side: ResizeSide) {
         let Some(target) = focus_neighbour(&self.resize_layout(), side) else { return };
         match target {
-            FocusTarget::Tree => self.focus = Focus::FileTree,
+            FocusTarget::Tree => self.focus_tree(),
             FocusTarget::Editor(pane) => {
                 self.focus = Focus::Editor;
                 self.editor_pane_focus = pane;
@@ -16241,6 +16293,25 @@ impl App {
         }
     }
 
+    /// Asks GitHub for the latest release because somebody asked for it.
+    ///
+    /// The automatic check keeps quiet about everything except good news, which is right for
+    /// something nobody asked for and wrong for a row somebody clicked: this one answers either
+    /// way, and says so while it is out asking. One at a time, because two curls and two answers
+    /// to the same question are one answer too many.
+    fn check_for_updates(&mut self) {
+        if crate::update::disabled_by_env() {
+            self.update_answer = Some(UpdateAnswer::Off);
+            return;
+        }
+        if self.update_checking {
+            return;
+        }
+        self.update_checking = true;
+        self.update_answer = Some(UpdateAnswer::Asking);
+        crate::update::spawn_check_now(self.update_tx.clone());
+    }
+
     /// Shows or hides the sidebar's shell half.
     ///
     /// Hiding it takes the keyboard back to the tree if it was down there — a half that is not on
@@ -16283,6 +16354,19 @@ impl App {
         } else {
             self.last_shell_click = Some((idx, Instant::now()));
         }
+    }
+
+    /// Puts the keyboard in the sidebar's tree — both halves of that answer, always together.
+    ///
+    /// Which frame has the keyboard and which half of the sidebar has it are two fields, and
+    /// every road into the tree has to write both. Four of them wrote only the first, and the
+    /// symptom was not the one you would predict: the arrows moved the tree, because the sidebar
+    /// was focused, while the *shell* half wore the lit border, because it was still the half of
+    /// record. A frame that works and does not look focused reads as a drawing bug, and the bug
+    /// was here. Nothing sets `Focus::FileTree` on its own any more.
+    fn focus_tree(&mut self) {
+        self.focus = Focus::FileTree;
+        self.sidebar_pane_focus = SidebarPane::Tree;
     }
 
     /// Whether the tree's selection is on its last row, which is the edge the arrows spill over.
@@ -17030,6 +17114,11 @@ impl App {
                     self.mouse_context_menu(col, row);
                     return;
                 }
+                if self.update_answer.is_some() {
+                    self.update_answer = None;
+                    self.redraw = true;
+                    return;
+                }
                 if self.show_delete_confirm {
                     self.show_delete_confirm = false;
                     self.delete_target = None;
@@ -17226,7 +17315,7 @@ impl App {
                 }
                 if let Some(sidebar) = areas.sidebar {
                     if within(sidebar, col, row) {
-                        self.focus = Focus::FileTree;
+                        self.focus_tree();
                         let inner = ui::inner_rect(sidebar);
                         if row >= inner.y {
                             let idx = (row - inner.y) as usize;
@@ -18172,7 +18261,7 @@ impl App {
         }
         if let Some(sidebar) = areas.sidebar {
             if within(sidebar, col, row) {
-                self.focus = Focus::FileTree;
+                self.focus_tree();
                 let inner = ui::inner_rect(sidebar);
                 if row >= inner.y {
                     let idx = (row - inner.y) as usize;

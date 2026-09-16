@@ -188,6 +188,12 @@ pub enum UpdateEvent {
     Available { version: String, method: InstallMethod },
     /// The upgrade the user accepted has finished, well or badly.
     UpgradeFinished { ok: bool, version: String, method: InstallMethod },
+    /// Asked for, and there is nothing newer. Only ever sent for a check somebody *asked* for:
+    /// the one that runs on its own is silent by design, and a row you clicked has to answer.
+    UpToDate { version: String },
+    /// Asked for, and the question could not be put — no curl, no network, GitHub unhappy.
+    /// Silence is the right answer for the automatic check and the wrong one here.
+    CheckFailed,
 }
 
 fn now_secs() -> u64 {
@@ -221,17 +227,7 @@ pub fn spawn_check(tx: Sender<UpdateEvent>, update_check_setting: bool) {
             // failing GitHub is not retried at every launch until it behaves.
             state.last_check = now;
             save_state(&state);
-            let output = std::process::Command::new("curl")
-                .args(["-fsSL", "--max-time", "8", LATEST_URL])
-                .stdin(std::process::Stdio::null())
-                .output();
-            let Ok(output) = output else { return };
-            if !output.status.success() {
-                return;
-            }
-            let Some(tag) = tag_from_json(&String::from_utf8_lossy(&output.stdout)) else {
-                return;
-            };
+            let Some(tag) = latest_tag() else { return };
             let method = std::env::current_exe()
                 .map(|exe| install_method(&exe))
                 .unwrap_or(InstallMethod::Other);
@@ -244,6 +240,71 @@ pub fn spawn_check(tx: Sender<UpdateEvent>, update_check_setting: bool) {
             state.notified = tag.clone();
             save_state(&state);
             let _ = tx.send(UpdateEvent::Available { version, method });
+        });
+    });
+}
+
+/// The newest release's tag, asked of GitHub. `None` for every way that can fail, which are all
+/// the same answer here: we do not know.
+///
+/// `curl` as a subprocess rather than an HTTP stack in the binary — the reason is in this
+/// module's own header, and it is the same reason both callers share this one function: there is
+/// exactly one address CleeCode ever asks anything of, and one place that asks it.
+fn latest_tag() -> Option<String> {
+    let output = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "8", LATEST_URL])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    tag_from_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The same question, asked because somebody asked it.
+///
+/// Everything the automatic check does to stay out of the way is dropped here, and each for its
+/// own reason. No startup delay: you are waiting for this. No once-a-day throttle and no
+/// once-per-version latch: those exist so a notice does not repeat itself, and a row you clicked
+/// is not a notice. No `update_check` setting either — that setting means "do not go and look on
+/// your own", and this is not on its own.
+///
+/// What it keeps is `disabled_by_env`, checked by the caller, because that one is not a
+/// preference: it is how somebody packaging CleeCode turns the network off for good.
+///
+/// And unlike the quiet one it always answers. A menu row that sometimes says nothing at all is
+/// indistinguishable from a menu row that is broken.
+pub fn spawn_check_now(tx: Sender<UpdateEvent>) {
+    std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(move || {
+            let Some(tag) = latest_tag() else {
+                let _ = tx.send(UpdateEvent::CheckFailed);
+                return;
+            };
+            let Some(latest) = parse_tag(&tag) else {
+                let _ = tx.send(UpdateEvent::CheckFailed);
+                return;
+            };
+            let current = env!("CARGO_PKG_VERSION");
+            let version = tag.trim().strip_prefix('v').unwrap_or(&tag).to_string();
+            // The asking is recorded even though the throttle was not consulted: a check is a
+            // check, and the quiet one has no business repeating a question that was just put.
+            let mut state = load_state();
+            state.last_check = now_secs();
+            if parse_tag(current).is_some_and(|current| is_newer(latest, current)) {
+                // Marked here too, so the automatic notice does not arrive later to announce a
+                // version this row has already named.
+                state.notified = tag.clone();
+                save_state(&state);
+                let method = std::env::current_exe()
+                    .map(|exe| install_method(&exe))
+                    .unwrap_or(InstallMethod::Other);
+                let _ = tx.send(UpdateEvent::Available { version, method });
+            } else {
+                save_state(&state);
+                let _ = tx.send(UpdateEvent::UpToDate { version: current.to_string() });
+            }
         });
     });
 }

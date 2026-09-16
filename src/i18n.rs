@@ -42,6 +42,7 @@ pub enum Key {
     ItemToggleTerminal,
     ItemToggleDrawer,
     ItemToggleShellPane,
+    ItemCheckForUpdates,
     ItemShowInTree,
     ItemOpenAsProject,
     /// Another agent beside the ones in the drawer. Ellipsised because it opens the launcher and
@@ -363,6 +364,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         // Named after the pane it shows and hides, like Sidebar and Agent drawer above it. It
         // read "Shell folder" first, which is what the pane *contains* — and a row in a list of
         // panes that names a folder sounds like somewhere it is about to take you.
+        (Lang::En, ItemCheckForUpdates) => "Check for updates",
+        (Lang::It, ItemCheckForUpdates) => "Controlla aggiornamenti",
         (Lang::En, ItemToggleShellPane) => "Shell pane",
         (Lang::It, ItemToggleShellPane) => "Riquadro shell",
         // Both name the pane that moves, which is the only thing that tells them apart: one
@@ -3213,6 +3216,53 @@ pub fn msg_navigate_outside(lang: Lang, path: &str) -> String {
 /// Said when a `cd` was asked of a shell that is running something. Refused rather than sent:
 /// at a prompt the line is a command, and inside a program it is four characters typed into
 /// somebody's editor.
+/// Said while an asked-for update check is out asking. The automatic one never says this — it
+/// is not supposed to be noticed at all — but a row you clicked has to show that something is
+/// happening, or the second click comes before the first answer does.
+/// The second line of a modal that reports rather than asks. Every key means the same thing
+/// there, and saying so is what stops somebody hunting for the one that does.
+pub fn msg_any_key_closes(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Any key closes this",
+        Lang::It => "Un tasto qualsiasi chiude",
+    }
+}
+
+pub fn msg_update_checking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Asking GitHub for the latest release…",
+        Lang::It => "Chiedo a GitHub qual è l'ultima versione…",
+    }
+}
+
+/// Said when an asked-for check found nothing newer. The quiet check stays quiet here; this one
+/// was asked a question and owes an answer.
+pub fn msg_update_up_to_date(lang: Lang, version: &str) -> String {
+    match lang {
+        Lang::En => format!("CleeCode {version} is the latest release"),
+        Lang::It => format!("CleeCode {version} è l'ultima versione"),
+    }
+}
+
+/// Said when the question could not be put at all — no curl, no network, GitHub unhappy. Named
+/// as what it is rather than as "no updates": those are different facts, and reporting the
+/// second for the first is how a machine that cannot see tells you the road is clear.
+pub fn msg_update_check_failed(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Could not reach GitHub to check for updates",
+        Lang::It => "Non sono riuscito a raggiungere GitHub per il controllo",
+    }
+}
+
+/// Said when the environment has turned the check off for good — a packager's switch, not a
+/// preference, so the row does not quietly do nothing.
+pub fn msg_update_check_off(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Update checks are switched off in this environment",
+        Lang::It => "I controlli aggiornamenti sono spenti in questo ambiente",
+    }
+}
+
 pub fn msg_shell_busy(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "That shell is busy — nothing was typed into it",

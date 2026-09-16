@@ -5,6 +5,8 @@ pub enum MenuAction {
     ToggleSidebar,
     /// Show or hide the sidebar's shell half.
     ToggleShellPane,
+    /// Ask GitHub, now, because somebody asked. See `update::spawn_check_now`.
+    CheckForUpdates,
     /// Point the project's tree at the folder the shell half has selected, without moving the
     /// root. See `App::show_shell_selection_in_tree`.
     ShowInTree,
@@ -144,6 +146,7 @@ impl MenuAction {
     pub const ALL: &'static [MenuAction] = &[
         MenuAction::ToggleSidebar,
         MenuAction::ToggleShellPane,
+        MenuAction::CheckForUpdates,
         MenuAction::ShowInTree,
         MenuAction::OpenAsProject,
         MenuAction::ToggleTerminal,
@@ -398,6 +401,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // without a chord of its own on purpose: this is the entry you use once, to
                 // find out that the chords are editable and what they are called.
                 item(Key::ItemKeybindings, MenuAction::EditKeybindings, None),
+                // The door to a check that otherwise only ever happens on its own: six seconds
+                // after startup, once a day, once per version, never on a build from source. All
+                // of that is there so a notice cannot nag — and it leaves nowhere to ask. This
+                // is the asking, and unlike the quiet one it always answers.
+                group(Key::ItemCheckForUpdates, MenuAction::CheckForUpdates, None),
                 group(Key::ItemQuit, MenuAction::Quit, Some("Ctrl+Q")),
             ],
         },

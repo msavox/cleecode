@@ -2218,32 +2218,87 @@ impl Editor {
     ///
     /// Scrolling is a look, not a move: the view goes where it is sent and stays there, and the
     /// next arrow key or edit brings it back to the cursor, which is what every editor does.
-    pub fn follow_cursor(&mut self, viewport_height: usize, viewport_width: usize) {
+    pub fn follow_cursor(&mut self, viewport_height: usize, text_width: usize, wrap: bool) {
         let cursor = (self.cursor_line, self.cursor_col);
-        let viewport = (viewport_height, viewport_width);
+        let viewport = (viewport_height, text_width);
         if cursor == self.cursor_seen && viewport == self.viewport_seen {
             return;
         }
         self.cursor_seen = cursor;
         self.viewport_seen = viewport;
-        self.adjust_scroll(viewport_height, viewport_width);
+        self.adjust_scroll(viewport_height, text_width, wrap);
     }
 
-    pub fn adjust_scroll(&mut self, viewport_height: usize, viewport_width: usize) {
+    /// Drags the view back until the cursor is on screen — down the page, and sideways where
+    /// there is a sideways.
+    ///
+    /// `text_width` is the pane's, always, and `wrap` says what it means. It used to arrive as
+    /// zero in wrap mode, standing for "no sideways to scroll", and that threw away the one
+    /// number the vertical half needed: see `scroll_to_cursor_wrapped`.
+    pub fn adjust_scroll(&mut self, viewport_height: usize, text_width: usize, wrap: bool) {
         if viewport_height > 0 {
-            if self.cursor_line < self.top_line {
+            if wrap {
+                self.scroll_to_cursor_wrapped(viewport_height, text_width);
+            } else if self.cursor_line < self.top_line {
                 self.top_line = self.cursor_line;
             } else if self.cursor_line >= self.top_line + viewport_height {
                 self.top_line = self.cursor_line + 1 - viewport_height;
             }
         }
-        if viewport_width > 0 {
+        // A wrapped pane has no sideways: every line is already whole on screen, and `left_col`
+        // stays where it is rather than being computed against a width that means rows here.
+        if !wrap && text_width > 0 {
             if self.cursor_col < self.left_col {
                 self.left_col = self.cursor_col;
-            } else if self.cursor_col >= self.left_col + viewport_width {
-                self.left_col = self.cursor_col + 1 - viewport_width;
+            } else if self.cursor_col >= self.left_col + text_width {
+                self.left_col = self.cursor_col + 1 - text_width;
             }
         }
+    }
+
+    /// Where the view has to start for the cursor's line to be drawn, in a pane that wraps.
+    ///
+    /// Counting logical lines is what the unwrapped case does, and here it is simply wrong: a
+    /// line twice the pane's width takes two rows, so `viewport_height` lines can be far more
+    /// than `viewport_height` rows. Putting the cursor's line last among them — which is what
+    /// `top_line = cursor_line + 1 - viewport_height` does — pushes it past the bottom edge,
+    /// where the renderer clips it.
+    ///
+    /// That is how an agent's edit could arrive highlighted and invisible: the view *did* scroll,
+    /// just not far enough, and from the outside those two look exactly alike.
+    ///
+    /// Folded lines are counted as though they were drawn, the way the unwrapped case counts
+    /// them. It errs towards scrolling less far up, which leaves the cursor on screen with room
+    /// to spare rather than off it.
+    fn scroll_to_cursor_wrapped(&mut self, viewport_height: usize, text_width: usize) {
+        if self.cursor_line < self.top_line {
+            self.top_line = self.cursor_line;
+            return;
+        }
+        // Walked up from the cursor's own line, taking whole lines while they fit. Where it stops
+        // is the highest line that can be on screen with the cursor's line still whole — and when
+        // that is at or below where the view already starts, the walk simply arrives there and
+        // nothing moves.
+        let mut used = self.wrapped_rows(self.cursor_line, text_width);
+        let mut top = self.cursor_line;
+        while top > self.top_line {
+            let above = self.wrapped_rows(top - 1, text_width);
+            if used + above > viewport_height {
+                break;
+            }
+            used += above;
+            top -= 1;
+        }
+        self.top_line = top;
+    }
+
+    /// How many rows one line takes at this width — never fewer than one, since an empty line
+    /// still occupies a row. The same arithmetic the renderer does to place the caret.
+    fn wrapped_rows(&self, line: usize, text_width: usize) -> usize {
+        if text_width == 0 || line >= self.rope.len_lines() {
+            return 1;
+        }
+        self.line_char_len(line).div_ceil(text_width).max(1)
     }
 }
 
@@ -3781,6 +3836,80 @@ mod tests {
     /// so the moment the cursor line left the viewport the view was yanked back to it, undoing
     /// each further notch before it was drawn. The view has to be allowed to leave the cursor
     /// behind, and to come back only when the cursor itself moves.
+    /// A wrapped pane is measured in rows, not in lines, and the two stop agreeing the moment
+    /// anything wraps.
+    ///
+    /// This is the bug an agent's edit showed: the change was applied and highlighted, the view
+    /// scrolled — and the line still was not on screen, because the old arithmetic counted
+    /// `viewport_height` *lines* back from the cursor and every one of them that wrapped ate
+    /// rows the count knew nothing about. The last of them is the cursor's own, so the cursor's
+    /// line was always the one pushed off the bottom.
+    #[test]
+    fn a_wrapped_pane_scrolls_far_enough_to_actually_show_the_cursor() {
+        const WIDTH: usize = 80;
+        const ROWS: usize = 10;
+        let mut ed = Editor::empty();
+        // Every line three rows wide at this width, so ten lines are thirty rows.
+        ed.rope = Rope::from_str(&(0..200).map(|_| format!("{}\n", "x".repeat(WIDTH * 2 + 1))).collect::<String>());
+        ed.cursor_line = 50;
+
+        ed.follow_cursor(ROWS, WIDTH, true);
+        // Three lines of three rows is nine, and a fourth would be twelve: the view starts as far
+        // up as it can with the cursor's line still whole.
+        assert_eq!(ed.top_line, 48);
+        let rows_above: usize = (ed.top_line..ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
+        assert!(
+            rows_above + ed.wrapped_rows(ed.cursor_line, WIDTH) <= ROWS,
+            "the cursor's line has to fit inside the pane, not merely be near it"
+        );
+
+        // What the unwrapped arithmetic would have answered for the same buffer, which is the
+        // defect stated as a number: line 41 at the top, and by the time the renderer reaches
+        // line 50 it has already drawn twenty-seven rows into a pane ten rows tall.
+        let mut naive = Editor::empty();
+        naive.rope = ed.rope.clone();
+        naive.cursor_line = 50;
+        naive.follow_cursor(ROWS, WIDTH, false);
+        assert_eq!(naive.top_line, 41);
+        let naive_above: usize = (naive.top_line..naive.cursor_line).map(|l| naive.wrapped_rows(l, WIDTH)).sum();
+        assert!(naive_above > ROWS, "which is exactly why the line was never on screen");
+    }
+
+    /// Lines that do not wrap must not pay for the ones that do: a pane of short lines with one
+    /// long one in it scrolls by rows, and the count is the renderer's, not a guess.
+    #[test]
+    fn wrapped_scrolling_counts_each_line_for_what_it_actually_takes() {
+        const WIDTH: usize = 20;
+        const ROWS: usize = 6;
+        let mut ed = Editor::empty();
+        let mut text = String::new();
+        for i in 0..40 {
+            // One line in every four is four rows tall; the rest are one.
+            if i % 4 == 0 {
+                text.push_str(&"y".repeat(WIDTH * 4));
+            } else {
+                text.push_str("short");
+            }
+            text.push('\n');
+        }
+        ed.rope = Rope::from_str(&text);
+        ed.cursor_line = 30;
+        ed.follow_cursor(ROWS, WIDTH, true);
+
+        let used: usize = (ed.top_line..=ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
+        assert!(used <= ROWS, "what is drawn from the top to the cursor has to fit: {used} rows");
+        // And it is the *highest* such line: taking one more would not fit.
+        if ed.top_line > 0 {
+            let with_one_more = used + ed.wrapped_rows(ed.top_line - 1, WIDTH);
+            assert!(with_one_more > ROWS, "the view must not sit lower than it has to");
+        }
+
+        // Scrolling up is unchanged: a cursor above the view brings the view to it.
+        ed.cursor_line = 3;
+        ed.follow_cursor(ROWS, WIDTH, true);
+        assert_eq!(ed.top_line, 3);
+    }
+
     #[test]
     fn the_wheel_can_scroll_past_the_cursor_and_the_cursor_still_pulls_the_view_back() {
         let rows = 10;
@@ -3788,28 +3917,28 @@ mod tests {
         ed.rope = Rope::from_str(&(0..200).map(|i| format!("line {i}\n")).collect::<String>());
 
         // A first frame with everything where it started leaves the view alone.
-        ed.follow_cursor(rows, 80);
+        ed.follow_cursor(rows, 80, false);
         assert_eq!(ed.top_line, 0);
 
         // Two screens' worth of notches, with the cursor left on line 0 — the case that used to
         // stop dead at the first screen.
         for _ in 0..7 {
             ed.top_line += 3;
-            ed.follow_cursor(rows, 80);
+            ed.follow_cursor(rows, 80, false);
         }
         assert_eq!(ed.top_line, 21, "the view goes where it is sent and stays there");
 
         // Moving the cursor is what asks the view to follow: it comes back, showing the cursor.
         ed.cursor_line = 4;
-        ed.follow_cursor(rows, 80);
+        ed.follow_cursor(rows, 80, false);
         assert_eq!(ed.top_line, 4);
 
         // A viewport that shrinks under a still cursor must also keep it on screen: the cursor is
         // on the last visible row and the frame loses half its height.
         ed.cursor_line = 13;
-        ed.follow_cursor(rows, 80);
+        ed.follow_cursor(rows, 80, false);
         assert_eq!(ed.top_line, 4, "still visible, so nothing moves");
-        ed.follow_cursor(5, 80);
+        ed.follow_cursor(5, 80, false);
         assert_eq!(ed.top_line, 9);
     }
 

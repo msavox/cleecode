@@ -432,6 +432,9 @@ install gets one small question naming the exact upgrade command, where Enter ru
 background and any other key means not now; every other install gets one status line pointing at
 the site. Each version is mentioned once, `update_check = false` in `settings.toml` (or the
 settings panel) turns the whole thing off, and a build from source is never bothered at all.
+**CleeCode › Check for updates** is the door to a check that otherwise only ever happens on its
+own: it goes now, ignores the once-a-day and once-per-version rules — those belong to the notice,
+not to you — and always answers, whether something newer exists or nothing does.
 
 ### Octave and Python, as an IDE
 

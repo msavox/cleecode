@@ -1566,6 +1566,9 @@ fn draw_frame(f: &mut Frame, app: &mut App) {
     if app.unsaved_prompt.is_some() {
         draw_unsaved_modal(f, app, f.area());
     }
+    if app.update_answer.is_some() {
+        draw_update_answer_modal(f, app, f.area());
+    }
     if app.update_prompt.is_some() {
         draw_update_modal(f, app, f.area());
     }
@@ -2163,6 +2166,46 @@ fn draw_update_modal(f: &mut Frame, app: &App, full: Rect) {
             Style::default().fg(pal.text_muted),
         )),
     ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// What an asked-for update check found, in the offer's clothes but with nothing to answer.
+///
+/// The automatic check says its piece on the status line and that is right for it: nobody asked,
+/// so nothing may interrupt. This one is the answer to a row somebody clicked a moment ago, and
+/// an answer belongs where the eyes already are. The dialog goes up the instant the question
+/// leaves, saying so — a box that appeared by itself five seconds after a click would read as an
+/// event rather than as a reply.
+fn draw_update_answer_modal(f: &mut Frame, app: &App, full: Rect) {
+    let pal = app.palette();
+    let Some(answer) = app.update_answer.as_ref() else { return };
+    let lang = app.settings.lang;
+    let rect = unsaved_modal_rect(full);
+    f.render_widget(Clear, rect);
+    // The accent, not the danger colour, for every one of these: a version check that came back
+    // empty-handed, or could not ask at all, is not a warning about anything.
+    let block = Block::default()
+        .title(format!(" {} ", i18n::t(lang, Key::ModalUpdate)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(pal.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let said = match answer {
+        crate::app::UpdateAnswer::Asking => i18n::msg_update_checking(lang).to_string(),
+        crate::app::UpdateAnswer::UpToDate(version) => i18n::msg_update_up_to_date(lang, version),
+        crate::app::UpdateAnswer::Found(version) => i18n::msg_update_available(lang, version, None),
+        crate::app::UpdateAnswer::Failed => i18n::msg_update_check_failed(lang).to_string(),
+        crate::app::UpdateAnswer::Off => i18n::msg_update_check_off(lang).to_string(),
+    };
+    let mut lines = vec![Line::from(said)];
+    // No second line while it is still out asking: there is nothing to dismiss yet, and telling
+    // somebody how to close a box that is about to answer them invites them to close it first.
+    if !matches!(answer, crate::app::UpdateAnswer::Asking) {
+        lines.push(Line::from(Span::styled(
+            i18n::msg_any_key_closes(lang),
+            Style::default().fg(pal.text_muted),
+        )));
+    }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -4973,7 +5016,10 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     if focused {
         app.editor_viewport = (viewport_height, text_width);
     }
-    app.editors[idx].follow_cursor(viewport_height, if app.settings.word_wrap { 0 } else { text_width });
+    // The pane's width either way, and the flag says what it means: wrapped, it is how wide a
+    // row is and therefore how many rows a line takes; unwrapped, it is how far the view can be
+    // from the cursor before it has to move sideways.
+    app.editors[idx].follow_cursor(viewport_height, text_width, app.settings.word_wrap);
 
     // Taken once, and cloned: the renderer holds the editors mutably while it draws, and the
     // marks live on the app beside them.
