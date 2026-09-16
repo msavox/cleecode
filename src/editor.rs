@@ -438,6 +438,34 @@ impl Editor {
         &self.changed_lines
     }
 
+    /// Puts the cursor on the first line the last reload brought in, so the view goes there.
+    ///
+    /// The other half of lighting those lines up. On its own the lighting only works when the
+    /// change happens to land where you were already looking — and a file somebody else is
+    /// writing is precisely the one you are *not* watching the right part of. Answers whether
+    /// there was anywhere to go.
+    ///
+    /// The cursor rather than `top_line` alone, for two reasons. `follow_cursor` would drag the
+    /// view straight back to wherever the cursor still was, so moving only the view lasts until
+    /// the next keystroke. And it is what an agent's `edit_buffer` already does when it changes
+    /// a buffer through the front door; a change that arrived through the filesystem instead is
+    /// the same event seen from the other side, and should not land differently.
+    ///
+    /// Nothing is lost by moving it: a buffer with unsaved edits is never reloaded — see
+    /// `check_external_changes`, which keeps local work and only notes the new mtime — so there
+    /// is no typing position here to take away from anybody.
+    pub fn show_arrived_lines(&mut self) -> bool {
+        let Some(&first) = self.changed_lines.first() else { return false };
+        if first >= self.rope.len_lines() {
+            return false;
+        }
+        self.cursor_line = first;
+        self.cursor_col = 0;
+        // A selection left over from before the reload describes text that is gone.
+        self.selection_anchor = None;
+        true
+    }
+
     /// Puts the lights out. Esc asks for this directly; every edit does it through
     /// `mark_edited_from` without having to know the feature exists.
     pub fn forget_arrived_lines(&mut self) {
@@ -3662,6 +3690,44 @@ mod tests {
         // the message does not come back every tick.
         assert!(ed.check_external_changes(Lang::En).is_none());
         assert_eq!(ed.rope.to_string(), "hand-typed one\ntwo\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Lighting the arrived lines is only half the promise: the other half is being able to see
+    /// them. A file rewritten from outside deep down, while you are reading the top of it, used
+    /// to light a line nobody was looking at.
+    #[test]
+    fn a_reload_takes_the_view_to_what_arrived() {
+        let dir = std::env::temp_dir().join(format!("clee_arrived_view_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.txt");
+        let before: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &before).unwrap();
+        let mut ed = Editor::open(path.clone()).unwrap();
+        assert_eq!(ed.cursor_line, 0, "reading the top of the file");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // The whole file written again with one line different, far from where anybody is.
+        let after = before.replace("line 150\n", "line 150 rewritten by somebody else\n");
+        std::fs::write(&path, &after).unwrap();
+        assert!(ed.check_external_changes(Lang::En).is_some());
+        assert_eq!(ed.arrived_lines(), [150]);
+
+        assert!(ed.show_arrived_lines(), "there was somewhere to go");
+        assert_eq!(ed.cursor_line, 150);
+        assert_eq!(ed.cursor_col, 0);
+        // And the view follows the cursor, which is the whole reason it is the cursor that moves.
+        ed.follow_cursor(20, 80, false);
+        assert!(
+            (ed.top_line..ed.top_line + 20).contains(&150),
+            "line 150 has to be inside the 20 rows on screen, not merely nearer"
+        );
+
+        // Nothing arrived, nowhere to go, and the cursor stays put.
+        ed.forget_arrived_lines();
+        ed.cursor_line = 7;
+        assert!(!ed.show_arrived_lines());
+        assert_eq!(ed.cursor_line, 7);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -63,7 +63,10 @@ that you have not opened appears beside your work without ever taking the keyboa
 per sweep and five in a session. It needs no watcher and knows nothing about agents — what it
 follows is the difference between two `git status` sweeps, which happen anyway, so `claude`,
 `codex`, `opencode` and a `sed` in a shell all trip it identically. Outside a git repository
-there is nothing to watch, and switching it on says so. Scrollbars appear inside the frame while the view
+there is nothing to watch, and switching it on says so. It also **takes the view to what arrived**:
+a file you already have open, rewritten from outside while you were reading elsewhere in it, goes
+to the first changed line rather than lighting one nobody is looking at. Only a buffer with no
+unsaved edits is ever reloaded, so there is no typing position to lose. Scrollbars appear inside the frame while the view
 moves or the pointer rests on them, and they are working controls: drag the thumb, click the
 groove to jump, click the end arrows to step a line.
 

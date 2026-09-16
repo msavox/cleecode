@@ -4916,9 +4916,21 @@ impl App {
         // files in silence and finds a fourth with unsaved edits still reports the one that
         // needs a decision.
         let mut said = None;
+        // Whether a buffer that was rewritten from outside should also take the view to what
+        // changed. Behind follow mode rather than always on, because that switch *is* this
+        // question — "when something out there writes files, show me" — and because moving
+        // somebody's view is not a thing to do unasked. The lines light up either way.
+        let follow = self.settings.follow_agent_edits;
         for editor in self.editors.iter_mut().filter(|e| e.preview.is_none()) {
+            // The revision, not the returned message: a reload and a dirty buffer that was left
+            // alone both answer with a sentence, and only one of them has new lines in it. The
+            // revision moves for the reload and for nothing else here.
+            let before = editor.revision();
             if let Some(msg) = editor.check_external_changes(lang) {
                 said = Some(msg);
+            }
+            if follow && editor.revision() != before {
+                editor.show_arrived_lines();
             }
         }
         if let Some(msg) = said {
