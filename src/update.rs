@@ -70,6 +70,24 @@ pub fn install_method(exe: &Path) -> InstallMethod {
     InstallMethod::Other
 }
 
+/// How *this* binary got here.
+///
+/// The path has to be resolved first, and that is the whole of this function. On macOS
+/// `current_exe` hands back the path the program was invoked by, symlinks and all — and
+/// Homebrew's `clee` is exactly that: `/opt/homebrew/bin/clee` pointing into
+/// `../Cellar/clee/<version>/bin/clee`. Tested unresolved it has no `Cellar` component, so
+/// every Homebrew install on macOS read as `Other` and was told a new version exists without
+/// ever being offered the one command that would fetch it. Linux never showed this because
+/// `current_exe` there reads `/proc/self/exe`, which is already resolved.
+///
+/// A path that will not canonicalise — deleted from under us, or a permission we do not have —
+/// falls back to the unresolved one, which is no worse than what this did before.
+pub fn running_install_method() -> InstallMethod {
+    let Ok(exe) = std::env::current_exe() else { return InstallMethod::Other };
+    let resolved = std::fs::canonicalize(&exe).unwrap_or(exe);
+    install_method(&resolved)
+}
+
 /// The upgrade command an install method makes safe to run for the user: non-interactive, no
 /// sudo, no questions the subprocess could sit waiting on. `None` is the decision *not* to
 /// offer — tarball and .deb installs involve paths and privileges we will not guess at, and a
@@ -228,9 +246,7 @@ pub fn spawn_check(tx: Sender<UpdateEvent>, update_check_setting: bool) {
             state.last_check = now;
             save_state(&state);
             let Some(tag) = latest_tag() else { return };
-            let method = std::env::current_exe()
-                .map(|exe| install_method(&exe))
-                .unwrap_or(InstallMethod::Other);
+            let method = running_install_method();
             if !should_notify(&tag, env!("CARGO_PKG_VERSION"), method, &state.notified) {
                 return;
             }
@@ -297,9 +313,7 @@ pub fn spawn_check_now(tx: Sender<UpdateEvent>) {
                 // version this row has already named.
                 state.notified = tag.clone();
                 save_state(&state);
-                let method = std::env::current_exe()
-                    .map(|exe| install_method(&exe))
-                    .unwrap_or(InstallMethod::Other);
+                let method = running_install_method();
                 let _ = tx.send(UpdateEvent::Available { version, method });
             } else {
                 save_state(&state);
@@ -386,6 +400,44 @@ mod tests {
         assert_eq!(of("/Users/x/GitHub/cleecode/target/debug/clee"), InstallMethod::Source);
         assert_eq!(of("/usr/local/bin/clee"), InstallMethod::Other);
         assert_eq!(of("/home/x/mytarget/clee"), InstallMethod::Other, "component, not substring");
+    }
+
+    /// The shape Homebrew actually installs on macOS: a symlink in `bin` pointing into the
+    /// Cellar. Read unresolved it looks like any other path, and the upgrade offer — the one
+    /// thing a Homebrew install is entitled to — never appeared.
+    #[test]
+    fn a_symlink_into_the_cellar_is_still_a_homebrew_install() {
+        let root = std::env::temp_dir().join(format!(
+            "clee-install-method-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let cellar = root.join("Cellar/clee/0.28.0/bin");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&cellar).expect("a scratch Cellar must be creatable");
+        std::fs::create_dir_all(&bin).expect("a scratch bin must be creatable");
+        let real = cellar.join("clee");
+        std::fs::write(&real, b"#!/bin/sh
+").expect("a stand-in binary must be writable");
+        let link = bin.join("clee");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).expect("the symlink must be creatable");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&real, &link).expect("the symlink must be creatable");
+
+        assert_eq!(
+            install_method(&link),
+            InstallMethod::Other,
+            "unresolved, the link says nothing — which is the bug this is about"
+        );
+        let resolved = std::fs::canonicalize(&link).expect("the link must resolve");
+        assert_eq!(install_method(&resolved), InstallMethod::Brew);
+        assert!(
+            upgrade_command(install_method(&resolved)).is_some(),
+            "and a Homebrew install has an upgrade to offer"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A source build is never notified, whatever the numbers say: whoever builds from master
