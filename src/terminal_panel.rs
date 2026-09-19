@@ -1400,23 +1400,64 @@ impl TerminalPanel {
 
     /// Whether the pane is back at a prompt: something in it is reading keystrokes rather than
     /// running a command. Used by the run watcher to know when a script it started is over.
+    /// Whether a line sent now would reach the shell rather than something it started.
+    ///
+    /// Two questions, and each one alone gets a case wrong.
+    ///
+    /// The first is whether the shell itself holds the terminal. A program the shell started in
+    /// the foreground owns the terminal's process group while it runs, and a line sent then is
+    /// not a command, it is keystrokes for that program. This was the only test tried at first
+    /// and it was dropped for the wrong reason: it cannot tell a shell running its own rc from a
+    /// shell at its prompt, because `bash` runs rc commands in its own group. True — but that is
+    /// one case, and without this test `vim` was another: `vim` turns the line discipline off
+    /// exactly as a line editor does, so the test below said "at a prompt" and the line was typed
+    /// into the buffer somebody had open.
+    ///
+    /// The second is whether the shell is ready for a line. A shell with a line editor answers by
+    /// turning canonical mode off to read keys one at a time, and that is the sharp signal:
+    /// measured on a slow rc, `ICANON` reads on for the whole of it and off within a tick of the
+    /// prompt appearing. But a shell without a line editor never turns it off at all — `dash`,
+    /// which is `/bin/sh` on Debian and Ubuntu, sits at its prompt in canonical mode forever. Read
+    /// as the only signal, that shell was busy for as long as it lived and nothing could ever be
+    /// typed into it. So where the line discipline says nothing, a quiet pane says it instead:
+    /// output that has stopped for `STARTUP_IDLE` is a shell that has finished what it was doing.
     pub fn is_at_prompt(&self) -> bool {
-        self.shell_is_reading_keys()
+        self.shell_holds_the_terminal() && (self.shell_is_reading_keys() || self.output_settled())
+    }
+
+    /// Whether the shell itself is the terminal's foreground group, rather than something it
+    /// started. `true` when it cannot be asked, so a platform without this is no worse off.
+    #[cfg(unix)]
+    fn shell_holds_the_terminal(&self) -> bool {
+        let (Some(fd), Some(pid)) = (self.master.as_raw_fd(), self.child_pid()) else {
+            return true;
+        };
+        // SAFETY: `fd` is the pty master this pane owns and is open for as long as the pane is;
+        // `tcgetpgrp` only reads. The shell is a session leader on this pty, so its process
+        // group is its own pid.
+        let group = unsafe { libc::tcgetpgrp(fd) };
+        group < 0 || group == pid as libc::pid_t
+    }
+
+    #[cfg(not(unix))]
+    fn shell_holds_the_terminal(&self) -> bool {
+        true
+    }
+
+    /// Whether the pane has stopped printing for long enough to have finished something.
+    fn output_settled(&self) -> bool {
+        let since_start = self.spawn.elapsed();
+        let idle = since_start
+            .saturating_sub(Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed)));
+        self.produced_output.load(Ordering::Relaxed) && idle >= STARTUP_IDLE
     }
 
     /// Whether something in the pane is reading keystrokes as keystrokes.
     ///
-    /// The terminal's own line discipline answers this, and it is the only thing that does. A
-    /// shell running its rc leaves the pty in canonical mode with echo on: a form feed sent then
-    /// is not a command, it is a character, and it comes straight back as a literal `^L`.
-    /// Readline turns both off to read keys one at a time, and from that moment a form feed
-    /// means "clear and redraw". Measured on a slow rc: `ICANON` reads on for the whole of it and
-    /// off within a tick of the prompt appearing.
-    ///
-    /// The foreground process group was the first thing tried here and it does not work: bash
-    /// does not put its rc's own commands in a group of their own, so `tcgetpgrp` says the shell
-    /// throughout and cannot tell the two apart. The line discipline can, because it is what the
-    /// reader itself changes.
+    /// The terminal's own line discipline answers this. A shell running its rc leaves the pty in
+    /// canonical mode with echo on: a form feed sent then is not a command, it is a character,
+    /// and it comes straight back as a literal `^L`. A line editor turns both off to read keys
+    /// one at a time, and from that moment a form feed means "clear and redraw".
     ///
     /// `true` when it cannot be asked, so a platform without this is no worse off than before.
     #[cfg(unix)]
@@ -2548,6 +2589,42 @@ mod tests {
             closing.elapsed()
         );
         assert!(!alive(pid), "the HUP-proof shell outlived its pane");
+    }
+
+    /// A program the shell started is not the shell, and a line sent while it runs would be
+    /// keystrokes for it.
+    ///
+    /// Against a real shell, because that is where it went wrong: the line discipline alone said
+    /// `vim` was a prompt — `vim` turns canonical mode off exactly as a line editor does — so an
+    /// agent asked to run a command typed it into somebody's open buffer. `cat` stands in for
+    /// `vim` here: it holds the terminal the same way and needs nothing installed.
+    ///
+    /// Each step waits for the state it needs rather than for a duration, and the prompt is
+    /// waited for *first* — a pane still running its rc is busy too, and a test that took that
+    /// for the program would pass without ever starting one.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_running_in_the_pane_is_not_a_prompt() {
+        let mut panel = TerminalPanel::new(24, 80, Path::new("/"))
+            .expect("a shell must be spawnable to test one");
+
+        let settle = |panel: &mut TerminalPanel, want: bool, what: &str| {
+            let deadline = Instant::now() + STARTUP_MAX + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                panel.flush_pending();
+                if panel.is_at_prompt() == want {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("{what}; the pane's screen was:\n{}", lock_poisoned(&panel.parser).screen().contents());
+        };
+
+        settle(&mut panel, true, "the shell never reached a prompt at all");
+        panel.type_line("cat");
+        settle(&mut panel, false, "a pane running `cat` read as a prompt, so a command would have gone into it");
+        panel.write_input(&[0x04]); // ^D at the start of a line: end of input, and cat exits
+        settle(&mut panel, true, "the shell never read as a prompt again after the program ended");
     }
 
     /// And the whole of it against a real shell, because the failure lived in the line editor
