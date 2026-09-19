@@ -639,6 +639,11 @@ fn load_medium(keys: &Keys, name: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// Windows reads a picture out of the escape and nowhere else, for now.
+///
+/// The file half would port — a path is a path — but the segment half is POSIX shared memory
+/// and has no counterpart, and the programs this road exists for (`mpv`, `ueberzugpp`, kitty's
+/// own `icat`) are not ones anybody runs there. Left as one refusal rather than half a feature.
 #[cfg(not(unix))]
 fn load_medium(_keys: &Keys, _name: &[u8]) -> Option<Vec<u8>> {
     None
@@ -1061,6 +1066,7 @@ mod tests {
     }
 
     /// `t=f`: the payload names a file, and the picture comes out of it.
+    #[cfg(unix)]
     #[test]
     fn a_picture_in_a_file_is_read_from_it() {
         let dir = std::env::temp_dir().join(format!("clee-graphics-{}", std::process::id()));
@@ -1087,6 +1093,7 @@ mod tests {
     /// A `t=t` naming something outside a temporary directory is still read and still drawn —
     /// and the file is still there afterwards. The far end of an `ssh` does not get to delete
     /// your files by asking for a picture.
+    #[cfg(unix)]
     #[test]
     fn a_delete_after_reading_is_only_obeyed_in_a_temporary_directory() {
         let dir = std::env::current_dir().unwrap().join(format!("clee-keep-{}", std::process::id()));
