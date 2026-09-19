@@ -1,3 +1,49 @@
+## What's new in 0.28.0
+
+**A terminal pane draws.** Two things a program in a pane writes used to be dropped on the floor,
+and neither of them said so.
+
+The first was the cursor. `vt100` implements CUP (`ESC [ y ; x H`) and not HVP
+(`ESC [ y ; x f`), which the standard says is the same instruction — and `btop` uses only the
+second, 556 times in three seconds of running. Every absolute move it made was discarded, which
+is why its panels arrived as one long wrapped stream with the box-drawing characters scattered
+through the numbers. `mpv` positions the same way. Both are fixed.
+
+The second was pictures. A pane now reads the kitty graphics protocol out of its own output,
+decodes the image and draws it at the cell the program put it at — so `chafa -f kitty` works in a
+pane, and so do the thumbnails `ytfzf -t` puts beside its list. CleeCode draws them itself rather
+than forwarding the escapes, which means real pixels where the host terminal has a protocol,
+coloured half-blocks where it has none, and over `ssh` either way. A picture goes when the text
+it was printed among scrolls past, when the screen is cleared, or when something is written over
+the cells it covers — which is what a preview pane scrolling its list does.
+
+It is for thumbnails, not film: past eight pictures a second a pane stops decoding and says so,
+because `mpv --vo=kitty` is megabytes a second and no pane can keep up. For video, open a
+terminal window of its own.
+
+**A pane stops claiming to be a terminal it is not.** `TERM_PROGRAM`, `KITTY_WINDOW_ID`,
+`WEZTERM_PANE`, `ITERM_SESSION_ID` and their like are inherited from the terminal CleeCode is
+displayed in, and inside a pane every one of them is false — which is the whole reason
+`mpv --vo=kitty` in a pane could be heard and not seen, and why `chafa` left to itself chose a
+graphics protocol and printed a megabyte into a blank pane. They are removed. `CLEECODE=1` is set
+instead, and is documented as the name to test for in an rc file or a script. A pane also answers
+the three size questions — `CSI 18 t`, `CSI 16 t`, `CSI 14 t` — so a program turning pixels into
+cells no longer has to wait for a timeout and then guess square cells.
+
+**Agents can drive your terminals.** Three new MCP tools: `terminals` lists your shells with
+their tab names, `open_terminal` opens one **with a name on it** so a long-running job gets a
+window you can find again, and `run_command` types a line into one of them and runs it — or
+leaves it at the prompt for you to read and press Enter on yourself. Both waiting tools tell the
+agent what actually happened, so it cannot believe it started a server that never started. A
+shell that is busy is refused rather than typed into, and an agent's own shell is never on the
+list.
+
+**Menus read as menus.** The keyboard shortcut beside a menu entry now sits one tone back from
+the entry itself. At the same weight the whole dropdown was one undifferentiated band of text; a
+shortcut is a reminder, and the thing you opened the menu to find should be the thing you see. A
+setting's value in that same column keeps its weight, because that one *is* what you came to
+read.
+
 ## What's new in 0.27.1
 
 **Follow mode takes the view to what arrived.** A file you already had open, rewritten from
