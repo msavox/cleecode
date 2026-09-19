@@ -1811,15 +1811,8 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
             Some(sc) => Some(keymap::shortcut_hint(lang, &app.keymap, sc)),
             None => menu::item_value(lang, i.action, states).map(str::to_string),
         };
-        let tail = match right {
-            Some(sc) => {
-                let content_width = inner_width.saturating_sub(2);
-                let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
-                format!("{}{}{} ", label, " ".repeat(pad), sc)
-            }
-            None => format!("{} ", label),
-        };
-        items.push(ListItem::new(accelerated_line(pal, &tail)));
+        let right = right.map(|text| (text, right_style(pal, i.shortcut.is_some())));
+        items.push(ListItem::new(menu_row(pal, label, right, inner_width)));
     }
     let mut state = ListState::default();
     state.select(Some(selected_row));
@@ -1863,21 +1856,53 @@ fn menu_highlight_style(pal: Palette, settings: &settings::Settings, item_idx: u
     }
 }
 
-/// A drop-down row with its initial in the accelerator colour, for the themes that have one.
+/// How the right-hand column is painted, which depends on what is in it.
 ///
-/// `tail` is the row without its leading space, because the space is not the initial and putting
-/// it in the coloured span would paint a red block where the letter is not.
-fn accelerated_line(pal: Palette, tail: &str) -> Line<'static> {
-    let Some(colour) = pal.accelerator else {
-        return Line::from(format!(" {tail}"));
-    };
-    let mut chars = tail.chars();
-    let Some(initial) = chars.next() else { return Line::from(" ".to_string()) };
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(initial.to_string(), Style::default().fg(colour)),
-        Span::raw(chars.collect::<String>()),
-    ])
+/// A shortcut is a *reminder*: it is the same six rows of `Ctrl+Shift+…` every time the menu
+/// opens, nobody reads it twice, and at the same weight as the label it turns every row into one
+/// undifferentiated band of text — which is what this exists to undo. `text_dim` is the theme's
+/// own answer for "hints, counts, separators", and the command palette has painted its shortcuts
+/// with it all along; the menus simply had not caught up.
+///
+/// A *value* is the opposite kind of thing. When a row carries a setting rather than a shortcut
+/// that column is the reason you opened the menu at all, so it keeps the label's weight. See
+/// `menu::item_value`: nothing ever carries both.
+fn right_style(pal: Palette, is_shortcut: bool) -> Style {
+    if is_shortcut { Style::default().fg(pal.text_dim) } else { Style::default() }
+}
+
+/// A drop-down row: its initial in the accelerator colour where the theme has one, and whatever
+/// the right-hand column holds pushed to the right edge in its own weight.
+///
+/// The leading space is a span of its own and never part of the coloured initial, because the
+/// space is not the initial and painting it would put a red block where the letter is not.
+fn menu_row(
+    pal: Palette,
+    label: &str,
+    right: Option<(String, Style)>,
+    inner_width: usize,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    match (pal.accelerator, label.chars().next()) {
+        (Some(colour), Some(initial)) => {
+            spans.push(Span::styled(initial.to_string(), Style::default().fg(colour)));
+            spans.push(Span::raw(label.chars().skip(1).collect::<String>()));
+        }
+        _ => spans.push(Span::raw(label.to_string())),
+    }
+    match right {
+        Some((text, style)) => {
+            // One space of breathing room at each edge, which is what the width was measured
+            // for — see `menu_rect`.
+            let content = inner_width.saturating_sub(2);
+            let pad = content.saturating_sub(label.chars().count() + text.chars().count()).max(1);
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(text, style));
+        }
+        None => {}
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 /// A caption over a group: dim and italic, so it reads as a label for the rows under it rather
@@ -1915,15 +1940,10 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
             items.push(menu_header(pal, label, inner_width.saturating_sub(1)));
             continue;
         }
-        let line = match i.shortcut.map(|sc| keymap::shortcut_hint(lang, &app.keymap, sc)) {
-            Some(sc) => {
-                let content_width = inner_width.saturating_sub(2);
-                let pad = content_width.saturating_sub(label.chars().count() + sc.chars().count()).max(1);
-                format!(" {}{}{} ", label, " ".repeat(pad), sc)
-            }
-            None => format!(" {} ", label),
-        };
-        items.push(ListItem::new(line));
+        let right = i
+            .shortcut
+            .map(|sc| (keymap::shortcut_hint(lang, &app.keymap, sc), right_style(pal, true)));
+        items.push(ListItem::new(menu_row(pal, label, right, inner_width)));
     }
     let mut state = ListState::default();
     state.select(Some(selected_row));
@@ -6788,21 +6808,67 @@ mod tests {
     /// The three buttons at the right-hand end share a row with the menu titles and with each
     /// other. Overlapping either way is the same bug twice: a button drawn over a title is a
     /// button nobody can see and a title nobody can click.
-    /// The initial is split into a span of its own only for the themes that colour it. For the
-    /// rest the row stays one span, because three spans that are all the same colour is three
-    /// times the work to draw the same line.
+    /// The initial is coloured only for the themes that have an accelerator colour, and
+    /// colouring a letter must never move it.
     #[test]
-    fn only_a_theme_with_an_accelerator_splits_the_initial_off() {
-        let plain = accelerated_line(crate::theme::Theme::CleeCode.palette(), "File ");
-        assert_eq!(plain.spans.len(), 1, "the default theme should draw one span");
+    fn only_a_theme_with_an_accelerator_colours_the_initial() {
+        let plain = menu_row(crate::theme::Theme::CleeCode.palette(), "File", None, 20);
         assert_eq!(plain.to_string(), " File ");
+        assert!(
+            plain.spans.iter().all(|s| s.style.fg.is_none()),
+            "the default theme colours nothing in the row"
+        );
 
-        let turbo = accelerated_line(crate::theme::Theme::Turbo.palette(), "File ");
-        assert_eq!(turbo.spans.len(), 3, "the initial should have a span of its own");
+        let turbo_pal = crate::theme::Theme::Turbo.palette();
+        let turbo = menu_row(turbo_pal, "File", None, 20);
         assert_eq!(turbo.spans[1].content, "F");
-        assert_eq!(turbo.spans[1].style.fg, crate::theme::Theme::Turbo.palette().accelerator);
-        // The row still reads the same: colouring a letter must not move it.
+        assert_eq!(turbo.spans[1].style.fg, turbo_pal.accelerator);
         assert_eq!(turbo.to_string(), " File ");
+    }
+
+    /// A shortcut is a reminder and sits back; a setting's value is what the menu was opened to
+    /// read and keeps the label's weight. The row must read identically either way.
+    #[test]
+    fn a_shortcut_sits_back_from_its_label_and_a_value_does_not() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        let shortcut = menu_row(pal, "Save", Some(("^S".to_string(), right_style(pal, true))), 20);
+        let hint = shortcut.spans.last().cloned().unwrap();
+        assert_eq!(shortcut.spans[shortcut.spans.len() - 2].content, "^S");
+        assert_eq!(
+            shortcut.spans[shortcut.spans.len() - 2].style.fg,
+            Some(pal.text_dim),
+            "a shortcut is drawn one step back from the label"
+        );
+        assert_eq!(hint.content, " ", "and the row still ends in its own space");
+
+        let value = menu_row(pal, "Wrap", Some(("on".to_string(), right_style(pal, false))), 20);
+        assert_eq!(
+            value.spans[value.spans.len() - 2].style.fg,
+            None,
+            "a value is the thing being read, so it keeps the label's weight"
+        );
+
+        // Same geometry either way: the column is shared, and a row that moved when its right
+        // half changed colour would make the menu jump.
+        assert_eq!(shortcut.to_string().chars().count(), value.to_string().chars().count());
+    }
+
+    /// The label and the shortcut never run into each other, at any width — including widths too
+    /// narrow to hold both, where a gap of one space is the floor.
+    #[test]
+    fn a_menu_row_always_keeps_a_gap_between_the_label_and_the_shortcut() {
+        let pal = crate::theme::Theme::CleeCode.palette();
+        for width in 0..40usize {
+            let row = menu_row(
+                pal,
+                "Save All",
+                Some(("Ctrl+Shift+S".to_string(), right_style(pal, true))),
+                width,
+            );
+            let text = row.to_string();
+            assert!(text.contains("Save All "), "at width {width}: {text:?}");
+            assert!(text.ends_with("Ctrl+Shift+S "), "at width {width}: {text:?}");
+        }
     }
 
     #[test]
