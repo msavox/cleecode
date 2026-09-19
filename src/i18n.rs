@@ -3729,29 +3729,18 @@ pub fn msg_internal_error(lang: Lang, detail: &str) -> String {
 
 /// Why a picture a program in a pane tried to draw is not on screen.
 ///
-/// Both answers name the fix rather than the fault, because in both cases there is one and it
-/// is a flag on the command the user just typed.
+/// Names what was missing rather than a flag to add, because by the time this is said the
+/// likely causes are no longer the user's spelling: a format a pane does not read, or a file
+/// or shared-memory segment that was gone by the time the pane went to look.
 pub fn msg_pane_graphics_unsupported(lang: Lang) -> String {
     match lang {
-        Lang::En => "A picture here could not be drawn: a pane reads the kitty protocol only \
-                     when the image travels in the escape itself. Try chafa -f kitty, or \
-                     -f symbols for text."
+        Lang::En => "A picture here could not be drawn: a pane reads PNG and raw pixels, in the \
+                     escape or in a file or segment it names. Try chafa -f kitty, or -f symbols \
+                     for text."
             .to_string(),
-        Lang::It => "Un'immagine qui non si è potuta disegnare: un pannello legge il protocollo \
-                     kitty solo quando l'immagine viaggia nell'escape stessa. Prova chafa -f \
-                     kitty, oppure -f symbols per il testo."
-            .to_string(),
-    }
-}
-
-pub fn msg_pane_graphics_flood(lang: Lang) -> String {
-    match lang {
-        Lang::En => "Too many pictures a second for a pane: that is video, and a pane does not \
-                     play it. Open a terminal tab of its own, or use --vo=null for sound only."
-            .to_string(),
-        Lang::It => "Troppe immagini al secondo per un pannello: quello è video, e un pannello \
-                     non lo riproduce. Apri una scheda di terminale a parte, o usa --vo=null \
-                     per il solo audio."
+        Lang::It => "Un'immagine qui non si è potuta disegnare: un pannello legge PNG e pixel \
+                     grezzi, nell'escape oppure in un file o un segmento che questa nomina. \
+                     Prova chafa -f kitty, oppure -f symbols per il testo."
             .to_string(),
     }
 }

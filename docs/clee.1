@@ -373,30 +373,37 @@ protocol, half\-blocks where it has none, and over
 .BR ssh (1)
 either way.
 .PP
-The picture must travel in the escape sequence itself. A picture named by a file path
-.RB ( t=f )
-or living in a shared\-memory segment
+The picture may travel in the escape sequence itself, in a file
+.RB ( t=f ", " t=t )
+or in a shared\-memory segment
 .RB ( t=s )
-is refused, because that path is written by the far end of a pty and over
-.BR ssh (1)
-names a file on another machine. So for
+that the escape names; all three are read. So for
 .BR chafa (1)
 use
 .B \-f kitty
 (drawn as pixels) or
 .B \-f symbols
-(drawn as text, and always available);
+(drawn as text, and always available).
 .BR ueberzug (1)
-and ueberzugpp cannot work in a pane at all, since they paint a window of their own over the
-screen rather than writing to any output.
+and ueberzugpp are the ones that cannot work in a pane at all, since they paint a window of
+their own over the screen rather than writing to any output.
 .PP
-It is thumbnails this is for, not film. Past eight pictures a second a pane stops decoding and
-says so on the status line: a video player writes a whole picture per frame \(em
+Video plays.
 .B mpv \-\-vo=kitty
-is some 8 MB a second at a small size \(em and no pane can keep up with that. For video, open a
-terminal window of your own outside CleeCode, or use
-.B \-\-vo=null
-for the sound alone.
+in a pane is a film in a pane, and
+.B \-\-vo\-kitty\-use\-shm=yes
+is the cheap way to send it: the frame goes into a shared\-memory segment and the escape carries
+only its name, a few hundred bytes a frame rather than five megabytes. A pane decodes the next
+frame only once the last one has gone up, so it runs at whatever rate the screen manages and
+spends nothing on frames nobody could have seen. A player that writes its status line straight
+over its own picture \(em mpv does, every frame \(em keeps both: the text takes the rows it is
+on and the picture takes the longest stretch left over.
+.PP
+It costs what it costs: turning a frame into pixels a terminal can take is processor work, there
+is no graphics card at the end of a pty, and the player does most of it \(em
+.B \-\-hwdec
+moves the decoding onto the card but the scaling and the colour conversion stay on the CPU. A
+smaller pane is the lever that actually works.
 .PP
 A picture goes when what it was drawn among goes: when the text scrolls past it, when the screen
 is cleared, when the program deletes it, or when something is written over the cells it covers

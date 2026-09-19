@@ -688,6 +688,41 @@ fn run(
     let started = Instant::now();
     let mut last_draw = Instant::now();
 
+    /// How long a frame is worth waiting for a keystroke that may not come.
+    ///
+    /// Thirty frames a second, which is the pace an idle editor comes round at.
+    const FRAME: Duration = Duration::from_millis(33);
+    /// How long the wait is willing to go without looking at the panes.
+    ///
+    /// The whole frame used to be spent in one `poll`, and that is what made a film in a pane
+    /// judder. A player hands over a frame at some arbitrary moment inside those thirty-three
+    /// milliseconds and then the screen sits there until they are up, so a thirty-frame stream
+    /// arrived on screen eighteen times a second and at uneven intervals — which is worse to
+    /// watch than eighteen even ones. Looking every two milliseconds instead costs a handful of
+    /// syscalls in a second of doing nothing and hands a frame on within two milliseconds of it
+    /// existing.
+    const GLANCE: Duration = Duration::from_millis(2);
+
+    /// Waits out a frame, and answers whether there is input to read.
+    ///
+    /// Returns early — with nothing to read — the moment a pane has put something on its screen,
+    /// because that is a frame owed just as much as a keystroke is.
+    fn wait_for_something(app: &App) -> std::io::Result<bool> {
+        let until = Instant::now() + FRAME;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            if event::poll(left.min(GLANCE))? {
+                return Ok(true);
+            }
+            if app.terminal_output_arrived() {
+                return Ok(false);
+            }
+        }
+    }
+
     loop {
         let owed = app.take_redraw()
             || started.elapsed() < ALWAYS_DRAW_FOR
@@ -739,7 +774,7 @@ fn run(
             }
         }
 
-        if event::poll(Duration::from_millis(33))? {
+        if wait_for_something(&app)? {
             // Everything already queued is handled before the screen is touched. The events in a
             // burst nearly always describe one gesture — a drag, a wheel spun, a paste arriving
             // as keystrokes — and only where it ended is worth drawing.

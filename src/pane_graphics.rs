@@ -20,16 +20,23 @@
 //! Drawing it ourselves rather than forwarding the escapes is what lets it keep working where
 //! the host terminal has no graphics protocol at all, and over `ssh`.
 //!
-//! What is deliberately not here is video. `mpv --vo=kitty` writes 7.7 MB a second at 320x240
-//! — every frame a whole picture, base64-encoded — and a pane that decoded and re-encoded that
-//! at twenty-five frames a second would spend the editor's entire budget on one pane. So there
-//! is a flood guard: past `FLOOD_PLACEMENTS` pictures in a second the pane stops decoding and
-//! says so, once, instead of melting. See `Flood`.
+//! Video is here too, which it was not at first. `mpv --vo=kitty` writes 7.7 MB a second at
+//! 320x240 — every frame a whole picture, base64-encoded — and a pane that decoded and
+//! re-encoded all of that would spend the editor's entire budget on one pane, so the first
+//! answer was a flood guard that shut the pane after eight pictures in a second. The protocol's
+//! own answer is better and is now implemented instead: `t=s` puts the frame in a shared-memory
+//! segment and sends only its name, some four hundred bytes a frame rather than five megabytes,
+//! and reading it is a page-mapping and a copy. What remains is a ceiling — `MAX_DECODES_PER_SEC`
+//! — and it is the screen's, not the protocol's: the editor draws thirty frames a second at the
+//! very most, so a thirty-first picture decoded in the same second is one that would be replaced
+//! before anybody saw it. See `Pace`.
 
 use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+
 use image::DynamicImage;
 
 /// The most base64 one picture may carry before it is abandoned. Generous for a thumbnail —
@@ -51,16 +58,17 @@ pub const MAX_PLACED: usize = 16;
 /// can use the pane as an image cache.
 const MAX_STORED: usize = 8;
 
-/// Pictures per second above which a pane stops decoding.
+/// A ceiling on decoding that no player is anywhere near, as a backstop for one that is.
 ///
-/// This is the line between a thumbnail and a video, and it is drawn here rather than argued
-/// about: eight pictures a second is far more than any preview pane asks for and far less than
-/// any player wants, so nothing legitimate is near it from either side.
-const FLOOD_PLACEMENTS: usize = 8;
+/// The pacing that actually matters is `Pace::queued` below and needs no number at all. This
+/// is only here so that a program which somehow hands over pictures faster than the screen is
+/// ever drained cannot keep the reader thread decoding without pause.
+const MAX_DECODES_PER_SEC: usize = 120;
 
-/// How long a pane stays shut after a flood, so a player that is still running does not get a
-/// picture through every time the window happens to slide.
-const FLOOD_COOLDOWN: Duration = Duration::from_secs(2);
+/// The most a picture read out of a file or a shared-memory segment may be. Four bytes a pixel
+/// at the pixel ceiling — the largest thing that would be accepted afterwards anyway, said here
+/// so that a name pointing at something enormous costs a `stat` rather than the read.
+const MAX_RAW: usize = (MAX_PIXELS * 4) as usize;
 
 /// One step of a pane's output, on its way to the parser.
 #[derive(Debug, PartialEq, Eq)]
@@ -71,6 +79,16 @@ pub enum Piece {
     /// commands all begin with `G`; anything else is passed on here and ignored by the reader,
     /// because guessing at somebody else's private sequence is how you corrupt it.
     Apc(Vec<u8>),
+    /// A graphics command was cut off part-way: an `ESC` arrived inside it that was not its
+    /// terminator, so the string ended where it stood and what had been collected is gone.
+    ///
+    /// Reported rather than passed over in silence, because a chunked transmission is only
+    /// half in this splitter — the other half is in `Decoder`, which is still holding the
+    /// chunks that came before and still waiting for the `m=0` that will now never come. Left
+    /// waiting, it reads the *next* frame's opening command as more of the frame that broke,
+    /// and the one after that, and a film stops after a fraction of a second while the status
+    /// line says a picture could not be drawn. One broken frame should cost one frame.
+    ApcBroken,
     /// The screen was wiped — `CSI 2 J`, or `CSI 3 J` which takes the scrollback with it.
     ///
     /// Reported rather than worked out, because working it out is not possible from the cells.
@@ -113,6 +131,9 @@ pub struct PaneStream {
     text: Vec<u8>,
     /// The body of the APC being collected.
     apc: Vec<u8>,
+    /// Bytes of a broken graphics command's payload still to be thrown away rather than
+    /// printed. See `LITTER`.
+    litter: usize,
     /// The parameter bytes of the CSI being collected, so that `CSI 2 J` can be told from the
     /// `CSI 0 J` a prompt writes several times a second. Bounded: a parameter list longer than
     /// this is not one of the two being looked for.
@@ -125,10 +146,37 @@ impl Default for PaneStream {
             state: State::Ground,
             text: Vec::new(),
             apc: Vec::new(),
+            litter: 0,
             params: Vec::new(),
         }
     }
 }
+
+/// How much of a broken graphics command's payload is thrown away rather than printed.
+///
+/// `mpv` writes its picture to stdout and its status line to stderr, and those are two buffers
+/// in front of one pty — so every so often the status line lands in the middle of a frame.
+/// Eight times in five hundred megabytes, measured in a plain pty with no CleeCode anywhere
+/// near it: this is `mpv`'s own doing and every terminal sees it.
+///
+/// What every terminal then does is print the rest of the frame, because base64 is printable
+/// text and the command that framed it is gone. That is the litter people see around a picture
+/// in a terminal, and in a pane it is worse than litter: a pane draws its pictures into the
+/// same cells as its text, and a screen full of base64 is a screen with nowhere left to put a
+/// picture. One corrupted frame ended the film, and every frame after it was decoded perfectly
+/// and dropped for want of an empty cell.
+///
+/// So the tail of a broken transmission is treated as what it is, which is not text. Thrown
+/// away until the `ESC \` that was going to end it turns up, and bounded by this — twice the
+/// largest chunk the protocol allows — so that a command broken with nothing following it
+/// cannot swallow a shell prompt.
+const LITTER: usize = 8 * 1024;
+
+/// How much of an APC body must have arrived before its tail counts as payload rather than as
+/// somebody's output. `mpv` signs off with `ESC _ G a=d ;` and no terminator at all, and what
+/// follows *that* is the escapes that leave the alternate screen — which must not be thrown
+/// away. See the test that pins it.
+const LITTER_AFTER: usize = 64;
 
 /// The most of an APC body that is collected before the rest is thrown away. One kitty chunk
 /// is capped at 4096 bytes of base64 by the protocol, so this is an order of magnitude of
@@ -145,6 +193,11 @@ impl PaneStream {
     pub fn feed(&mut self, data: &[u8]) -> Vec<Piece> {
         let mut out = Vec::new();
         for &b in data {
+            // The tail of a broken graphics command is counted down a byte at a time, whatever
+            // state the byte is handled in, so that a stream of escapes cannot keep the pane
+            // swallowing output. `LITTER` says what this is for.
+            let littering = self.litter > 0;
+            self.litter = self.litter.saturating_sub(1);
             // One byte can need handling twice: an ESC that ends an unterminated string
             // sequence is also the start of whatever comes next, and that next thing has to be
             // read rather than dropped. Only `ApcEscape` ever asks for the second pass, and the
@@ -155,10 +208,35 @@ impl PaneStream {
                     State::Ground => {
                         if b == 0x1b {
                             self.state = State::Escape;
+                        } else if littering {
+                            // The tail of a command that broke: payload, not text.
+                            continue;
                         }
                         self.text.push(b);
                     }
                     State::Escape => {
+                        // Only two things end the swallowing, and an ordinary escape is
+                        // neither. The interruption that broke the command is itself an escape
+                        // — that is how it broke it — and it is usually a player repainting a
+                        // status line, escapes and text together, with the rest of the picture
+                        // still to come after it. Stopping there would put the rest of the
+                        // picture back on the screen, which is the whole thing being avoided.
+                        if littering {
+                            match b {
+                                // The terminator the broken command never got to use. It
+                                // belongs to that command, so it is not printed either.
+                                b'\\' => {
+                                    self.litter = 0;
+                                    self.text.pop();
+                                    self.state = State::Ground;
+                                    continue;
+                                }
+                                // A new command of its own: whatever was left of the old one is
+                                // not coming.
+                                b'_' | b'X' | b'^' => self.litter = 0,
+                                _ => {}
+                            }
+                        }
                         self.text.push(b);
                         self.state = match b {
                             b'[' => {
@@ -236,7 +314,17 @@ impl PaneStream {
                             // The half-collected command is dropped rather than guessed at. A kitty
                             // payload is base64 and never contains an ESC, so nothing well-formed
                             // is lost by ending it here.
+                            let broken = !self.apc.is_empty();
+                            // Long enough to have been carrying a picture, so what follows the
+                            // interruption is the rest of that picture and not output.
+                            if self.apc.len() > LITTER_AFTER {
+                                self.litter = LITTER;
+                            }
                             self.apc.clear();
+                            if broken {
+                                flush(&mut out, &mut self.text);
+                                out.push(Piece::ApcBroken);
+                            }
                             self.text.push(0x1b);
                             self.state = State::Escape;
                             again = true;
@@ -278,8 +366,9 @@ pub struct Keys {
     pub action: u8,
     /// `f` — 24 for RGB, 32 for RGBA, 100 for a PNG. Anything else is refused.
     pub format: u32,
-    /// `t` — where the data is: `d` in the payload. A file or a shared-memory segment is
-    /// refused on purpose; see `Decoded::Unsupported`.
+    /// `t` — where the data is: `d` in the payload itself, `f` a file, `t` a file to be
+    /// deleted once read, `s` a POSIX shared-memory object. For all but `d` the payload is the
+    /// *name* rather than the picture; see `load_medium`.
     pub medium: u8,
     /// `s`, `v` — the picture's size in pixels, needed for the raw formats and ignored for PNG.
     pub width: u32,
@@ -296,6 +385,11 @@ pub struct Keys {
     pub keep_cursor: bool,
     /// `d` — which pictures a delete is about.
     pub delete: u8,
+    /// `O` — how far into the file or segment the picture starts. Zero, nearly always.
+    pub offset: u32,
+    /// `S` — how many bytes of it to read. Zero means "to the end", which for a raw format is
+    /// worked out from `s` and `v` instead, because those are the exact answer.
+    pub size: u32,
 }
 
 impl Keys {
@@ -320,6 +414,8 @@ impl Keys {
                 b'm' => keys.more = number() == Some(1),
                 b'C' => keys.keep_cursor = number() == Some(1),
                 b'd' => keys.delete = letter(),
+                b'O' => keys.offset = number().unwrap_or(0),
+                b'S' => keys.size = number().unwrap_or(0),
                 _ => {}
             }
         }
@@ -335,9 +431,10 @@ pub enum Decoded {
     Show(Keys),
     /// Forget one picture, or all of them.
     Forget(Keys),
-    /// A command this understands the shape of but cannot carry out: a picture living in a file
-    /// or a shared-memory segment, or compressed. Named rather than ignored so the pane can say
-    /// so once instead of appearing to do nothing.
+    /// A command this understands the shape of but cannot carry out: a format this does not
+    /// read, dimensions that cannot be meant, or a file or shared-memory segment that was not
+    /// there to be read. Named rather than ignored so the pane can say so once instead of
+    /// appearing to do nothing.
     Unsupported,
     /// Nothing to do — a chunk in the middle of a transmission, or a command for a part of the
     /// protocol this does not implement.
@@ -350,12 +447,26 @@ pub struct Decoder {
     /// The command that opened the transmission, and the base64 gathered since. Kitty sends the
     /// control keys once and then repeats `m=1` with payload only, so the first set has to be
     /// kept until `m=0` closes it.
-    pending: Option<(Keys, Vec<u8>)>,
+    ///
+    /// A `None` buffer is a transmission being *swallowed*: the pane already has as many
+    /// pictures this second as it can show, so the payload is dropped as it arrives rather than
+    /// gathered and then thrown away. The chunks still have to be read past to find the end,
+    /// which is the whole reason the state is kept at all.
+    pending: Option<(Keys, Option<Vec<u8>>)>,
 }
 
 impl Decoder {
+    /// Lets go of a transmission that is not going to be finished.
+    ///
+    /// Called when the splitter reports a command cut off part-way. Without it the chunks
+    /// gathered so far sit here waiting for a terminator that has been thrown away, and every
+    /// command after them is read as more of them.
+    pub fn abandon(&mut self) {
+        self.pending = None;
+    }
+
     /// Reads one APC body.
-    pub fn feed(&mut self, body: &[u8]) -> Decoded {
+    pub fn feed(&mut self, body: &[u8], pace: &mut Pace) -> Decoded {
         // Kitty's commands, and only kitty's, begin with `G`.
         let Some(rest) = body.strip_prefix(b"G") else { return Decoded::Nothing };
         let (control, payload) = match rest.iter().position(|&b| b == b';') {
@@ -367,17 +478,22 @@ impl Decoder {
         // A chunk in the middle carries only `m=`, so the keys that matter are the ones the
         // transmission opened with.
         if let Some((open, buffer)) = &mut self.pending {
-            if buffer.len() + payload.len() > MAX_PAYLOAD {
-                self.pending = None;
-                return Decoded::Nothing;
+            if let Some(buffer) = buffer {
+                if buffer.len() + payload.len() > MAX_PAYLOAD {
+                    self.pending = None;
+                    return Decoded::Nothing;
+                }
+                buffer.extend_from_slice(payload);
             }
-            buffer.extend_from_slice(payload);
             if keys.more {
                 return Decoded::Nothing;
             }
-            let (open, buffer) = (*open, std::mem::take(buffer));
+            let (open, buffer) = (*open, buffer.take());
             self.pending = None;
-            return finish(open, &buffer);
+            return match buffer {
+                Some(buffer) => finish(open, &buffer),
+                None => Decoded::Nothing,
+            };
         }
 
         match keys.action {
@@ -390,29 +506,73 @@ impl Decoder {
             _ => return Decoded::Nothing,
         }
 
-        // Anything but a direct transmission is refused. A file path or a shared-memory name
-        // is written from the far end of a pty that may be on another machine entirely, and
-        // opening whatever it happens to name on *this* one is not a feature.
-        if keys.medium != 0 && keys.medium != b'd' {
+        // Dimensions that cannot be meant are refused here, before anything is read or mapped:
+        // the protocol states the size ahead of the data precisely so that it can be.
+        if absurd(&keys) {
             return Decoded::Unsupported;
         }
+
+        // A picture that lives somewhere else. The payload is its *name*, not its bytes, and
+        // the protocol's chunking does not apply: kitty honours `m` for a direct transmission
+        // only, and `mpv` depends on that — it marks every single frame `m=1` and never sends
+        // the `m=0` that would close one. Reading `m` here the way the direct path does would
+        // gather every frame of a film into one transmission that never ends.
+        if keys.medium != 0 && keys.medium != b'd' {
+            if !pace.admit() {
+                return Decoded::Nothing;
+            }
+            let Ok(name) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+                return Decoded::Nothing;
+            };
+            let Some(bytes) = load_medium(&keys, &name) else { return Decoded::Unsupported };
+            return decode(keys, bytes);
+        }
+
+        if !pace.admit() {
+            // The chunks of the refused transmission still have to be counted past, or the one
+            // after it would be read as more of this.
+            if keys.more {
+                self.pending = Some((keys, None));
+            }
+            return Decoded::Nothing;
+        }
         if keys.more {
-            self.pending = Some((keys, payload.to_vec()));
+            self.pending = Some((keys, Some(payload.to_vec())));
             return Decoded::Nothing;
         }
         finish(keys, payload)
     }
 }
 
+/// Whether the dimensions a command states are ones to refuse before any of its data is looked
+/// at. Only the raw formats state their size; a PNG carries its own.
+fn absurd(keys: &Keys) -> bool {
+    let pixels = u64::from(keys.width) * u64::from(keys.height);
+    matches!(keys.format, 24 | 32) && (pixels == 0 || pixels > MAX_PIXELS)
+}
+
+/// How many bytes one pixel of a raw format takes, or `None` where the format is not raw.
+fn bytes_per_pixel(format: u32) -> Option<usize> {
+    match format {
+        24 => Some(3),
+        32 => Some(4),
+        _ => None,
+    }
+}
+
 /// Turns a complete base64 payload into a picture.
 fn finish(keys: Keys, payload: &[u8]) -> Decoded {
-    let pixels = u64::from(keys.width) * u64::from(keys.height);
-    if matches!(keys.format, 24 | 32) && (pixels == 0 || pixels > MAX_PIXELS) {
+    if absurd(&keys) {
         return Decoded::Unsupported;
     }
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
         return Decoded::Nothing;
     };
+    decode(keys, bytes)
+}
+
+/// Turns the picture's own bytes — however they arrived — into the picture.
+fn decode(keys: Keys, bytes: Vec<u8>) -> Decoded {
     let image = match keys.format {
         24 => image::RgbImage::from_raw(keys.width, keys.height, bytes).map(DynamicImage::ImageRgb8),
         32 => {
@@ -426,6 +586,168 @@ fn finish(keys: Keys, payload: &[u8]) -> Decoded {
         Some(image) => Decoded::Picture { keys, image },
         None => Decoded::Unsupported,
     }
+}
+
+/// Reads a picture out of wherever the command said it lives.
+///
+/// This used to be refused outright, and the reason given was that a name written from the far
+/// end of a pty may have been written on another machine, so opening whatever it happens to
+/// name on *this* one is not a feature. That reason does not survive being looked at: the
+/// program in the pane runs as the user who is reading the screen, so there is nothing here it
+/// could not have read itself and sent down the direct road instead. What it actually cost was
+/// video. The protocol has no compression, so a frame of any size is megabytes of base64 —
+/// `mpv --vo=kitty` measures at some twenty megabytes a second into a small pane — and `t=s`
+/// exists exactly so that it need not be: the frame goes into a shared-memory segment and the
+/// escape carries four hundred bytes of name. That is the road that makes a pane able to play
+/// a film at all, and it was the one closed.
+///
+/// What is guarded instead is the shape of what is opened: a regular file and nothing else, so
+/// that a name pointing at a fifo or a character device cannot park the reader thread in a read
+/// that never returns, and a ceiling on the length so that one pointing at something enormous
+/// costs a `stat` rather than the read.
+///
+/// And the deleting is guarded harder than the reading, because the two are not the same risk.
+/// Reading a name a remote program sent shows *you* a file of your own, which you could have
+/// opened anyway; deleting one destroys it, and the far end of an `ssh` could not have done
+/// that itself. So `t=t` — "read this and throw it away" — throws away only what is in a
+/// temporary directory, which is the only place anything made for a single escape sequence has
+/// any business being. Kitty draws the same line in the same place.
+///
+/// `None` where it could not be read, which the caller reports as a picture that could not be
+/// drawn rather than as silence.
+#[cfg(unix)]
+fn load_medium(keys: &Keys, name: &[u8]) -> Option<Vec<u8>> {
+    // For a raw format the exact length is known from `s` and `v`, and knowing it is worth more
+    // than `S`: a segment is often rounded up to a page and reading the padding back would make
+    // the picture the wrong length. A PNG states its own size, so there `S` — or the whole of
+    // the file — is the answer.
+    let want = match bytes_per_pixel(keys.format) {
+        Some(bytes) => (keys.width as usize).checked_mul(keys.height as usize)?.checked_mul(bytes)?,
+        None => keys.size as usize,
+    };
+    let offset = u64::from(keys.offset);
+    match keys.medium {
+        // `t=t` is a file the terminal is expected to delete once it has read it; `t=f` is one
+        // it must leave alone.
+        b'f' | b't' => {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(name));
+            read_file(path, offset, want, keys.medium == b't' && temporary(path))
+        }
+        b's' => read_shared(name, offset, want),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn load_medium(_keys: &Keys, _name: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
+/// Whether a path is somewhere a file made for one escape sequence would live, and so
+/// somewhere a `t=t` may be taken at its word. Compared as text rather than resolved, because
+/// what is being asked is where the program *said* the file was.
+#[cfg(unix)]
+fn temporary(path: &std::path::Path) -> bool {
+    let temp = std::env::temp_dir();
+    [temp.as_path(), std::path::Path::new("/tmp"), std::path::Path::new("/var/tmp")]
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+/// Reads `want` bytes from `offset` in a file, and deletes it afterwards if asked to.
+#[cfg(unix)]
+fn read_file(path: &std::path::Path, offset: u64, want: usize, remove: bool) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    // Regular files only. A fifo would block the reader thread until whoever wrote the name
+    // decided to say something, which is a pane that stops taking output.
+    if !meta.is_file() {
+        return None;
+    }
+    let start = offset.min(meta.len());
+    let available = usize::try_from(meta.len() - start).ok()?;
+    let want = if want == 0 { available } else { want.min(available) };
+    if want == 0 || want > MAX_RAW {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![0u8; want];
+    let read = file.read_exact(&mut bytes).ok();
+    if remove {
+        // Deleted whether or not the read worked: `t=t` means the file was made for this one
+        // command, and leaving it behind because the read failed is how a temp directory fills.
+        let _ = std::fs::remove_file(path);
+    }
+    read.map(|()| bytes)
+}
+
+/// Reads `want` bytes from `offset` in a POSIX shared-memory object, and unlinks it.
+///
+/// Two things here are not obvious. The first is the unlink: the protocol makes the terminal
+/// responsible for the segment the moment it has read it, and a player that is handed its name
+/// back frame after frame relies on that — `mpv` recreates it each time, so a terminal that
+/// never unlinked would leave one segment per film sitting in the kernel for as long as the
+/// machine is up.
+///
+/// The second is the leading slash. `mpv` creates its segment as `shm_open("/mpv-kitty-0x…")`
+/// and then transmits the name with the slash stripped off. glibc's `shm_open` accepts a name
+/// spelled either way, so on Linux nobody has ever noticed; macOS does not, and answers
+/// `ENOENT` to every frame — which is sound with no picture. So the name is tried as it was
+/// sent and then again with the slash put back, and the film plays on both.
+#[cfg(unix)]
+fn read_shared(name: &[u8], offset: u64, want: usize) -> Option<Vec<u8>> {
+    let mut spellings = vec![name.to_vec()];
+    if !name.starts_with(b"/") {
+        let mut slashed = vec![b'/'];
+        slashed.extend_from_slice(name);
+        spellings.push(slashed);
+    }
+    for spelling in spellings {
+        let Ok(spelling) = std::ffi::CString::new(spelling) else { continue };
+        // SAFETY: a nul-terminated name and a flag word, which is all `shm_open` reads.
+        let fd = unsafe { libc::shm_open(spelling.as_ptr(), libc::O_RDONLY) };
+        if fd < 0 {
+            continue;
+        }
+        let bytes = read_mapping(fd, offset, want);
+        // SAFETY: `fd` came back from `shm_open` above and is closed exactly once.
+        unsafe {
+            libc::close(fd);
+            libc::shm_unlink(spelling.as_ptr());
+        }
+        return bytes;
+    }
+    None
+}
+
+/// Maps a descriptor and copies the wanted stretch of it out.
+#[cfg(unix)]
+fn read_mapping(fd: libc::c_int, offset: u64, want: usize) -> Option<Vec<u8>> {
+    // SAFETY: `stat` is plain data and is written entirely by `fstat` before it is read.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    let len = usize::try_from(stat.st_size).ok()?;
+    let start = usize::try_from(offset).ok()?.min(len);
+    let want = if want == 0 { len - start } else { want.min(len - start) };
+    if len == 0 || want == 0 || want > MAX_RAW {
+        return None;
+    }
+    // SAFETY: a read-only mapping of the whole object, unmapped below with the same length.
+    let map = unsafe {
+        libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0)
+    };
+    if map == libc::MAP_FAILED {
+        return None;
+    }
+    // SAFETY: `start + want <= len`, which is the length just mapped, and the copy is finished
+    // before the mapping goes.
+    let bytes = unsafe { std::slice::from_raw_parts(map.cast::<u8>().add(start), want) }.to_vec();
+    // SAFETY: the same address and length `mmap` returned, unmapped exactly once.
+    unsafe { libc::munmap(map, len) };
+    Some(bytes)
 }
 
 /// A picture on a pane, and where it sits.
@@ -455,58 +777,60 @@ pub enum Event {
     /// The screen was wiped. Only the pictures on the grid it happened on go: a full-screen
     /// program clearing the alternate screen has nothing to say about the shell underneath it.
     ClearScreen { alternate: bool },
-    /// A picture arrived that cannot be drawn — a file, a shared-memory segment, a format this
-    /// does not read. Reported so the pane can say so rather than stay blank.
+    /// A picture arrived that cannot be drawn — a format this does not read, a size that cannot
+    /// be meant, a file or segment that was not there. Reported so the pane can say so rather
+    /// than stay blank.
     Unsupported,
-    /// Pictures are arriving faster than a pane is for. Said once per flood.
-    Flood,
 }
 
-/// Counts recent placements, so a pane can tell a preview from a film.
-pub struct Flood {
+/// Keeps a pane's decoding down to what its screen actually takes up.
+///
+/// The measure is the screen itself rather than a number of pictures a second, and the
+/// difference is visible. A fixed ceiling has to be set *somewhere*, and wherever it is set it
+/// beats against the players that are near it: at thirty a second against a thirty-frame film,
+/// the window filled up once a second and threw away the three frames it took to slide, which
+/// on screen is a smooth film that hitches once a second — worse to watch than a slower one
+/// that never does.
+///
+/// So the question asked instead is "is there already a picture waiting that nobody has seen".
+/// If there is, this one would only replace it, and replacing it costs the whole decode for
+/// nothing; if there is not, the screen is ready and the picture is worth having. A pane
+/// therefore decodes exactly as often as it draws, whatever that turns out to be, and needs to
+/// be told nothing about either.
+pub struct Pace {
     recent: VecDeque<Instant>,
-    /// When the gate closed. Until it reopens, nothing is decoded.
-    shut: Option<Instant>,
+    /// Pictures decoded and handed over that the screen has not taken up yet. Written by the
+    /// pane as it drains its queue, read here.
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl Default for Flood {
+impl Default for Pace {
     fn default() -> Self {
-        Flood { recent: VecDeque::new(), shut: None }
+        Pace::sharing(std::sync::Arc::default())
     }
 }
 
-impl Flood {
-    /// Whether a picture may be decoded now, and whether this is the moment the gate shut.
-    pub fn admit(&mut self) -> Admission {
-        let now = Instant::now();
-        if let Some(since) = self.shut {
-            if now.duration_since(since) < FLOOD_COOLDOWN {
-                return Admission::Refused;
-            }
-            self.shut = None;
-            self.recent.clear();
+impl Pace {
+    /// A pace that watches this counter of pictures still waiting to be drawn.
+    pub fn sharing(queued: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Pace {
+        Pace { recent: VecDeque::new(), queued }
+    }
+
+    /// Whether a picture may be decoded now.
+    pub fn admit(&mut self) -> bool {
+        if self.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            return false;
         }
+        let now = Instant::now();
         while self.recent.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1)) {
             self.recent.pop_front();
         }
-        self.recent.push_back(now);
-        if self.recent.len() > FLOOD_PLACEMENTS {
-            self.shut = Some(now);
-            self.recent.clear();
-            return Admission::JustShut;
+        if self.recent.len() >= MAX_DECODES_PER_SEC {
+            return false;
         }
-        Admission::Allowed
+        self.recent.push_back(now);
+        true
     }
-}
-
-/// The answer to "may this picture be decoded".
-#[derive(PartialEq, Eq, Debug)]
-pub enum Admission {
-    Allowed,
-    /// The first refusal of this flood — worth telling the user about, once.
-    JustShut,
-    /// A later refusal of the same flood. Silent.
-    Refused,
 }
 
 /// Pictures kept for a later `a=p`, oldest dropped first.
@@ -695,11 +1019,12 @@ mod tests {
     #[test]
     fn a_chunked_transmission_is_reassembled() {
         let mut decoder = Decoder::default();
+        let pace = &mut Pace::default();
         // A 2x1 RGB picture is six bytes, "/wAAAP8A" in base64.
-        assert!(matches!(decoder.feed(b"Ga=T,f=24,s=2,v=1,c=1,r=1,m=1;"), Decoded::Nothing));
-        assert!(matches!(decoder.feed(b"Gm=1;/wAA"), Decoded::Nothing));
-        assert!(matches!(decoder.feed(b"Gm=1;AP8A"), Decoded::Nothing));
-        let done = decoder.feed(b"Gm=0;");
+        assert!(matches!(decoder.feed(b"Ga=T,f=24,s=2,v=1,c=1,r=1,m=1;", pace), Decoded::Nothing));
+        assert!(matches!(decoder.feed(b"Gm=1;/wAA", pace), Decoded::Nothing));
+        assert!(matches!(decoder.feed(b"Gm=1;AP8A", pace), Decoded::Nothing));
+        let done = decoder.feed(b"Gm=0;", pace);
         let Decoded::Picture { keys, image } = done else { panic!("expected a picture") };
         assert_eq!((image.width(), image.height()), (2, 1));
         assert_eq!((keys.cols, keys.rows), (1, 1));
@@ -708,46 +1033,166 @@ mod tests {
     #[test]
     fn an_unchunked_transmission_decodes_at_once() {
         let mut decoder = Decoder::default();
-        let done = decoder.feed(b"Ga=T,f=24,s=2,v=1;/wAAAP8A");
+        let done = decoder.feed(b"Ga=T,f=24,s=2,v=1;/wAAAP8A", &mut Pace::default());
         assert!(matches!(done, Decoded::Picture { .. }));
     }
 
+    /// `t=f`: the payload names a file, and the picture comes out of it.
     #[test]
-    fn a_file_or_shared_memory_picture_is_refused() {
+    fn a_picture_in_a_file_is_read_from_it() {
+        let dir = std::env::temp_dir().join(format!("clee-graphics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("six-bytes.rgb");
+        std::fs::write(&path, [0xff, 0, 0, 0, 0xff, 0]).unwrap();
+        let name = base64::engine::general_purpose::STANDARD.encode(path.to_str().unwrap());
+
         let mut decoder = Decoder::default();
-        assert!(matches!(decoder.feed(b"Ga=T,f=24,t=f,s=2,v=1;L3RtcC94"), Decoded::Unsupported));
+        let command = format!("Ga=T,f=24,t=f,s=2,v=1;{name}");
+        let done = decoder.feed(command.as_bytes(), &mut Pace::default());
+        let Decoded::Picture { image, .. } = done else { panic!("expected a picture") };
+        assert_eq!((image.width(), image.height()), (2, 1));
+        assert!(path.exists(), "`t=f` leaves the file where it found it");
+
+        // `t=t` is the same read, and then the file is gone.
+        let command = format!("Ga=T,f=24,t=t,s=2,v=1;{name}");
+        let done = Decoder::default().feed(command.as_bytes(), &mut Pace::default());
+        assert!(matches!(done, Decoded::Picture { .. }));
+        assert!(!path.exists(), "`t=t` means the terminal is to delete it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `t=t` naming something outside a temporary directory is still read and still drawn —
+    /// and the file is still there afterwards. The far end of an `ssh` does not get to delete
+    /// your files by asking for a picture.
+    #[test]
+    fn a_delete_after_reading_is_only_obeyed_in_a_temporary_directory() {
+        let dir = std::env::current_dir().unwrap().join(format!("clee-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("six-bytes.rgb");
+        std::fs::write(&path, [0xff, 0, 0, 0, 0xff, 0]).unwrap();
+        let name = base64::engine::general_purpose::STANDARD.encode(path.to_str().unwrap());
+
+        let command = format!("Ga=T,f=24,t=t,s=2,v=1;{name}");
+        let done = Decoder::default().feed(command.as_bytes(), &mut Pace::default());
+        assert!(matches!(done, Decoded::Picture { .. }), "it is still a picture");
+        assert!(path.exists(), "and it is still a file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `t=s`: how `mpv` sends a film. The picture comes out of the segment, and the segment is
+    /// gone afterwards — including when the name arrives without the leading slash it was
+    /// created with, which is exactly what `mpv` does.
+    #[cfg(unix)]
+    #[test]
+    fn a_picture_in_shared_memory_is_read_and_the_segment_unlinked() {
+        for bare in [false, true] {
+            let slashed = format!("/clee-graphics-{}-{}", std::process::id(), u8::from(bare));
+            let created = std::ffi::CString::new(slashed.clone()).unwrap();
+            // SAFETY: a nul-terminated name; the descriptor is closed below.
+            let fd = unsafe {
+                libc::shm_open(created.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600 as libc::c_uint)
+            };
+            assert!(fd >= 0, "could not make a segment to read back");
+            let frame = [0xffu8, 0, 0, 0, 0xff, 0];
+            // SAFETY: the object was just made and is sized before it is written.
+            unsafe {
+                libc::ftruncate(fd, frame.len() as libc::off_t);
+                libc::write(fd, frame.as_ptr().cast(), frame.len());
+                libc::close(fd);
+            }
+
+            let sent = if bare { slashed.trim_start_matches('/').to_string() } else { slashed.clone() };
+            let name = base64::engine::general_purpose::STANDARD.encode(&sent);
+            let command = format!("Ga=T,f=24,t=s,s=2,v=1,C=1,q=2,m=1;{name}");
+            let done = Decoder::default().feed(command.as_bytes(), &mut Pace::default());
+            let Decoded::Picture { image, .. } = done else {
+                panic!("expected a picture from the segment named {sent}")
+            };
+            assert_eq!((image.width(), image.height()), (2, 1));
+
+            // SAFETY: a nul-terminated name, and unlinking one that is already gone is an error
+            // and nothing more.
+            let again = unsafe { libc::shm_open(created.as_ptr(), libc::O_RDONLY) };
+            assert!(again < 0, "the segment should have been unlinked after it was read");
+        }
+    }
+
+    /// `mpv`'s shape, and the reason `m` cannot be read on this road: every frame says `m=1`
+    /// and no frame ever says `m=0`. Each one has to stand on its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_memory_command_is_complete_even_though_it_says_more_follows() {
+        let name = base64::engine::general_purpose::STANDARD.encode("clee-graphics-absent");
+        let command = format!("Ga=T,t=s,f=24,s=512,v=384,C=1,q=2,m=1;{name}");
         let mut decoder = Decoder::default();
-        assert!(matches!(decoder.feed(b"Ga=T,f=24,t=s,s=2,v=1;L3RtcC94"), Decoded::Unsupported));
+        // Unsupported, not Nothing: the segment is not there, which is a picture that could not
+        // be drawn rather than a chunk of one still arriving...
+        assert!(matches!(decoder.feed(command.as_bytes(), &mut Pace::default()), Decoded::Unsupported));
+        // ...and nothing was left half-open, so the sign-off that follows is still a delete.
+        assert!(matches!(decoder.feed(b"Ga=d", &mut Pace::default()), Decoded::Forget(_)));
     }
 
     #[test]
     fn a_delete_is_recognised() {
         let mut decoder = Decoder::default();
-        assert!(matches!(decoder.feed(b"Ga=d"), Decoded::Forget(_)));
+        assert!(matches!(decoder.feed(b"Ga=d", &mut Pace::default()), Decoded::Forget(_)));
     }
 
     #[test]
     fn a_non_kitty_apc_is_ignored() {
         let mut decoder = Decoder::default();
-        assert!(matches!(decoder.feed(b"somebody-elses-sequence"), Decoded::Nothing));
+        assert!(matches!(
+            decoder.feed(b"somebody-elses-sequence", &mut Pace::default()),
+            Decoded::Nothing
+        ));
     }
 
     #[test]
     fn a_picture_too_large_to_be_meant_is_refused() {
         let mut decoder = Decoder::default();
-        assert!(matches!(decoder.feed(b"Ga=T,f=24,s=60000,v=60000;AAAA"), Decoded::Unsupported));
+        assert!(matches!(
+            decoder.feed(b"Ga=T,f=24,s=60000,v=60000;AAAA", &mut Pace::default()),
+            Decoded::Unsupported
+        ));
     }
 
-    /// The line between a preview and a film.
+    /// A picture nobody has drawn yet is a picture the next one would only replace, so the next
+    /// one is not decoded at all. This is the whole of the pacing.
     #[test]
-    fn a_flood_shuts_the_gate_once_and_stays_shut() {
-        let mut flood = Flood::default();
-        for _ in 0..FLOOD_PLACEMENTS {
-            assert_eq!(flood.admit(), Admission::Allowed);
+    fn nothing_is_decoded_while_a_picture_is_still_waiting_to_be_drawn() {
+        let waiting = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pace = Pace::sharing(std::sync::Arc::clone(&waiting));
+        assert!(pace.admit(), "an empty queue means the screen is ready");
+        waiting.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(!pace.admit());
+        assert!(!pace.admit());
+        waiting.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(pace.admit(), "and it is ready again once the picture has gone up");
+    }
+
+    /// The backstop, for a program that hands over pictures faster than anything drains them.
+    #[test]
+    fn decoding_has_a_ceiling_even_when_the_screen_never_falls_behind() {
+        let mut pace = Pace::default();
+        for _ in 0..MAX_DECODES_PER_SEC {
+            assert!(pace.admit());
         }
-        assert_eq!(flood.admit(), Admission::JustShut);
-        assert_eq!(flood.admit(), Admission::Refused);
-        assert_eq!(flood.admit(), Admission::Refused);
+        assert!(!pace.admit());
+        assert!(!pace.admit());
+    }
+
+    /// A refused frame must not swallow the one after it: its chunks are read past, and then
+    /// the next transmission is a transmission again.
+    #[test]
+    fn a_refused_transmission_is_counted_past_rather_than_gathered() {
+        let waiting = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let mut pace = Pace::sharing(waiting);
+        let mut decoder = Decoder::default();
+        assert!(matches!(decoder.feed(b"Ga=T,f=24,s=2,v=1,m=1;/wAA", &mut pace), Decoded::Nothing));
+        assert!(matches!(decoder.feed(b"Gm=0;AP8A", &mut pace), Decoded::Nothing));
+        // The gate is still shut, but the decoder is back at the start of a command rather than
+        // in the middle of one.
+        assert!(matches!(decoder.feed(b"Ga=d", &mut pace), Decoded::Forget(_)));
     }
 
     #[test]
@@ -762,3 +1207,4 @@ mod tests {
         assert!(store.get(MAX_STORED as u32 + 2).is_none());
     }
 }
+

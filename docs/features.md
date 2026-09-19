@@ -261,14 +261,23 @@ inside one they are false and a program that believes them draws into a pty that
 graphics protocol out of the pane's own output and draws the picture itself, at the cell the
 program put it at — real pixels where the host terminal has a protocol, half-blocks where it has
 none, and over `ssh` either way. So `chafa -f kitty` works in a pane, and so do the thumbnails
-`ytfzf -t` puts beside its list. The picture must travel in the escape itself: one named by a
-file path (`t=f`) or a shared-memory segment (`t=s`) is refused, since over `ssh` that path is on
-another machine; and `ueberzug` cannot work in a pane at all, because it paints a window of its
-own over the screen instead of writing to any output.
+`ytfzf -t` puts beside its list. The picture may travel in the escape itself, in a file (`t=f`,
+`t=t`) or in a shared-memory segment (`t=s`) the escape names — all three are read. `ueberzug` is
+the one that cannot work in a pane at all, because it paints a window of its own over the screen
+instead of writing to any output.
 
-It is for thumbnails, not film. Past eight pictures a second a pane stops decoding and says so:
-`mpv --vo=kitty` is around 8 MB a second even at a small size. For video, open a terminal window
-outside CleeCode — or `--vo=null` for the sound alone.
+**Video plays too.** `mpv --vo=kitty` in a pane is a film in a pane, and
+`--vo-kitty-use-shm=yes` is the cheap way to send it: the frame goes into a shared-memory segment
+and the escape carries only its name, a few hundred bytes a frame instead of five megabytes. A
+pane decodes the next frame only once the last one has gone up, so it runs at whatever rate the
+screen manages and spends nothing on frames nobody could have seen. A player that writes its
+status line straight over its own picture — mpv does, every frame — keeps both: the text takes
+the rows it is on and the picture takes the longest stretch left over.
+
+It costs what it costs: turning a frame into pixels a terminal can take is processor work, there
+is no graphics card at the end of a pty, and the player does most of it — `--hwdec` moves the
+decoding onto the card but the scaling and the colour conversion stay on the CPU. A smaller pane
+is the lever that actually works.
 
 ### Agents, over MCP
 

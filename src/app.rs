@@ -4873,16 +4873,7 @@ impl App {
     /// counter that has been running long enough to overflow is still only being compared with
     /// itself, and a pane closing lowers the total exactly as legitimately as output raises it.
     pub fn poll_terminal_output(&mut self) {
-        // The drawer's pane is folded into the same sum. It is not in `terminals`, and leaving it
-        // out is not a small bug: nothing else raises the redraw flag for output, so the agent
-        // would paint its first frame and then appear to freeze — every reply arriving in a
-        // buffer nobody was drawing until an unrelated keystroke happened to ask for a frame.
-        let now = self
-            .terminals
-            .iter()
-            .chain(self.drawer.iter().filter_map(|d| d.window.as_ref()))
-            .flat_map(|w| w.tabs.iter())
-            .fold(0u64, |total, tab| total.wrapping_add(tab.generation()));
+        let now = self.terminal_generation_now();
         if now != self.terminal_generation {
             self.terminal_generation = now;
             self.redraw = true;
@@ -4898,6 +4889,29 @@ impl App {
         {
             self.redraw = true;
         }
+    }
+
+    /// How much every pane has ever printed, added up.
+    ///
+    /// The drawer's pane is folded into the same sum. It is not in `terminals`, and leaving it
+    /// out is not a small bug: nothing else raises the redraw flag for output, so the agent
+    /// would paint its first frame and then appear to freeze — every reply arriving in a
+    /// buffer nobody was drawing until an unrelated keystroke happened to ask for a frame.
+    fn terminal_generation_now(&self) -> u64 {
+        self.terminals
+            .iter()
+            .chain(self.drawer.iter().filter_map(|d| d.window.as_ref()))
+            .flat_map(|w| w.tabs.iter())
+            .fold(0u64, |total, tab| total.wrapping_add(tab.generation()))
+    }
+
+    /// Whether a pane has put anything on its screen since the last frame was drawn from it.
+    ///
+    /// Asked while `main` is waiting for a keystroke, so that the wait can be cut short by a
+    /// pane rather than only by the user. Reads atomics and nothing else, and deliberately does
+    /// not take the news: `poll_terminal_output` is still the one that acts on it.
+    pub fn terminal_output_arrived(&self) -> bool {
+        self.terminal_generation_now() != self.terminal_generation
     }
 
     /// Collects the complaint of any pane that could not draw a picture it was asked to.
@@ -4919,7 +4933,6 @@ impl App {
             if let Some(note) = tab.graphics_note.take() {
                 said = Some(match note {
                     GraphicsNote::Unsupported => i18n::msg_pane_graphics_unsupported(lang),
-                    GraphicsNote::Flood => i18n::msg_pane_graphics_flood(lang),
                 });
             }
         }
