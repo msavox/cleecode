@@ -3756,6 +3756,40 @@ pub fn msg_pane_graphics_flood(lang: Lang) -> String {
     }
 }
 
+/// What the status bar says when an agent typed into one of the user's shells.
+///
+/// The command is in it, and the shell's name is in it, because this is the one agent action
+/// that happens in the user's own window: they should be able to read what it was without
+/// having to go and look.
+pub fn msg_agent_ran(lang: Lang, terminal: &str, command: &str, submitted: bool) -> String {
+    let command = command_cut(command);
+    match (lang, submitted) {
+        (Lang::En, true) => format!("Agent ran in {terminal}: {command}"),
+        (Lang::En, false) => format!("Agent put a line at the prompt in {terminal}: {command}"),
+        (Lang::It, true) => format!("Agente ha eseguito in {terminal}: {command}"),
+        (Lang::It, false) => {
+            format!("Agente ha messo una riga al prompt in {terminal}: {command}")
+        }
+    }
+}
+
+pub fn msg_agent_opened_terminal(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("Agent opened a terminal: {name}"),
+        Lang::It => format!("Agente ha aperto un terminale: {name}"),
+    }
+}
+
+/// A command, cut to what a status line can carry. The bar is one line, and a long pipeline is
+/// mostly the part nobody is reading.
+fn command_cut(text: &str) -> String {
+    const MOST: usize = 80;
+    if text.chars().count() <= MOST {
+        return text.to_string();
+    }
+    text.chars().take(MOST - 1).collect::<String>() + "\u{2026}"
+}
+
 pub fn msg_scp_result(lang: Lang, ok: usize, failed: usize, target: &str) -> String {
     match lang {
         Lang::En if failed == 0 => format!("scp: {ok} item(s) uploaded to {target}"),

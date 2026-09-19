@@ -332,9 +332,10 @@ def main():
 
         listed = mcp.send("tools/list")
         names = [t.get("name") for t in (listed or {}).get("result", {}).get("tools", [])]
-        report.check("tools/list offers the seven tools",
+        report.check("tools/list offers every tool",
                      names == ["open_files", "selection", "diagnostics", "open_file",
-                                "preview", "say", "edit_buffer"],
+                                "preview", "say", "terminals", "run_command",
+                                "open_terminal", "edit_buffer"],
                      note=repr(names))
 
         files, failed = mcp.tool("open_files")
@@ -645,6 +646,59 @@ def main():
                      note=repr(ambiguous))
         report.check("nothing changed: the buffer still reads exactly as the earlier edits left it",
                      "anchor_main = 2" in session.text() and "renamed" not in session.text(), session)
+
+        # ---- the user's terminals: listed, opened by name, typed into -------------------------
+        #
+        # The half of this that no unit test can reach is that the name an agent gets back is a
+        # real tab on a real strip, and that run_command's line lands in *that* shell.
+        listed, failed = mcp.tool("terminals")
+        report.check("terminals lists the user's shells with ids and names",
+                     not failed and isinstance(listed, dict)
+                     and any(t.get("id") == "1.1" for t in listed.get("terminals", [])),
+                     session, note=repr(listed))
+        report.check("and the agent's own shell is not among them",
+                     not failed
+                     and all("drawer" not in str(t.get("name", "")).lower()
+                             for t in listed.get("terminals", [])),
+                     session, note=repr(listed))
+
+        opened, failed = mcp.tool("open_terminal", {"name": "logs"})
+        report.check("open_terminal opens a tab and answers with its name",
+                     not failed and isinstance(opened, dict) and opened.get("terminal") == "logs",
+                     session, note=repr(opened))
+        report.check("and the tab is on the strip, under that name",
+                     wait_for(lambda: "logs" in session.text(), 10, session), session)
+
+        # Typed into by name, and the name is the one open_terminal just gave back.
+        ran, failed = mcp.tool("run_command",
+                                {"terminal": "logs", "command": "echo AGENT_WAS_HERE"})
+        report.check("run_command answers once the line is typed",
+                     not failed and isinstance(ran, dict) and ran.get("status") == "run",
+                     session, note=repr(ran))
+        report.check("and the command ran in that shell",
+                     wait_for(lambda: "AGENT_WAS_HERE" in session.text(), 15, session), session)
+
+        # submit=false is the install-line case: the line is at the prompt and has not run.
+        #
+        # The command is chosen so that its text and its output are different strings: with
+        # `echo X` both are "X" and the check could not tell a line that ran from one that did
+        # not, which is the only thing being checked here.
+        typed, failed = mcp.tool("run_command",
+                                  {"terminal": "logs", "command": "printf AGENT_%s_OUT RAN",
+                                   "submit": False})
+        report.check("run_command can leave a line at the prompt instead of running it",
+                     not failed and isinstance(typed, dict) and typed.get("status") == "typed",
+                     session, note=repr(typed))
+        session.wait(lambda s: "AGENT_%s_OUT" in s.text(), 8)
+        report.check("the line is at the prompt and has not run",
+                     "AGENT_%s_OUT" in session.text() and "AGENT_RAN_OUT" not in session.text(),
+                     session)
+        session.send("\x15")                                  # clear the line again
+
+        missing, failed = mcp.tool("run_command",
+                                    {"terminal": "no-such-tab", "command": "ls"})
+        report.check("a terminal that is not there is refused, with the ones that are",
+                     failed and "logs" in str(missing), session, note=repr(missing))
 
         # The request file is consumed rather than replayed for the rest of the session.
         requests = os.path.join(session_dir, "requests")

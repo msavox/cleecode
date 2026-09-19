@@ -283,10 +283,11 @@ inherits it and the `clee --mcp` it spawns inherits it in turn. Neither end sear
 other, which is what stops two open CleeCodes being mistaken for each other; an agent started
 anywhere else gets a tool that says so rather than a wrong answer.
 
-Seven tools. Four read: `open_files` (the files open in tabs, which is active, and which have
+Ten tools. Four read: `open_files` (the files open in tabs, which is active, and which have
 unsaved changes), `selection` (the active file, the cursor's line and column, and the selected
-text) and `diagnostics` (what the language server currently says, whole or for one file). Three
-make the editor move: `open_file` (show a file, optionally at a line, optionally highlighting a
+text), `diagnostics` (what the language server currently says, whole or for one file) and
+`terminals` (your shells: the name on each tab, an id, where the shell is, and whether it is at a
+prompt). Three make the editor move: `open_file` (show a file, optionally at a line, optionally highlighting a
 range of them), `preview` (render a file in the preview pane — markdown as a document, images and
 PDFs as pictures) and `say` (one line in the status bar, marked as the agent's). None of the
 three takes the keyboard, and none touches your layout: **an agent never opens the split for
@@ -297,7 +298,19 @@ is an ordinary selection, and it goes the moment you touch that pane. (The Octav
 figures still open the split when there is room: a plot beside the script that drew it is what
 that feature is for, and you ran the script.)
 
-The seventh writes. `edit_buffer` changes text in a buffer that has **unsaved** changes in it —
+Two drive your terminals. `open_terminal` opens a tab **with a name on it** — `server`, `tests`,
+`logs` — so a long-running job gets a window you can find later instead of being buried in
+whichever shell was in front; it answers with the name, which is the handle for the next call.
+`run_command` types a line into one of your shells and runs it, or with `submit: false` leaves it
+at the prompt for you to read and press Enter on yourself — which is what an install line that
+pipes a download into a shell deserves. Both wait for the editor to say what happened, so an
+agent cannot believe it started a server that never started. Two rules make them safe to hand to
+an agent: **a shell that is busy is refused**, because a line sent to a pane running `vim` is not
+a command but keystrokes for `vim`; and **the agent's own shell is not on the list**, so it
+cannot type into its own prompt and drive itself. The output stays in your terminal — it does not
+come back to the agent, which has a shell of its own for the things it runs for itself.
+
+The tenth writes. `edit_buffer` changes text in a buffer that has **unsaved** changes in it —
 the ones `open_files` lists as dirty, where an agent cannot simply edit the file because your work
 is in the buffer and nowhere else. It asks first, on the status line: `Y` once, `A` for the whole
 session, `N` or Esc to refuse, and the agent's call waits up to two minutes for the answer. The

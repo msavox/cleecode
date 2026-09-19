@@ -7493,7 +7493,40 @@ impl App {
             dirty_files,
             active,
             diagnostics: crate::mcp::tidy_diagnostics(diagnostics),
+            terminals: self.mcp_terminals(),
         }
+    }
+
+    /// The user's shells, for an agent to read before it sends a line to one.
+    ///
+    /// The drawer's own pane is left out, and that is not tidiness. It is the shell the agent is
+    /// *running in*: offered one, an agent could type into its own terminal, watch its own
+    /// prompt answer, and drive itself. Everything here is a shell the user opened.
+    fn mcp_terminals(&self) -> Vec<crate::mcp::Terminal> {
+        let lang = self.settings.lang;
+        let focused = self.focus == Focus::Terminal;
+        self.terminals
+            .iter()
+            .enumerate()
+            .flat_map(|(window_index, window)| {
+                let labels =
+                    crate::ui::terminal_tab_labels(window, window_index + 1, lang);
+                window.tabs.iter().enumerate().map(move |(tab_index, tab)| {
+                    crate::mcp::Terminal {
+                        id: format!("{}.{}", window_index + 1, tab_index + 1),
+                        name: labels
+                            .get(tab_index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Terminal {}", window_index + 1)),
+                        cwd: tab.cwd().map(|dir| dir.to_string_lossy().into_owned()),
+                        at_prompt: tab.is_at_prompt(),
+                        active: focused
+                            && window_index == self.active_terminal
+                            && tab_index == window.active,
+                    }
+                })
+            })
+            .collect()
     }
 
     /// A path as an agent should see it: absolute, and with the links resolved when the file is
@@ -7549,7 +7582,165 @@ impl App {
                 let edit = PendingAgentEdit { id, path: self.mcp_resolve(&path), old, new };
                 self.ask_or_apply_agent_edit(edit);
             }
+            crate::mcp::Request::Run { id, terminal, command, submit } => {
+                let reply = self.agent_run_command(id, terminal.as_deref(), &command, submit);
+                self.answer_agent_edit(reply);
+            }
+            crate::mcp::Request::NewTerminal { id, name, command, cwd } => {
+                let reply = self.agent_new_terminal(id, name, command.as_deref(), cwd.as_deref());
+                self.answer_agent_edit(reply);
+            }
         }
+    }
+
+    /// Types one line into one of the user's shells, on an agent's behalf.
+    ///
+    /// Every refusal is a sentence that says what to do instead, for the reason
+    /// [`Self::apply_agent_edit`]'s are: the agent on the other end has to tell a person what
+    /// happened, and it can relay a sentence while it can only guess at a code.
+    ///
+    /// A busy shell is refused rather than typed into. That is the whole of the safety here and
+    /// it is worth being plain about why: a line sent to a pane where `vim` or a REPL is running
+    /// is not a command, it is keystrokes for that program — and an agent that "started the
+    /// server" by typing `npm start` into somebody's editor would have no way of knowing.
+    fn agent_run_command(
+        &mut self,
+        id: u128,
+        terminal: Option<&str>,
+        command: &str,
+        submit: bool,
+    ) -> crate::mcp::Reply {
+        let lang = self.settings.lang;
+        let refuse =
+            |message: String| crate::mcp::Reply { id, ok: false, message };
+        let Some((window_index, tab_index)) = self.find_agent_terminal(terminal) else {
+            return refuse(crate::mcp::no_such_terminal(terminal, &self.mcp_terminals()));
+        };
+        let name = self
+            .mcp_terminals()
+            .into_iter()
+            .find(|t| t.id == format!("{}.{}", window_index + 1, tab_index + 1))
+            .map(|t| t.name)
+            .unwrap_or_default();
+        let Some(tab) = self
+            .terminals
+            .get_mut(window_index)
+            .and_then(|window| window.tabs.get_mut(tab_index))
+        else {
+            return refuse(crate::mcp::no_such_terminal(terminal, &[]));
+        };
+        if !tab.is_at_prompt() {
+            return refuse(format!(
+                "The shell \"{name}\" is busy: something is running in it, and a line sent now \
+                 would be typed at that program rather than at the shell. Wait for it, or open a \
+                 terminal of its own with open_terminal."
+            ));
+        }
+        if submit {
+            tab.type_line(command);
+        } else {
+            tab.queue_line_unsent(command);
+        }
+        // Brought into view, because a command an agent ran in a pane nobody can see is a
+        // command that appears not to have run. The keyboard is not moved: that rule is the
+        // same one every other agent request follows.
+        self.settings.show_terminal = true;
+        self.active_terminal = window_index;
+        if let Some(window) = self.terminals.get_mut(window_index) {
+            window.active = tab_index;
+        }
+        self.status_message = i18n::msg_agent_ran(lang, &name, command, submit);
+        self.mark_dirty();
+        crate::mcp::Reply { id, ok: true, message: name }
+    }
+
+    /// Opens a terminal tab an agent asked for, with the name it asked for on it.
+    fn agent_new_terminal(
+        &mut self,
+        id: u128,
+        name: Option<String>,
+        command: Option<&str>,
+        cwd: Option<&str>,
+    ) -> crate::mcp::Reply {
+        let lang = self.settings.lang;
+        let cwd = cwd.map(|dir| self.mcp_resolve(dir)).unwrap_or_else(|| self.root.clone());
+        // A folder that is not there would make the shell start in whatever the pty inherited,
+        // which is a different folder from the one the agent named and nobody would be told.
+        if !cwd.is_dir() {
+            return crate::mcp::Reply {
+                id,
+                ok: false,
+                message: format!(
+                    "No folder at {}. Name one that exists, or leave cwd out for the project \
+                     root.",
+                    cwd.display()
+                ),
+            };
+        }
+        let panel = crate::terminal_panel::TerminalPanel::with_startup(24, 80, &cwd, command);
+        let mut panel = match panel {
+            Ok(panel) => panel,
+            Err(e) => {
+                return crate::mcp::Reply {
+                    id,
+                    ok: false,
+                    message: format!("CleeCode could not start a shell: {e}"),
+                };
+            }
+        };
+        panel.name = name.clone();
+        panel.startup_command = command.map(str::to_string);
+        let (window_index, tab_index) = match self.terminals.get_mut(self.active_terminal) {
+            Some(window) => {
+                // `add_tab` focuses what it added, so the new tab is where `active` now points.
+                window.add_tab(panel);
+                (self.active_terminal, window.active)
+            }
+            None => {
+                self.terminals.push(crate::terminal_panel::TerminalWindow {
+                    tabs: vec![panel],
+                    active: 0,
+                    weight: crate::terminal_panel::TERMINAL_WEIGHT_DEFAULT,
+                });
+                (self.terminals.len() - 1, 0)
+            }
+        };
+        self.active_terminal = window_index;
+        self.settings.show_terminal = true;
+        self.mark_dirty();
+        // Read back rather than assumed: a tab with no name of its own is called something, and
+        // what it is called is worked out by the tab strip. The agent is told the same name the
+        // user is looking at, which is the one `run_command` will take.
+        let opened = format!("{}.{}", window_index + 1, tab_index + 1);
+        let label = self
+            .mcp_terminals()
+            .into_iter()
+            .find(|t| t.id == opened)
+            .map(|t| t.name)
+            .or(name)
+            .unwrap_or_else(|| "Terminal".to_string());
+        self.status_message = i18n::msg_agent_opened_terminal(lang, &label);
+        crate::mcp::Reply { id, ok: true, message: label }
+    }
+
+    /// Which shell an agent meant: by tab name first, then by the `window.tab` id, and with
+    /// nothing named, the one the user is in.
+    ///
+    /// Name before number on purpose. A name is what the agent itself asked for when it opened
+    /// the tab and what survives another tab being opened before it; the id is arithmetic over a
+    /// list that moves.
+    fn find_agent_terminal(&self, wanted: Option<&str>) -> Option<(usize, usize)> {
+        let Some(wanted) = wanted else {
+            let window = self.terminals.get(self.active_terminal)?;
+            return Some((self.active_terminal, window.active.min(window.tabs.len() - 1)));
+        };
+        let listed = self.mcp_terminals();
+        let found = listed
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(wanted))
+            .or_else(|| listed.iter().find(|t| t.id == wanted))?;
+        let (window, tab) = found.id.split_once('.')?;
+        Some((window.parse::<usize>().ok()? - 1, tab.parse::<usize>().ok()? - 1))
     }
 
     /// A path as an agent named it, as a path this editor can use.

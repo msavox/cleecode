@@ -77,6 +77,14 @@ const REPLY_INTERVAL: Duration = Duration::from_millis(100);
 /// that an agent left running against an editor nobody is sitting at eventually says so.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long an answer the *editor* gives on its own is waited for.
+///
+/// Seconds rather than minutes, because nobody is being asked anything: the editor picks these
+/// up on its poll and answers in the same turn, so the only thing this covers is an editor that
+/// has stopped polling — a modal open over it, a long frame — and past a few seconds the honest
+/// answer to the agent is that it did not happen.
+const EDITOR_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How much of an agent's line the status bar will carry. The bar is one line, and a sentence
 /// longer than this is one that would be cut by the renderer instead — better cut here, where it
 /// can be said in the tool's description that it will be.
@@ -193,6 +201,31 @@ pub struct State {
     /// The buffer being typed in, if any.
     pub active: Option<Active>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The user's shells, in the order they are on screen.
+    ///
+    /// Additive like `dirty_files`, and for the same reason: a server reading a state file from
+    /// an older editor sees an empty list, which is that editor saying it has none to offer.
+    #[serde(default)]
+    pub terminals: Vec<Terminal>,
+}
+
+/// One of the user's shells, as an agent sees it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Terminal {
+    /// Where it is: `window.tab`, both counted from one, so `2.1` is the first tab of the second
+    /// terminal window. Stable for as long as nothing is opened or closed before it, which is
+    /// why `name` is the better handle and this is the fallback.
+    pub id: String,
+    /// What the tab is called — the name the user gave it, or the default one.
+    pub name: String,
+    /// Where its shell is, when the shell has said. Many never do; see the OSC 7 scanner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Whether the shell is sitting at a prompt. `false` means something is running in it, and a
+    /// command sent to it would be typed at that program rather than at the shell.
+    pub at_prompt: bool,
+    /// Whether this is the shell the keyboard is in.
+    pub active: bool,
 }
 
 /// The active buffer. Lines and columns are 1-based here and everywhere else this module
@@ -240,14 +273,42 @@ pub enum Request {
     Preview { path: String },
     /// One line for the status bar, already cut to size by the server.
     Say { text: String },
-    /// Change text in an open buffer, once the user has said so. The only request that is
-    /// answered, and `id` is what the answer is filed under — see [`Reply`].
+    /// Change text in an open buffer, once the user has said so. `id` is what the answer is
+    /// filed under — see [`Reply`].
     Edit {
         #[serde(with = "id_as_text")]
         id: u128,
         path: String,
         old: String,
         new: String,
+    },
+    /// Type a line into one of the user's shells.
+    ///
+    /// Answered, because every way this can fail is one the agent has to know about and can do
+    /// something about: the name matched nothing, or the shell was busy. Filing it and
+    /// forgetting it would leave an agent believing it had started a server that never started.
+    Run {
+        #[serde(with = "id_as_text")]
+        id: u128,
+        /// Which shell: a tab name, or an `id` as [`Terminal`] gives it. `None` means the one
+        /// the user is in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal: Option<String>,
+        command: String,
+        /// Whether to press Enter. `false` leaves the line at the prompt for the user to read
+        /// and run themselves, which is what an install line piped into a shell deserves.
+        submit: bool,
+    },
+    /// Open a new terminal tab, with a name on it.
+    NewTerminal {
+        #[serde(with = "id_as_text")]
+        id: u128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
 }
 
@@ -1156,6 +1217,75 @@ fn tools() -> Value {
             },
         },
         {
+            "name": "terminals",
+            "description": "The user's shells in CleeCode: the name of each tab, an id of the \
+                            form window.tab, where its shell is if it has said, whether it is \
+                            sitting at a prompt, and which one the user is in. Read this before \
+                            run_command so you send a line to the shell you meant. Your own \
+                            shell is not in this list.",
+            "inputSchema": nothing,
+        },
+        {
+            "name": "run_command",
+            "description": "Type a command into one of the USER'S shells in CleeCode and run \
+                            it. This is for things the user should see happening in their own \
+                            window — starting a dev server, running a watch, tailing a log. It \
+                            is not how you run your own commands: you have a shell of your own \
+                            for those, and output from this one does not come back to you. \
+                            Waits for CleeCode to say whether the line was typed. A shell that \
+                            is busy is refused rather than typed into, so a command cannot end \
+                            up as input to whatever is already running there.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command line, as the user would type it. One line.",
+                    },
+                    "terminal": {
+                        "type": "string",
+                        "description": "Which shell: a tab name, or an id as terminals gives \
+                                        them. Left out, the one the user is in.",
+                    },
+                    "submit": {
+                        "type": "boolean",
+                        "description": "Whether to press Enter. Default true. Pass false to \
+                                        leave the line at the prompt for the user to read and \
+                                        run themselves — what an install line that pipes a \
+                                        downloaded script into a shell deserves.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+        {
+            "name": "open_terminal",
+            "description": "Open a new terminal tab in CleeCode, with a name on the tab. Use it \
+                            to give a long-running job a window of its own that the user can \
+                            find later by its name — \"server\", \"tests\", \"logs\" — rather than \
+                            burying it in whichever shell happened to be in front. Returns the \
+                            new tab's id and name, which run_command takes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "What to call the tab. Short: it is shown on a tab strip.",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "A command to run in it once its shell is ready. Left \
+                                        out, the tab opens at a prompt.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Where the shell should start. Absolute, or relative to \
+                                        the project root. Left out, the project root.",
+                    },
+                },
+            },
+        },
+        {
             "name": "edit_buffer",
             "description": "Change text in a buffer that has UNSAVED edits in CleeCode — the \
                             files open_files lists as dirty. The user is asked for their consent \
@@ -1288,6 +1418,86 @@ fn run(
             file(&dir, next_request_number(), &Request::Say { text: line.clone() })?;
             render(&json!({ "status": "said", "text": line }))
         }
+        "terminals" => {
+            let state = read_state(session)?;
+            render(&json!({ "terminals": state.terminals }))
+        }
+        "run_command" => {
+            let dir = session_with_editor(session)?;
+            let command = arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| "run_command needs a command to type".to_string())?;
+            // One line, and said so rather than silently truncated: a model that meant to run
+            // three commands should send three calls, and finding out here is cheaper than
+            // finding out from a shell that ran the first and took the rest as arguments.
+            if command.contains('\n') || command.contains('\r') {
+                return Err("run_command takes one line. Send one call per command, or write a \
+                            script and run that."
+                    .to_string());
+            }
+            let terminal = arguments
+                .get("terminal")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            let submit = arguments.get("submit").and_then(Value::as_bool).unwrap_or(true);
+            let id = next_request_number();
+            file(
+                &dir,
+                id,
+                &Request::Run { id, terminal: terminal.clone(), command: command.to_string(), submit },
+            )?;
+            match await_reply(&dir, id, editor_wait(wait)) {
+                Some(reply) if reply.ok => render(&json!({
+                    "status": if submit { "run" } else { "typed" },
+                    "terminal": reply.message,
+                    "command": command,
+                    "note": "The output is in the user's terminal, not here.",
+                })),
+                Some(reply) => Err(reply.message),
+                None => Err(NO_ANSWER.to_string()),
+            }
+        }
+        "open_terminal" => {
+            let dir = session_with_editor(session)?;
+            let text = |key: &str| {
+                arguments
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            let name = text("name");
+            if name.as_deref().is_some_and(|name| name.contains('\n') || name.len() > TAB_NAME_MAX) {
+                return Err(format!(
+                    "open_terminal wants a short name for a tab strip: one line, at most \
+                     {TAB_NAME_MAX} characters."
+                ));
+            }
+            let id = next_request_number();
+            file(
+                &dir,
+                id,
+                &Request::NewTerminal {
+                    id,
+                    name: name.clone(),
+                    command: text("command"),
+                    cwd: text("cwd"),
+                },
+            )?;
+            match await_reply(&dir, id, editor_wait(wait)) {
+                Some(reply) if reply.ok => {
+                    render(&json!({ "status": "opened", "terminal": reply.message }))
+                }
+                Some(reply) => Err(reply.message),
+                None => Err(NO_ANSWER.to_string()),
+            }
+        }
         "edit_buffer" => {
             let dir = session_with_editor(session)?;
             let path = wanted_path(arguments, "edit_buffer")?;
@@ -1327,6 +1537,36 @@ fn run(
         other => Err(format!("unknown tool: {other}")),
     }
 }
+
+/// What to tell an agent that named a shell that is not there.
+///
+/// The list comes with it, because the mistake is nearly always a name that has changed or a tab
+/// that has closed, and an agent given only "no such terminal" retries the same wrong name. What
+/// it needs is the names that do exist, which is one round trip it now does not have to make.
+pub fn no_such_terminal(wanted: Option<&str>, listed: &[Terminal]) -> String {
+    let names = listed
+        .iter()
+        .map(|t| format!("{} ({})", t.name, t.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (wanted, names.is_empty()) {
+        (_, true) => "CleeCode has no terminal open. Use open_terminal to make one.".to_string(),
+        (Some(wanted), _) => {
+            format!("No terminal called \"{wanted}\". CleeCode has: {names}.")
+        }
+        (None, _) => format!("CleeCode has no terminal in focus. Name one of: {names}."),
+    }
+}
+
+/// The patience for an answer the editor gives on its own, honouring a caller that asked for
+/// less. The tests hand in a zero wait, and a floor here would make them sleep for nothing.
+fn editor_wait(wait: ReplyWait) -> ReplyWait {
+    ReplyWait { interval: wait.interval, timeout: wait.timeout.min(EDITOR_REPLY_TIMEOUT) }
+}
+
+/// The longest name a terminal tab is given. The strip is one row and the names ride it beside
+/// one another; past this a name is not a label, it is the whole strip.
+pub const TAB_NAME_MAX: usize = 32;
 
 /// The `path` argument every tool that names a file wants, or a sentence saying which tool wanted
 /// it. Named after the tool because a model calling three of them in a row has to be told which
@@ -1430,6 +1670,22 @@ mod tests {
                 severity: "error".to_string(),
                 message: "no such thing".to_string(),
             }],
+            terminals: vec![
+                Terminal {
+                    id: "1.1".to_string(),
+                    name: "Terminal 1".to_string(),
+                    cwd: Some("/proj".to_string()),
+                    at_prompt: true,
+                    active: true,
+                },
+                Terminal {
+                    id: "1.2".to_string(),
+                    name: "server".to_string(),
+                    cwd: Some("/proj".to_string()),
+                    at_prompt: false,
+                    active: false,
+                },
+            ],
         }
     }
 
@@ -1539,12 +1795,198 @@ mod tests {
         let names: Vec<&str> = listed.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             names,
-            ["open_files", "selection", "diagnostics", "open_file", "preview", "say", "edit_buffer"]
+            [
+                "open_files",
+                "selection",
+                "diagnostics",
+                "open_file",
+                "preview",
+                "say",
+                "terminals",
+                "run_command",
+                "open_terminal",
+                "edit_buffer",
+            ]
         );
         for tool in listed {
             assert_eq!(tool["inputSchema"]["type"], "object", "every schema is an object");
             assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
         }
+    }
+
+    /// The shells an agent may send a line to, read straight out of the published state.
+    #[test]
+    fn the_terminals_tool_lists_the_users_shells() {
+        let state = a_state();
+        let dir = a_session(&state);
+        let replies = talk(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"terminals"}}"#],
+            Some(&dir),
+        );
+        let listed: Value = serde_json::from_str(&tool_text(&replies[0])).expect("JSON out");
+        assert_eq!(listed["terminals"][0]["id"], "1.1");
+        assert_eq!(listed["terminals"][1]["name"], "server");
+        // The one with something running in it says so, which is what stops an agent typing
+        // into a program rather than a shell.
+        assert_eq!(listed["terminals"][1]["at_prompt"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line typed into one of the user's shells: filed, answered, and relayed.
+    #[test]
+    fn run_command_files_the_line_and_relays_the_editors_answer() {
+        let dir = a_session(&a_state());
+        let editor = an_editor_answering(&dir, |request| match request {
+            Request::Run { id, .. } => Reply { id: *id, ok: true, message: "server".to_string() },
+            other => panic!("expected a Run, got {other:?}"),
+        });
+        let replies = talk_waiting(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"npm run dev","terminal":"server"}}}"#],
+            Some(&dir),
+            ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
+        );
+        let request = editor.join().expect("the editor thread must finish");
+        match request {
+            Request::Run { terminal, command, submit, .. } => {
+                assert_eq!(terminal.as_deref(), Some("server"));
+                assert_eq!(command, "npm run dev");
+                assert!(submit, "Enter is pressed unless the call said otherwise");
+            }
+            other => panic!("expected a Run, got {other:?}"),
+        }
+        assert_eq!(replies[0]["result"]["isError"], false, "{}", replies[0]);
+        let out: Value = serde_json::from_str(&tool_text(&replies[0])).expect("JSON out");
+        assert_eq!(out["status"], "run");
+        assert_eq!(out["terminal"], "server");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `submit: false` is the install-line case: put it at the prompt, let the user read it.
+    #[test]
+    fn run_command_can_leave_the_line_at_the_prompt() {
+        let dir = a_session(&a_state());
+        let editor = an_editor_answering(&dir, |request| match request {
+            Request::Run { id, .. } => {
+                Reply { id: *id, ok: true, message: "Terminal 1".to_string() }
+            }
+            other => panic!("expected a Run, got {other:?}"),
+        });
+        let replies = talk_waiting(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"curl x | sh","submit":false}}}"#],
+            Some(&dir),
+            ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
+        );
+        match editor.join().expect("the editor thread must finish") {
+            Request::Run { submit, terminal, .. } => {
+                assert!(!submit);
+                assert_eq!(terminal, None, "no terminal named means the one in focus");
+            }
+            other => panic!("expected a Run, got {other:?}"),
+        }
+        let out: Value = serde_json::from_str(&tool_text(&replies[0])).expect("JSON out");
+        assert_eq!(out["status"], "typed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refusal has to reach the agent as a refusal, with the reason in it — the agent is what
+    /// tells the person that the server did not start.
+    #[test]
+    fn a_shell_that_is_busy_comes_back_as_an_error() {
+        let dir = a_session(&a_state());
+        let editor = an_editor_answering(&dir, |request| match request {
+            Request::Run { id, .. } => Reply {
+                id: *id,
+                ok: false,
+                message: "The shell \"server\" is busy".to_string(),
+            },
+            other => panic!("expected a Run, got {other:?}"),
+        });
+        let replies = talk_waiting(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"ls","terminal":"server"}}}"#],
+            Some(&dir),
+            ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
+        );
+        let _ = editor.join();
+        assert_eq!(replies[0]["result"]["isError"], true, "{}", replies[0]);
+        assert!(tool_text(&replies[0]).contains("busy"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two commands in one call would run the first and hand the rest to it as arguments. Caught
+    /// here, where the answer can say what to do instead.
+    #[test]
+    fn run_command_takes_one_line_and_says_so() {
+        let dir = a_session(&a_state());
+        let replies = talk(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"cd build\nmake"}}}"#],
+            Some(&dir),
+        );
+        assert_eq!(replies[0]["result"]["isError"], true, "{}", replies[0]);
+        assert!(tool_text(&replies[0]).contains("one line"));
+        assert!(
+            requests_in(&dir).is_empty(),
+            "a call that was refused must not have been filed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name is the whole point of the tool: it is how the tab is found afterwards.
+    #[test]
+    fn open_terminal_carries_the_name_and_the_command() {
+        let dir = a_session(&a_state());
+        let editor = an_editor_answering(&dir, |request| match request {
+            Request::NewTerminal { id, .. } => {
+                Reply { id: *id, ok: true, message: "logs".to_string() }
+            }
+            other => panic!("expected a NewTerminal, got {other:?}"),
+        });
+        let replies = talk_waiting(
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_terminal","arguments":{"name":"logs","command":"tail -f out.log"}}}"#],
+            Some(&dir),
+            ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
+        );
+        match editor.join().expect("the editor thread must finish") {
+            Request::NewTerminal { name, command, cwd, .. } => {
+                assert_eq!(name.as_deref(), Some("logs"));
+                assert_eq!(command.as_deref(), Some("tail -f out.log"));
+                assert_eq!(cwd, None, "no cwd named means the project root");
+            }
+            other => panic!("expected a NewTerminal, got {other:?}"),
+        }
+        let out: Value = serde_json::from_str(&tool_text(&replies[0])).expect("JSON out");
+        assert_eq!(out["status"], "opened");
+        assert_eq!(out["terminal"], "logs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name long enough to swallow the tab strip is refused before a shell is started for it.
+    #[test]
+    fn open_terminal_refuses_a_name_that_is_not_a_label() {
+        let dir = a_session(&a_state());
+        let long = "x".repeat(TAB_NAME_MAX + 1);
+        let replies = talk(
+            &[&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"open_terminal","arguments":{{"name":"{long}"}}}}}}"#
+            )],
+            Some(&dir),
+        );
+        assert_eq!(replies[0]["result"]["isError"], true, "{}", replies[0]);
+        assert!(requests_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The names that *do* exist travel with the refusal, so an agent that guessed wrong can
+    /// correct itself without another round trip.
+    #[test]
+    fn a_terminal_that_is_not_there_is_answered_with_the_ones_that_are() {
+        let listed = a_state().terminals;
+        let said = no_such_terminal(Some("build"), &listed);
+        assert!(said.contains("build"), "{said}");
+        assert!(said.contains("server (1.2)"), "{said}");
+        assert!(
+            no_such_terminal(Some("build"), &[]).contains("open_terminal"),
+            "with no terminals at all, the answer is how to make one"
+        );
     }
 
     #[test]
