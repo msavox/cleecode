@@ -1,3 +1,66 @@
+## What's new in 0.28.3
+
+**Video plays in a terminal pane, and `ytfzf -t` shows its thumbnails.** Both were refused or
+broken before, for four separate reasons.
+
+**A picture can live somewhere other than the escape.** The kitty protocol lets a program put the
+image in a file (`t=f`, `t=t`) or a POSIX shared-memory segment (`t=s`) and send only its name.
+CleeCode refused all three on the grounds that a name written by the far end of a pty might have
+been written on another machine. That reasoning does not survive contact with the facts: the
+program in the pane runs as the user reading the screen, so there is nothing it could name that
+it could not have read itself and sent the direct way. What the refusal actually cost was video —
+`mpv --vo=kitty --vo-kitty-use-shm=yes` sends around four hundred bytes a frame instead of five
+megabytes, and that is the only road down which a pty carries a film at all. All three are read
+now. Only regular files, so a name pointing at a fifo cannot park the reader thread in a read
+that never returns; and `t=t`, which asks the terminal to delete the file once read, obeys only
+inside a temporary directory — reading a file you own is something the program could have done
+itself, deleting one is not.
+
+`mpv` also marks every frame `m=1` and never sends the `m=0` that would close one. That is legal:
+kitty honours chunking for direct transmission only. CleeCode does too now; reading it otherwise
+gathered a whole film into one transmission that never ended.
+
+**The pace comes from the screen, not from a number.** A fixed ceiling beats against the players
+near it: at thirty pictures a second against a thirty-frame film, the window filled once a second
+and dropped the three frames it took to slide — a smooth film that hitches once a second, worse
+to watch than a slower one that never does. The question asked now is whether a picture is
+already waiting that nobody has drawn. If one is, the next would only replace it, and replacing
+it costs the whole decode for nothing. A pane therefore decodes exactly as often as it draws.
+
+The main loop no longer spends a whole frame asleep in one `poll` either: it glances at the panes
+every two milliseconds, so a frame reaches the screen within two milliseconds of existing.
+Measured end to end: 18.5 frames a second with 100 ms gaps, to 30.1 a second with a median gap of
+33 ms, a maximum of 40, and a standard deviation of 2.6.
+
+**Where text and pictures meet, each keeps what is its own.** A kitty terminal holds the two in
+separate layers; a pane has one grid for both, and the old rule — any written cell ends the
+picture — threw away two different situations as if they were one. A column occupied from top to
+bottom is not text over the picture, it is furniture beside it: `fzf` draws a border down the
+side of its preview window, and a picture that reached it lost every row it had. That is why
+`ytfzf -t` showed a list and no thumbnails. Those columns are given back at the edges. A line
+written across the picture is text: `mpv` writes its status straight over its own frame, every
+frame. The text takes the rows it is on, the picture takes the longest stretch left over.
+
+A cell written with a space covers nothing, either. `vt100` counts one as contents, and `fzf`
+blanks its preview window before filling it — so the rows a thumbnail had just been placed on
+were full of spaces a frame later. Blank is blank however it got that way.
+
+**The litter is gone.** `mpv` writes its picture to stdout and its status line to stderr, two
+buffers in front of one pty, and every so often the second lands inside the first — eight times
+in five hundred megabytes, measured in a bare pty with no CleeCode involved. Every terminal then
+prints the rest of the frame, because base64 is printable text and the command framing it is
+gone; that is the litter you see around a picture in a terminal. In a pane it was worse than
+litter: a screen full of base64 is a screen with nowhere left to put a picture, so one corrupted
+frame ended the film and every frame after it was decoded perfectly and dropped for want of an
+empty cell. The tail of a broken transmission is now treated as what it is, which is not text,
+and the decoder lets go of what it had gathered instead of reading the next frame as more of it.
+
+Worth knowing about the cost: turning a frame into pixels a terminal can take is processor work,
+there is no graphics card at the end of a pty, and the player does most of it. Measured on the
+same clip: `mpv --vo=null` 4% of a core, `mpv --vo=kitty` 33%, and `--hwdec` moves that to 31% —
+it offloads the decoding, which was never the expensive part. A smaller pane is the lever that
+works.
+
 ## What's new in 0.28.2
 
 **A pane no longer locks up after a video.** Running `mpv --vo=kitty` in a terminal pane is
