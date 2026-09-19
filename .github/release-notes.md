@@ -1,3 +1,22 @@
+## What's new in 0.28.1
+
+**Check for updates offers the update again, instead of only announcing it.** On macOS a
+Homebrew install read as "installed from somewhere we cannot name", so anybody using one was
+told a new version exists and never offered the one command that fetches it.
+
+The offer itself was never broken: the question goes up whenever there is a command safe enough
+to run unattended, and for Homebrew there is — `brew upgrade clee`. It was the recognition that
+went wrong a step earlier. CleeCode reads the install method off its own executable's path,
+looking for a `Cellar` component; but on macOS that path comes back exactly as the program was
+invoked, symlinks and all — and a Homebrew install is exactly that, `/opt/homebrew/bin/clee`
+pointing into `../Cellar/clee/<version>/bin/clee`. Unresolved there is no `Cellar` in it, so the
+method fell through to the case that deliberately offers nothing. Linux never showed this,
+because there the path is already resolved — which is why it went unnoticed on the platform where
+Homebrew is the ordinary way to install.
+
+The path is resolved before it is read now. A path that will not resolve falls back to the
+unresolved one, which is no worse than before.
+
 ## What's new in 0.28.0
 
 **A terminal pane draws.** Two things a program in a pane writes used to be dropped on the floor,
