@@ -682,6 +682,29 @@ fn read_file(path: &std::path::Path, offset: u64, want: usize, remove: bool) -> 
     read.map(|()| bytes)
 }
 
+/// Opens a shared-memory object for reading, spelled the way each platform declares it.
+///
+/// macOS gives `shm_open` as the variadic C function it is, so the mode is simply not passed;
+/// Linux declares the three-argument form and the mode is required, then ignored because
+/// `O_CREAT` is not among the flags. Two arguments compiled on the machine this was written on
+/// and on no other, which is the sort of thing only a build somewhere else finds.
+///
+/// # Safety
+/// `name` must point at a nul-terminated string.
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn shm_open_read(name: *const libc::c_char) -> libc::c_int {
+    unsafe { libc::shm_open(name, libc::O_RDONLY) }
+}
+
+/// See the macOS spelling above.
+///
+/// # Safety
+/// `name` must point at a nul-terminated string.
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn shm_open_read(name: *const libc::c_char) -> libc::c_int {
+    unsafe { libc::shm_open(name, libc::O_RDONLY, 0) }
+}
+
 /// Reads `want` bytes from `offset` in a POSIX shared-memory object, and unlinks it.
 ///
 /// Two things here are not obvious. The first is the unlink: the protocol makes the terminal
@@ -705,8 +728,8 @@ fn read_shared(name: &[u8], offset: u64, want: usize) -> Option<Vec<u8>> {
     }
     for spelling in spellings {
         let Ok(spelling) = std::ffi::CString::new(spelling) else { continue };
-        // SAFETY: a nul-terminated name and a flag word, which is all `shm_open` reads.
-        let fd = unsafe { libc::shm_open(spelling.as_ptr(), libc::O_RDONLY) };
+        // SAFETY: a nul-terminated name, which is all `shm_open_read` reads.
+        let fd = unsafe { shm_open_read(spelling.as_ptr()) };
         if fd < 0 {
             continue;
         }
@@ -1112,7 +1135,7 @@ mod tests {
 
             // SAFETY: a nul-terminated name, and unlinking one that is already gone is an error
             // and nothing more.
-            let again = unsafe { libc::shm_open(created.as_ptr(), libc::O_RDONLY) };
+            let again = unsafe { super::shm_open_read(created.as_ptr()) };
             assert!(again < 0, "the segment should have been unlinked after it was read");
         }
     }
