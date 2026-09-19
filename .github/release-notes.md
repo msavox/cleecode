@@ -1,3 +1,26 @@
+## What's new in 0.28.2
+
+**A pane no longer locks up after a video.** Running `mpv --vo=kitty` in a terminal pane is
+refused on purpose — a pane decodes thumbnails, not film — but when mpv exited it left a frame
+stuck over the pane that nothing shifted: `clear` did not remove it, typing did not cover it, and
+the prompt never came back.
+
+mpv signs off with `ESC _ G a=d ;` — "forget every image" — and writes no terminator for it, then
+immediately sends the escapes that leave the alternate screen and bring the cursor back. Reading
+those as more of the unterminated command swallowed every one of them, so the pane stayed on the
+alternate screen showing a grid the shell was no longer writing to, with an image placed on that
+screen still legitimately drawn over it.
+
+An ESC inside a string sequence that is not its terminator now *ends* the sequence, which is what
+the parser the rest of a pane runs on already does, and what terminals do. The half-written
+command is dropped rather than guessed at: a kitty payload is base64 and cannot contain an ESC,
+so nothing well-formed is lost.
+
+Worth knowing if you want video in a terminal at all: outside CleeCode, `mpv --vo=kitty` pushes
+around 140 MB a second down a full-size terminal, which is why it stutters. `--vo-kitty-use-shm=yes`
+sends the name of a shared-memory segment per frame instead, and the same two seconds cost 2.5 KB.
+Lowering the resolution with `--vo-kitty-width`/`--vo-kitty-height` is the weaker second lever.
+
 ## What's new in 0.28.1
 
 **Check for updates offers the update again, instead of only announcing it.** On macOS a
