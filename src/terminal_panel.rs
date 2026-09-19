@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ratatui::layout::Rect;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,6 +165,41 @@ pub struct TerminalPanel {
     /// furniture: it appears while it is being used and fades back out, so an idle pane stays
     /// all output and no chrome.
     last_scroll: Option<Instant>,
+    /// Pictures the program in this pane has drawn, posted by the reader thread and taken up
+    /// by the next frame. A queue rather than the pictures themselves because the decoding
+    /// happens on that thread and the drawing on this one, and the two must not share a list
+    /// they both edit.
+    graphics: Arc<Mutex<Vec<crate::pane_graphics::Event>>>,
+    /// The pictures currently on this pane, each with the drawing it was last built into.
+    images: Vec<PaneImage>,
+    /// Something a program tried to draw and could not be. Read and cleared by the app, which
+    /// puts it on the status line — a picture that cannot appear should say why rather than
+    /// leave a pane looking broken.
+    pub graphics_note: Option<GraphicsNote>,
+}
+
+/// One picture on a pane, and the drawing of it.
+struct PaneImage {
+    placement: crate::pane_graphics::Placement,
+    /// What it is drawn through, built once.
+    ///
+    /// Once, and not once a frame, for the reason `preview.rs` gives where it does the same
+    /// thing: a protocol carries the identity the host terminal knows the picture by, and a
+    /// fresh one every frame is a fresh transmission every frame — the picture redrawn on top
+    /// of itself ten times a second, which is not a picture, it is a flicker. The resizing to
+    /// whatever rectangle the pane offers is the protocol's own job and it caches it.
+    drawn: Option<Box<ratatui_image::protocol::StatefulProtocol>>,
+}
+
+/// Why a picture a pane asked for is not there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GraphicsNote {
+    /// The picture lives in a file or a shared-memory segment, or is in a format this does not
+    /// read. Worth naming because the fix is on the user's side: a different flag.
+    Unsupported,
+    /// Pictures arrived faster than a pane is for — which means a video player. Also a fix on
+    /// the user's side, and a different one.
+    Flood,
 }
 
 /// A text selection over the terminal's visible screen, in cell coordinates. `anchor` is
@@ -380,6 +416,157 @@ pub fn bracketed_paste(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
+/// The pty's size, said in both of the units a program may ask it in.
+///
+/// The pixel half used to be zero, which is not "small" but "unknown": `TIOCGWINSZ` carries it
+/// and every program that has to turn pixels into cells reads it there first. Filled in from
+/// the host's own cell size, which is the right answer — a pane's cell is the host's cell —
+/// and left at zero on a host that never said, because zero is what "unknown" is spelled as
+/// and a made-up number would be believed.
+fn pty_size(rows: u16, cols: u16) -> PtySize {
+    let (width, height) = crate::preview::cell_pixel_size().unwrap_or((0, 0));
+    PtySize {
+        rows,
+        cols,
+        pixel_width: cols.saturating_mul(width),
+        pixel_height: rows.saturating_mul(height),
+    }
+}
+
+/// Takes one kitty graphics command off a pane's output and turns it into a picture the pane
+/// can draw, a deletion, or a complaint.
+///
+/// Runs on the reader thread with the parser's lock, because the two questions it has to ask —
+/// where the cursor is, and how far the pane has scrolled — are only true at this exact point
+/// in the stream. A frame later the shell may have printed three more lines.
+fn take_graphics(
+    body: &[u8],
+    decoder: &mut crate::pane_graphics::Decoder,
+    store: &mut crate::pane_graphics::Store,
+    flood: &mut crate::pane_graphics::Flood,
+    parser: &Mutex<vt100::Parser>,
+    inbox: &Mutex<Vec<crate::pane_graphics::Event>>,
+) {
+    use crate::pane_graphics::{Admission, Decoded, Event, Placement};
+
+    let (keys, image) = match decoder.feed(body) {
+        Decoded::Picture { keys, image } => {
+            // `a=t` is "keep this, I will say where later".
+            if keys.action == b't' {
+                store.keep(keys.id, image);
+                return;
+            }
+            (keys, image)
+        }
+        Decoded::Show(keys) => match store.get(keys.id) {
+            Some(image) => (keys, image.clone()),
+            None => return,
+        },
+        Decoded::Forget(keys) => {
+            // `d` names which pictures to forget, and its absence means all of them — which is
+            // what `mpv` sends between frames and what anything else sends to tidy up.
+            let all = !matches!(keys.delete, b'i' | b'I' | b'n' | b'N');
+            store.forget(keys.id, all);
+            lock_poisoned(inbox).push(Event::Forget { id: keys.id, all });
+            return;
+        }
+        Decoded::Unsupported => {
+            lock_poisoned(inbox).push(Event::Unsupported);
+            return;
+        }
+        Decoded::Nothing => return,
+    };
+
+    match flood.admit() {
+        Admission::Allowed => {}
+        Admission::JustShut => {
+            lock_poisoned(inbox).push(Event::Flood);
+            return;
+        }
+        Admission::Refused => return,
+    }
+
+    // How many cells the picture covers. The program usually says (`c` and `r`); when it does
+    // not, the host's cell size answers, and where even that is unknown the picture is measured
+    // against a plausible cell rather than refused — being roughly the right size is worth more
+    // than being absent.
+    let (cell_w, cell_h) = crate::preview::cell_pixel_size().unwrap_or((10, 20));
+    let in_cells = |pixels: u32, cell: u16| -> u16 {
+        let cell = u32::from(cell.max(1));
+        pixels.div_ceil(cell).clamp(1, u32::from(u16::MAX)) as u16
+    };
+    let cols = if keys.cols > 0 { keys.cols } else { in_cells(image.width(), cell_w) };
+    let rows = if keys.rows > 0 { keys.rows } else { in_cells(image.height(), cell_h) };
+
+    let mut p = lock_poisoned(parser);
+    let (cursor_row, cursor_col) = p.screen().cursor_position();
+    let alternate = p.screen().alternate_screen();
+    // Counted from the top of everything the pane has ever printed, so the picture travels with
+    // the text it was printed among instead of standing still while that scrolls past it.
+    let anchor = held_lines(&mut p) + usize::from(cursor_row);
+
+    // Where the cursor ends up. A kitty terminal moves it past the picture unless told not to,
+    // and a program printing two pictures in a row — or a newline after one — is relying on
+    // that. Sent through the parser as the ordinary moves they are.
+    if !keys.keep_cursor {
+        let mut moves = Vec::new();
+        if rows > 1 {
+            moves.extend_from_slice(format!("\x1b[{}B", rows - 1).as_bytes());
+        }
+        if cols > 0 {
+            moves.extend_from_slice(format!("\x1b[{cols}C").as_bytes());
+        }
+        process_anchored(&mut p, &moves);
+    }
+    drop(p);
+
+    lock_poisoned(inbox).push(Event::Place(Box::new(Placement {
+        id: keys.id,
+        anchor,
+        col: cursor_col,
+        cols,
+        rows,
+        alternate,
+        image,
+    })));
+}
+
+/// Names the host terminal exports to say which terminal it is, all of which are false inside a
+/// pane and all of which are read by something.
+///
+/// Not an exhaustive list of every terminal on earth — an unknown one's marker does no harm,
+/// because a program that recognises it is a program that would have found nothing to use
+/// anyway. These are the ones whose presence actually changes a decision: the graphics
+/// protocol `chafa`, `ytfzf`, `timg` and `viu` pick, and the keyboard protocol some readline
+/// replacements turn on.
+const HOST_TERMINAL_ENV: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERMINAL_EMULATOR",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    "GHOSTTY_SHELL_FEATURES",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_PUBLIC_KEY",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_CONFIG_FILE",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "VTE_VERSION",
+    "KONSOLE_VERSION",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "CONTOUR_PROFILE",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+];
+
 /// The interactive shell to spawn in a new terminal pane. Honours `$SHELL` on Unix and
 /// `%ComSpec%` on Windows, falling back to `/bin/bash` and `cmd.exe` respectively.
 fn default_shell() -> String {
@@ -399,10 +586,31 @@ enum TerminalQuery {
     Status,
     PrimaryDeviceAttributes,
     SecondaryDeviceAttributes,
+    /// `CSI 18 t` — how many rows and columns the text area has.
+    TextAreaCells,
+    /// `CSI 16 t` — how many pixels one cell is.
+    CellPixels,
+    /// `CSI 14 t` — how many pixels the whole text area is.
+    TextAreaPixels,
+}
+
+/// What a pane knows about itself when a program asks. Gathered once per batch of queries
+/// rather than per query, because reading the cursor means taking the parser's lock.
+#[derive(Clone, Copy)]
+struct PaneMetrics {
+    /// Row and column, zero-based.
+    cursor: (u16, u16),
+    /// Rows and columns.
+    size: (u16, u16),
+    /// One cell's width and height in pixels, as the host reported them. `None` on a host that
+    /// never said, and then the size questions go unanswered rather than invented.
+    cell: Option<(u16, u16)>,
 }
 
 impl TerminalQuery {
-    fn response(&self, cursor_row: u16, cursor_col: u16) -> Vec<u8> {
+    fn response(&self, metrics: PaneMetrics) -> Vec<u8> {
+        let (cursor_row, cursor_col) = metrics.cursor;
+        let (rows, cols) = metrics.size;
         match self {
             // DSR 6n: report the cursor position (1-based row/col).
             TerminalQuery::CursorPosition => {
@@ -414,6 +622,26 @@ impl TerminalQuery {
             TerminalQuery::PrimaryDeviceAttributes => b"\x1b[?1;2c".to_vec(),
             // DA2: harmless xterm-ish terminal id/version.
             TerminalQuery::SecondaryDeviceAttributes => b"\x1b[>0;10;0c".to_vec(),
+            // The three size questions, which a pane could not answer at all until now.
+            //
+            // `chafa` asks all three before it draws anything, and so does anything else that
+            // has to turn pixels into cells. Unanswered they each cost it a timeout and then a
+            // guess — square cells, which is why a picture in a pane came out with its
+            // proportions wrong even when it came out at all.
+            TerminalQuery::TextAreaCells => format!("\x1b[8;{rows};{cols}t").into_bytes(),
+            TerminalQuery::CellPixels => match metrics.cell {
+                Some((width, height)) => format!("\x1b[6;{height};{width}t").into_bytes(),
+                None => Vec::new(),
+            },
+            TerminalQuery::TextAreaPixels => match metrics.cell {
+                Some((width, height)) => format!(
+                    "\x1b[4;{};{}t",
+                    u32::from(rows) * u32::from(height),
+                    u32::from(cols) * u32::from(width)
+                )
+                .into_bytes(),
+                None => Vec::new(),
+            },
         }
     }
 }
@@ -449,6 +677,15 @@ impl CsiScanner {
                                 out.push(TerminalQuery::SecondaryDeviceAttributes)
                             }
                             b'c' => out.push(TerminalQuery::PrimaryDeviceAttributes),
+                            // `t` is mostly window *manipulation* — move, raise, retitle — and
+                            // a pane has no window to manipulate. Exactly three of its forms
+                            // are questions, and those are the three answered here; everything
+                            // else ending in `t` is left to be ignored as before.
+                            b't' if self.params == b"18" => out.push(TerminalQuery::TextAreaCells),
+                            b't' if self.params == b"16" => out.push(TerminalQuery::CellPixels),
+                            b't' if self.params == b"14" => {
+                                out.push(TerminalQuery::TextAreaPixels)
+                            }
                             _ => {}
                         }
                         self.state = 0;
@@ -702,12 +939,7 @@ impl TerminalPanel {
     ) -> Result<Self> {
         let (rows, cols) = buildable_size(rows, cols);
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair = pty_system.openpty(pty_size(rows, cols))?;
 
         let mut cmd = CommandBuilder::new(default_shell());
         cmd.cwd(cwd);
@@ -746,6 +978,22 @@ impl TerminalPanel {
         // `xterm-256color` alone would not let a program ask for.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // And what it is *not* talking to.
+        //
+        // Overriding `TERM` was only half the job. A great many programs never ask the terminal
+        // anything: they read the environment, find `TERM_PROGRAM=ghostty` or `KITTY_WINDOW_ID`,
+        // and take that as proof of a graphics protocol. Those names are inherited from the
+        // terminal CleeCode is displayed in, and inside a pane every one of them is a lie —
+        // which is the whole of why `mpv --vo=kitty` in a pane could be heard and not seen, and
+        // why `chafa` left to itself chose kitty and printed a megabyte into a blank pane.
+        //
+        // Removed rather than rewritten. There is no value for `TERM_PROGRAM` that describes
+        // this honestly, and inventing one only moves the guess somewhere else; a name that is
+        // absent is a question the program answers by looking at what it can actually do.
+        // `CLEECODE=1`, set above, is the name that *is* true here and is documented as such.
+        for name in HOST_TERMINAL_ENV {
+            cmd.env_remove(name);
+        }
         // Where an interpreter started in this pane should publish its workspace, and where to
         // find the code that does it. Set on every shell, for both languages: a shell that
         // starts neither carries a few unread names, which costs nothing, and the alternative is
@@ -814,11 +1062,21 @@ impl TerminalPanel {
         let cwd_clone = Arc::clone(&cwd);
         let reports_cwd = Arc::new(AtomicBool::new(false));
         let reports_clone = Arc::clone(&reports_cwd);
+        let graphics: Arc<Mutex<Vec<crate::pane_graphics::Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let graphics_clone = Arc::clone(&graphics);
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut scanner = CsiScanner::default();
             let mut osc = Osc7Scanner::default();
+            // The three halves of the graphics road. They live on this thread because the work
+            // is per-pane and must not be on the frame's path: decoding a thumbnail is
+            // milliseconds, and a pane doing it is a pane, while the main thread doing it is
+            // every pane, the editor and the keyboard.
+            let mut stream = crate::pane_graphics::PaneStream::default();
+            let mut decoder = crate::pane_graphics::Decoder::default();
+            let mut store = crate::pane_graphics::Store::default();
+            let mut flood = crate::pane_graphics::Flood::default();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -836,9 +1094,32 @@ impl TerminalPanel {
                             continue;
                         }
                         let data = &buf[..n];
-                        {
-                            let mut p = lock_poisoned(&parser_clone);
-                            process_anchored(&mut p, data);
+                        // Split before parsed, because a picture is placed at the cursor and
+                        // the cursor is wherever the text before it left off. The pieces come
+                        // back in the order they were written for exactly that reason.
+                        for piece in stream.feed(data) {
+                            match piece {
+                                crate::pane_graphics::Piece::Text(text) => {
+                                    let mut p = lock_poisoned(&parser_clone);
+                                    process_anchored(&mut p, &text);
+                                }
+                                crate::pane_graphics::Piece::Apc(body) => take_graphics(
+                                    &body,
+                                    &mut decoder,
+                                    &mut store,
+                                    &mut flood,
+                                    &parser_clone,
+                                    &graphics_clone,
+                                ),
+                                crate::pane_graphics::Piece::ClearScreen => {
+                                    let alternate =
+                                        lock_poisoned(&parser_clone).screen().alternate_screen();
+                                    store.forget(0, true);
+                                    lock_poisoned(&graphics_clone).push(
+                                        crate::pane_graphics::Event::ClearScreen { alternate },
+                                    );
+                                }
+                            }
                         }
                         // Raised after the parser has taken the bytes, so a reader that sees the
                         // new number is looking at a screen that already holds them.
@@ -859,9 +1140,13 @@ impl TerminalPanel {
                         let mut queries = Vec::new();
                         scanner.feed(data, &mut queries);
                         if !queries.is_empty() {
-                            let (crow, ccol) = {
+                            let metrics = {
                                 let p = lock_poisoned(&parser_clone);
-                                p.screen().cursor_position()
+                                PaneMetrics {
+                                    cursor: p.screen().cursor_position(),
+                                    size: p.screen().size(),
+                                    cell: crate::preview::cell_pixel_size(),
+                                }
                             };
                             // Queued like anything else the pane sends, and queued as one
                             // message so a burst of queries cannot fill the channel on its own.
@@ -870,7 +1155,7 @@ impl TerminalPanel {
                             // freeze the pane's display as well as its input.
                             let mut reply = Vec::new();
                             for q in &queries {
-                                reply.extend_from_slice(&q.response(crow, ccol));
+                                reply.extend_from_slice(&q.response(metrics));
                             }
                             let _ = input_clone.try_send(reply);
                         }
@@ -904,6 +1189,9 @@ impl TerminalPanel {
             last_scroll: None,
             cwd,
             reports_cwd,
+            graphics,
+            images: Vec::new(),
+            graphics_note: None,
         })
     }
 
@@ -1389,13 +1677,158 @@ impl TerminalPanel {
         }
         self.rows = rows;
         self.cols = cols;
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let _ = self.master.resize(pty_size(rows, cols));
         lock_poisoned(&self.parser).screen_mut().set_size(rows, cols);
+        // A reflow moves every line, and a picture's anchor is a line number. Rather than guess
+        // where each one went, they go: a pane that has just changed shape is about to be
+        // redrawn by whatever is running in it anyway, and a picture in the wrong place is
+        // worse than one that has to be drawn again.
+        self.images.clear();
+    }
+
+    /// Takes up whatever the reader thread has decoded since the last frame.
+    pub fn poll_graphics(&mut self) {
+        use crate::pane_graphics::Event;
+        let events = std::mem::take(&mut *lock_poisoned(&self.graphics));
+        for event in events {
+            match event {
+                Event::Place(placement) => {
+                    // A picture placed where one already is replaces it rather than stacking on
+                    // it. That is how a preview pane showing one thumbnail after another
+                    // behaves, and without it the list of pictures would grow with every arrow
+                    // key until the oldest were being dropped for no reason.
+                    self.images.retain(|held| {
+                        !(held.placement.anchor == placement.anchor
+                            && held.placement.col == placement.col)
+                    });
+                    self.images.push(PaneImage { placement: *placement, drawn: None });
+                    // Oldest first, because the oldest is the one nearest the top of the pane
+                    // and so the one about to scroll off anyway.
+                    while self.images.len() > crate::pane_graphics::MAX_PLACED {
+                        self.images.remove(0);
+                    }
+                }
+                Event::Forget { id, all } => {
+                    if all {
+                        self.images.clear();
+                    } else {
+                        self.images.retain(|held| held.placement.id != id);
+                    }
+                }
+                Event::ClearScreen { alternate } => {
+                    self.images.retain(|held| held.placement.alternate != alternate);
+                }
+                Event::Unsupported => self.graphics_note = Some(GraphicsNote::Unsupported),
+                Event::Flood => self.graphics_note = Some(GraphicsNote::Flood),
+            }
+        }
+    }
+
+    /// Where this pane's pictures are on screen right now, dropping the ones that no longer
+    /// belong there.
+    ///
+    /// Three things end a picture, and all three are asked here rather than tracked:
+    ///
+    /// * the text it was placed among scrolled off, so its line number is behind the top of the
+    ///   screen — or ahead of the bottom, which a full-screen program switching grids does;
+    /// * the pane changed grids. A picture put up by `fzf` on the alternate screen has nothing
+    ///   to do with the shell underneath it, and vice versa;
+    /// * something was *written* over it. This is the one that matters for a preview pane: a
+    ///   kitty terminal keeps a picture until it is told otherwise, but a list being scrolled
+    ///   does not tell it anything — it simply draws the next entry over the top. So a picture
+    ///   lives only while every cell it covers is still empty, which is exactly as long as
+    ///   nothing has been drawn there.
+    ///
+    /// Returns an index into `images` with the rectangle to draw it in, so the caller can let
+    /// go of the parser's lock before it draws.
+    pub fn graphics_layout(&mut self, content: Rect) -> Vec<(usize, Rect)> {
+        if self.images.is_empty() {
+            return Vec::new();
+        }
+        let mut parser = lock_poisoned(&self.parser);
+        let held = held_lines(&mut parser);
+        let screen = parser.screen();
+        let (screen_rows, screen_cols) = screen.size();
+        let alternate = screen.alternate_screen();
+
+        let mut rects = Vec::new();
+        let mut keep = Vec::with_capacity(self.images.len());
+        for (index, held_image) in self.images.iter().enumerate() {
+            let placement = &held_image.placement;
+            let on_screen = placement.alternate == alternate
+                && placement.anchor >= held
+                && placement.anchor - held < usize::from(screen_rows);
+            if !on_screen {
+                keep.push(false);
+                continue;
+            }
+            let row = (placement.anchor - held) as u16;
+            // Clipped to the pane rather than refused by it: a picture wider than the pane is
+            // still worth the part of it that fits, which is what a terminal does too.
+            let width = placement.cols.min(screen_cols.saturating_sub(placement.col));
+            let height = placement.rows.min(screen_rows - row);
+            if width == 0 || height == 0 {
+                keep.push(false);
+                continue;
+            }
+            let covered_written = (row..row + height).any(|r| {
+                (placement.col..placement.col + width)
+                    .any(|c| screen.cell(r, c).is_some_and(vt100::Cell::has_contents))
+            });
+            if covered_written {
+                keep.push(false);
+                continue;
+            }
+            keep.push(true);
+            rects.push((
+                index,
+                Rect {
+                    x: content.x + placement.col,
+                    y: content.y + row,
+                    width,
+                    height,
+                },
+            ));
+        }
+        drop(parser);
+
+        if keep.iter().any(|alive| !alive) {
+            // Dropping shifts the indices just collected, so they are renumbered rather than
+            // recomputed: the rectangles are still right, only their places in the list moved.
+            let mut moved = Vec::with_capacity(rects.len());
+            let mut next = 0usize;
+            let mut map = Vec::with_capacity(keep.len());
+            for alive in &keep {
+                map.push(if *alive { Some(next) } else { None });
+                if *alive {
+                    next += 1;
+                }
+            }
+            let mut alive = keep.iter();
+            self.images.retain(|_| *alive.next().unwrap_or(&false));
+            for (index, rect) in rects {
+                if let Some(Some(index)) = map.get(index) {
+                    moved.push((*index, rect));
+                }
+            }
+            return moved;
+        }
+        rects
+    }
+
+    /// Draws one of this pane's pictures, building its protocol the first time.
+    pub fn draw_graphic(&mut self, f: &mut ratatui::Frame, index: usize, rect: Rect) {
+        use ratatui::widgets::StatefulWidget;
+        let Some(picker) = crate::preview::pane_picker() else { return };
+        let Some(held) = self.images.get_mut(index) else { return };
+        let protocol = held
+            .drawn
+            .get_or_insert_with(|| Box::new(picker.new_resize_protocol(held.placement.image.clone())));
+        // `Fit` shrinks the picture to the cells it was given and never enlarges it, which is
+        // what the program asking for `c` columns and `r` rows meant.
+        ratatui_image::StatefulImage::default()
+            .resize(ratatui_image::Resize::Fit(None))
+            .render(rect, f.buffer_mut(), protocol.as_mut());
     }
 }
 
@@ -1566,6 +1999,131 @@ impl TerminalWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture arrives the way chafa sends one — the keys once, the data in chunks — and
+    /// lands where the cursor was, not where the cursor ends up.
+    #[test]
+    fn a_picture_lands_at_the_cursor_and_moves_it_past_itself() {
+        use crate::pane_graphics::Event;
+        let parser = Mutex::new(vt100::Parser::new(10, 40, 100));
+        let inbox = Mutex::new(Vec::new());
+        let mut decoder = crate::pane_graphics::Decoder::default();
+        let mut store = crate::pane_graphics::Store::default();
+        let mut flood = crate::pane_graphics::Flood::default();
+
+        // Two lines of output first, so the cursor is somewhere worth testing.
+        lock_poisoned(&parser).process(b"one\r\ntwo\r\n");
+        assert_eq!(lock_poisoned(&parser).screen().cursor_position(), (2, 0));
+
+        // A 2x1 RGB picture covering one cell, announced and then sent.
+        let feed = |body: &[u8], decoder: &mut _, store: &mut _, flood: &mut _| {
+            take_graphics(body, decoder, store, flood, &parser, &inbox)
+        };
+        feed(b"Ga=T,f=24,s=2,v=1,c=3,r=2,m=1;", &mut decoder, &mut store, &mut flood);
+        feed(b"Gm=1;/wAAAP8A", &mut decoder, &mut store, &mut flood);
+        feed(b"Gm=0;", &mut decoder, &mut store, &mut flood);
+
+        let events = lock_poisoned(&inbox);
+        let [Event::Place(placement)] = &events[..] else { panic!("expected one placement") };
+        assert_eq!(placement.anchor, 2, "the third line the pane ever printed");
+        assert_eq!(placement.col, 0);
+        assert_eq!((placement.cols, placement.rows), (3, 2));
+        assert!(!placement.alternate);
+        // Down by one row less than the picture is tall, and right by its width: where a kitty
+        // terminal would have left it, so a newline after it lands below the picture.
+        assert_eq!(lock_poisoned(&parser).screen().cursor_position(), (3, 3));
+    }
+
+    /// `C=1` is a program saying it will do its own positioning.
+    #[test]
+    fn a_picture_asked_to_keep_the_cursor_keeps_it() {
+        let parser = Mutex::new(vt100::Parser::new(10, 40, 100));
+        let inbox = Mutex::new(Vec::new());
+        let mut decoder = crate::pane_graphics::Decoder::default();
+        let mut store = crate::pane_graphics::Store::default();
+        let mut flood = crate::pane_graphics::Flood::default();
+        take_graphics(
+            b"Ga=T,f=24,s=2,v=1,c=3,r=2,C=1;/wAAAP8A",
+            &mut decoder,
+            &mut store,
+            &mut flood,
+            &parser,
+            &inbox,
+        );
+        assert_eq!(lock_poisoned(&parser).screen().cursor_position(), (0, 0));
+    }
+
+    /// What mpv sends between frames, and what anything else sends to tidy up.
+    #[test]
+    fn a_delete_without_a_target_forgets_everything() {
+        use crate::pane_graphics::Event;
+        let parser = Mutex::new(vt100::Parser::new(10, 40, 100));
+        let inbox = Mutex::new(Vec::new());
+        let mut decoder = crate::pane_graphics::Decoder::default();
+        let mut store = crate::pane_graphics::Store::default();
+        let mut flood = crate::pane_graphics::Flood::default();
+        take_graphics(b"Ga=d", &mut decoder, &mut store, &mut flood, &parser, &inbox);
+        let events = lock_poisoned(&inbox);
+        assert!(matches!(events[..], [Event::Forget { all: true, .. }]));
+    }
+
+    /// A picture in a file is a path written by the far end of a pty, which over ssh is not
+    /// this machine at all. Refused, and said so.
+    #[test]
+    fn a_picture_that_cannot_be_drawn_is_reported_rather_than_ignored() {
+        use crate::pane_graphics::Event;
+        let parser = Mutex::new(vt100::Parser::new(10, 40, 100));
+        let inbox = Mutex::new(Vec::new());
+        let mut decoder = crate::pane_graphics::Decoder::default();
+        let mut store = crate::pane_graphics::Store::default();
+        let mut flood = crate::pane_graphics::Flood::default();
+        take_graphics(
+            b"Ga=T,f=100,t=f;L3RtcC9waWMucG5n",
+            &mut decoder,
+            &mut store,
+            &mut flood,
+            &parser,
+            &inbox,
+        );
+        let events = lock_poisoned(&inbox);
+        assert!(matches!(events[..], [Event::Unsupported]));
+    }
+
+    /// The three size questions chafa asks before it draws anything. The pixel pair is answered
+    /// only where the host said what a cell is; silence is the honest reply otherwise, and a
+    /// program that gets it falls back to its own guess rather than to a wrong number.
+    #[test]
+    fn the_size_questions_are_answered_in_the_units_they_were_asked_in() {
+        let known =
+            PaneMetrics { cursor: (0, 0), size: (24, 80), cell: Some((9, 19)) };
+        assert_eq!(TerminalQuery::TextAreaCells.response(known), b"\x1b[8;24;80t".to_vec());
+        assert_eq!(TerminalQuery::CellPixels.response(known), b"\x1b[6;19;9t".to_vec());
+        assert_eq!(
+            TerminalQuery::TextAreaPixels.response(known),
+            format!("\x1b[4;{};{}t", 24 * 19, 80 * 9).into_bytes()
+        );
+
+        let unknown = PaneMetrics { cursor: (0, 0), size: (24, 80), cell: None };
+        assert_eq!(TerminalQuery::TextAreaCells.response(unknown), b"\x1b[8;24;80t".to_vec());
+        assert!(TerminalQuery::CellPixels.response(unknown).is_empty());
+        assert!(TerminalQuery::TextAreaPixels.response(unknown).is_empty());
+    }
+
+    #[test]
+    fn the_size_questions_are_recognised_and_window_commands_are_not() {
+        let mut scanner = CsiScanner::default();
+        let mut out = Vec::new();
+        // The three questions, then a retitle and a raise — commands, not questions.
+        scanner.feed(b"\x1b[18t\x1b[16t\x1b[14t\x1b[22;0t\x1b[5t", &mut out);
+        assert_eq!(
+            out,
+            vec![
+                TerminalQuery::TextAreaCells,
+                TerminalQuery::CellPixels,
+                TerminalQuery::TextAreaPixels,
+            ]
+        );
+    }
 
     /// Everything a shell can put in front of a path on the way to saying where it is.
     #[test]
@@ -2212,8 +2770,9 @@ mod tests {
 
     #[test]
     fn cursor_position_response_is_one_based() {
-        assert_eq!(TerminalQuery::CursorPosition.response(0, 0), b"\x1b[1;1R");
-        assert_eq!(TerminalQuery::CursorPosition.response(4, 9), b"\x1b[5;10R");
+        let at = |row, col| PaneMetrics { cursor: (row, col), size: (24, 80), cell: None };
+        assert_eq!(TerminalQuery::CursorPosition.response(at(0, 0)), b"\x1b[1;1R");
+        assert_eq!(TerminalQuery::CursorPosition.response(at(4, 9)), b"\x1b[5;10R");
     }
 
     /// Feeds `count` numbered lines, the way a shell printing output would.

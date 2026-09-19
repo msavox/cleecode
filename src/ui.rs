@@ -5811,6 +5811,12 @@ fn draw_single_terminal(
     // anything about its scrollback while holding it would deadlock the whole app.
     draw_terminal_scrollbar(pal, f, terminal, area, engaged);
 
+    // Pictures a program in this pane has drawn arrive on the reader thread and are taken up
+    // here, a frame at a time. Before the parser is locked below, because working out where
+    // they go takes that lock too.
+    terminal.poll_graphics();
+    let graphics = terminal.graphics_layout(content);
+
     let selection = terminal.selection;
     let parser = crate::terminal_panel::lock_poisoned(&terminal.parser);
     let screen = parser.screen();
@@ -5822,9 +5828,17 @@ fn draw_single_terminal(
     } else {
         None
     };
+    drop(parser);
 
     // The border was already drawn; the terminal grid fills the content area below the strip.
     f.render_widget(Paragraph::new(lines), content);
+
+    // Over the cells, because that is where the program put it: a picture placed at a cursor
+    // position covers whatever those cells held, the same as it would in a terminal that drew
+    // it itself.
+    for (index, rect) in graphics {
+        terminal.draw_graphic(f, index, rect);
+    }
 
     if let Some((cy, cx)) = cursor_pos {
         f.set_cursor_position((content.x + cx, content.y + cy));

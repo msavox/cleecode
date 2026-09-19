@@ -4900,6 +4900,35 @@ impl App {
         }
     }
 
+    /// Collects the complaint of any pane that could not draw a picture it was asked to.
+    ///
+    /// Said on the status line and said once: the note is taken off the pane as it is read, so
+    /// a program that keeps trying does not keep announcing. The drawer's pane is included for
+    /// the same reason it is included above — an agent running `chafa` is a program in a pane
+    /// like any other.
+    pub fn poll_graphics_notes(&mut self) {
+        use crate::terminal_panel::GraphicsNote;
+        let lang = self.settings.lang;
+        let mut said = None;
+        for tab in self
+            .terminals
+            .iter_mut()
+            .chain(self.drawer.iter_mut().filter_map(|d| d.window.as_mut()))
+            .flat_map(|w| w.tabs.iter_mut())
+        {
+            if let Some(note) = tab.graphics_note.take() {
+                said = Some(match note {
+                    GraphicsNote::Unsupported => i18n::msg_pane_graphics_unsupported(lang),
+                    GraphicsNote::Flood => i18n::msg_pane_graphics_flood(lang),
+                });
+            }
+        }
+        if let Some(text) = said {
+            self.status_message = text;
+            self.redraw = true;
+        }
+    }
+
     pub fn poll_external_changes(&mut self) {
         // Files may have been reloaded, the tree re-read and the git dots refreshed underneath.
         self.redraw = true;

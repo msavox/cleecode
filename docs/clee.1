@@ -328,6 +328,31 @@ hands it the editor's context, and a
 .IR file : line
 it prints back opens on a double\-click. All six names are reserved and saving over one is
 refused.
+.SS What a pane says it is
+A pane sets
+.B TERM
+to
+.B xterm\-256color
+\(em what its parser actually implements, and an entry every terminfo database has \(em with
+.B COLORTERM=truecolor
+beside it, since the parser does carry 24\-bit colour through. It answers the cursor, status and
+device\-attribute questions, and the three size questions
+.RB ( CSI\ 18\ t ,
+.BR CSI\ 16\ t ,
+.BR CSI\ 14\ t )
+so that a program turning pixels into cells need not guess.
+.PP
+The host terminal's own names \(em
+.BR TERM_PROGRAM ,
+.BR KITTY_WINDOW_ID ,
+.BR WEZTERM_PANE ,
+.B ITERM_SESSION_ID
+and their like \(em are removed from a pane's environment. Inside a pane every one of them is
+false, and a program that reads one and concludes it has a graphics protocol will write into a
+pty that never had one.
+.B CLEECODE=1
+is set instead, and is the name to test for in an rc file or a script: it is true, and it is
+CleeCode's own.
 .SH PICTURES
 A picture \(em .png, .jpg, .jpeg, .gif, .webp, .bmp, .ico, .tiff \(em opens in a tab that draws
 it, rather than the blank read\-only buffer a binary file gives. There is nothing in one to edit,
@@ -335,10 +360,47 @@ so no buffer is made for it.
 .PP
 On a terminal with a graphics protocol (kitty, iTerm2, sixel) those are real pixels; elsewhere it
 falls back to coloured half\-blocks. The status line names which was used when the tab opens.
-CleeCode writes the graphics itself rather than leaving it to a program in a terminal pane \(em a
-pane is parsed into cells and repainted, and graphics escapes do not survive that \(em which is
-also why this works over
+CleeCode writes the graphics itself rather than leaving it to the host terminal \(em which is also
+why this works over
 .BR ssh (1).
+.PP
+.SS Pictures in a terminal pane
+A program running in a pane may draw one too. A pane is parsed into a grid of cells, so the
+escape sequences cannot simply be passed on; instead CleeCode reads the kitty graphics protocol
+out of the pane's own output, decodes the picture and draws it at the cell the program put it
+at. That means it works the same way the tabs do \(em real pixels where the host terminal has a
+protocol, half\-blocks where it has none, and over
+.BR ssh (1)
+either way.
+.PP
+The picture must travel in the escape sequence itself. A picture named by a file path
+.RB ( t=f )
+or living in a shared\-memory segment
+.RB ( t=s )
+is refused, because that path is written by the far end of a pty and over
+.BR ssh (1)
+names a file on another machine. So for
+.BR chafa (1)
+use
+.B \-f kitty
+(drawn as pixels) or
+.B \-f symbols
+(drawn as text, and always available);
+.BR ueberzug (1)
+and ueberzugpp cannot work in a pane at all, since they paint a window of their own over the
+screen rather than writing to any output.
+.PP
+It is thumbnails this is for, not film. Past eight pictures a second a pane stops decoding and
+says so on the status line: a video player writes a whole picture per frame \(em
+.B mpv \-\-vo=kitty
+is some 8 MB a second at a small size \(em and no pane can keep up with that. For video, open a
+terminal window of your own outside CleeCode, or use
+.B \-\-vo=null
+for the sound alone.
+.PP
+A picture goes when what it was drawn among goes: when the text scrolls past it, when the screen
+is cleared, when the program deletes it, or when something is written over the cells it covers
+\(em which is what a preview pane scrolling its list does.
 .PP
 Decoding happens on a background thread, so opening a large picture never stalls the window or
 the shells in it. In split view a picture opens in the pane that is not focused, leaving the file

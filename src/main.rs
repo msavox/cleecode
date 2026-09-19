@@ -22,6 +22,7 @@ mod lsp;
 mod manual;
 mod mcp;
 mod menu;
+mod pane_graphics;
 mod picker;
 mod preview;
 mod recovery;
@@ -770,6 +771,7 @@ fn run(
             app.poll_previews();
             app.refresh_rendered_previews();
             app.poll_terminal_exits();
+            app.poll_graphics_notes();
             app.poll_git_status();
             app.poll_shell_cwd();
             app.poll_search();

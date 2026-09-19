@@ -250,6 +250,26 @@ its output. A command can be shared by every project or kept in the project's ow
 which wins and is meant to be committed with it. Interpreters off `PATH` go under
 `[interpreter_paths]`.
 
+A pane answers the questions a program asks a terminal — the cursor, the device attributes, and
+the three size questions (`CSI 18 t`, `CSI 16 t`, `CSI 14 t`) so nothing has to guess how big a
+cell is. It also *stops* answering to a name that is not its own: `TERM_PROGRAM`,
+`KITTY_WINDOW_ID`, `WEZTERM_PANE` and the rest are taken out of a pane's environment, because
+inside one they are false and a program that believes them draws into a pty that cannot show it.
+`CLEECODE=1` is there instead, and is the one to test for in an rc file.
+
+**Pictures in a pane.** A program running in a pane can draw one: CleeCode reads the kitty
+graphics protocol out of the pane's own output and draws the picture itself, at the cell the
+program put it at — real pixels where the host terminal has a protocol, half-blocks where it has
+none, and over `ssh` either way. So `chafa -f kitty` works in a pane, and so do the thumbnails
+`ytfzf -t` puts beside its list. The picture must travel in the escape itself: one named by a
+file path (`t=f`) or a shared-memory segment (`t=s`) is refused, since over `ssh` that path is on
+another machine; and `ueberzug` cannot work in a pane at all, because it paints a window of its
+own over the screen instead of writing to any output.
+
+It is for thumbnails, not film. Past eight pictures a second a pane stops decoding and says so:
+`mpv --vo=kitty` is around 8 MB a second even at a small size. For video, open a terminal window
+outside CleeCode — or `--vo=null` for the sound alone.
+
 ### Agents, over MCP
 
 Claude Code, codex, opencode and gemini are terminal programs, and CleeCode hosts real terminals —

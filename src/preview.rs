@@ -189,6 +189,28 @@ pub fn protocol_name() -> &'static str {
     }
 }
 
+/// How big one cell is, in pixels, as the host terminal reported it at startup.
+///
+/// Asked for by the panes rather than by this module: a program running in one has no other way
+/// to find out. `TIOCGWINSZ` on a pty carries the two numbers, and a terminal that implements
+/// `CSI 16 t` answers with them — CleeCode had neither, so `chafa` in a pane spent a timeout
+/// asking and then guessed square cells, which is why its pictures came out squashed. The
+/// numbers are the host's, which is the honest answer: a pane's cell is the host's cell.
+///
+/// `None` where the host never said, which is a terminal without a graphics protocol. Nothing
+/// is invented in that case — a made-up cell size would be worse than the program's own guess.
+pub fn cell_pixel_size() -> Option<(u16, u16)> {
+    let size = picker()?.font_size();
+    (size.width > 0 && size.height > 0).then_some((size.width, size.height))
+}
+
+/// The picker the panes draw their pictures with — the same one the tabs use, because a
+/// picture written by a program in a pane and a picture opened in a tab are the same picture
+/// as far as the host terminal is concerned.
+pub fn pane_picker() -> Option<&'static Picker> {
+    picker()
+}
+
 /// Whether the terminal draws real pixels rather than coloured cells. A page of prose reduced
 /// to half-blocks is unreadable — a 150dpi page is some 200 times more pixels than a pane has
 /// cells — so where there is no graphics protocol the *text* rendering is the better answer,
