@@ -1,55 +1,47 @@
 /**
  * Cloudflare Pages Function — /api/counter
  *
- * GET  → returns current { visits, unique, users? } without incrementing (for display)
+ * GET  → returns current { visits, unique, downloads?, downloads_at? } without
+ *        incrementing (for display)
  * POST → increments visits; increments unique if this IP hasn't been seen in 30 days
  *
  * KV binding: COUNTER (bound in site/wrangler.toml)
  *
- * ---- users: estimated CleeCode users ----
- * Nothing about "users" is stored as a running total — it is recomputed from
- * GitHub's own release download counters, which already know who has fetched
- * a build. The formula:
+ * ---- downloads: release downloads ----
+ * Nothing about "downloads" is stored as a running total — it is read from
+ * GitHub's own release download counters, which already know how many times
+ * each build has been fetched. The sum is every asset of every release, minus
+ * the *.sha256 checksums, which are not the software.
  *
- *   1. List every release of the repo (paginating past 100 if there are more).
- *   2. Sort each release's assets into platform families by filename glob:
- *        linux    linux-*.tar.gz
- *        macos    macos-*.tar.gz
- *        windows  windows-*.zip
- *        deb      *.deb
- *        brew     *-src.tar.gz   (no such asset exists yet — contributes 0
- *                                 until one is published, never an error)
- *      *.sha256 checksums are never counted.
- *   3. For each family, take the MAX over all releases of that release's
- *      summed download_count for that family: someone who upgrades every
- *      version still counts once per family, someone who only ever grabbed
- *      an old build still counts at all.
- *   4. users = sum of the five family maxima.
+ * This replaced an earlier "estimated users" figure that took, per platform
+ * family, the maximum over releases of that release's downloads. That number
+ * could not keep rising: with a release every few days the downloads spread
+ * across versions, so no new release ever beat the historical peak of its
+ * family and the figure sat still even when the refresh was working. A plain
+ * sum has no such ceiling — every download moves it, which is the only way a
+ * frozen counter is distinguishable from a quiet week.
  *
  * The GitHub call is slow, rate-limited, and pointless to repeat on every
- * page load, so the result sits in KV (key users_est) with its timestamp.
- * The entry never expires: past its 6-hour freshness window a refresh is
- * attempted, but if GitHub can't be reached the stale value is served
- * anyway — the counter may lag, it must never vanish. visits and unique
- * never depend on GitHub being reachable.
+ * page load, so the result sits in KV (key downloads_total) with its
+ * timestamp. The entry never expires: past its 6-hour freshness window a
+ * refresh is attempted, but if GitHub can't be reached the stale value is
+ * served anyway — the counter may lag, it must never vanish. Because a
+ * permanently failing refresh is otherwise invisible (it just looks like a
+ * number that stopped moving), the response carries downloads_at: the instant
+ * the served figure was actually read from GitHub. Compare it with now to
+ * tell a stalled refresh from a quiet week. visits and unique never depend on
+ * GitHub being reachable.
  *
  * Unauthenticated GitHub API calls are limited to 60/hour per IP, and Pages
  * Functions egress from shared Cloudflare IPs where that budget is always
- * exhausted — so a GITHUB_TOKEN secret (read-only, public repo) should be
- * set on the Pages project to get a per-token 5000/hour limit instead.
+ * exhausted — so a GITHUB_TOKEN secret (read-only, public repo) must be set on
+ * the Pages project to get a per-token 5000/hour limit instead. Without it the
+ * refresh fails every time and the figure freezes at whatever was last cached.
  */
 
 const GITHUB_REPO = 'msavox/cleecode'
-const USERS_CACHE_KEY = 'users_est'
-const USERS_FRESH_MS = 6 * 60 * 60 * 1000 // refresh from GitHub past this age
-
-const FAMILY_PATTERNS = {
-  linux:   /linux-.*\.tar\.gz$/,
-  macos:   /macos-.*\.tar\.gz$/,
-  windows: /windows-.*\.zip$/,
-  deb:     /\.deb$/,
-  brew:    /-src\.tar\.gz$/,
-}
+const DOWNLOADS_CACHE_KEY = 'downloads_total'
+const DOWNLOADS_FRESH_MS = 6 * 60 * 60 * 1000 // refresh from GitHub past this age
 
 async function fetchAllReleases(env) {
   const headers = { 'User-Agent': 'cleecode-site' } // GitHub's API 4xxs any request without one
@@ -68,59 +60,61 @@ async function fetchAllReleases(env) {
   return releases
 }
 
-function estimateUsers(releases) {
-  const maxima = {}
-  for (const family in FAMILY_PATTERNS) maxima[family] = 0
-
+// Every asset of every release, except the checksums beside them.
+function countDownloads(releases) {
+  let total = 0
   for (const release of releases) {
-    const sums = {}
-    for (const family in FAMILY_PATTERNS) sums[family] = 0
     for (const asset of release.assets || []) {
-      const name = asset.name
-      if (name.endsWith('.sha256')) continue
-      for (const family in FAMILY_PATTERNS) {
-        if (FAMILY_PATTERNS[family].test(name)) sums[family] += asset.download_count
-      }
-    }
-    for (const family in FAMILY_PATTERNS) {
-      if (sums[family] > maxima[family]) maxima[family] = sums[family]
+      if (asset.name.endsWith('.sha256')) continue
+      total += asset.download_count
     }
   }
-
-  let users = 0
-  for (const family in maxima) users += maxima[family]
-  return users
+  return total
 }
 
 // Shared by GET and POST. Serves the cached value while it's fresh; past the
 // freshness window it asks GitHub again, but a failed refresh falls back to
-// the stale value rather than dropping users. Never throws — returns
-// undefined only when there is no cached value at all AND GitHub can't be
-// reached, so the caller can simply omit users from the response.
-async function getUsersEstimate(env) {
+// the stale value rather than dropping the figure. Never throws — returns
+// {} only when there is no cached value at all AND GitHub can't be reached,
+// so the caller can simply omit downloads from the response. The returned
+// `at` is when the figure was read from GitHub, not when it was served.
+async function getDownloads(env) {
   let stale
-  const cached = await env.COUNTER.get(USERS_CACHE_KEY)
+  const cached = await env.COUNTER.get(DOWNLOADS_CACHE_KEY)
   if (cached) {
     try {
       const parsed = JSON.parse(cached)
-      if (typeof parsed.users === 'number') {
-        if (Date.now() - Date.parse(parsed.at || 0) < USERS_FRESH_MS) return parsed.users
-        stale = parsed.users
+      if (typeof parsed.downloads === 'number') {
+        if (Date.now() - Date.parse(parsed.at || '') < DOWNLOADS_FRESH_MS) {
+          return { downloads: parsed.downloads, at: parsed.at }
+        }
+        stale = { downloads: parsed.downloads, at: parsed.at }
       }
     } catch {
       // corrupt entry — fall through and recompute
     }
   }
   try {
-    const users = estimateUsers(await fetchAllReleases(env))
-    await env.COUNTER.put(
-      USERS_CACHE_KEY,
-      JSON.stringify({ users, at: new Date().toISOString() })
-    )
-    return users
-  } catch {
-    return stale
+    const downloads = countDownloads(await fetchAllReleases(env))
+    const at = new Date().toISOString()
+    await env.COUNTER.put(DOWNLOADS_CACHE_KEY, JSON.stringify({ downloads, at }))
+    return { downloads, at }
+  } catch (err) {
+    // Logged, not swallowed: without this a token that stopped working shows up
+    // only as a figure that quietly stopped moving. Visible in `wrangler pages
+    // deployment tail` and in the dashboard's live logs.
+    console.error('downloads refresh failed:', err && err.message)
+    return stale || {}
   }
+}
+
+function body(visits, unique, downloads) {
+  const out = { visits, unique }
+  if (typeof downloads.downloads === 'number') {
+    out.downloads = downloads.downloads
+    if (downloads.at) out.downloads_at = downloads.at
+  }
+  return out
 }
 
 export async function onRequestPost({ request, env }) {
@@ -146,18 +140,12 @@ export async function onRequestPost({ request, env }) {
     await env.COUNTER.put(key, '1', { expirationTtl: 86400 * 30 })   // 30-day window
   }
 
-  const users = await getUsersEstimate(env)
-  const body = { visits, unique }
-  if (typeof users === 'number') body.users = users
-  return Response.json(body)
+  return Response.json(body(visits, unique, await getDownloads(env)))
 }
 
 export async function onRequestGet({ env }) {
   if (!env.COUNTER) return Response.json({ error: 'KV not bound' }, { status: 500 })
   const visits = parseInt(await env.COUNTER.get('visits') || '0')
   const unique = parseInt(await env.COUNTER.get('unique') || '0')
-  const users  = await getUsersEstimate(env)
-  const body = { visits, unique }
-  if (typeof users === 'number') body.users = users
-  return Response.json(body)
+  return Response.json(body(visits, unique, await getDownloads(env)))
 }

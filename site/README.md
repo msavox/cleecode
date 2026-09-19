@@ -21,3 +21,18 @@ directory, not relative to the uploaded directory — run it from the repo root 
 `site/dist` as the argument instead and the deploy silently ships static files only,
 with `/api/counter` left unbound. Check the deploy output for `Uploading Functions
 bundle`; if that line is missing, the Function was not picked up.
+
+The Function needs one secret, `GITHUB_TOKEN` — a read-only GitHub token (the repo is
+public, so it needs no scopes). `/api/counter` reports total release downloads read from
+GitHub's API, and unauthenticated calls are capped at 60/hour *per IP*: Pages Functions
+egress from shared Cloudflare addresses where that budget is always spent by somebody
+else, so without the secret every refresh 403s. The cached figure is then served
+forever — by design, since a lagging number beats a vanished one — and the counter
+silently freezes. Set it with:
+
+    wrangler pages secret put GITHUB_TOKEN --project-name cleecode
+
+The response carries `downloads_at`, the instant the figure was actually read from
+GitHub; if it is hours old the refresh is failing. `wrangler pages deployment tail
+--project-name cleecode` shows the reason (the Function logs `downloads refresh
+failed:`).
