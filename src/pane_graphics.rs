@@ -145,101 +145,115 @@ impl PaneStream {
     pub fn feed(&mut self, data: &[u8]) -> Vec<Piece> {
         let mut out = Vec::new();
         for &b in data {
-            match self.state {
-                State::Ground => {
-                    if b == 0x1b {
-                        self.state = State::Escape;
-                    }
-                    self.text.push(b);
-                }
-                State::Escape => {
-                    self.text.push(b);
-                    self.state = match b {
-                        b'[' => {
-                            self.params.clear();
-                            State::Csi { plain: true }
-                        }
-                        // APC, and the two that behave like it: SOS and PM are string
-                        // sequences with the same shape, and collecting one costs nothing.
-                        b'_' | b'X' | b'^' => {
-                            // The `ESC _` itself never reaches the parser: a sequence being
-                            // taken out of the stream has to be taken out whole.
-                            self.text.truncate(self.text.len().saturating_sub(2));
-                            self.apc.clear();
-                            State::Apc
-                        }
-                        b']' | b'P' => State::String,
-                        // Another ESC restarts the sequence rather than ending it.
-                        0x1b => State::Escape,
-                        _ => State::Ground,
-                    };
-                }
-                State::Csi { plain } => {
-                    if (0x40..=0x7e).contains(&b) {
-                        // HVP and CUP are the same instruction; only one of them is
-                        // implemented downstream, so this is where the other becomes it.
-                        self.text.push(if b == b'f' && plain { b'H' } else { b });
-                        self.state = State::Ground;
-                        if b == b'J' && matches!(self.params.as_slice(), b"2" | b"3") {
-                            // After the sequence, not before: the parser has to perform the
-                            // wipe, and the pane reads which screen it was on afterwards.
-                            flush(&mut out, &mut self.text);
-                            out.push(Piece::ClearScreen);
-                        }
-                    } else {
-                        self.text.push(b);
-                        if self.params.len() < 16 {
-                            self.params.push(b);
-                        }
-                        // 0x30..=0x3b is digits and `;`. Anything else — a private marker or
-                        // an intermediate — means this is not an HVP and must be left alone.
-                        self.state = State::Csi { plain: plain && (0x30..=0x3b).contains(&b) };
-                    }
-                }
-                State::Apc => match b {
-                    0x1b => self.state = State::ApcEscape,
-                    // A bare BEL ends a string sequence in plenty of terminals, and some
-                    // programs use it here too.
-                    0x07 => {
-                        flush(&mut out, &mut self.text);
-                        out.push(Piece::Apc(std::mem::take(&mut self.apc)));
-                        self.state = State::Ground;
-                    }
-                    _ => {
-                        if self.apc.len() < MAX_APC {
-                            self.apc.push(b);
-                        }
-                    }
-                },
-                State::ApcEscape => {
-                    if b == b'\\' {
-                        flush(&mut out, &mut self.text);
-                        out.push(Piece::Apc(std::mem::take(&mut self.apc)));
-                        self.state = State::Ground;
-                    } else {
-                        // Not a terminator after all: the ESC belonged to the body.
-                        if self.apc.len() < MAX_APC {
-                            self.apc.push(0x1b);
-                        }
-                        self.state = State::Apc;
+            // One byte can need handling twice: an ESC that ends an unterminated string
+            // sequence is also the start of whatever comes next, and that next thing has to be
+            // read rather than dropped. Only `ApcEscape` ever asks for the second pass, and the
+            // state it leaves behind consumes the byte, so this cannot spin.
+            let mut again = true;
+            while std::mem::take(&mut again) {
+                match self.state {
+                    State::Ground => {
                         if b == 0x1b {
-                            self.state = State::ApcEscape;
-                        } else if self.apc.len() < MAX_APC {
-                            self.apc.push(b);
+                            self.state = State::Escape;
+                        }
+                        self.text.push(b);
+                    }
+                    State::Escape => {
+                        self.text.push(b);
+                        self.state = match b {
+                            b'[' => {
+                                self.params.clear();
+                                State::Csi { plain: true }
+                            }
+                            // APC, and the two that behave like it: SOS and PM are string
+                            // sequences with the same shape, and collecting one costs nothing.
+                            b'_' | b'X' | b'^' => {
+                                // The `ESC _` itself never reaches the parser: a sequence being
+                                // taken out of the stream has to be taken out whole.
+                                self.text.truncate(self.text.len().saturating_sub(2));
+                                self.apc.clear();
+                                State::Apc
+                            }
+                            b']' | b'P' => State::String,
+                            // Another ESC restarts the sequence rather than ending it.
+                            0x1b => State::Escape,
+                            _ => State::Ground,
+                        };
+                    }
+                    State::Csi { plain } => {
+                        if (0x40..=0x7e).contains(&b) {
+                            // HVP and CUP are the same instruction; only one of them is
+                            // implemented downstream, so this is where the other becomes it.
+                            self.text.push(if b == b'f' && plain { b'H' } else { b });
+                            self.state = State::Ground;
+                            if b == b'J' && matches!(self.params.as_slice(), b"2" | b"3") {
+                                // After the sequence, not before: the parser has to perform the
+                                // wipe, and the pane reads which screen it was on afterwards.
+                                flush(&mut out, &mut self.text);
+                                out.push(Piece::ClearScreen);
+                            }
+                        } else {
+                            self.text.push(b);
+                            if self.params.len() < 16 {
+                                self.params.push(b);
+                            }
+                            // 0x30..=0x3b is digits and `;`. Anything else — a private marker or
+                            // an intermediate — means this is not an HVP and must be left alone.
+                            self.state = State::Csi { plain: plain && (0x30..=0x3b).contains(&b) };
                         }
                     }
-                }
-                State::String => {
-                    self.text.push(b);
-                    match b {
-                        0x1b => self.state = State::StringEscape,
-                        0x07 => self.state = State::Ground,
-                        _ => {}
+                    State::Apc => match b {
+                        0x1b => self.state = State::ApcEscape,
+                        // A bare BEL ends a string sequence in plenty of terminals, and some
+                        // programs use it here too.
+                        0x07 => {
+                            flush(&mut out, &mut self.text);
+                            out.push(Piece::Apc(std::mem::take(&mut self.apc)));
+                            self.state = State::Ground;
+                        }
+                        _ => {
+                            if self.apc.len() < MAX_APC {
+                                self.apc.push(b);
+                            }
+                        }
+                    },
+                    State::ApcEscape => {
+                        if b == b'\\' {
+                            flush(&mut out, &mut self.text);
+                            out.push(Piece::Apc(std::mem::take(&mut self.apc)));
+                            self.state = State::Ground;
+                        } else {
+                            // An ESC inside a string sequence that turns out not to be its
+                            // terminator *ends* the sequence. That is what `vte` does — the parser
+                            // the rest of a pane runs on — and it is not a nicety. `mpv` signs off
+                            // with `ESC _ G a=d ;` and no terminator at all, followed straight away
+                            // by the escapes that leave the alternate screen and bring the cursor
+                            // back. Reading those as more of the string, which is what this used to
+                            // do, swallowed every one of them: the pane stayed on the alternate
+                            // screen with the last frame of the video stuck over it for good, and
+                            // no amount of typing got it back.
+                            //
+                            // The half-collected command is dropped rather than guessed at. A kitty
+                            // payload is base64 and never contains an ESC, so nothing well-formed
+                            // is lost by ending it here.
+                            self.apc.clear();
+                            self.text.push(0x1b);
+                            self.state = State::Escape;
+                            again = true;
+                        }
                     }
-                }
-                State::StringEscape => {
-                    self.text.push(b);
-                    self.state = if b == 0x1b { State::StringEscape } else { State::Ground };
+                    State::String => {
+                        self.text.push(b);
+                        match b {
+                            0x1b => self.state = State::StringEscape,
+                            0x07 => self.state = State::Ground,
+                            _ => {}
+                        }
+                    }
+                    State::StringEscape => {
+                        self.text.push(b);
+                        self.state = if b == 0x1b { State::StringEscape } else { State::Ground };
+                    }
                 }
             }
         }
@@ -620,6 +634,49 @@ mod tests {
         let mut stream = PaneStream::default();
         let pieces = stream.feed(b"\x1b[0J\x1b[J\x1b[1J\x1b[K");
         assert!(!pieces.iter().any(|p| *p == Piece::ClearScreen));
+    }
+
+    /// How `mpv` signs off, byte for byte: a delete-everything command left open, and then the
+    /// escapes that leave the alternate screen and bring the cursor back. Collected into the
+    /// string instead of ending it, those escapes never reach the parser — and the pane is left
+    /// on the alternate screen with a frame of video over it that nothing can shift.
+    #[test]
+    fn an_unterminated_command_ends_at_the_next_escape_instead_of_eating_it() {
+        let mut stream = PaneStream::default();
+        let tail = b"\x1b_Ga=d;\x1b[?25h\x1b[?1003l\x1b[?1049l\x1b>\x1b[?25h";
+        let pieces = stream.feed(tail);
+        let text = text(&pieces);
+        assert_eq!(
+            text,
+            b"\x1b[?25h\x1b[?1003l\x1b[?1049l\x1b>\x1b[?25h".to_vec(),
+            "everything after the unterminated command has to reach the parser"
+        );
+        assert!(
+            !pieces.iter().any(|p| matches!(p, Piece::Apc(_))),
+            "and the half-written command is dropped, not guessed at"
+        );
+    }
+
+    /// The same, split across reads the way a pty hands it over.
+    #[test]
+    fn an_unterminated_command_split_across_reads_still_releases_what_follows() {
+        let mut stream = PaneStream::default();
+        let mut text_out = text(&stream.feed(b"\x1b_Ga=d;"));
+        text_out.extend(text(&stream.feed(b"\x1b")));
+        text_out.extend(text(&stream.feed(b"[?1049l")));
+        assert_eq!(text_out, b"\x1b[?1049l".to_vec());
+    }
+
+    /// A well-formed command still ends where it says it does, and an ESC inside the payload
+    /// is not something a base64 body can contain anyway.
+    #[test]
+    fn a_terminated_command_is_unaffected() {
+        let mut stream = PaneStream::default();
+        let pieces = stream.feed(b"\x1b_Ga=T,f=24;AAAA\x1b\\rest");
+        assert_eq!(
+            pieces,
+            vec![Piece::Apc(b"Ga=T,f=24;AAAA".to_vec()), Piece::Text(b"rest".to_vec())]
+        );
     }
 
     #[test]
