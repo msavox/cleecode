@@ -2,9 +2,10 @@ use crate::app::{App, EditorPane, Focus, SidebarPane};
 use crate::i18n::{self, Key, Lang};
 use crate::keymap::{self, Keymap};
 use crate::menu::{self, ContextMenu, MenuBar};
-use crate::terminal_panel::{TermSelection, TerminalWindow};
 use crate::settings;
+use crate::terminal_panel::{TermSelection, TerminalWindow};
 use crate::theme::Palette;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -12,7 +13,6 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 use ratatui_image::StatefulImage;
 use std::time::Duration;
 
@@ -431,8 +431,7 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
     // Always a column of the layout and never an overlay: the panel is read while stepping through
     // the code it is about, and a column painted over the buffer would be covering the thing it is
     // there to explain.
-    let (main_area, debug) =
-        if p.debug_panel { debug_split(main_area) } else { (main_area, None) };
+    let (main_area, debug) = if p.debug_panel { debug_split(main_area) } else { (main_area, None) };
 
     if p.terminal_on_right {
         let (sidebar, rest) = if p.show_sidebar {
@@ -447,7 +446,10 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         let (editor, terminals) = if p.show_terminal {
             let h = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
+                .constraints([
+                    Constraint::Percentage(100 - p.terminal_pct),
+                    Constraint::Percentage(p.terminal_pct),
+                ])
                 .split(rest);
             (h[0], Some(terminal_panes(h[1], &p.terminal_weights, Direction::Vertical)))
         } else {
@@ -470,7 +472,10 @@ pub fn compute_layout(full: Rect, p: &LayoutParams) -> Areas {
         let (main_top, terminals) = if p.show_terminal {
             let v = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(100 - p.terminal_pct), Constraint::Percentage(p.terminal_pct)])
+                .constraints([
+                    Constraint::Percentage(100 - p.terminal_pct),
+                    Constraint::Percentage(p.terminal_pct),
+                ])
                 .split(main_area);
             (v[0], Some(terminal_panes(v[1], &p.terminal_weights, Direction::Horizontal)))
         } else {
@@ -769,7 +774,11 @@ fn clipped_tab_strip(widths: &[u16], width: u16, first: usize) -> TabStrip {
 /// "run" would mean nothing there, and a button that means nothing is worse than one that means
 /// something small.
 fn run_button_label(app: &App, idx: usize) -> String {
-    let key = if app.editors.get(idx).is_some_and(|e| e.preview.as_ref().is_some_and(|p| p.refreshable())) {
+    let key = if app
+        .editors
+        .get(idx)
+        .is_some_and(|e| e.preview.as_ref().is_some_and(|p| p.refreshable()))
+    {
         Key::ToolbarRefresh
     } else {
         Key::ToolbarRun
@@ -790,14 +799,16 @@ fn run_button_label(app: &App, idx: usize) -> String {
 /// the tab strip, so it shows just the venv folder — prefixed with its parent when the
 /// folder name is a generic one that on its own wouldn't say which venv is active.
 pub fn venv_display_name(venv: &str, registered: &[settings::RegisteredVenv]) -> String {
-    if let Some(nickname) = registered.iter().find(|r| r.path() == venv).and_then(|r| r.nickname()) {
+    if let Some(nickname) = registered.iter().find(|r| r.path() == venv).and_then(|r| r.nickname())
+    {
         return nickname.to_string();
     }
     // Cut by hand on both separators rather than through `Path`, which answers for the platform
     // it was compiled for: `is_absolute` is false on Windows for `/opt/venvs/ml-3.12` — no drive
     // letter — so a venv registered on a Mac and read on a PC showed as its whole path, and a
     // settings.toml does get copied between machines. `run_program_name` below cuts both too.
-    let mut parts = venv.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).filter(|p| !p.is_empty());
+    let mut parts =
+        venv.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).filter(|p| !p.is_empty());
     // No separator at all: an auto-discovered venv, whose folder name is already the label.
     let Some(name) = parts.next() else { return venv.to_string() };
     if matches!(name, ".venv" | "venv" | "env" | ".env") {
@@ -842,8 +853,13 @@ pub fn run_target_text(app: &App, idx: usize) -> String {
         // The selected venv is remembered globally, so opening a project that doesn't have it
         // left the button naming a venv that isn't there while runs quietly fell back to system
         // python. The label follows what would actually be used.
-        return match crate::app::effective_venv(app.settings.active_venv.as_deref(), &app.available_venvs) {
-            Some(name) => format!("venv: {}", venv_display_name(name, &app.settings.registered_venvs)),
+        return match crate::app::effective_venv(
+            app.settings.active_venv.as_deref(),
+            &app.available_venvs,
+        ) {
+            Some(name) => {
+                format!("venv: {}", venv_display_name(name, &app.settings.registered_venvs))
+            }
             None => i18n::t(lang, Key::ToolbarVenvNone).to_string(),
         };
     }
@@ -867,8 +883,10 @@ fn fit(text: &str, width: usize) -> String {
 /// label now changes with the active tab, and letting the button's width follow it would resize
 /// the tab strip — shuffling the tabs sideways — every time you switched tab.
 pub fn run_target_button_width(app: &App) -> u16 {
-    let widest =
-        (0..app.editors.len()).map(|i| run_target_text(app, i).chars().count() as u16).max().unwrap_or(0);
+    let widest = (0..app.editors.len())
+        .map(|i| run_target_text(app, i).chars().count() as u16)
+        .max()
+        .unwrap_or(0);
     // A leading space, then " \u{25be} " after the text.
     (widest + 4).clamp(14, 26)
 }
@@ -885,7 +903,10 @@ fn run_target_button_label(app: &App, idx: usize) -> String {
 /// `MIN_TAB_STRIP` columns would be left for the tabs themselves.
 ///
 /// Pane-independent, because the target button's width is too: only its text differs per pane.
-pub fn toolbar_button_ranges(app: &App, area_width: u16) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
+pub fn toolbar_button_ranges(
+    app: &App,
+    area_width: u16,
+) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
     let run_w = run_button_label(app, 0).chars().count() as u16;
     let target_w = run_target_button_width(app);
 
@@ -1071,7 +1092,8 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, keymap: &Keymap, full: Rec
     let ranges = menu_title_ranges(menu, lang);
     let (x, _) = ranges.get(menu.menu_index).copied().unwrap_or((0, 0));
     let items = &menu.defs[menu.menu_index].items;
-    let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
+    let label_width =
+        items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
     // The right-hand column carries two kinds of thing: a shortcut, and — for an item that holds
     // a setting rather than doing something once — what that setting is right now. They share the
     // column because they are never both on the same row, and the width is the widest of either.
@@ -1103,7 +1125,8 @@ pub fn menu_dropdown_rect(menu: &MenuBar, lang: Lang, keymap: &Keymap, full: Rec
 /// right or bottom edge. Shared by the renderer and click handling so both agree on the rows.
 pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, keymap: &Keymap, full: Rect) -> Rect {
     let items = &menu.items;
-    let label_width = items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
+    let label_width =
+        items.iter().map(|i| i18n::t(lang, i.label_key).chars().count()).max().unwrap_or(0);
     let shortcut_width = items
         .iter()
         .filter_map(|i| i.shortcut)
@@ -1111,7 +1134,8 @@ pub fn context_menu_rect(menu: &ContextMenu, lang: Lang, keymap: &Keymap, full: 
         .max()
         .unwrap_or(0);
     let gap = if shortcut_width > 0 { 3 } else { 0 };
-    let width = ((1 + label_width + gap + shortcut_width + 1) as u16).max(18).min(full.width.max(1));
+    let width =
+        ((1 + label_width + gap + shortcut_width + 1) as u16).max(18).min(full.width.max(1));
     let separators = items.iter().filter(|i| i.new_group).count() as u16;
     let height = (items.len() as u16 + separators + 2).min(full.height.max(1));
     Rect {
@@ -1333,18 +1357,27 @@ fn draw_splash(f: &mut Frame, app: &App, full: Rect) {
 fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut Frame, full: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for row in SPLASH_BANNER {
-        lines.push(Line::from(Span::styled(*row, Style::default().fg(pal.success))).alignment(ratatui::layout::Alignment::Center));
+        lines.push(
+            Line::from(Span::styled(*row, Style::default().fg(pal.success)))
+                .alignment(ratatui::layout::Alignment::Center),
+        );
     }
     // Two blank rows under the wordmark, not one: its last row fills the bottom halves of its
     // cells, so a single row of air after it reads as half a gap — against the drawing when the
     // screen holds one, against the tagline's own turtle when it does not.
     lines.push(Line::from(""));
     lines.push(Line::from(""));
-    lines.push(Line::from(i18n::t(lang, Key::SplashTagline)).alignment(ratatui::layout::Alignment::Center));
+    lines.push(
+        Line::from(i18n::t(lang, Key::SplashTagline)).alignment(ratatui::layout::Alignment::Center),
+    );
     lines.push(Line::from(""));
     lines.push(
-        Line::from(format!("{} · v{}", i18n::t(lang, Key::SplashSubtitle), env!("CARGO_PKG_VERSION")))
-            .alignment(ratatui::layout::Alignment::Center),
+        Line::from(format!(
+            "{} · v{}",
+            i18n::t(lang, Key::SplashSubtitle),
+            env!("CARGO_PKG_VERSION")
+        ))
+        .alignment(ratatui::layout::Alignment::Center),
     );
     lines.push(
         Line::from(Span::styled("msavox 2026", Style::default().fg(pal.text_dim)))
@@ -1356,8 +1389,14 @@ fn draw_splash_body(pal: Palette, lang: Lang, workspace: Option<&str>, f: &mut F
         lines.push(Line::from(""));
         lines.push(
             Line::from(vec![
-                Span::styled(format!("{} ", i18n::t(lang, Key::WorkspaceBadge)), Style::default().fg(pal.text_dim)),
-                Span::styled(name.to_string(), Style::default().fg(pal.success).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", i18n::t(lang, Key::WorkspaceBadge)),
+                    Style::default().fg(pal.text_dim),
+                ),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(pal.success).add_modifier(Modifier::BOLD),
+                ),
             ])
             .alignment(ratatui::layout::Alignment::Center),
         );
@@ -1695,11 +1734,14 @@ fn draw_menu_bar(f: &mut Frame, app: &App, area: Rect) {
         let label = format!(" {} ", title);
         used += columns(&label);
         let is_open = app.menu.active && app.menu.menu_index == i;
-        let mut style = chrome(pal, if is_open {
-            Style::default().fg(pal.on_accent).bg(pal.accent)
-        } else {
-            Style::default().fg(pal.on_bar).bg(pal.bar)
-        });
+        let mut style = chrome(
+            pal,
+            if is_open {
+                Style::default().fg(pal.on_accent).bg(pal.accent)
+            } else {
+                Style::default().fg(pal.on_bar).bg(pal.bar)
+            },
+        );
         if i == 0 {
             style = style.add_modifier(Modifier::BOLD);
         }
@@ -1816,12 +1858,13 @@ fn draw_menu_dropdown(f: &mut Frame, app: &App, full: Rect) {
     }
     let mut state = ListState::default();
     state.select(Some(selected_row));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(pal.accent));
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(menu_highlight_style(pal, &app.settings, app.menu.item_index));
+    let block =
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.accent));
+    let list = List::new(items).block(block).highlight_style(menu_highlight_style(
+        pal,
+        &app.settings,
+        app.menu.item_index,
+    ));
     f.render_widget(Clear, rect);
     f.render_stateful_widget(list, rect, &mut state);
 }
@@ -1947,12 +1990,13 @@ fn draw_context_menu(f: &mut Frame, app: &App, full: Rect) {
     }
     let mut state = ListState::default();
     state.select(Some(selected_row));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(pal.accent));
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(menu_highlight_style(pal, &app.settings, menu.selected));
+    let block =
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.accent));
+    let list = List::new(items).block(block).highlight_style(menu_highlight_style(
+        pal,
+        &app.settings,
+        menu.selected,
+    ));
     f.render_widget(Clear, rect);
     f.render_stateful_widget(list, rect, &mut state);
 }
@@ -1972,7 +2016,9 @@ fn draw_settings_modal(f: &mut Frame, app: &App, full: Rect) {
             // longer than the column — "Language server (diagnostics, completion)" was — pushes
             // its value along instead of being run into by it.
             let pad = inner_width
-                .saturating_sub(marker.chars().count() + r.label.chars().count() + r.value.chars().count())
+                .saturating_sub(
+                    marker.chars().count() + r.label.chars().count() + r.value.chars().count(),
+                )
                 .max(1);
             ListItem::new(Line::from(format!("{marker}{}{}{}", r.label, " ".repeat(pad), r.value)))
         })
@@ -2248,10 +2294,7 @@ fn draw_font_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(i18n::msg_font_question(lang)),
-        Line::from(Span::styled(
-            i18n::msg_font_choices(lang),
-            Style::default().fg(pal.text_muted),
-        )),
+        Line::from(Span::styled(i18n::msg_font_choices(lang), Style::default().fg(pal.text_muted))),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -2277,7 +2320,10 @@ fn draw_unsaved_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(i18n::msg_unsaved_question(lang, &detail)),
-        Line::from(Span::styled(i18n::msg_unsaved_choices(lang), Style::default().fg(pal.text_muted))),
+        Line::from(Span::styled(
+            i18n::msg_unsaved_choices(lang),
+            Style::default().fg(pal.text_muted),
+        )),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -2303,12 +2349,15 @@ fn draw_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let prompt = i18n::msg_rename_prompt(app.settings.lang, &old_name);
-    let lines = vec![Line::from(prompt), Line::from(Span::styled(app.rename_input.clone(), Style::default().fg(pal.warning)))];
+    let lines = vec![
+        Line::from(prompt),
+        Line::from(Span::styled(app.rename_input.clone(), Style::default().fg(pal.warning))),
+    ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     // Clamped to the box: a name longer than the modal is wide would otherwise park the caret
     // on whatever is drawn beside it, which reads as the cursor having escaped.
-    let cursor_x = (inner.x + app.rename_input.chars().count() as u16)
-        .min(inner.right().saturating_sub(1));
+    let cursor_x =
+        (inner.x + app.rename_input.chars().count() as u16).min(inner.right().saturating_sub(1));
     f.set_cursor_position((cursor_x, inner.y + 1));
 }
 
@@ -2422,12 +2471,8 @@ fn draw_edit_preview(
 
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    let lines: Vec<Line> = rows
-        .iter()
-        .skip(scroll)
-        .take(height)
-        .map(|row| Line::from(diff_span(pal, row)))
-        .collect();
+    let lines: Vec<Line> =
+        rows.iter().skip(scroll).take(height).map(|row| Line::from(diff_span(pal, row))).collect();
     f.render_widget(Paragraph::new(lines), body);
     let keys = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
     f.render_widget(
@@ -2441,7 +2486,14 @@ fn draw_edit_preview(
 }
 
 /// Simple single-line input modal shared by Go-to-line and New file/folder.
-fn draw_input_modal(pal: Palette, f: &mut Frame, full: Rect, title: &str, prompt: &str, input: &str) {
+fn draw_input_modal(
+    pal: Palette,
+    f: &mut Frame,
+    full: Rect,
+    title: &str,
+    prompt: &str,
+    input: &str,
+) {
     let rect = centered_rect(60, 6, full);
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -2466,7 +2518,8 @@ fn draw_goto_modal(f: &mut Frame, app: &App, full: Rect) {
     let lang = app.settings.lang;
     // What the number will mean depends on what is being looked at.
     let pages = app.editor().preview.as_ref().is_some_and(|p| p.pages.is_some());
-    draw_input_modal(pal, 
+    draw_input_modal(
+        pal,
         f,
         full,
         i18n::goto_title(lang, pages),
@@ -2562,7 +2615,11 @@ fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
     let title = match slice {
         Some(s) if s.rows > 0 => format!(
             " {}  {}x{}  ({},{}) ",
-            inspector.name, s.rows, s.cols, s.r0.max(1), s.c0.max(1)
+            inspector.name,
+            s.rows,
+            s.cols,
+            s.r0.max(1),
+            s.c0.max(1)
         ),
         _ => format!(" {} ", inspector.name),
     };
@@ -2581,7 +2638,10 @@ fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
     match slice {
         None => lines.push(Line::from(Span::styled(i18n::msg_inspect_waiting(lang), dim))),
         Some(slice) if !slice.error.is_empty() => {
-            lines.push(Line::from(Span::styled(slice.error.clone(), Style::default().fg(pal.danger))));
+            lines.push(Line::from(Span::styled(
+                slice.error.clone(),
+                Style::default().fg(pal.danger),
+            )));
         }
         Some(slice) if slice.text => {
             for line in slice.lines() {
@@ -2604,7 +2664,11 @@ fn draw_inspector(f: &mut Frame, app: &App, full: Rect) {
             for (r, row) in grid.iter().enumerate() {
                 let mut text = format!("{:>w$}", slice.r0.max(1) + r, w = gutter);
                 for value in row.iter().take(per_row) {
-                    text.push_str(&format!("{:>cell$}", crate::wsview::cell_number(*value), cell = cell));
+                    text.push_str(&format!(
+                        "{:>cell$}",
+                        crate::wsview::cell_number(*value),
+                        cell = cell
+                    ));
                 }
                 lines.push(Line::from(Span::raw(text)));
             }
@@ -2694,14 +2758,20 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
 
     let Some(snap) = panel.snap.as_ref() else {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(i18n::msg_git_loading(lang), Style::default().fg(pal.text_dim)))),
+            Paragraph::new(Line::from(Span::styled(
+                i18n::msg_git_loading(lang),
+                Style::default().fg(pal.text_dim),
+            ))),
             body,
         );
         return;
     };
     if let Some(error) = &snap.error {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(error.clone(), Style::default().fg(pal.danger)))),
+            Paragraph::new(Line::from(Span::styled(
+                error.clone(),
+                Style::default().fg(pal.danger),
+            ))),
             body,
         );
         return;
@@ -2733,7 +2803,12 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     Style::default().fg(pal.text_dim),
                 ))]
             } else {
-                snap.diff.iter().skip(panel.scroll).take(rows).map(|l| Line::from(diff_span(pal, l))).collect()
+                snap.diff
+                    .iter()
+                    .skip(panel.scroll)
+                    .take(rows)
+                    .map(|l| Line::from(diff_span(pal, l)))
+                    .collect()
             }
         }
         GitTab::Graph => {
@@ -2752,7 +2827,9 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                     .enumerate()
                     .skip(panel.scroll)
                     .take(rows)
-                    .map(|(row, r)| graph_line(pal, r, &snap.graph, art, row == panel.selected, width))
+                    .map(|(row, r)| {
+                        graph_line(pal, r, &snap.graph, art, row == panel.selected, width)
+                    })
                     .collect()
             }
         }
@@ -2817,7 +2894,13 @@ fn draw_git_panel(f: &mut Frame, app: &mut App, full: Rect) {
                 // and no reflog. Deleting a branch asks in the same shape and not in the same
                 // colour, because red on every question is red on none of them.
                 let colour = if confirm.destroys_work() { pal.danger } else { pal.warning };
-                draw_git_question(f, rect, &i18n::msg_git_confirm_prompt(lang, confirm), "", colour);
+                draw_git_question(
+                    f,
+                    rect,
+                    &i18n::msg_git_confirm_prompt(lang, confirm),
+                    "",
+                    colour,
+                );
             }
         }
     }
@@ -2836,7 +2919,8 @@ fn lane_colour(pal: Palette, lane: usize) -> Color {
 
 /// One row of the graph: the drawing, then — if the row is a commit rather than the lines
 /// between two — its hash, what points at it, and what it says.
-fn graph_line(pal: Palette, 
+fn graph_line(
+    pal: Palette,
     row: &crate::git_graph::Row,
     commits: &[crate::git::GraphCommit],
     art_width: usize,
@@ -2915,7 +2999,12 @@ fn refs_text(refs: &[crate::git::RefName]) -> String {
     refs.iter().map(ref_label).collect::<Vec<_>>().join(" ") + " "
 }
 
-fn stash_line(pal: Palette, stash: &crate::git::Stash, picked: bool, width: usize) -> Line<'static> {
+fn stash_line(
+    pal: Palette,
+    stash: &crate::git::Stash,
+    picked: bool,
+    width: usize,
+) -> Line<'static> {
     let text = format!("{}  {}", stash.name, stash.subject);
     if picked {
         let padded = format!("{text:<width$}");
@@ -2932,7 +3021,13 @@ fn stash_line(pal: Palette, stash: &crate::git::Stash, picked: bool, width: usiz
 /// Its own box rather than a sixth tab: it is about the row the cursor is on rather than about
 /// the repository, and a tab you can only reach from one row of one other tab is a tab that is
 /// empty most of the time you look at it.
-fn draw_git_detail(pal: Palette, f: &mut Frame, detail: &crate::app::GitDetail, lang: i18n::Lang, panel: Rect) {
+fn draw_git_detail(
+    pal: Palette,
+    f: &mut Frame,
+    detail: &crate::app::GitDetail,
+    lang: i18n::Lang,
+    panel: Rect,
+) {
     let rect = Rect {
         x: panel.x + 2,
         y: panel.y + 2,
@@ -2977,7 +3072,12 @@ fn draw_git_detail(pal: Palette, f: &mut Frame, detail: &crate::app::GitDetail, 
 ///
 /// A picked row is one span across the full width instead of three, so the highlight covers the
 /// row rather than stopping where the filename does.
-fn status_line(pal: Palette, change: &crate::git::Change, picked: bool, width: usize) -> Line<'static> {
+fn status_line(
+    pal: Palette,
+    change: &crate::git::Change,
+    picked: bool,
+    width: usize,
+) -> Line<'static> {
     let text = format!("{}{} {}", change.index, change.worktree, change.path.display());
     if picked {
         let padded = format!("{text:<width$}");
@@ -3047,7 +3147,8 @@ fn branch_line(pal: Palette, b: &crate::git::Branch, picked: bool, width: usize)
 /// modifier — which is only safe while the panel owns the keyboard, and only discoverable if the
 /// panel says so. A key that stages a file on one tab and does nothing on the next has to say
 /// which is which, or the way to find out is to press it.
-fn draw_git_footer(pal: Palette, 
+fn draw_git_footer(
+    pal: Palette,
     f: &mut Frame,
     panel: &crate::app::GitPanel,
     lang: i18n::Lang,
@@ -3063,7 +3164,10 @@ fn draw_git_footer(pal: Palette,
         // where the rest of one is read.
         let first = text.lines().next().unwrap_or_default().to_string();
         let area = Rect { y: inner.bottom().saturating_sub(2), height: 1, ..inner };
-        f.render_widget(Paragraph::new(Line::from(Span::styled(first, Style::default().fg(colour)))), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(first, Style::default().fg(colour)))),
+            area,
+        );
     }
     let area = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
     f.render_widget(
@@ -3156,7 +3260,10 @@ fn draw_search_modal(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     // The two spaces the value rows are indented by are part of the caret's arithmetic: it sits
     // after the last character typed, which is two columns in from the frame.
-    let typed = match on_query { true => &app.search_input, false => &app.search_replace };
+    let typed = match on_query {
+        true => &app.search_input,
+        false => &app.search_replace,
+    };
     let cursor_x =
         (inner.x + 2 + typed.chars().count() as u16).min(inner.right().saturating_sub(1));
     f.set_cursor_position((cursor_x, inner.y + if on_query { 1 } else { 3 }));
@@ -3182,11 +3289,20 @@ fn draw_terminal_rename_modal(f: &mut Frame, app: &App, full: Rect) {
     let value = Style::default().fg(pal.warning);
     let label = Style::default().fg(pal.text_muted);
     let lines = vec![
-        Line::from(Span::styled(format!("{}{}", marker(on_name), i18n::msg_terminal_rename_prompt(lang)), label)),
+        Line::from(Span::styled(
+            format!("{}{}", marker(on_name), i18n::msg_terminal_rename_prompt(lang)),
+            label,
+        )),
         Line::from(Span::styled(format!("  {}", app.terminal_rename_input), value)),
-        Line::from(Span::styled(format!("{}{}", marker(!on_name), i18n::msg_terminal_startup_prompt(lang)), label)),
+        Line::from(Span::styled(
+            format!("{}{}", marker(!on_name), i18n::msg_terminal_startup_prompt(lang)),
+            label,
+        )),
         Line::from(Span::styled(format!("  {}", app.terminal_startup_input), value)),
-        Line::from(Span::styled(i18n::msg_terminal_form_hint(lang), Style::default().fg(pal.text_dim))),
+        Line::from(Span::styled(
+            i18n::msg_terminal_form_hint(lang),
+            Style::default().fg(pal.text_dim),
+        )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 
@@ -3203,7 +3319,14 @@ fn draw_workspace_save_modal(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
     let prompt = i18n::msg_workspace_save_prompt(app.settings.lang);
     let lang = app.settings.lang;
-    draw_input_modal(pal, f, full, i18n::t(lang, Key::ModalSaveWorkspace), &prompt, &app.workspace_save_input);
+    draw_input_modal(
+        pal,
+        f,
+        full,
+        i18n::t(lang, Key::ModalSaveWorkspace),
+        &prompt,
+        &app.workspace_save_input,
+    );
 }
 
 /// The manual's frame: bigger than the palette, but still a modal with the screen showing
@@ -3245,8 +3368,31 @@ pub fn manual_body_height(full: Rect) -> u16 {
 fn is_box_rule(c: char) -> bool {
     matches!(
         c,
-        '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
-            | '║' | '╨' | '╧' | '╪' | '╫' | '═' | '╔' | '╗' | '╚' | '╝' | '╠' | '╣' | '╦' | '╩' | '╬'
+        '┌' | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '─'
+            | '│'
+            | '║'
+            | '╨'
+            | '╧'
+            | '╪'
+            | '╫'
+            | '═'
+            | '╔'
+            | '╗'
+            | '╚'
+            | '╝'
+            | '╠'
+            | '╣'
+            | '╦'
+            | '╩'
+            | '╬'
     )
 }
 
@@ -3256,7 +3402,10 @@ fn looks_like_key(word: &str) -> bool {
     if w.starts_with("Ctrl+") || w.starts_with("Alt+") || w.starts_with("Shift+") {
         return true;
     }
-    if matches!(w, "Esc" | "Enter" | "Tab" | "Del" | "Backspace" | "Home" | "End" | "Space" | "PgUp" | "PgDn") {
+    if matches!(
+        w,
+        "Esc" | "Enter" | "Tab" | "Del" | "Backspace" | "Home" | "End" | "Space" | "PgUp" | "PgDn"
+    ) {
         return true;
     }
     // F1..F12, but not a word that merely starts with F.
@@ -3284,7 +3433,10 @@ fn manual_line(pal: Palette, line: &str) -> Line<'_> {
         let mut in_rule = false;
         for c in line.chars() {
             if is_box_rule(c) != in_rule && !buf.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut buf), if in_rule { rule } else { plain }));
+                spans.push(Span::styled(
+                    std::mem::take(&mut buf),
+                    if in_rule { rule } else { plain },
+                ));
             }
             in_rule = is_box_rule(c);
             buf.push(c);
@@ -3373,7 +3525,12 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
     f.render_widget(Paragraph::new(visible), body_area);
 
     // Position within the section, then the key hints, on the two rows kept back above.
-    let footer = Rect { x: body_area.x, y: body_area.y + body_area.height, width: body_area.width, height: 2 };
+    let footer = Rect {
+        x: body_area.x,
+        y: body_area.y + body_area.height,
+        width: body_area.width,
+        height: 2,
+    };
     let shown = (state.scroll + body_area.height as usize).min(section.body.len());
     let position = format!("{}/{}  ", shown, section.body.len().max(1));
     let footer_lines = vec![
@@ -3389,7 +3546,8 @@ fn draw_manual(f: &mut Frame, app: &App, full: Rect) {
 fn draw_new_entry_modal(f: &mut Frame, app: &App, full: Rect) {
     let pal = app.palette();
     let lang = app.settings.lang;
-    let title = i18n::t(lang, if app.new_entry_is_dir { Key::ModalNewFolder } else { Key::ModalNewFile });
+    let title =
+        i18n::t(lang, if app.new_entry_is_dir { Key::ModalNewFolder } else { Key::ModalNewFile });
     let prompt = i18n::msg_new_entry_prompt(lang, app.new_entry_is_dir);
     draw_input_modal(pal, f, full, title, prompt, &app.new_entry_input);
 }
@@ -3421,7 +3579,8 @@ fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
     let Some(selected) = app.theme_menu else { return };
     let Some(rect) = theme_menu_rect(app, full) else { return };
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.accent));
+    let block =
+        Block::default().borders(Borders::ALL).border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3438,8 +3597,7 @@ fn draw_theme_menu(f: &mut Frame, app: &App, full: Rect) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(selected));
-    let list = List::new(items)
-        .highlight_style(menu_highlight_style(pal, &app.settings, selected));
+    let list = List::new(items).highlight_style(menu_highlight_style(pal, &app.settings, selected));
     f.render_stateful_widget(list, inner, &mut state);
 }
 
@@ -3487,18 +3645,14 @@ fn draw_extras_menu(f: &mut Frame, app: &App, full: Rect) {
         .into_iter()
         .map(|extra| {
             let (installed, text) = extras_row_text(app, extra);
-            let style = if installed {
-                Style::default().fg(pal.text_dim)
-            } else {
-                Style::default()
-            };
+            let style =
+                if installed { Style::default().fg(pal.text_dim) } else { Style::default() };
             ListItem::new(Line::from(Span::styled(text, style)))
         })
         .collect();
     let mut state = ListState::default();
     state.select(Some(selected));
-    let list = List::new(items)
-        .highlight_style(menu_highlight_style(pal, &app.settings, selected));
+    let list = List::new(items).highlight_style(menu_highlight_style(pal, &app.settings, selected));
     f.render_stateful_widget(list, inner, &mut state);
 }
 
@@ -3510,7 +3664,11 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
     let block = Block::default()
         // Named after the extension, so it is plain that what's chosen here applies to every
         // file of this kind rather than only to the one on screen.
-        .title(format!(" {} \u{00b7} .{} ", i18n::t(app.settings.lang, Key::RunMenuTitle), menu.ext))
+        .title(format!(
+            " {} \u{00b7} .{} ",
+            i18n::t(app.settings.lang, Key::RunMenuTitle),
+            menu.ext
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(pal.accent));
     let inner = block.inner(rect);
@@ -3529,7 +3687,8 @@ fn draw_run_menu(f: &mut Frame, app: &App, editor_area: Rect, full: Rect) {
         })
         .collect();
 
-    let list = List::new(items).highlight_style(menu_highlight_style(pal, &app.settings, menu.selected));
+    let list =
+        List::new(items).highlight_style(menu_highlight_style(pal, &app.settings, menu.selected));
     let mut state = ListState::default();
     state.select(Some(menu.selected));
     f.render_stateful_widget(list, inner, &mut state);
@@ -3615,11 +3774,7 @@ pub fn picker_row_at(p: &crate::picker::Picker, full: Rect, col: u16, row: u16) 
     let list_rows = inner.height.saturating_sub(1) as usize;
     // The list scrolls to keep the selection visible, so the first row on screen is not
     // necessarily the first result — the same offset the drawing uses.
-    let start = if p.selected >= list_rows {
-        p.selected + 1 - list_rows
-    } else {
-        0
-    };
+    let start = if p.selected >= list_rows { p.selected + 1 - list_rows } else { 0 };
     let index = start + (row - inner.y - 1) as usize;
     (index < p.filtered.len()).then_some(index)
 }
@@ -3631,7 +3786,13 @@ pub fn picker_row_at(p: &crate::picker::Picker, full: Rect, col: u16, row: u16) 
 /// list is tall, and slides left rather than spilling off the right edge. The text column is
 /// lined up with the first letter of the word being completed, so the candidates read as a
 /// continuation of what was typed rather than as a box that happens to be nearby.
-pub fn completion_rect(anchor: (u16, u16), prefix_len: u16, width: u16, rows: u16, full: Rect) -> Rect {
+pub fn completion_rect(
+    anchor: (u16, u16),
+    prefix_len: u16,
+    width: u16,
+    rows: u16,
+    full: Rect,
+) -> Rect {
     let height = rows + 2;
     let width = width.min(full.width.max(1));
     // The border and the two-cell selection marker sit between the box edge and the text.
@@ -3651,7 +3812,13 @@ pub fn completion_rect(anchor: (u16, u16), prefix_len: u16, width: u16, rows: u1
 /// Takes the popup and the cursor cell rather than the whole `App`, so a test can render one
 /// into a buffer and read back what it drew — which is the only way to check a list of words
 /// actually reaches the screen without a terminal to look at.
-fn draw_completion(pal: Palette, f: &mut Frame, popup: &crate::complete::Popup, anchor: (u16, u16), full: Rect) {
+fn draw_completion(
+    pal: Palette,
+    f: &mut Frame,
+    popup: &crate::complete::Popup,
+    anchor: (u16, u16),
+    full: Rect,
+) {
     let rows: Vec<(&crate::complete::Candidate, bool)> = popup.visible().collect();
     if rows.is_empty() {
         return;
@@ -3744,17 +3911,18 @@ fn draw_completion(pal: Palette, f: &mut Frame, popup: &crate::complete::Popup, 
 /// nothing on screen that said so — they sat in the list looking exactly like something you
 /// had made and could throw away. Cyan is the colour the chooser already uses for the parts
 /// that belong to the app rather than to you: its border, its prompt.
-fn picker_row_style(pal: Palette, kind: crate::picker::PickerKind, label: &str, selected: bool) -> Style {
+fn picker_row_style(
+    pal: Palette,
+    kind: crate::picker::PickerKind,
+    label: &str,
+    selected: bool,
+) -> Style {
     if selected {
         return Style::default().fg(pal.on_accent).bg(pal.accent);
     }
     let built_in = matches!(kind, crate::picker::PickerKind::Workspaces)
         && crate::workspace::is_built_in(label);
-    if built_in {
-        Style::default().fg(pal.accent)
-    } else {
-        Style::default().fg(pal.text_muted)
-    }
+    if built_in { Style::default().fg(pal.accent) } else { Style::default().fg(pal.text_muted) }
 }
 
 fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
@@ -3762,7 +3930,8 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
     let Some(p) = app.picker.as_ref() else { return };
     let rect = picker_rect(full);
     f.render_widget(Clear, rect);
-    let title = format!(" {}  {} ", p.title, i18n::msg_picker_matches(app.settings.lang, p.filtered.len()));
+    let title =
+        format!(" {}  {} ", p.title, i18n::msg_picker_matches(app.settings.lang, p.filtered.len()));
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -3812,8 +3981,8 @@ fn draw_picker_modal(f: &mut Frame, app: &App, full: Rect) {
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
-    let cursor_x = (inner.x + 2 + p.query.chars().count() as u16)
-        .min(inner.right().saturating_sub(1));
+    let cursor_x =
+        (inner.x + 2 + p.query.chars().count() as u16).min(inner.right().saturating_sub(1));
     f.set_cursor_position((cursor_x, inner.y));
 }
 
@@ -3894,7 +4063,10 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
             Style::default().fg(pal.danger),
         )));
     }
-    lines.push(Line::from(Span::styled(i18n::msg_find_hint(lang), Style::default().fg(pal.text_dim))));
+    lines.push(Line::from(Span::styled(
+        i18n::msg_find_hint(lang),
+        Style::default().fg(pal.text_dim),
+    )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
     // Cursor sits at the end of whichever field is focused.
@@ -3906,8 +4078,8 @@ fn draw_find_modal(f: &mut Frame, app: &App, full: Rect) {
     // Two columns for the ▶ marker, then whatever the labels were padded to above. Taken from
     // the same number that drew them: a hard-coded 11 was the English "▶ Find:    " and put the
     // caret inside the word in every other language.
-    let cursor_x = (inner.x + 2 + label_width as u16 + text_len as u16)
-        .min(inner.right().saturating_sub(1));
+    let cursor_x =
+        (inner.x + 2 + label_width as u16 + text_len as u16).min(inner.right().saturating_sub(1));
     f.set_cursor_position((cursor_x, inner.y + row));
 }
 
@@ -3928,7 +4100,9 @@ fn git_status_color(pal: Palette, status: crate::git_status::FileStatus) -> Colo
 /// as icons; CleeCode ships one and can install it via `--install-font` (see main.rs).
 fn file_icon(name: &str) -> (&'static str, Color) {
     match name.to_lowercase().as_str() {
-        ".gitignore" | ".gitattributes" | ".gitmodules" => return ("\u{e702}", Color::Rgb(245, 77, 39)),
+        ".gitignore" | ".gitattributes" | ".gitmodules" => {
+            return ("\u{e702}", Color::Rgb(245, 77, 39));
+        }
         ".env" | ".env.local" | ".env.example" => return ("\u{f462}", Color::Rgb(250, 247, 67)),
         "dockerfile" | "docker-compose.yml" | "docker-compose.yaml" => {
             return ("\u{f0868}", Color::Rgb(69, 142, 230));
@@ -3936,7 +4110,10 @@ fn file_icon(name: &str) -> (&'static str, Color) {
         "makefile" => return ("\u{e779}", Color::Rgb(109, 128, 134)),
         _ => {}
     }
-    let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = std::path::Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "rs" => ("\u{e68b}", Color::Rgb(222, 165, 132)),
         "py" => ("\u{e606}", Color::Rgb(255, 188, 3)),
@@ -4025,7 +4202,9 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(Span::raw(" ".repeat(pad)));
             }
             spans.push(match dot {
-                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status))),
+                Some(status) => {
+                    Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status)))
+                }
                 None => Span::raw(" "),
             });
             ListItem::new(Line::from(spans))
@@ -4080,14 +4259,9 @@ fn draw_shell_list(f: &mut Frame, app: &mut App, area: Rect) {
     // The pane's own name rather than the word "Shell": with three terminals open, which one
     // this is showing is the question the title is there to answer, and "Shell" answers it for
     // none of them. The generic word is left for the case where there is no pane to name.
-    let who = app
-        .shell_pane_label(lang)
-        .unwrap_or_else(|| i18n::t(lang, Key::PanelShell).to_string());
-    let title = if here.is_empty() {
-        format!(" {who} ")
-    } else {
-        format!(" {who} · {here} ")
-    };
+    let who =
+        app.shell_pane_label(lang).unwrap_or_else(|| i18n::t(lang, Key::PanelShell).to_string());
+    let title = if here.is_empty() { format!(" {who} ") } else { format!(" {who} · {here} ") };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -4102,11 +4276,8 @@ fn draw_shell_list(f: &mut Frame, app: &mut App, area: Rect) {
             if row.is_up {
                 return ListItem::new(Line::from("  .."));
             }
-            let (icon, icon_color) = if row.is_dir {
-                ("\u{f07b}", pal.folder)
-            } else {
-                file_icon(&row.name)
-            };
+            let (icon, icon_color) =
+                if row.is_dir { ("\u{f07b}", pal.folder) } else { file_icon(&row.name) };
             // The dots come from the sweep the tree's already use, so a folder inside the project
             // is annotated here too — and one outside it simply has nothing to say, which is the
             // truthful answer rather than a missing feature.
@@ -4120,7 +4291,9 @@ fn draw_shell_list(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(Span::raw(" ".repeat(pad)));
             }
             spans.push(match dot {
-                Some(status) => Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status))),
+                Some(status) => {
+                    Span::styled("\u{25cf}", Style::default().fg(git_status_color(pal, *status)))
+                }
                 None => Span::raw(" "),
             });
             ListItem::new(Line::from(spans))
@@ -4239,7 +4412,12 @@ fn restyle_range(
     result
 }
 
-fn highlight_selection(pal: Palette, spans: Vec<(Style, String)>, sel_from: usize, sel_to: usize) -> Vec<(Style, String)> {
+fn highlight_selection(
+    pal: Palette,
+    spans: Vec<(Style, String)>,
+    sel_from: usize,
+    sel_to: usize,
+) -> Vec<(Style, String)> {
     restyle_range(spans, sel_from, sel_to, |style| style.bg(pal.selection))
 }
 
@@ -4306,7 +4484,8 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
     let mut spans = Vec::new();
     let strip_width = tab_strip_width(app, area.width);
     let tabs = app.pane_tabs(pane);
-    let strip = tab_strip_layout(&tab_widths(app, pane), strip_width, app.tab_offsets[pane.index()]);
+    let strip =
+        tab_strip_layout(&tab_widths(app, pane), strip_width, app.tab_offsets[pane.index()]);
     let arrow_style = Style::default().fg(pal.text_muted).bg(pal.tab_inactive);
     if strip.left_arrow.is_some() {
         spans.push(Span::styled(SCROLL_LEFT_GLYPH, arrow_style));
@@ -4328,11 +4507,14 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect, active_position: usize, pa
             fit(&format!(" {}{} ", editor.title(lang), dirty), label_width)
         );
         used = layout.full.1;
-        let style = chrome(pal, if position == active_position {
-            Style::default().fg(pal.on_accent).bg(pal.accent)
-        } else {
-            Style::default().fg(pal.text_muted).bg(pal.tab_inactive)
-        });
+        let style = chrome(
+            pal,
+            if position == active_position {
+                Style::default().fg(pal.on_accent).bg(pal.accent)
+            } else {
+                Style::default().fg(pal.text_muted).bg(pal.tab_inactive)
+            },
+        );
         // The box first, in the columns `tab_layout_at` set aside for it at the tab's left edge,
         // and the title after it — the order the tab is read in and the order it is drawn in.
         spans.push(Span::styled(" ", style));
@@ -4479,7 +4661,10 @@ fn hit_zones_from<T: Copy>(drawn: &[(T, Rect)]) -> Vec<(T, Rect)> {
         // The gap goes to the button *after* it, not to both: zones that touch exactly leave no
         // dead column and no column that two buttons could claim.
         let right = rect.x + rect.width;
-        zones.push((*control, Rect { x: left, y: rect.y, width: right.saturating_sub(left).max(1), height: 1 }));
+        zones.push((
+            *control,
+            Rect { x: left, y: rect.y, width: right.saturating_sub(left).max(1), height: 1 },
+        ));
     }
     zones
 }
@@ -4487,8 +4672,12 @@ fn hit_zones_from<T: Copy>(drawn: &[(T, Rect)]) -> Vec<(T, Rect)> {
 /// The row a preview's navigation bar sits on: the last line inside the frame.
 fn nav_bar_rect(area: Rect) -> Option<Rect> {
     let inner = inner_rect(area);
-    (inner.height >= 2 && inner.width >= 8)
-        .then(|| Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 })
+    (inner.height >= 2 && inner.width >= 8).then(|| Rect {
+        x: inner.x,
+        y: inner.y + inner.height - 1,
+        width: inner.width,
+        height: 1,
+    })
 }
 
 /// A button's name, and the key that does the same thing.
@@ -4624,10 +4813,8 @@ fn draw_nav_bar(f: &mut Frame, app: &App, idx: usize, area: Rect) {
     // The state and the key hint, right-aligned — but never over the buttons, which are drawn
     // first and own their cells. What does not fit is dropped whole rather than truncated: half
     // a hint reads as a glitch, and the hint is the least important thing on the bar.
-    let buttons_end = nav_bar_layout(app, idx, area)
-        .last()
-        .map(|(_, r)| r.x + r.width)
-        .unwrap_or(row.x);
+    let buttons_end =
+        nav_bar_layout(app, idx, area).last().map(|(_, r)| r.x + r.width).unwrap_or(row.x);
     let free = (row.x + row.width).saturating_sub(buttons_end + 1);
 
     let mut state = String::new();
@@ -4834,7 +5021,10 @@ fn draw_md_toolbar(pal: Palette, f: &mut Frame, area: Rect) {
         let pad = (rect.width as usize).saturating_sub(natural);
         let (before, after) = (pad / 2, pad - pad / 2);
         let line = if hint.is_empty() {
-            Line::from(Span::styled(format!("{} {name} {}", " ".repeat(before), " ".repeat(after)), style))
+            Line::from(Span::styled(
+                format!("{} {name} {}", " ".repeat(before), " ".repeat(after)),
+                style,
+            ))
         } else {
             Line::from(vec![
                 Span::styled(format!("{} {name} ", " ".repeat(before)), style),
@@ -4872,9 +5062,11 @@ fn draw_preview_pane(
     let pal = app.palette();
     use crate::preview::State as Preview;
     let lang = app.settings.lang;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+    let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(
+        pal,
+        focused,
+        app.layout_resize_active(),
+    ));
     f.render_widget(block, content_area);
     let inner = preview_image_rect(content_area);
     if inner.width == 0 || inner.height == 0 {
@@ -4888,7 +5080,16 @@ fn draw_preview_pane(
         let engaged = app.scrollbar_engaged(id, content_area, axis);
         if let Some((total, position, viewport)) = app.preview_scroll_view(idx, axis) {
             if engaged || app.editors[idx].scrolled_within(SCROLLBAR_LINGER) {
-                draw_scrollbar(pal, f, scrollbar_area(app, idx, content_area), axis, total, position, viewport, engaged);
+                draw_scrollbar(
+                    pal,
+                    f,
+                    scrollbar_area(app, idx, content_area),
+                    axis,
+                    total,
+                    position,
+                    viewport,
+                    engaged,
+                );
             }
         }
     }
@@ -4975,9 +5176,11 @@ fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
 /// a strip with no tabs on it is a bar of nothing, and the frame is already saying that.
 fn draw_no_file_open(f: &mut Frame, app: &App, area: Rect, focused: bool) {
     let pal = app.palette();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+    let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(
+        pal,
+        focused,
+        app.layout_resize_active(),
+    ));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let lines: Vec<Line> = i18n::msg_no_file_open(app.settings.lang)
@@ -4996,7 +5199,14 @@ fn draw_no_file_open(f: &mut Frame, app: &App, area: Rect, focused: bool) {
     f.render_widget(Paragraph::new(lines), Rect { y, height, ..inner });
 }
 
-fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focused: bool, pane: EditorPane) {
+fn draw_editor_pane(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    idx: usize,
+    focused: bool,
+    pane: EditorPane,
+) {
     let pal = app.palette();
     // Asked of the strip rather than of `idx`, which is a buffer number and stays 0 whether or
     // not there is a buffer 0 to be had.
@@ -5017,9 +5227,11 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     }
 
     // No title here: the open tab right above already shows the filename and dirty marker.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focused_border_style(pal, focused, app.layout_resize_active()));
+    let block = Block::default().borders(Borders::ALL).border_style(focused_border_style(
+        pal,
+        focused,
+        app.layout_resize_active(),
+    ));
 
     // A picture takes the whole frame and none of the text machinery: no gutter, no wrapping,
     // no syntax, and no scrollbars, because there is nothing to scroll through.
@@ -5114,19 +5326,22 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
                 Style::default().fg(pal.on_accent).bg(pal.warning).add_modifier(Modifier::BOLD)
             } else {
                 match (worst, arrived, is_current) {
-                (Some(severity), _, current) => {
-                    let style = Style::default().fg(severity_colour(pal, severity));
-                    if current { style.add_modifier(Modifier::BOLD) } else { style }
-                }
-                (None, true, current) => {
-                    let style = Style::default().fg(pal.changed_line);
-                    if current { style.add_modifier(Modifier::BOLD) } else { style }
-                }
-                (None, false, true) => Style::default().fg(pal.warning).add_modifier(Modifier::BOLD),
-                (None, false, false) => Style::default().fg(pal.text_dim),
+                    (Some(severity), _, current) => {
+                        let style = Style::default().fg(severity_colour(pal, severity));
+                        if current { style.add_modifier(Modifier::BOLD) } else { style }
+                    }
+                    (None, true, current) => {
+                        let style = Style::default().fg(pal.changed_line);
+                        if current { style.add_modifier(Modifier::BOLD) } else { style }
+                    }
+                    (None, false, true) => {
+                        Style::default().fg(pal.warning).add_modifier(Modifier::BOLD)
+                    }
+                    (None, false, false) => Style::default().fg(pal.text_dim),
                 }
             };
-            let num_text = format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
+            let num_text =
+                format!("{:>width$} ", line_idx + 1, width = (gutter as usize).saturating_sub(1));
             spans.push(Span::styled(num_text, num_style));
         }
         if app.editors[idx].folds.iter().any(|&(s, _)| s == line_idx) {
@@ -5156,7 +5371,8 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
         // all say "you are doing this right now"; an arrival is context, and context painted over
         // what the user is holding would be the two read the wrong way round.
         let raw_spans = if arrived { arrival_tint(pal, raw_spans) } else { raw_spans };
-        let raw_spans = if on_line.is_empty() { raw_spans } else { underline_marks(pal, raw_spans, &on_line) };
+        let raw_spans =
+            if on_line.is_empty() { raw_spans } else { underline_marks(pal, raw_spans, &on_line) };
         // The whole stopped line, marked: where the program *is* is worth more than a colour on
         // one word, and it is what you look for when you glance back at the editor.
         let raw_spans = match stopped == Some(line_idx) {
@@ -5206,7 +5422,13 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, idx: usize, focuse
     if focused {
         let cursor_col = app.editors[idx].cursor_col;
         let cell = if app.settings.word_wrap {
-            wrapped_cursor_offset(&wrapped_widths, cursor_row, cursor_col, text_width, viewport_height)
+            wrapped_cursor_offset(
+                &wrapped_widths,
+                cursor_row,
+                cursor_col,
+                text_width,
+                viewport_height,
+            )
         } else {
             Some((cursor_col.saturating_sub(left_col) as u16, cursor_row as u16))
         };
@@ -5315,7 +5537,8 @@ fn draw_editor_scrollbars(
     text_width: usize,
 ) {
     for axis in [Axis::Vertical, Axis::Horizontal] {
-        let engaged = app.scrollbar_engaged(crate::app::ScrollbarId::Editor(pane, axis), area, axis);
+        let engaged =
+            app.scrollbar_engaged(crate::app::ScrollbarId::Editor(pane, axis), area, axis);
         if !engaged && !app.editors[idx].scrolled_within(SCROLLBAR_LINGER) {
             continue;
         }
@@ -5324,7 +5547,16 @@ fn draw_editor_scrollbars(
         else {
             continue;
         };
-        draw_scrollbar(pal, f, scrollbar_area(app, idx, area), axis, total, position, viewport, engaged);
+        draw_scrollbar(
+            pal,
+            f,
+            scrollbar_area(app, idx, area),
+            axis,
+            total,
+            position,
+            viewport,
+            engaged,
+        );
     }
 }
 
@@ -5404,12 +5636,9 @@ pub enum Axis {
 /// `None` when there is no room to spare.
 pub fn scrollbar_strip(inner: Rect, axis: Axis) -> Option<Rect> {
     match axis {
-        Axis::Vertical if inner.width >= 1 && inner.height >= 2 => Some(Rect {
-            x: inner.x + inner.width - 1,
-            y: inner.y,
-            width: 1,
-            height: inner.height,
-        }),
+        Axis::Vertical if inner.width >= 1 && inner.height >= 2 => {
+            Some(Rect { x: inner.x + inner.width - 1, y: inner.y, width: 1, height: inner.height })
+        }
         // One column short of the right edge, left to the vertical bar: the two would otherwise
         // both claim the inside corner, and a cell that belongs to two controls belongs to
         // neither.
@@ -5508,7 +5737,8 @@ pub fn scroll_position_from_track(offset: u16, len: u16, total: usize, viewport:
 /// `lit` marks the bar as being pointed at or dragged, which is the moment its click targets
 /// have to be legible rather than merely hinted at.
 #[allow(clippy::too_many_arguments)]
-fn draw_scrollbar(pal: Palette, 
+fn draw_scrollbar(
+    pal: Palette,
     f: &mut Frame,
     box_: Rect,
     axis: Axis,
@@ -5583,7 +5813,8 @@ fn draw_terminal_scrollbar(
     let Some((total, position, viewport)) = terminal_scroll_metrics(terminal) else { return };
     // Parked back in the history the bar stays up whether or not it is being touched: that is
     // the one moment its position is worth stating rather than hinting at.
-    if terminal.scrollback_offset() == 0 && !engaged && !terminal.scrolled_within(SCROLLBAR_LINGER) {
+    if terminal.scrollback_offset() == 0 && !engaged && !terminal.scrolled_within(SCROLLBAR_LINGER)
+    {
         return;
     }
     draw_scrollbar(pal, f, inner_rect(area), Axis::Vertical, total, position, viewport, engaged);
@@ -5611,12 +5842,7 @@ pub fn terminal_tab_strip_rect(area: Rect, window_close: bool) -> Rect {
     // close box, which wears a cell of padding on each side — the tabs must never sit under the
     // box or its pads, or the strip would paint over the button and take its clicks with it.
     let skip = if window_close { 4 } else { 1 };
-    Rect {
-        x: area.x + skip,
-        y: area.y,
-        width: area.width.saturating_sub(skip + 1),
-        height: 1,
-    }
+    Rect { x: area.x + skip, y: area.y, width: area.width.saturating_sub(skip + 1), height: 1 }
 }
 
 /// One tab in a terminal window's strip: its whole x-range, and the column of its `■` close
@@ -5631,7 +5857,11 @@ pub struct TermTab {
 /// been renamed. A single-tab window is named after its own position in the layout — every
 /// window used to call its lone tab "Terminal 1", so two windows carried the same title —
 /// while the tabs of a multi-tab window are numbered within it.
-pub fn terminal_tab_labels(window: &TerminalWindow, window_index: usize, lang: Lang) -> Vec<String> {
+pub fn terminal_tab_labels(
+    window: &TerminalWindow,
+    window_index: usize,
+    lang: Lang,
+) -> Vec<String> {
     window
         .tabs
         .iter()
@@ -5680,7 +5910,13 @@ pub fn drawer_tab_ranges(area: Rect, labels: &[String]) -> Vec<TermTab> {
 
 /// Draws a terminal window's tab strip. The active tab is green — the terminal accent — so it
 /// never reads as an editor tab (those go cyan). Each tab carries a `■` to close it.
-fn draw_terminal_tab_strip(pal: Palette, f: &mut Frame, area: Rect, labels: &[String], active: usize) {
+fn draw_terminal_tab_strip(
+    pal: Palette,
+    f: &mut Frame,
+    area: Rect,
+    labels: &[String],
+    active: usize,
+) {
     // The ungated layout: the callers decide whether a strip is drawn at all, and the drawer
     // draws one for a single tab — see `drawer_tab_ranges`.
     let tabs = drawer_tab_ranges(area, labels);
@@ -5843,11 +6079,8 @@ fn draw_single_terminal(
 
     let lines = terminal_lines(screen, selection);
 
-    let cursor_pos = if focused && !screen.hide_cursor() {
-        Some(screen.cursor_position())
-    } else {
-        None
-    };
+    let cursor_pos =
+        if focused && !screen.hide_cursor() { Some(screen.cursor_position()) } else { None };
     drop(parser);
 
     // The border was already drawn; the terminal grid fills the content area below the strip.
@@ -5957,7 +6190,10 @@ fn draw_debug_output(f: &mut Frame, pal: Palette, lang: Lang, area: Rect, lines:
         Style::default().fg(pal.text_muted).add_modifier(Modifier::BOLD),
     ))];
     rows.extend(lines.iter().map(|line| {
-        Line::from(Span::styled(clip_to(line, area.width as usize), Style::default().fg(pal.text_dim)))
+        Line::from(Span::styled(
+            clip_to(line, area.width as usize),
+            Style::default().fg(pal.text_dim),
+        ))
     }));
     f.render_widget(Paragraph::new(rows), area);
 }
@@ -6031,7 +6267,10 @@ fn debug_row_line(
             return Line::from(spans);
         }
         DebugRowKind::Note => {
-            spans.push(Span::styled(format!("  {}", clip_to(&row.label, width.saturating_sub(2))), style(pal.text_dim)));
+            spans.push(Span::styled(
+                format!("  {}", clip_to(&row.label, width.saturating_sub(2))),
+                style(pal.text_dim),
+            ));
             return Line::from(spans);
         }
         DebugRowKind::Frame { current, .. } => {
@@ -6050,7 +6289,10 @@ fn debug_row_line(
                 (true, true) => "\u{25be} ",
                 (true, false) => "\u{25b8} ",
             };
-            spans.push(Span::styled(format!("{}{mark}", "  ".repeat(row.depth)), style(pal.text_dim)));
+            spans.push(Span::styled(
+                format!("{}{mark}", "  ".repeat(row.depth)),
+                style(pal.text_dim),
+            ));
             spans.push(Span::styled(row.label.clone(), style(pal.info)));
             if !row.value.is_empty() {
                 spans.push(Span::styled(" = ".to_string(), style(pal.text_dim)));
@@ -6267,7 +6509,9 @@ fn draw_drawer_launcher(
     // one to hunt for. `terminal_close_cell` is where it is — which means it goes on before the
     // title, so it is the first left title and lands in that cell rather than after the words.
     let block = with_close_box(
-        Block::default().borders(Borders::ALL).border_style(focused_border_style(pal, focused, resizing)),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(focused_border_style(pal, focused, resizing)),
         pal,
     )
     .title(format!(" {} ", i18n::t(lang, Key::DrawerTitle)));
@@ -6316,7 +6560,8 @@ fn draw_drawer_launcher(
             // bottom row, where it reads as the frame's own label when the missing one is also
             // the chosen one.
             if !installed {
-                let below = Rect { x: frame_x, y: rect.y + rect.height - 1, width: frame_width, height: 1 };
+                let below =
+                    Rect { x: frame_x, y: rect.y + rect.height - 1, width: frame_width, height: 1 };
                 f.render_widget(
                     Paragraph::new(
                         Line::from(Span::styled(
@@ -6362,8 +6607,10 @@ fn draw_drawer_launcher(
     if !rows.is_empty() && last + 1 < inner.y + inner.height {
         let row = Rect { y: inner.y + inner.height - 1, height: 1, ..inner };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(pal.text_dim)))
-                .alignment(ratatui::layout::Alignment::Center)),
+            Paragraph::new(
+                Line::from(Span::styled(hint, Style::default().fg(pal.text_dim)))
+                    .alignment(ratatui::layout::Alignment::Center),
+            ),
             row,
         );
     }
@@ -6579,7 +6826,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     if let Some((text, colour)) = said {
         let width = text.chars().count() as u16;
-        let spot = Rect { x: area.right() - width - taken - chip_taken, y: area.y, width, height: 1 };
+        let spot =
+            Rect { x: area.right() - width - taken - chip_taken, y: area.y, width, height: 1 };
         f.render_widget(Paragraph::new(Line::from(Span::styled(text, colour_of(colour)))), spot);
     }
 
@@ -6621,7 +6869,9 @@ mod tests {
         // space in front of it.
         for (i, (control, zone)) in zones.iter().enumerate() {
             assert_eq!(*control, drawn[i].0);
-            assert!(zone.x <= drawn[i].1.x && zone.x + zone.width >= drawn[i].1.x + drawn[i].1.width);
+            assert!(
+                zone.x <= drawn[i].1.x && zone.x + zone.width >= drawn[i].1.x + drawn[i].1.width
+            );
         }
         assert_eq!(zones[0].1.x, drawn[0].1.x - 1);
     }
@@ -6638,8 +6888,7 @@ mod tests {
         let pal = crate::theme::Theme::CleeCode.palette();
         let keyword = Style::default().fg(pal.info);
         let string = Style::default().fg(pal.success);
-        let spans =
-            vec![(keyword, "let ".to_string()), (string, "\"hello\"".to_string())];
+        let spans = vec![(keyword, "let ".to_string()), (string, "\"hello\"".to_string())];
         let tinted = super::arrival_tint(pal, spans);
         assert_eq!(
             tinted.iter().map(|(style, _)| style.fg).collect::<Vec<_>>(),
@@ -6664,7 +6913,11 @@ mod tests {
     fn even_the_shortest_button_is_worth_aiming_at() {
         for kind in [crate::preview::Kind::Picture, crate::preview::Kind::Document] {
             for control in [NavControl::ZoomIn, NavControl::ZoomOut, NavControl::FigLeft] {
-                assert!(nav_width(control, kind) >= NAV_MIN_WIDTH, "{:?}", nav_width(control, kind));
+                assert!(
+                    nav_width(control, kind) >= NAV_MIN_WIDTH,
+                    "{:?}",
+                    nav_width(control, kind)
+                );
             }
         }
     }
@@ -6676,21 +6929,24 @@ mod tests {
     #[test]
     fn the_menu_carousel_wraps_every_six_items_and_classic_stays_reversed() {
         let pal = crate::theme::Theme::CleeCode.palette();
-        let carousel = settings::Settings { menu_highlight: "carousel".to_string(), ..Default::default() };
+        let carousel =
+            settings::Settings { menu_highlight: "carousel".to_string(), ..Default::default() };
         assert_eq!(
             menu_highlight_style(pal, &carousel, 0).bg,
             menu_highlight_style(pal, &carousel, 6).bg,
             "the seventh item is the first stripe again"
         );
-        let backgrounds: Vec<Color> =
-            (0..6).map(|i| menu_highlight_style(pal, &carousel, i).bg.expect("carousel paints a bg")).collect();
+        let backgrounds: Vec<Color> = (0..6)
+            .map(|i| menu_highlight_style(pal, &carousel, i).bg.expect("carousel paints a bg"))
+            .collect();
         for (i, a) in backgrounds.iter().enumerate() {
             for (j, b) in backgrounds.iter().enumerate() {
                 assert!(i == j || a != b, "items {i} and {j} share a stripe inside one lap");
             }
         }
 
-        let classic = settings::Settings { menu_highlight: "classic".to_string(), ..Default::default() };
+        let classic =
+            settings::Settings { menu_highlight: "classic".to_string(), ..Default::default() };
         assert_eq!(
             menu_highlight_style(pal, &classic, 0),
             Style::default().add_modifier(Modifier::REVERSED),
@@ -6749,8 +7005,18 @@ mod tests {
         for slot in git_tab_slots(lang) {
             let left = header.x + slot.x;
             let right = left + slot.width - 1;
-            assert_eq!(git_tab_at(lang, header, left), Some(slot.tab), "left edge of {:?}", slot.tab);
-            assert_eq!(git_tab_at(lang, header, right), Some(slot.tab), "right edge of {:?}", slot.tab);
+            assert_eq!(
+                git_tab_at(lang, header, left),
+                Some(slot.tab),
+                "left edge of {:?}",
+                slot.tab
+            );
+            assert_eq!(
+                git_tab_at(lang, header, right),
+                Some(slot.tab),
+                "right edge of {:?}",
+                slot.tab
+            );
         }
         // The single space between two tabs belongs to neither.
         let first = &git_tab_slots(lang)[0];
@@ -7037,7 +7303,8 @@ mod tests {
         // the tagline is exactly where it always is.
         let tiny = Rect { x: 0, y: 0, width: 80, height: 20 };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(tiny.width, tiny.height)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(tiny.width, tiny.height))
+                .unwrap();
         terminal.draw(|f| draw_splash_body(pal, lang, None, f, tiny)).unwrap();
         let buffer = terminal.backend().buffer();
         assert!(
@@ -7048,7 +7315,8 @@ mod tests {
         // Comfortably tall: the drawing's rows land above the tagline's row.
         let roomy = Rect { x: 0, y: 0, width: 80, height: 40 };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(roomy.width, roomy.height)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(roomy.width, roomy.height))
+                .unwrap();
         terminal.draw(|f| draw_splash_body(pal, lang, None, f, roomy)).unwrap();
         let buffer = terminal.backend().buffer();
         let tagline_row = find_row(buffer, roomy.width, roomy.height)
@@ -7227,9 +7495,8 @@ mod tests {
         terminal.draw(|f| draw_completion(pal, f, &popup, (10, 2), f.area())).unwrap();
 
         let buffer = terminal.backend().buffer();
-        let screen: Vec<String> = (0..12)
-            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
-            .collect();
+        let screen: Vec<String> =
+            (0..12).map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect();
         let text = screen.join("\n");
         assert!(text.contains("config_path"), "the buffer word is missing:\n{text}");
         assert!(text.contains("const"), "the keyword is missing:\n{text}");
@@ -7257,7 +7524,8 @@ mod tests {
         let left = completion_rect((1, 5), 1, 20, 4, SCREEN);
         assert_eq!(left.x, 0);
         // A cursor on the top row with no room either way: the top of the screen, not off it.
-        let squeezed = completion_rect((10, 0), 2, 20, 20, Rect { x: 0, y: 0, width: 80, height: 8 });
+        let squeezed =
+            completion_rect((10, 0), 2, 20, 20, Rect { x: 0, y: 0, width: 80, height: 8 });
         assert_eq!(squeezed.y, 0);
     }
 
@@ -7431,10 +7699,7 @@ mod tests {
         let list_rows = inner.height.saturating_sub(1) as usize;
         p.selected = list_rows + 4;
         let start = p.selected + 1 - list_rows;
-        assert_eq!(
-            picker_row_at(&p, full, inner.x + 2, inner.y + 1),
-            Some(start)
-        );
+        assert_eq!(picker_row_at(&p, full, inner.x + 2, inner.y + 1), Some(start));
         assert_eq!(
             picker_row_at(&p, full, inner.x + 2, inner.y + list_rows as u16),
             Some(p.selected)
@@ -7599,7 +7864,10 @@ mod tests {
 
                 // Carved, not painted: nothing else reaches the column, which is why a click on
                 // it cannot be a click on the editor's scrollbar riding the same edge.
-                assert!(closed.editor.x + closed.editor.width <= ribbon.x, "the editor stops short");
+                assert!(
+                    closed.editor.x + closed.editor.width <= ribbon.x,
+                    "the editor stops short"
+                );
                 for rect in closed.terminals.iter().flatten() {
                     assert!(rect.x + rect.width <= ribbon.x, "so does every terminal window");
                 }
@@ -7695,7 +7963,9 @@ mod tests {
                 );
             } else {
                 assert!(
-                    pill.height + RIBBON_STRIPE_HEIGHTS[RIBBON_STRIPE_HEIGHTS.len() - 1] * bands + 2
+                    pill.height
+                        + RIBBON_STRIPE_HEIGHTS[RIBBON_STRIPE_HEIGHTS.len() - 1] * bands
+                        + 2
                         > rect.height,
                     "the bands are dropped only when even the thin ones do not fit"
                 );
@@ -7852,9 +8122,17 @@ mod tests {
             debug_panel: false,
         };
 
-        assert_eq!(compute_layout(full, &params(false, false)).menu_bar.height, 0, "hidden and idle");
+        assert_eq!(
+            compute_layout(full, &params(false, false)).menu_bar.height,
+            0,
+            "hidden and idle"
+        );
         assert_eq!(compute_layout(full, &params(true, false)).menu_bar.height, 1, "shown");
-        assert_eq!(compute_layout(full, &params(false, true)).menu_bar.height, 1, "hidden but open");
+        assert_eq!(
+            compute_layout(full, &params(false, true)).menu_bar.height,
+            1,
+            "hidden but open"
+        );
 
         // The row has to come out of the frames below, not off the bottom of the window.
         let opened = compute_layout(full, &params(false, true));
@@ -7962,13 +8240,19 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let (cx, cy) = terminal_close_cell(area).unwrap();
-        assert_eq!(buffer[(cx, cy)].symbol(), CLOSE_BOX, "the box is not in the cell it is clicked in");
+        assert_eq!(
+            buffer[(cx, cy)].symbol(),
+            CLOSE_BOX,
+            "the box is not in the cell it is clicked in"
+        );
         // And nowhere else on that border, so there is one box and one meaning to a click.
-        let boxes: Vec<u16> =
-            (area.x..area.x + area.width).filter(|&x| buffer[(x, area.y)].symbol() == CLOSE_BOX).collect();
+        let boxes: Vec<u16> = (area.x..area.x + area.width)
+            .filter(|&x| buffer[(x, area.y)].symbol() == CLOSE_BOX)
+            .collect();
         assert_eq!(boxes, vec![cx]);
         // The title follows the box rather than being pushed off the border by it.
-        let top: String = (area.x..area.x + area.width).map(|x| buffer[(x, area.y)].symbol()).collect();
+        let top: String =
+            (area.x..area.x + area.width).map(|x| buffer[(x, area.y)].symbol()).collect();
         assert!(top.contains("Terminal 1"), "the name lost its place on the border: {top:?}");
     }
 
@@ -8036,7 +8320,11 @@ mod tests {
     #[test]
     fn the_handle_is_there_exactly_while_the_half_is_away() {
         let column = Some(Rect::new(0, 1, 30, 40));
-        assert_eq!(shell_handle(column, false), Some(Rect::new(10, 40, 9, 1)), "on the bottom border");
+        assert_eq!(
+            shell_handle(column, false),
+            Some(Rect::new(10, 40, 9, 1)),
+            "on the bottom border"
+        );
         assert_eq!(shell_handle(column, true), None, "not while the half is up");
         assert_eq!(shell_handle(None, false), None, "no sidebar, no handle");
         // Both answers for one column: never two controls on the same row.
@@ -8230,7 +8518,10 @@ mod tests {
             assert!(body.y >= inner.y + 1, "the tab row keeps its own line");
             assert!(body.bottom() <= keys_row, "height {height}: the list runs under the keys");
             if notice {
-                assert!(body.bottom() <= notice_row, "height {height}: the notice covers a row of list");
+                assert!(
+                    body.bottom() <= notice_row,
+                    "height {height}: the notice covers a row of list"
+                );
             } else {
                 assert_eq!(height, 3, "the notice is only given up at the floor");
             }
@@ -8280,7 +8571,10 @@ mod tests {
     #[test]
     fn venv_nickname_wins_over_the_derived_name() {
         let registered = vec![
-            settings::RegisteredVenv::Named { name: "ml".to_string(), path: "/opt/venvs/ml-3.12".to_string() },
+            settings::RegisteredVenv::Named {
+                name: "ml".to_string(),
+                path: "/opt/venvs/ml-3.12".to_string(),
+            },
             settings::RegisteredVenv::Path("/opt/venvs/plain".to_string()),
         ];
         assert_eq!(venv_display_name("/opt/venvs/ml-3.12", &registered), "ml");
@@ -8350,7 +8644,10 @@ mod tests {
         assert_eq!(zones.len(), drawn.len());
         for (i, (tool, rect)) in drawn.iter().enumerate() {
             assert!(rect.width >= 3, "{tool:?} is {} cells wide", rect.width);
-            assert!(rect.x >= row.x && rect.x + rect.width <= row.x + row.width, "{tool:?} runs off the bar");
+            assert!(
+                rect.x >= row.x && rect.x + rect.width <= row.x + row.width,
+                "{tool:?} runs off the bar"
+            );
             let (name, _) = md_tool_label(*tool);
             assert!(!name.is_empty(), "{tool:?} has no label");
             // The zone contains the button it belongs to, and touches its neighbours exactly.
@@ -8359,7 +8656,11 @@ mod tests {
             assert!(zone.x <= rect.x && zone.x + zone.width >= rect.x + rect.width, "{tool:?}");
             if i > 0 {
                 let before = zones[i - 1].1;
-                assert_eq!(before.x + before.width, zone.x, "{tool:?}: a column belongs to neither");
+                assert_eq!(
+                    before.x + before.width,
+                    zone.x,
+                    "{tool:?}: a column belongs to neither"
+                );
             }
         }
     }
@@ -8374,7 +8675,11 @@ mod tests {
             let drawn = md_toolbar_layout(row);
             for (tool, rect) in &drawn {
                 assert!(rect.x + rect.width <= width, "width {width}: {tool:?} runs off the bar");
-                assert_eq!(rect.width, md_tool_width(*tool), "width {width}: {tool:?} was squeezed");
+                assert_eq!(
+                    rect.width,
+                    md_tool_width(*tool),
+                    "width {width}: {tool:?} was squeezed"
+                );
             }
             assert!(drawn.len() >= seen, "width {width}: a wider bar lost a button");
             seen = drawn.len();
@@ -8413,11 +8718,20 @@ mod tests {
         assert!(md_toolbar_shown(true, "md", true, tall), "a markdown buffer should have it");
         assert!(!md_toolbar_shown(false, "md", true, tall), "switched off in the View menu");
         assert!(!md_toolbar_shown(true, "rs", true, tall), "these actions write markdown");
-        assert!(!md_toolbar_shown(true, "", true, tall), "a buffer never saved has no syntax to write");
-        assert!(!md_toolbar_shown(true, "md", false, tall), "a read-only buffer refuses every edit");
+        assert!(
+            !md_toolbar_shown(true, "", true, tall),
+            "a buffer never saved has no syntax to write"
+        );
+        assert!(
+            !md_toolbar_shown(true, "md", false, tall),
+            "a read-only buffer refuses every edit"
+        );
         for height in 0..MD_TOOLBAR_MIN_HEIGHT {
             let short = Rect { height, ..tall };
-            assert!(!md_toolbar_shown(true, "md", true, short), "height {height} has no row to spare");
+            assert!(
+                !md_toolbar_shown(true, "md", true, short),
+                "height {height} has no row to spare"
+            );
         }
         assert!(md_toolbar_shown(true, "md", true, Rect { height: MD_TOOLBAR_MIN_HEIGHT, ..tall }));
     }
@@ -8447,7 +8761,10 @@ mod tests {
         // Anything that fits is right-aligned *within* what is free, never over a button.
         for text_len in [1u16, 10, 29] {
             let x = row_end - text_len;
-            assert!(x > buttons_end, "text of {text_len} would overlap a button ending at {buttons_end}");
+            assert!(
+                x > buttons_end,
+                "text of {text_len} would overlap a button ending at {buttons_end}"
+            );
         }
         // And one cell too long no longer fits, so it is dropped rather than overlapping.
         assert!(30 > free);
@@ -8475,7 +8792,8 @@ mod tests {
         let area = Rect { x: 10, y: 5, width: 40, height: 12 };
         let inner = inner_rect(area);
 
-        let bar = scrollbar_strip(inner_rect(area), Axis::Vertical).expect("a normal frame has room");
+        let bar =
+            scrollbar_strip(inner_rect(area), Axis::Vertical).expect("a normal frame has room");
         // Last column of the *contents*, one in from the border — the border is the resize seam
         // and stays entirely its own.
         assert_eq!(bar.x, 48);
@@ -8486,7 +8804,8 @@ mod tests {
         assert_eq!(bar.y, 6);
         assert_eq!(bar.height, 10);
 
-        let bar = scrollbar_strip(inner_rect(area), Axis::Horizontal).expect("a normal frame has room");
+        let bar =
+            scrollbar_strip(inner_rect(area), Axis::Horizontal).expect("a normal frame has room");
         assert_eq!(bar.y, 15);
         assert_eq!(bar.y, inner.y + inner.height - 1);
         assert_eq!(bar.height, 1);
@@ -8497,11 +8816,15 @@ mod tests {
         assert_eq!(bar.x + bar.width, vertical.x);
 
         // Frames too small to have an interior get no bar rather than one drawn on the border.
-        let vert = |w, h| scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Vertical);
+        let vert = |w, h| {
+            scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Vertical)
+        };
         assert_eq!(vert(2, 12), None, "no interior width");
         assert_eq!(vert(40, 3), None, "one row of contents is not a scrollbar");
         assert_eq!(vert(0, 0), None);
-        let horiz = |w, h| scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Horizontal);
+        let horiz = |w, h| {
+            scrollbar_strip(inner_rect(Rect { x: 0, y: 0, width: w, height: h }), Axis::Horizontal)
+        };
         assert_eq!(horiz(3, 12), None, "one column of contents, all of it the vertical bar's");
         assert_eq!(horiz(40, 2), None);
     }
@@ -8590,5 +8913,3 @@ mod tests {
         assert_eq!(fit("venv: some/very/long/name", 10), "venv: som\u{2026}");
     }
 }
-
-

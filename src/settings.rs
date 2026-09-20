@@ -847,7 +847,8 @@ impl Settings {
 
     pub fn clamp_layout(&mut self) {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_WIDTH_RANGE.0, SIDEBAR_WIDTH_RANGE.1);
-        self.shell_pane_rows = self.shell_pane_rows.clamp(SHELL_PANE_ROWS_RANGE.0, SHELL_PANE_ROWS_RANGE.1);
+        self.shell_pane_rows =
+            self.shell_pane_rows.clamp(SHELL_PANE_ROWS_RANGE.0, SHELL_PANE_ROWS_RANGE.1);
         self.terminal_pct = self.terminal_pct.clamp(TERMINAL_PCT_RANGE.0, TERMINAL_PCT_RANGE.1);
         self.split_pct = self.split_pct.clamp(SPLIT_PCT_RANGE.0, SPLIT_PCT_RANGE.1);
         self.drawer_pct = self.drawer_pct.clamp(DRAWER_PCT_RANGE.0, DRAWER_PCT_RANGE.1);
@@ -957,8 +958,8 @@ mod tests {
     /// themes left behind.
     #[test]
     fn a_file_of_nothing_but_keys_keeps_every_other_default() {
-        let only_keys: Settings =
-            toml::from_str("[keys]\nfind-in-project = \"Ctrl+Alt+F\"\n").expect("a [keys]-only file loads");
+        let only_keys: Settings = toml::from_str("[keys]\nfind-in-project = \"Ctrl+Alt+F\"\n")
+            .expect("a [keys]-only file loads");
         assert_eq!(only_keys.keys.get("find-in-project").map(String::as_str), Some("Ctrl+Alt+F"));
         let fresh = Settings::default();
         assert_eq!(only_keys.tab_size, fresh.tab_size);
@@ -1027,7 +1028,10 @@ mod tests {
         // No screen: what the file says stops mattering, and both answers read the same.
         for asked in [true, false] {
             for lang in [Lang::En, Lang::It] {
-                assert_eq!(plots_value(lang, asked, false), i18n::t(lang, Key::SettingPlotsNoDisplay));
+                assert_eq!(
+                    plots_value(lang, asked, false),
+                    i18n::t(lang, Key::SettingPlotsNoDisplay)
+                );
             }
         }
     }
@@ -1054,7 +1058,11 @@ mod tests {
             assert!(!settings.drawer_pinned);
             assert_eq!(value(&settings), i18n::t(lang, Key::SettingDrawerAutocollapse));
             settings.activate(idx);
-            assert_eq!(value(&settings), i18n::t(lang, Key::SettingDrawerPinned), "two states, a ring");
+            assert_eq!(
+                value(&settings),
+                i18n::t(lang, Key::SettingDrawerPinned),
+                "two states, a ring"
+            );
         }
     }
 
@@ -1066,7 +1074,11 @@ mod tests {
         assert_eq!(MenuHighlight::of("accent"), MenuHighlight::Accent);
         assert_eq!(MenuHighlight::of("classic"), MenuHighlight::Classic);
         for typo in ["Accent", "CLASSIC", "carousel", "", "rainbow"] {
-            assert_eq!(MenuHighlight::of(typo), MenuHighlight::Carousel, "{typo:?} should fall back");
+            assert_eq!(
+                MenuHighlight::of(typo),
+                MenuHighlight::Carousel,
+                "{typo:?} should fall back"
+            );
         }
     }
 
@@ -1078,7 +1090,11 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(settings.menu_highlight, "carousel");
         let label = i18n::t(settings.lang, Key::SettingMenuHighlight);
-        let idx = settings.rows().iter().position(|r| r.label == label).expect("menu highlight has a row");
+        let idx = settings
+            .rows()
+            .iter()
+            .position(|r| r.label == label)
+            .expect("menu highlight has a row");
         settings.activate(idx);
         assert_eq!(settings.menu_highlight, "accent");
         settings.activate(idx);
@@ -1119,7 +1135,8 @@ mod tests {
             if !plots_row_declares_nothing_to_choose {
                 assert_ne!(
                     before[idx].value, after[idx].value,
-                    "row {idx} ({}) did not change when it was picked", before[idx].label
+                    "row {idx} ({}) did not change when it was picked",
+                    before[idx].label
                 );
             }
             // The language row is the one exception, and not a leak: it repaints every other
@@ -1128,7 +1145,8 @@ mod tests {
                 for (other, (was, now)) in before.iter().zip(after.iter()).enumerate() {
                     assert!(
                         other == idx || was.value == now.value,
-                        "picking row {idx} changed row {other} ({})", now.label
+                        "picking row {idx} changed row {other} ({})",
+                        now.label
                     );
                 }
             }
@@ -1140,10 +1158,15 @@ mod tests {
         let mut settings = Settings::default();
         settings.registered_venvs = vec![
             RegisteredVenv::Path("/opt/venvs/central".to_string()),
-            RegisteredVenv::Named { name: "ml".to_string(), path: "/opt/venvs/ml-3.12".to_string() },
+            RegisteredVenv::Named {
+                name: "ml".to_string(),
+                path: "/opt/venvs/ml-3.12".to_string(),
+            },
         ];
         settings.interpreter_paths =
-            [("octave-cli".to_string(), "/opt/homebrew/bin/octave-cli".to_string())].into_iter().collect();
+            [("octave-cli".to_string(), "/opt/homebrew/bin/octave-cli".to_string())]
+                .into_iter()
+                .collect();
         settings.active_venv = Some(".venv".to_string());
         settings.tab_size = 2;
         // How documents are read: one answer per kind, and each has to come back on its own.
@@ -1160,7 +1183,10 @@ mod tests {
         assert_eq!(back.run_commands.get("m"), settings.run_commands.get("m"));
         assert!(back.preview_dark, "a PDF read dark stays dark");
         assert!(back.preview_markdown_text, "markdown left as text opens as text");
-        assert!(!back.preview_dark_markdown, "markdown keeps its own answer, untouched by the PDF one");
+        assert!(
+            !back.preview_dark_markdown,
+            "markdown keeps its own answer, untouched by the PDF one"
+        );
     }
 
     /// The switch that hands the background back, and the one theme that will not take it: a
@@ -1235,7 +1261,10 @@ mod tests {
 
         // Written back out, the dead key is simply gone.
         let text = toml::to_string_pretty(&older).expect("settings serialise");
-        assert!(!text.contains("opaque_background"), "the retired key is not written again:\n{text}");
+        assert!(
+            !text.contains("opaque_background"),
+            "the retired key is not written again:\n{text}"
+        );
     }
 
     /// Both hand-written forms must parse. A parse failure is silent (`load()` falls back to
@@ -1250,9 +1279,12 @@ mod tests {
         }
 
         // The two forms are alternatives for the same key, so each is checked on its own.
-        let bare: OnlyVenvs =
-            toml::from_str("registered_venvs = [\"/opt/venvs/plain\"]").expect("bare list must parse");
-        assert_eq!(bare.registered_venvs, vec![RegisteredVenv::Path("/opt/venvs/plain".to_string())]);
+        let bare: OnlyVenvs = toml::from_str("registered_venvs = [\"/opt/venvs/plain\"]")
+            .expect("bare list must parse");
+        assert_eq!(
+            bare.registered_venvs,
+            vec![RegisteredVenv::Path("/opt/venvs/plain".to_string())]
+        );
         assert_eq!(bare.registered_venvs[0].nickname(), None);
         assert_eq!(bare.registered_venvs[0].path(), "/opt/venvs/plain");
 
@@ -1334,9 +1366,13 @@ mod tests {
     /// what is checked.
     #[test]
     fn a_hand_written_language_parses_however_it_was_typed_and_costs_nothing_else() {
-        for (written, expected) in
-            [("it", Lang::It), ("It", Lang::It), ("IT", Lang::It), ("en", Lang::En), ("EN", Lang::En)]
-        {
+        for (written, expected) in [
+            ("it", Lang::It),
+            ("It", Lang::It),
+            ("IT", Lang::It),
+            ("en", Lang::En),
+            ("EN", Lang::En),
+        ] {
             let text = format!("{HAND_WRITTEN}lang = \"{written}\"\n");
             let s: Settings = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("lang = \"{written}\" must parse: {e}"));
@@ -1350,7 +1386,9 @@ mod tests {
 
         // A language nobody speaks is still an error rather than a silent English: the file is
         // then set aside intact, which is a question the user can answer.
-        assert!(toml::from_str::<Settings>(&format!("{HAND_WRITTEN}lang = \"martian\"\n")).is_err());
+        assert!(
+            toml::from_str::<Settings>(&format!("{HAND_WRITTEN}lang = \"martian\"\n")).is_err()
+        );
         // Absent entirely it simply falls back, the way every other optional key does.
         let s: Settings = toml::from_str(HAND_WRITTEN).expect("a file with no language must load");
         assert_eq!(s.lang, Lang::default());
@@ -1376,7 +1414,10 @@ mod tests {
         let mangled = format!("{HAND_WRITTEN}this is not toml {{{{{{\n");
         std::fs::write(&path, &mangled).unwrap();
         assert_eq!(Settings::read_or_set_aside(&path).tab_size, Settings::default().tab_size);
-        assert!(!path.exists(), "the unparsable file moves aside instead of waiting to be overwritten");
+        assert!(
+            !path.exists(),
+            "the unparsable file moves aside instead of waiting to be overwritten"
+        );
         assert_eq!(std::fs::read_to_string(&broken).unwrap(), mangled);
 
         // A second failure replaces the first one: the file that just broke is the interesting
@@ -1425,7 +1466,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         left.sort();
-        assert_eq!(left, vec!["fresh.toml".to_string(), "link.toml".to_string(), "real.toml".to_string()]);
+        assert_eq!(
+            left,
+            vec!["fresh.toml".to_string(), "link.toml".to_string(), "real.toml".to_string()]
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1442,7 +1486,8 @@ fn plots_value(lang: i18n::Lang, in_tabs: bool, can_open_a_window: bool) -> Stri
     if !can_open_a_window {
         return i18n::t(lang, Key::SettingPlotsNoDisplay).to_string();
     }
-    i18n::t(lang, if in_tabs { Key::SettingPlotsTabs } else { Key::SettingPlotsWindows }).to_string()
+    i18n::t(lang, if in_tabs { Key::SettingPlotsTabs } else { Key::SettingPlotsWindows })
+        .to_string()
 }
 
 /// What the agent drawer's row reads: which of its two modes it is in.
@@ -1466,12 +1511,27 @@ impl Settings {
         let lang = self.lang;
         let b = |v: bool| i18n::t(lang, if v { Key::On } else { Key::Off }).to_string();
         vec![
-            SettingRow { label: i18n::t(lang, Key::SettingLineNumbers), value: b(self.show_line_numbers) },
-            SettingRow { label: i18n::t(lang, Key::SettingSyntaxHighlighting), value: b(self.syntax_highlighting) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingLineNumbers),
+                value: b(self.show_line_numbers),
+            },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingSyntaxHighlighting),
+                value: b(self.syntax_highlighting),
+            },
             SettingRow { label: i18n::t(lang, Key::SettingWordWrap), value: b(self.word_wrap) },
-            SettingRow { label: i18n::t(lang, Key::SettingTabSize), value: self.tab_size.to_string() },
-            SettingRow { label: i18n::t(lang, Key::SettingInsertSpaces), value: b(self.insert_spaces) },
-            SettingRow { label: i18n::t(lang, Key::SettingShowWhitespace), value: b(self.show_whitespace) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingTabSize),
+                value: self.tab_size.to_string(),
+            },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingInsertSpaces),
+                value: b(self.insert_spaces),
+            },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingShowWhitespace),
+                value: b(self.show_whitespace),
+            },
             SettingRow { label: i18n::t(lang, Key::SettingAutoIndent), value: b(self.auto_indent) },
             SettingRow { label: i18n::t(lang, Key::SettingCompletion), value: b(self.completion) },
             SettingRow {
@@ -1499,13 +1559,22 @@ impl Settings {
                 value: drawer_mode_value(lang, self.drawer_pinned),
             },
             SettingRow { label: i18n::t(lang, Key::SettingSplash), value: b(self.show_splash) },
-            SettingRow { label: i18n::t(lang, Key::SettingUpdateCheck), value: b(self.update_check) },
-            SettingRow { label: i18n::t(lang, Key::SettingMouseEnabled), value: b(self.mouse_enabled) },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingUpdateCheck),
+                value: b(self.update_check),
+            },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingMouseEnabled),
+                value: b(self.mouse_enabled),
+            },
             SettingRow {
                 label: i18n::t(lang, Key::SettingMenuHighlight),
                 value: i18n::t(lang, MenuHighlight::of(&self.menu_highlight).label()).to_string(),
             },
-            SettingRow { label: i18n::t(lang, Key::SettingLanguage), value: self.lang.label().to_string() },
+            SettingRow {
+                label: i18n::t(lang, Key::SettingLanguage),
+                value: self.lang.label().to_string(),
+            },
         ]
     }
 
@@ -1544,7 +1613,10 @@ impl Settings {
             15 => self.update_check = !self.update_check,
             16 => self.mouse_enabled = !self.mouse_enabled,
             // Three states, so picking the row is walking round them. See `MenuHighlight::next`.
-            17 => self.menu_highlight = MenuHighlight::of(&self.menu_highlight).next().word().to_string(),
+            17 => {
+                self.menu_highlight =
+                    MenuHighlight::of(&self.menu_highlight).next().word().to_string()
+            }
             18 => self.lang = self.lang.next(),
             _ => {}
         }

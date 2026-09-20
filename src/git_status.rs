@@ -78,15 +78,18 @@ fn key_for(root: &Path, base: &Path, absolute: &Path) -> Option<PathBuf> {
 /// up separately and used for joining instead of `root`.
 pub fn compute(root: &Path) -> HashMap<PathBuf, FileStatus> {
     let mut result = HashMap::new();
-    let Ok(toplevel_output) =
-        std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).current_dir(root).output()
+    let Ok(toplevel_output) = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(root)
+        .output()
     else {
         return result;
     };
     if !toplevel_output.status.success() {
         return result;
     }
-    let toplevel = PathBuf::from(String::from_utf8_lossy(&toplevel_output.stdout).trim().to_string());
+    let toplevel =
+        PathBuf::from(String::from_utf8_lossy(&toplevel_output.stdout).trim().to_string());
 
     let Ok(output) = std::process::Command::new("git")
         .args(["status", "--porcelain=v1", "-z"])

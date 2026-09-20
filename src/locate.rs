@@ -56,10 +56,7 @@ fn octave(text: &str) -> Option<Location> {
         return None;
     }
     let line = take_number(rest)?;
-    let column = rest
-        .split_once(" column ")
-        .and_then(|(_, c)| take_number(c))
-        .unwrap_or(1);
+    let column = rest.split_once(" column ").and_then(|(_, c)| take_number(c)).unwrap_or(1);
     let bare_name = !name.ends_with(".m");
     Some(Location { path: name.to_string(), line, column, bare_name })
 }
@@ -216,7 +213,9 @@ pub fn find_url(text: &str) -> Option<&str> {
 /// Where a URL stops. The space is covered by the whitespace test rather than listed twice, and
 /// control characters are here because a row of terminal output can hold them.
 fn not_in_a_url(c: char) -> bool {
-    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
 }
 
 /// Cuts the punctuation a sentence left on the end of a URL, a character at a time, so that
@@ -255,13 +254,34 @@ mod tests {
     fn a_line_that_is_not_a_location_is_not_read_as_one() {
         let very_long = "a".repeat(10_000);
         let odd = [
-            "", " ", ":", "::", ":::::", "1:2:3", ":1:", "a:", ":a",
-            "-9223372036854775808:1", "99999999999999999999:1:1",
-            "file.rs:99999999999999999999", "file.rs:-3", "file.rs:0",
-            "C:\\", "C:\\src", "/", "//", "\u{0}\u{1}", "日本語:12:3",
-            "\u{1f422}.m:1:1", very_long.as_str(),
-            "http://example.com:8080/x", "warning: unused variable at 12:5",
-            "        ", "\t\t:\t", "--:--:--", "[2026-08-20 17:21:42] ok",
+            "",
+            " ",
+            ":",
+            "::",
+            ":::::",
+            "1:2:3",
+            ":1:",
+            "a:",
+            ":a",
+            "-9223372036854775808:1",
+            "99999999999999999999:1:1",
+            "file.rs:99999999999999999999",
+            "file.rs:-3",
+            "file.rs:0",
+            "C:\\",
+            "C:\\src",
+            "/",
+            "//",
+            "\u{0}\u{1}",
+            "日本語:12:3",
+            "\u{1f422}.m:1:1",
+            very_long.as_str(),
+            "http://example.com:8080/x",
+            "warning: unused variable at 12:5",
+            "        ",
+            "\t\t:\t",
+            "--:--:--",
+            "[2026-08-20 17:21:42] ok",
         ];
         for line in odd {
             if let Some(found) = find(line) {
@@ -305,7 +325,10 @@ mod tests {
     /// it does not, which is why one of these is a lead and the other is a location.
     #[test]
     fn an_octave_backtrace_names_a_function_or_a_file() {
-        assert_eq!(at("    tb/run.m at line 1 column 16"), Some(("tb/run.m".to_string(), 1, 16, false)));
+        assert_eq!(
+            at("    tb/run.m at line 1 column 16"),
+            Some(("tb/run.m".to_string(), 1, 16, false))
+        );
         assert_eq!(at("    boom at line 3 column 3"), Some(("boom".to_string(), 3, 3, true)));
         // The column is optional in some of Octave's messages.
         assert_eq!(at("    boom at line 7"), Some(("boom".to_string(), 7, 1, true)));
@@ -313,10 +336,19 @@ mod tests {
 
     #[test]
     fn the_shape_every_other_tool_uses_works_too() {
-        assert_eq!(at("src/app.rs:4045:9: warning: unused"), Some(("src/app.rs".to_string(), 4045, 9, false)));
+        assert_eq!(
+            at("src/app.rs:4045:9: warning: unused"),
+            Some(("src/app.rs".to_string(), 4045, 9, false))
+        );
         assert_eq!(at("  --> src/lsp.rs:120:5"), Some(("src/lsp.rs".to_string(), 120, 5, false)));
-        assert_eq!(at("main.c:42: error: expected ';'"), Some(("main.c".to_string(), 42, 1, false)));
-        assert_eq!(at("    at /app/server.js:19:11)"), Some(("/app/server.js".to_string(), 19, 11, false)));
+        assert_eq!(
+            at("main.c:42: error: expected ';'"),
+            Some(("main.c".to_string(), 42, 1, false))
+        );
+        assert_eq!(
+            at("    at /app/server.js:19:11)"),
+            Some(("/app/server.js".to_string(), 19, 11, false))
+        );
     }
 
     /// A Windows path carries a colon of its own, which is why the numbers are read from the
@@ -325,10 +357,7 @@ mod tests {
     /// is the matched line, not a column. Found by double-clicking one and landing nowhere.
     #[test]
     fn a_grep_hit_is_a_location_even_though_the_third_field_is_text() {
-        assert_eq!(
-            at("dati.txt:5:CERCAMI qui"),
-            Some(("dati.txt".to_string(), 5, 1, false))
-        );
+        assert_eq!(at("dati.txt:5:CERCAMI qui"), Some(("dati.txt".to_string(), 5, 1, false)));
         assert_eq!(
             at("src/app.rs:120:    let x = 1;"),
             Some(("src/app.rs".to_string(), 120, 1, false))
@@ -431,7 +460,10 @@ mod tests {
         assert_eq!(find_url("<https://a.io/p>"), Some("https://a.io/p"));
         assert_eq!(find_url("href=\"https://a.io/p\">x"), Some("https://a.io/p"));
         assert_eq!(find_url("https://a.io/p|next"), Some("https://a.io/p"));
-        assert_eq!(find_url("https://it.wikipedia.org/wiki/Perù."), Some("https://it.wikipedia.org/wiki/Perù"));
+        assert_eq!(
+            find_url("https://it.wikipedia.org/wiki/Perù."),
+            Some("https://it.wikipedia.org/wiki/Perù")
+        );
         assert_eq!(find_url("https://a.io/\u{1b}[0m"), Some("https://a.io/"));
     }
 

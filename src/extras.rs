@@ -125,8 +125,19 @@ mod tests {
                 assert!(cmd.starts_with("brew install "), "{cmd}");
             }
         }
-        assert_eq!(install_command(Extra::Pdf, PackageManager::Apt), Some("sudo apt install poppler-utils"));
-        assert_eq!(install_command(Extra::Typst, PackageManager::Apt), None, "apt has no typst; say the name");
-        assert_eq!(install_command(Extra::Chafa, PackageManager::Scoop), None, "scoop's main bucket has no chafa");
+        assert_eq!(
+            install_command(Extra::Pdf, PackageManager::Apt),
+            Some("sudo apt install poppler-utils")
+        );
+        assert_eq!(
+            install_command(Extra::Typst, PackageManager::Apt),
+            None,
+            "apt has no typst; say the name"
+        );
+        assert_eq!(
+            install_command(Extra::Chafa, PackageManager::Scoop),
+            None,
+            "scoop's main bucket has no chafa"
+        );
     }
 }

@@ -168,8 +168,11 @@ pub fn snapshot(root: &Path, file: Option<PathBuf>) -> Snapshot {
         snap.changes = parse_changes(&text);
     }
 
-    let format = format!("--format=%(HEAD){SEP}%(refname:short){SEP}%(upstream:short){SEP}%(upstream:track)");
-    if let Ok(text) = git(root, &["for-each-ref", "--sort=-committerdate", &format, "refs/heads/"]) {
+    let format = format!(
+        "--format=%(HEAD){SEP}%(refname:short){SEP}%(upstream:short){SEP}%(upstream:track)"
+    );
+    if let Ok(text) = git(root, &["for-each-ref", "--sort=-committerdate", &format, "refs/heads/"])
+    {
         snap.branches = text.lines().filter_map(parse_branch).collect();
     }
 
@@ -201,8 +204,7 @@ fn diff(root: &Path, file: Option<&Path>) -> Vec<String> {
     // Asked outright rather than read off the failed diff's stderr: what git says about an unborn
     // branch is prose, it has been reworded between versions, and it is translated.
     let born = git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
-    let against: &[&[&str]] =
-        if born { &[&["HEAD"]] } else { &[&["--cached", EMPTY_TREE], &[]] };
+    let against: &[&[&str]] = if born { &[&["HEAD"]] } else { &[&["--cached", EMPTY_TREE], &[]] };
     let mut out = Vec::new();
     for part in against {
         let mut args: Vec<&OsStr> = vec![OsStr::new("diff")];
@@ -321,8 +323,9 @@ pub fn commit(root: &Path, message: &str) -> Result<String, String> {
 /// is `rm` in the terminal, where it reads as what it is.
 pub fn discard(root: &Path, change: &Change) -> Result<String, String> {
     if change.untracked() {
-        return Err("git has never been told about this file — there is nothing to go back to"
-            .to_string());
+        return Err(
+            "git has never been told about this file — there is nothing to go back to".to_string()
+        );
     }
     write(
         root,
@@ -524,11 +527,7 @@ pub struct PushTo {
 /// to `origin` fails naming something that does not exist. With several remotes and no `origin`
 /// the first is a guess, and a wrong guess is a refusal from git rather than a wrong push.
 pub fn push_remote(remotes: &[String]) -> Option<&str> {
-    remotes
-        .iter()
-        .find(|r| r.as_str() == "origin")
-        .or_else(|| remotes.first())
-        .map(String::as_str)
+    remotes.iter().find(|r| r.as_str() == "origin").or_else(|| remotes.first()).map(String::as_str)
 }
 
 /// The branch that is checked out and where a push of it would go, asked of git rather than read
@@ -556,7 +555,9 @@ pub fn head_branch(root: &Path) -> (Option<String>, PushTo) {
 /// slash in its name.
 pub fn remotes(root: &Path) -> Vec<String> {
     git(root, &["remote"])
-        .map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+        .map(|text| {
+            text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+        })
         .unwrap_or_default()
 }
 
@@ -586,8 +587,7 @@ pub fn show(root: &Path, hash: &str) -> Result<Vec<String>, String> {
     let mut args: Vec<&str> = vec!["show"];
     args.extend(DIFF_FLAGS);
     args.extend(["--stat", "--patch", "--cc", hash]);
-    git(root, &args)
-        .map(|text| text.lines().map(str::to_string).collect())
+    git(root, &args).map(|text| text.lines().map(str::to_string).collect())
 }
 
 // ---- Writing, continued ----------------------------------------------------------------------
@@ -810,7 +810,10 @@ mod tests {
     #[test]
     fn a_decoration_is_read_with_the_remotes_in_hand() {
         let remotes = vec!["origin".to_string(), "upstream".to_string()];
-        let refs = parse_refs("HEAD -> main, origin/main, tag: v0.1, feature/login, upstream/main", &remotes);
+        let refs = parse_refs(
+            "HEAD -> main, origin/main, tag: v0.1, feature/login, upstream/main",
+            &remotes,
+        );
         let kinds: Vec<_> = refs.iter().map(|r| (r.kind, r.text.as_str())).collect();
         assert_eq!(
             kinds,
@@ -878,8 +881,7 @@ mod tests {
         );
 
         // With several, `origin` is the one that was cloned from, wherever it sits in the list.
-        let several =
-            vec!["upstream".to_string(), "origin".to_string(), "fork".to_string()];
+        let several = vec!["upstream".to_string(), "origin".to_string(), "fork".to_string()];
         assert_eq!(push_remote(&several), Some("origin"));
 
         // Several and no `origin` is a guess either way, and the first is the one git itself

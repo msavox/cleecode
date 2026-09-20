@@ -1,10 +1,10 @@
 use anyhow::Result;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::layout::Rect;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -234,7 +234,11 @@ impl TermSelection {
 
     /// Endpoints in screen order, so callers don't have to care which way it was dragged.
     pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
-        if self.anchor <= self.cursor { (self.anchor, self.cursor) } else { (self.cursor, self.anchor) }
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
     }
 
     /// True while the selection has never left its starting cell, which is what a plain click
@@ -258,7 +262,11 @@ impl TermSelection {
 /// a blank), which keeps this testable without a real pty. Trailing blanks are trimmed per
 /// row — they are padding on screen, not something anyone means to copy — and rows are joined
 /// with newlines.
-pub fn selected_text(selection: TermSelection, cols: u16, cell: impl Fn(u16, u16) -> String) -> String {
+pub fn selected_text(
+    selection: TermSelection,
+    cols: u16,
+    cell: impl Fn(u16, u16) -> String,
+) -> String {
     let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
     let mut rows = Vec::new();
     for row in start_row..=end_row {
@@ -378,12 +386,7 @@ fn encode_mouse(
 
 /// A wheel notch. Both directions are reported as presses with no release — there is no such
 /// thing as letting go of a wheel.
-fn encode_wheel(
-    encoding: vt100::MouseProtocolEncoding,
-    up: bool,
-    row: u16,
-    col: u16,
-) -> Vec<u8> {
+fn encode_wheel(encoding: vt100::MouseProtocolEncoding, up: bool, row: u16, col: u16) -> Vec<u8> {
     let button = if up { BUTTON_WHEEL_UP } else { BUTTON_WHEEL_DOWN };
     encode_mouse(encoding, button, MouseAction::Press, row, col)
 }
@@ -770,9 +773,7 @@ impl CsiScanner {
                             // else ending in `t` is left to be ignored as before.
                             b't' if self.params == b"18" => out.push(TerminalQuery::TextAreaCells),
                             b't' if self.params == b"16" => out.push(TerminalQuery::CellPixels),
-                            b't' if self.params == b"14" => {
-                                out.push(TerminalQuery::TextAreaPixels)
-                            }
+                            b't' if self.params == b"14" => out.push(TerminalQuery::TextAreaPixels),
                             _ => {}
                         }
                         self.state = 0;
@@ -1129,8 +1130,11 @@ impl TerminalPanel {
             }
         });
 
-        let parser =
-            Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LEN.load(Ordering::Relaxed))));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(
+            rows,
+            cols,
+            SCROLLBACK_LEN.load(Ordering::Relaxed),
+        )));
         let parser_clone = Arc::clone(&parser);
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = Arc::clone(&exited);
@@ -1149,7 +1153,8 @@ impl TerminalPanel {
         let cwd_clone = Arc::clone(&cwd);
         let reports_cwd = Arc::new(AtomicBool::new(false));
         let reports_clone = Arc::clone(&reports_cwd);
-        let graphics: Arc<Mutex<Vec<crate::pane_graphics::Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let graphics: Arc<Mutex<Vec<crate::pane_graphics::Event>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let graphics_clone = Arc::clone(&graphics);
         let graphics_queued: Arc<AtomicUsize> = Arc::default();
         let queued_clone = Arc::clone(&graphics_queued);
@@ -1216,7 +1221,8 @@ impl TerminalPanel {
                         // Raised after the parser has taken the bytes, so a reader that sees the
                         // new number is looking at a screen that already holds them.
                         generation_clone.fetch_add(1, Ordering::Release);
-                        last_output_clone.store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        last_output_clone
+                            .store(spawn.elapsed().as_millis() as u64, Ordering::Relaxed);
                         produced_clone.store(true, Ordering::Relaxed);
 
                         // Where the shell says it is, if it said so in this chunk. Read off the
@@ -1546,7 +1552,8 @@ impl TerminalPanel {
         }
         let elapsed = self.spawn.elapsed();
         let produced = self.produced_output.load(Ordering::Relaxed);
-        let idle = elapsed.saturating_sub(Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed)));
+        let idle = elapsed
+            .saturating_sub(Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed)));
         if elapsed >= STARTUP_MAX || (produced && idle >= STARTUP_IDLE) {
             self.revealed = true;
         }
@@ -1973,7 +1980,7 @@ impl TerminalPanel {
                 && placement.anchor >= held
                 && placement.anchor - held < usize::from(screen_rows);
             if !on_screen {
-                    keep.push(false);
+                keep.push(false);
                 continue;
             }
             let row = (placement.anchor - held) as u16;
@@ -2059,9 +2066,11 @@ impl TerminalPanel {
         let Some(protocol) = held.drawn.as_mut() else { return };
         // `Fit` shrinks the picture to the cells it was given and never enlarges it, which is
         // what the program asking for `c` columns and `r` rows meant.
-        ratatui_image::StatefulImage::default()
-            .resize(ratatui_image::Resize::Fit(None))
-            .render(rect, f.buffer_mut(), protocol.as_mut());
+        ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None)).render(
+            rect,
+            f.buffer_mut(),
+            protocol.as_mut(),
+        );
     }
 }
 
@@ -2345,7 +2354,10 @@ mod tests {
         assert_eq!(fit_into_free_cells(11, 40, |_, col| col == 39), Some((0, 0, 11, 39)));
         assert_eq!(fit_into_free_cells(11, 40, |_, col| col == 0), Some((0, 1, 11, 39)));
         // Both at once, which is a film inside a bordered pane.
-        assert_eq!(fit_into_free_cells(11, 40, |row, col| row == 0 || col == 39), Some((1, 0, 10, 39)));
+        assert_eq!(
+            fit_into_free_cells(11, 40, |row, col| row == 0 || col == 39),
+            Some((1, 0, 10, 39))
+        );
         // A column standing in the middle is not furniture: it really does cut the picture, and
         // the rows it is on are the rows that go.
         assert_eq!(fit_into_free_cells(11, 40, |_, col| col == 20), None);
@@ -2360,8 +2372,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_film_arrives_as_one_placement_per_frame() {
-        use base64::Engine;
         use crate::pane_graphics::Event;
+        use base64::Engine;
 
         // A 2x1 RGB frame, in a segment named the way mpv names one: created with a leading
         // slash and transmitted without it.
@@ -2407,7 +2419,8 @@ mod tests {
         }
 
         let events = lock_poisoned(&inbox);
-        let deletes = events.iter().filter(|e| matches!(e, Event::Forget { all: true, .. })).count();
+        let deletes =
+            events.iter().filter(|e| matches!(e, Event::Forget { all: true, .. })).count();
         let places = events.iter().filter(|e| matches!(e, Event::Place(_))).count();
         assert_eq!(deletes, 3, "each frame clears the one before it");
         // One placement survives rather than three: the frames are all at the same spot, and a
@@ -2424,8 +2437,7 @@ mod tests {
     /// program that gets it falls back to its own guess rather than to a wrong number.
     #[test]
     fn the_size_questions_are_answered_in_the_units_they_were_asked_in() {
-        let known =
-            PaneMetrics { cursor: (0, 0), size: (24, 80), cell: Some((9, 19)) };
+        let known = PaneMetrics { cursor: (0, 0), size: (24, 80), cell: Some((9, 19)) };
         assert_eq!(TerminalQuery::TextAreaCells.response(known), b"\x1b[8;24;80t".to_vec());
         assert_eq!(TerminalQuery::CellPixels.response(known), b"\x1b[6;19;9t".to_vec());
         assert_eq!(
@@ -2509,7 +2521,10 @@ mod tests {
         assert_eq!(osc.feed(b"\x1b]0;a title\x07"), None);
         assert_eq!(osc.feed(b"\x1b]2;another\x1b\\"), None);
         // And the scanner is still in working order afterwards.
-        assert_eq!(osc.feed(b"\x1b]7;file:///after\x07").as_deref(), Some(std::path::Path::new("/after")));
+        assert_eq!(
+            osc.feed(b"\x1b]7;file:///after\x07").as_deref(),
+            Some(std::path::Path::new("/after"))
+        );
     }
 
     /// A `%` in a path that was never encoded is a literal, and eating it would rename the
@@ -2560,7 +2575,10 @@ mod tests {
     #[test]
     fn one_line_goes_in_and_it_is_the_command() {
         let bytes = typed_line("npm run dev");
-        assert!(bytes.starts_with(LINE_RESET), "the line has to be cleared before anything is typed");
+        assert!(
+            bytes.starts_with(LINE_RESET),
+            "the line has to be cleared before anything is typed"
+        );
         assert_eq!(bytes.iter().filter(|b| **b == b'\r').count(), 1, "one line, submitted once");
         assert!(bytes.ends_with(b"npm run dev\r"));
 
@@ -2577,9 +2595,15 @@ mod tests {
     fn the_unsent_line_never_submits() {
         let danger = "curl -fsSL https://opencode.ai/install | bash";
         let bytes = typed_line_unsent(danger);
-        assert!(bytes.starts_with(LINE_RESET), "the line is still cleared before anything is typed");
+        assert!(
+            bytes.starts_with(LINE_RESET),
+            "the line is still cleared before anything is typed"
+        );
         assert!(!bytes.contains(&b'\r'), "not one carriage return: the Enter is the user's");
-        assert!(bytes.ends_with(danger.as_bytes()), "and the command is all that is left on the line");
+        assert!(
+            bytes.ends_with(danger.as_bytes()),
+            "and the command is all that is left on the line"
+        );
     }
 
     /// The other half of it: a shell is handed nothing at all until it is at a prompt. Writing
@@ -2674,12 +2698,19 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            panic!("{what}; the pane's screen was:\n{}", lock_poisoned(&panel.parser).screen().contents());
+            panic!(
+                "{what}; the pane's screen was:\n{}",
+                lock_poisoned(&panel.parser).screen().contents()
+            );
         };
 
         settle(&mut panel, true, "the shell never reached a prompt at all");
         panel.type_line("cat");
-        settle(&mut panel, false, "a pane running `cat` read as a prompt, so a command would have gone into it");
+        settle(
+            &mut panel,
+            false,
+            "a pane running `cat` read as a prompt, so a command would have gone into it",
+        );
         panel.write_input(&[0x04]); // ^D at the start of a line: end of input, and cat exits
         settle(&mut panel, true, "the shell never read as a prompt again after the program ended");
     }
@@ -2825,8 +2856,8 @@ mod tests {
     /// was missing, so htop's bottom bar and lazygit's panels could be seen but never clicked.
     #[test]
     fn a_button_is_reported_the_way_the_program_asked() {
-        use vt100::MouseProtocolEncoding::{Default, Sgr};
         use MouseAction::{Drag, Press, Release};
+        use vt100::MouseProtocolEncoding::{Default, Sgr};
 
         // SGR: the button number, one-based coordinates, and a final letter that says which way
         // it went — the only encoding that can tell a release from a press at all.
@@ -2840,20 +2871,29 @@ mod tests {
 
         // The old encoding offsets every number by 32, and has one code for "something was
         // released" that never says what.
-        assert_eq!(encode_mouse(Default, BUTTON_LEFT, Press, 0, 0), vec![0x1b, b'[', b'M', 32, 33, 33]);
-        assert_eq!(encode_mouse(Default, BUTTON_RIGHT, Press, 0, 0), vec![0x1b, b'[', b'M', 34, 33, 33]);
+        assert_eq!(
+            encode_mouse(Default, BUTTON_LEFT, Press, 0, 0),
+            vec![0x1b, b'[', b'M', 32, 33, 33]
+        );
+        assert_eq!(
+            encode_mouse(Default, BUTTON_RIGHT, Press, 0, 0),
+            vec![0x1b, b'[', b'M', 34, 33, 33]
+        );
         let released = vec![0x1b, b'[', b'M', 35, 33, 33];
         assert_eq!(encode_mouse(Default, BUTTON_LEFT, Release, 0, 0), released);
         assert_eq!(encode_mouse(Default, BUTTON_RIGHT, Release, 0, 0), released);
-        assert_eq!(encode_mouse(Default, BUTTON_LEFT, Drag, 0, 0), vec![0x1b, b'[', b'M', 64, 33, 33]);
+        assert_eq!(
+            encode_mouse(Default, BUTTON_LEFT, Drag, 0, 0),
+            vec![0x1b, b'[', b'M', 64, 33, 33]
+        );
     }
 
     /// A program gets the kinds of event it asked for and no others. X10 mode wants presses
     /// alone, and a release it never asked for is how a menu ends up opening twice.
     #[test]
     fn a_program_hears_only_the_events_its_mode_has_a_word_for() {
-        use vt100::MouseProtocolMode as Mode;
         use MouseAction::{Drag, Press, Release};
+        use vt100::MouseProtocolMode as Mode;
         for action in [Press, Release, Drag] {
             assert!(!mode_reports(Mode::None, action), "nothing asked for the mouse");
         }
@@ -2969,7 +3009,10 @@ mod tests {
             Some(&b"\x1b[<64;10;5M"[..]),
             "the wheel must be handed to a program that asked for it"
         );
-        assert!(panel.alternate_screen(), "and that is exactly where we have no history of our own");
+        assert!(
+            panel.alternate_screen(),
+            "and that is exactly where we have no history of our own"
+        );
     }
 
     /// What a shell actually needs to receive. Ctrl+letter is the control byte, and an Alt chord
@@ -3070,7 +3113,11 @@ mod tests {
         assert_eq!(forward.ordered(), backward.ordered());
         for row in 0..2 {
             for col in 0..5 {
-                assert_eq!(forward.contains(row, col), backward.contains(row, col), "at {row},{col}");
+                assert_eq!(
+                    forward.contains(row, col),
+                    backward.contains(row, col),
+                    "at {row},{col}"
+                );
             }
         }
     }
@@ -3190,7 +3237,10 @@ mod tests {
 
         parser.screen_mut().set_scrollback(10);
         let parked_on = top_row(&parser);
-        assert!(parked_on.starts_with("line "), "expected to be parked on output, saw {parked_on:?}");
+        assert!(
+            parked_on.starts_with("line "),
+            "expected to be parked on output, saw {parked_on:?}"
+        );
 
         // The shell keeps printing while we read.
         for batch in 0..5 {
@@ -3245,5 +3295,3 @@ mod tests {
         assert!(held_lines(&mut parser) > 0, "the real screen keeps its history");
     }
 }
-
-

@@ -540,8 +540,12 @@ fn probe() -> [bool; 4] {
 /// next time that file is opened.
 pub fn msg_install_typed(lang: Lang, agent: &str, command: &str) -> String {
     match lang {
-        Lang::En => format!("{agent} is not installed — `{command}` is at a shell prompt, unsent. Enter is yours."),
-        Lang::It => format!("{agent} non è installato — `{command}` è al prompt di una shell, non inviato. L'Invio è tuo."),
+        Lang::En => format!(
+            "{agent} is not installed — `{command}` is at a shell prompt, unsent. Enter is yours."
+        ),
+        Lang::It => format!(
+            "{agent} non è installato — `{command}` è al prompt di una shell, non inviato. L'Invio è tuo."
+        ),
     }
 }
 
@@ -549,8 +553,12 @@ pub fn msg_install_typed(lang: Lang, agent: &str, command: &str) -> String {
 /// free — and it still has to say the command, or the offer was worth nothing.
 pub fn msg_install_no_shell(lang: Lang, agent: &str, command: &str) -> String {
     match lang {
-        Lang::En => format!("{agent} is not installed — no shell to type into. Install it with: {command}"),
-        Lang::It => format!("{agent} non è installato — nessuna shell in cui scrivere. Installalo con: {command}"),
+        Lang::En => {
+            format!("{agent} is not installed — no shell to type into. Install it with: {command}")
+        }
+        Lang::It => format!(
+            "{agent} non è installato — nessuna shell in cui scrivere. Installalo con: {command}"
+        ),
     }
 }
 
@@ -657,7 +665,12 @@ mod tests {
         assert!(coral(Agent::Claude), "Clawd is Anthropic's coral");
         assert!(!coral(Agent::Codex), "and nobody else's mark is");
         let inks = |agent| {
-            art(agent).into_iter().flatten().flat_map(|c| [c.fg, c.bg]).flatten().collect::<Vec<_>>()
+            art(agent)
+                .into_iter()
+                .flatten()
+                .flat_map(|c| [c.fg, c.bg])
+                .flatten()
+                .collect::<Vec<_>>()
         };
         assert!(inks(Agent::Claude).contains(&CLAWD_EYE), "the eyes are what make it Clawd");
         let word = inks(Agent::OpenCode);
@@ -811,7 +824,10 @@ mod tests {
         assert!(!drawer.choosing);
         assert!(drawer.showing_launcher(), "and the launcher is showing for the plain reason");
         drawer.stop_choosing();
-        assert!(drawer.showing_launcher(), "with nothing to go back to, cancelling changes nothing");
+        assert!(
+            drawer.showing_launcher(),
+            "with nothing to go back to, cancelling changes nothing"
+        );
         assert_eq!(drawer.highlighted(), Agent::Codex);
     }
 }

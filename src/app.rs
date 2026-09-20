@@ -9,15 +9,15 @@ use crate::i18n::{self, Key, Lang};
 use crate::keymap::Action as KeyAction;
 use crate::menu::{ContextMenu, ContextTarget, MenuAction, MenuBar};
 use crate::settings::{self, Settings};
-use crate::terminal_panel::{self, key_to_bytes, MouseAction, TerminalPanel, TerminalWindow};
+use crate::terminal_panel::{self, MouseAction, TerminalPanel, TerminalWindow, key_to_bytes};
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const SPLASH_DURATION: Duration = Duration::from_millis(1800);
@@ -106,7 +106,10 @@ pub fn is_python_ext(ext: &str) -> bool {
 ///
 /// A free function so the index-to-action mapping a click relies on can be tested without
 /// standing up an App (which would need real ptys).
-#[allow(clippy::too_many_arguments, reason = "one row list, and every argument is a source of rows")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one row list, and every argument is a source of rows"
+)]
 fn run_rows(
     ext: &str,
     active: Option<&str>,
@@ -363,8 +366,7 @@ fn agent_span(editor: &Editor, line: usize, end_line: usize) -> (usize, usize) {
     let from = (from - 1).min(last);
     let to = (to - 1).min(last);
     let start = editor.rope.line_to_char(from);
-    let end =
-        if to < last { editor.rope.line_to_char(to + 1) } else { editor.rope.len_chars() };
+    let end = if to < last { editor.rope.line_to_char(to + 1) } else { editor.rope.len_chars() };
     (start, end)
 }
 
@@ -1386,9 +1388,9 @@ impl SelectionWalk {
         spans: Vec<(usize, usize)>,
         here: (usize, usize),
     ) -> Option<SelectionWalk> {
-        let at = spans
-            .iter()
-            .position(|&(start, end)| start <= here.0 && end >= here.1 && (start, end) != here && end > start)?;
+        let at = spans.iter().position(|&(start, end)| {
+            start <= here.0 && end >= here.1 && (start, end) != here && end > start
+        })?;
         let selected = spans[at];
         Some(SelectionWalk { path, revision, spans, at, selected })
     }
@@ -1593,8 +1595,11 @@ impl ReplaceSweep {
     /// How many of the files take each road. Two numbers rather than one because they are two
     /// different promises to the reader: the buffers can be undone and the disk cannot.
     fn split(&self) -> (usize, usize) {
-        let buffers =
-            self.files.iter().filter(|f| matches!(f.target, SweepTarget::OpenBuffer { .. })).count();
+        let buffers = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.target, SweepTarget::OpenBuffer { .. }))
+            .count();
         (buffers, self.files.len() - buffers)
     }
 }
@@ -1630,8 +1635,12 @@ pub enum GitText {
     /// to add one forgotten file is how a commit loses the sentence that explained it.
     Amend,
     /// A new branch, starting at a commit picked out of the graph or at HEAD when `at` is none.
-    Branch { at: Option<String> },
-    Tag { at: String },
+    Branch {
+        at: Option<String>,
+    },
+    Tag {
+        at: String,
+    },
     Stash,
 }
 
@@ -1642,7 +1651,10 @@ pub enum GitConfirm {
     Discard(crate::git::Change),
     DeleteBranch(String),
     /// Moving the branch to an older commit and making the working tree match it.
-    ResetHard { hash: String, subject: String },
+    ResetHard {
+        hash: String,
+        subject: String,
+    },
     DropStash(String),
 }
 
@@ -1709,11 +1721,7 @@ fn spawn_git_status_refresh(
 /// Name of the directory holding a virtualenv's executables: `Scripts` on Windows,
 /// `bin` everywhere else. Keeps venv discovery and the interpreter swap portable.
 pub fn venv_bin_dir() -> &'static str {
-    if cfg!(windows) {
-        "Scripts"
-    } else {
-        "bin"
-    }
+    if cfg!(windows) { "Scripts" } else { "bin" }
 }
 
 /// Top-level subdirectories of `root` that look like Python virtualenvs (they carry an
@@ -1759,7 +1767,10 @@ fn discover_venvs(root: &std::path::Path) -> Vec<String> {
 
 /// The venvs offered by the selector: those auto-discovered in `root`, plus every
 /// still-existing user-registered absolute path (deduplicated, registered ones last).
-fn available_venvs(root: &std::path::Path, registered: &[crate::settings::RegisteredVenv]) -> Vec<String> {
+fn available_venvs(
+    root: &std::path::Path,
+    registered: &[crate::settings::RegisteredVenv],
+) -> Vec<String> {
     let mut venvs = discover_venvs(root);
     for r in registered {
         let path = r.path().to_string();
@@ -1773,9 +1784,7 @@ fn available_venvs(root: &std::path::Path, registered: &[crate::settings::Regist
 /// Orders version-bearing directory names numerically, so `Octave-10.1.0` ranks above
 /// `Octave-9.2.0` — plain string ordering would pick the older one.
 fn version_key(name: &str) -> Vec<u64> {
-    name.split(|c: char| !c.is_ascii_digit())
-        .filter_map(|s| s.parse().ok())
-        .collect()
+    name.split(|c: char| !c.is_ascii_digit()).filter_map(|s| s.parse().ok()).collect()
 }
 
 /// Finds the Octave console binary under a Windows `Program Files` directory, where it sits
@@ -1785,12 +1794,8 @@ fn version_key(name: &str) -> Vec<u64> {
 /// Octave comes from a package manager and is already on PATH).
 fn discover_octave(program_files: Option<&std::path::Path>) -> Option<PathBuf> {
     let base = program_files?.join("GNU Octave");
-    let mut installs: Vec<PathBuf> = std::fs::read_dir(&base)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut installs: Vec<PathBuf> =
+        std::fs::read_dir(&base).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     installs.sort_by_key(|p| version_key(&p.file_name().unwrap_or_default().to_string_lossy()));
     installs.reverse();
     installs.into_iter().find_map(|install| {
@@ -1812,11 +1817,8 @@ fn resolve_interpreter(
     program_files: Option<&std::path::Path>,
 ) -> String {
     let (program, rest) = template.split_once(' ').unwrap_or((template, ""));
-    let resolved = interpreter_paths
-        .get(program)
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| {
+    let resolved =
+        interpreter_paths.get(program).map(PathBuf::from).filter(|p| p.exists()).or_else(|| {
             matches!(program, "octave" | "octave-cli")
                 .then(|| discover_octave(program_files))
                 .flatten()
@@ -1834,11 +1836,7 @@ fn resolve_interpreter(
 /// verbatim and never finds — the interpreter was resolved correctly and then handed over
 /// unusable.
 fn shell_quote(text: &str) -> String {
-    if cfg!(windows) {
-        quote_for_cmd(text)
-    } else {
-        shell_words::quote(text).into_owned()
-    }
+    if cfg!(windows) { quote_for_cmd(text) } else { shell_words::quote(text).into_owned() }
 }
 
 /// Double quotes are what cmd.exe understands, and inside them a backslash is just a backslash
@@ -2328,7 +2326,11 @@ fn skipped_component(name: &str, show_hidden: bool) -> bool {
 /// out is this project's idiom for asking git anything, and it is the reason no dependency here
 /// has to grow its own ignore-file dialect. Anything else — not a repo, no git installed, a git
 /// that failed — falls back to the walk.
-pub fn collect_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) -> bool {
+pub fn collect_project_files(
+    root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    show_hidden: bool,
+) -> bool {
     if let Some(truncated) = git_project_files(root, out, show_hidden) {
         return truncated;
     }
@@ -2346,7 +2348,11 @@ fn file_picker_title(lang: Lang, truncated: bool) -> &'static str {
 
 /// The file list as git sees it: everything tracked plus everything untracked that is not
 /// ignored. `None` when git could not answer, which is the caller's cue to walk the tree.
-fn git_project_files(root: &std::path::Path, out: &mut Vec<PathBuf>, show_hidden: bool) -> Option<bool> {
+fn git_project_files(
+    root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    show_hidden: bool,
+) -> Option<bool> {
     let listed = std::process::Command::new("git")
         .current_dir(root)
         .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
@@ -2464,9 +2470,13 @@ pub enum DragTarget {
     /// A drag born from a double-click: the selection grows by whole words, and the word the
     /// press landed on stays selected whichever way the pointer goes — so it is carried here as
     /// the pair of positions bounding it, not re-derived from an anchor the drag keeps moving.
-    WordSelection { anchor: ((usize, usize), (usize, usize)) },
+    WordSelection {
+        anchor: ((usize, usize), (usize, usize)),
+    },
     /// A drag born from a triple-click: whole lines, from the one the press landed on.
-    LineSelection { anchor: usize },
+    LineSelection {
+        anchor: usize,
+    },
     /// Selecting text inside an embedded terminal, in the pane the drag started in.
     TerminalSelection(usize),
     /// A button held down over a pane whose program asked for the mouse: the pane's index and the
@@ -2493,7 +2503,9 @@ pub enum DragTarget {
     /// tolerance, and here the cell to the right is the agent's own pane and the one to the left
     /// belongs to whatever frame the drawer is standing next to. Closing the drawer from either
     /// would be a click landing on something the user was not pointing at.
-    DrawerEdgePress { on_handle: bool },
+    DrawerEdgePress {
+        on_handle: bool,
+    },
     /// A text selection being dragged inside the drawer's pane. No index: there is only one.
     DrawerSelection,
     /// A button the drawer's agent was told went down, and has to be told came back up.
@@ -2505,7 +2517,11 @@ pub enum DragTarget {
     /// left alone; `start` is the cell the press landed on and `from` the scroll offsets it began
     /// at, so each motion sets an absolute position from the press rather than accumulating the
     /// rounding of one step at a time.
-    PreviewPan { idx: usize, start: (u16, u16), from: (u32, u32) },
+    PreviewPan {
+        idx: usize,
+        start: (u16, u16),
+        from: (u32, u32),
+    },
 }
 
 /// Which scrollbar a click, a drag or the pointer is on. A frame plus an axis is enough to name
@@ -2712,14 +2728,11 @@ pub fn agent_precedence(
     terminal_running: Option<(usize, crate::session::Agent)>,
     terminal_declared: Option<(usize, crate::session::Agent)>,
 ) -> Option<(AgentPane, crate::session::Agent)> {
-    drawer_running
-        .or(drawer_declared)
-        .map(|agent| (AgentPane::Drawer, agent))
-        .or_else(|| {
-            terminal_running
-                .or(terminal_declared)
-                .map(|(index, agent)| (AgentPane::Terminal(index), agent))
-        })
+    drawer_running.or(drawer_declared).map(|agent| (AgentPane::Drawer, agent)).or_else(|| {
+        terminal_running
+            .or(terminal_declared)
+            .map(|(index, agent)| (AgentPane::Terminal(index), agent))
+    })
 }
 
 /// The frame that lies in the given direction, or `None` at the edge of the window.
@@ -2775,8 +2788,11 @@ pub fn focus_neighbour(l: &ResizeLayout, side: ResizeSide) -> Option<FocusTarget
             // leave the panel for whatever is next to it.
             let (prev, next) = if l.terminal_on_right { (Up, Down) } else { (Left, Right) };
             let leave = if l.terminal_on_right { Left } else { Up };
-            let back_to_editor =
-                Some(FocusTarget::Editor(if l.split_view { EditorPane::Right } else { EditorPane::Left }));
+            let back_to_editor = Some(FocusTarget::Editor(if l.split_view {
+                EditorPane::Right
+            } else {
+                EditorPane::Left
+            }));
             match side {
                 s if s == prev => l.terminal_index.checked_sub(1).map(FocusTarget::Terminal),
                 // Past the last window along the tiling axis there is the drawer, or the window
@@ -2853,7 +2869,9 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
             // The sidebar's right edge is the sidebar↔editor seam; growing widens the sidebar.
             Right => Some(ResizeCmd::Sidebar(s * SIDEBAR_STEP)),
             // Its bottom edge only meets a seam when the terminal is a full-width strip below.
-            Down if l.show_terminal && !l.terminal_on_right => Some(ResizeCmd::Terminal(-s * TERMINAL_STEP)),
+            Down if l.show_terminal && !l.terminal_on_right => {
+                Some(ResizeCmd::Terminal(-s * TERMINAL_STEP))
+            }
             _ => None,
         },
         Focus::Terminal => {
@@ -2873,7 +2891,8 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
                 // The seam is named by the window on its left/top, so which one that is
                 // depends on the direction — and which way its weight has to move for the
                 // *focused* window to grow.
-                let seam = if toward_next { l.terminal_index } else { l.terminal_index.checked_sub(1)? };
+                let seam =
+                    if toward_next { l.terminal_index } else { l.terminal_index.checked_sub(1)? };
                 if seam + 1 >= l.terminal_count {
                     // Past the last window there is no neighbour to trade weight with — but in
                     // the classic layout the strip's right end is the drawer's seam, and that
@@ -2921,7 +2940,9 @@ pub fn resize_command(l: &ResizeLayout, side: ResizeSide, grow: bool) -> Option<
                 (true, false, false, true)
             };
             match side {
-                Left if sidebar_left && l.show_sidebar => Some(ResizeCmd::Sidebar(-s * SIDEBAR_STEP)),
+                Left if sidebar_left && l.show_sidebar => {
+                    Some(ResizeCmd::Sidebar(-s * SIDEBAR_STEP))
+                }
                 Left if split_left => Some(ResizeCmd::Split(-s * SPLIT_STEP)),
                 Right if split_right => Some(ResizeCmd::Split(s * SPLIT_STEP)),
                 Right if terminal_far && l.show_terminal && l.terminal_on_right => {
@@ -3095,9 +3116,15 @@ pub struct DebugSession {
     /// [`App::open_debug_start`] — so nothing reads these two yet, which is why the compiler is
     /// told so here rather than left to warn about a field somebody would then be tempted to
     /// delete and have to invent again.
-    #[allow(dead_code, reason = "a restart re-sends them, and the prompt will grow to ask for them")]
+    #[allow(
+        dead_code,
+        reason = "a restart re-sends them, and the prompt will grow to ask for them"
+    )]
     args: Vec<String>,
-    #[allow(dead_code, reason = "a restart re-sends them, and the prompt will grow to ask for them")]
+    #[allow(
+        dead_code,
+        reason = "a restart re-sends them, and the prompt will grow to ask for them"
+    )]
     cwd: PathBuf,
     /// The thread the debuggee is stopped on, which is the thread every step names. `None` while
     /// it runs — which is also what makes "not stopped" a question this can answer honestly
@@ -3545,7 +3572,11 @@ fn cargo_package_name(text: &str) -> Option<String> {
 /// and the refusal that follows names it rather than starting something at random.
 fn debuggee_for(root: &Path, remembered: Option<&Path>) -> PathBuf {
     if let Some(remembered) = remembered {
-        return if remembered.is_absolute() { remembered.to_path_buf() } else { root.join(remembered) };
+        return if remembered.is_absolute() {
+            remembered.to_path_buf()
+        } else {
+            root.join(remembered)
+        };
     }
     if let Some(name) = std::fs::read_to_string(root.join("Cargo.toml"))
         .ok()
@@ -3562,7 +3593,10 @@ fn debuggee_for(root: &Path, remembered: Option<&Path>) -> PathBuf {
         // Windows answers every correctly built Rust project with the sentence reserved for a
         // program nobody has compiled yet, and the prefill in the box names the wrong file while
         // it does so.
-        return root.join("target").join("debug").join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        return root
+            .join("target")
+            .join("debug")
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     }
     root.to_path_buf()
 }
@@ -3645,7 +3679,11 @@ fn within(r: Rect, x: u16, y: u16) -> bool {
 ///
 /// A query ending in a separator lists that directory whole; otherwise the last component is
 /// treated as what the user is partway through typing.
-fn path_query(query: &str, root: &std::path::Path, home: Option<&std::path::Path>) -> Option<(PathBuf, String)> {
+fn path_query(
+    query: &str,
+    root: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Option<(PathBuf, String)> {
     let trimmed = query.trim_start();
     let base: PathBuf = if let Some(rest) = trimmed.strip_prefix("~/") {
         home?.join(rest)
@@ -3677,7 +3715,8 @@ fn venv_browse_items(dir: &std::path::Path) -> Vec<crate::picker::PickItem> {
         .into_iter()
         .filter(|p| p.is_dir())
         .map(|path| {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name =
+                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             crate::picker::PickItem {
                 label: format!("{name}/"),
                 shortcut: is_venv_dir(&path).then(|| "venv".to_string()),
@@ -3711,7 +3750,11 @@ fn list_dir_entries(dir: &std::path::Path, show_hidden: bool) -> Vec<PathBuf> {
 /// off the project root, an absolute one is taken as it is, and `~` is expanded — the box is
 /// typed by hand, so a home-relative path is a reasonable thing to write. `None` for a name
 /// that is only whitespace.
-fn resolve_save_as_path(input: &str, root: &std::path::Path, home: Option<&std::path::Path>) -> Option<PathBuf> {
+fn resolve_save_as_path(
+    input: &str,
+    root: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
@@ -3781,7 +3824,7 @@ fn is_attached_to_what_precedes_it(c: char) -> bool {
         | 0x1DC0..=0x1DFF    // …supplement
         | 0x20D0..=0x20FF    // …for symbols, including the enclosing keycap
         | 0xFE00..=0xFE0F    // variation selectors
-        | 0xFE20..=0xFE2F)   // combining half marks
+        | 0xFE20..=0xFE2F) // combining half marks
 }
 
 /// Which single-line box is taking typing right now.
@@ -4080,7 +4123,8 @@ impl App {
             t.hurried = t.hurried.saturating_add(1);
             scold = t.hurried == TURTLE_PATIENCE;
         } else {
-            self.turtle = Some(Turtle { started: Instant::now(), nudged: 0, hurried: 0, displaced: None });
+            self.turtle =
+                Some(Turtle { started: Instant::now(), nudged: 0, hurried: 0, displaced: None });
         }
         if scold {
             let was = std::mem::replace(
@@ -4177,8 +4221,7 @@ impl App {
                         Some(_) => self.update_prompt = Some((version, method)),
                         None if asked => self.update_answer = Some(UpdateAnswer::Found(version)),
                         None => {
-                            self.status_message =
-                                i18n::msg_update_available(lang, &version, None);
+                            self.status_message = i18n::msg_update_available(lang, &version, None);
                         }
                     }
                 }
@@ -4664,7 +4707,8 @@ impl App {
         // The git panel's own boxes: a message or a name takes the text, and the one-letter
         // questions and the lists behind them take nothing.
         if let Some(panel) = self.git_panel.as_ref() {
-            return matches!(panel.prompt, Some(GitPrompt::Text { .. })).then_some(ModalTextField::GitPrompt);
+            return matches!(panel.prompt, Some(GitPrompt::Text { .. }))
+                .then_some(ModalTextField::GitPrompt);
         }
         // The inspector, the manual, resize mode, the settings page and the menu bar all read
         // keys as commands. There is nowhere for a sentence to go in any of them.
@@ -4690,9 +4734,7 @@ impl App {
         let ssh_target = if paths.is_empty() {
             None
         } else {
-            self.focused_panel()
-                .and_then(|t| t.child_pid())
-                .and_then(dnd::detect_ssh_target)
+            self.focused_panel().and_then(|t| t.child_pid()).and_then(dnd::detect_ssh_target)
         };
         if let Some(target) = ssh_target {
             self.status_message = i18n::msg_scp_confirm(lang, paths.len(), &target);
@@ -4836,8 +4878,7 @@ impl App {
         // And the keyboard leaves with the file: an editor with no buffer that still held the
         // focus would swallow every keystroke into a buffer nobody can see.
         if self.focus == Focus::Editor {
-            self.focus =
-                empty_state_focus(self.settings.show_sidebar, self.settings.show_terminal);
+            self.focus = empty_state_focus(self.settings.show_sidebar, self.settings.show_terminal);
         }
     }
 
@@ -4984,7 +5025,11 @@ impl App {
         // for that half it is most of what it is for: the folder a build or an agent is working in
         // is precisely the one somebody is watching.
         self.shell_list.refresh();
-        spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
+        spawn_git_status_refresh(
+            self.root.clone(),
+            self.git_status_tx.clone(),
+            self.git_status_pending.clone(),
+        );
     }
 
     /// Copies every changed unsaved buffer into the recovery directory, a few seconds at a time.
@@ -5088,9 +5133,7 @@ impl App {
                 let name = match &entry.original {
                     // Relative to the project, like every other list of files here: the absolute
                     // path is the same forty characters on every row and says nothing.
-                    Some(path) => {
-                        path.strip_prefix(&root).unwrap_or(path).display().to_string()
-                    }
+                    Some(path) => path.strip_prefix(&root).unwrap_or(path).display().to_string(),
                     None => i18n::t(lang, Key::UntitledFile).to_string(),
                 };
                 let age = i18n::msg_recovery_age(
@@ -5159,10 +5202,8 @@ impl App {
                 let idx = self.adopt_editor(editor);
                 self.place_in_pane(self.editor_pane_focus, idx);
                 self.focus = Focus::Editor;
-                self.status_message = i18n::msg_recovery_restored(
-                    lang,
-                    i18n::t(lang, Key::UntitledFile),
-                );
+                self.status_message =
+                    i18n::msg_recovery_restored(lang, i18n::t(lang, Key::UntitledFile));
                 let _ = std::fs::remove_file(&entry.file);
                 return;
             }
@@ -5254,7 +5295,8 @@ impl App {
         if !path.is_file() {
             return false;
         }
-        if self.editors.iter().any(|e| e.path.as_deref().is_some_and(|open| same_file(open, path))) {
+        if self.editors.iter().any(|e| e.path.as_deref().is_some_and(|open| same_file(open, path)))
+        {
             return false;
         }
         // Something that would be *run* rather than opened: a PDF with a viewer configured goes
@@ -5352,13 +5394,13 @@ impl App {
                     // call; finding out whether that pid has an ssh under it is a snapshot of
                     // every process on the machine, and this runs every second or so for as long
                     // as a zsh pane is on screen.
-                    let known = self
-                        .shell_asked
-                        .as_ref()
-                        .is_some_and(|(pane, seen, _)| Some(*pane) == self.shell_source && seen == &dir);
+                    let known = self.shell_asked.as_ref().is_some_and(|(pane, seen, _)| {
+                        Some(*pane) == self.shell_source && seen == &dir
+                    });
                     if !known {
                         let remote = dnd::detect_ssh_target(pid).is_some();
-                        self.shell_asked = self.shell_source.map(|pane| (pane, dir.clone(), remote));
+                        self.shell_asked =
+                            self.shell_source.map(|pane| (pane, dir.clone(), remote));
                     }
                     let remote = self.shell_asked.as_ref().is_some_and(|(_, _, remote)| *remote);
                     if !remote {
@@ -5414,7 +5456,8 @@ impl App {
             self.status_message = i18n::msg_no_shell_folder(self.settings.lang).to_string();
             return;
         };
-        let Some(pid) = self.terminals.get(window).and_then(|w| w.tabs.get(tab)).and_then(|p| p.child_pid())
+        let Some(pid) =
+            self.terminals.get(window).and_then(|w| w.tabs.get(tab)).and_then(|p| p.child_pid())
         else {
             return;
         };
@@ -5912,14 +5955,12 @@ impl App {
             .iter()
             .filter(|(file, _)| crate::session::Language::of_path(file).is_some())
             .flat_map(|(file, lines)| {
-                let name = file
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name =
+                    file.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let full = file.to_string_lossy().into_owned();
-                lines.iter().map(move |line| {
-                    serde_json::json!({"name": name, "path": full, "line": line})
-                })
+                lines
+                    .iter()
+                    .map(move |line| serde_json::json!({"name": name, "path": full, "line": line}))
             })
             .collect();
         let temp = path.with_extension("tmp");
@@ -5969,7 +6010,10 @@ impl App {
     }
 
     /// The breakpoints on a file, for the renderer.
-    pub fn breakpoints_in(&self, path: Option<&Path>) -> Option<&std::collections::BTreeSet<usize>> {
+    pub fn breakpoints_in(
+        &self,
+        path: Option<&Path>,
+    ) -> Option<&std::collections::BTreeSet<usize>> {
         self.breakpoints.get(path?)
     }
 
@@ -6348,7 +6392,8 @@ impl App {
         };
         let program = self.debuggee_to_run();
         if !program.is_file() {
-            self.status_message = i18n::msg_debugger_no_debuggee(lang, &self.debuggee_name(&program));
+            self.status_message =
+                i18n::msg_debugger_no_debuggee(lang, &self.debuggee_name(&program));
             return;
         }
         let cwd = self.root.clone();
@@ -6373,7 +6418,8 @@ impl App {
         // until the program stops, and that is the point: it says "running…" while the program
         // runs, so the first breakpoint hit lands somewhere the reader is already looking.
         self.show_debug_panel();
-        self.status_message = i18n::msg_debugger_started(lang, &adapter.name(), &self.debuggee_name(&program));
+        self.status_message =
+            i18n::msg_debugger_started(lang, &adapter.name(), &self.debuggee_name(&program));
     }
 
     /// Ends the session, taking the debuggee with it.
@@ -6723,7 +6769,8 @@ impl App {
     fn drop_selected_watch(&mut self) {
         let lang = self.settings.lang;
         let rows = self.debug_rows();
-        let Some(DebugRowKind::Watch { index }) = rows.get(self.debug_panel.selected).map(|r| r.kind.clone())
+        let Some(DebugRowKind::Watch { index }) =
+            rows.get(self.debug_panel.selected).map(|r| r.kind.clone())
         else {
             return;
         };
@@ -6853,7 +6900,8 @@ impl App {
         // Written beside and renamed, like everything else on this channel, so the reader on the
         // other side never sees half a question.
         let temp = path.with_extension("tmp");
-        let written = std::fs::write(&temp, request.to_string()).and_then(|_| std::fs::rename(&temp, &path));
+        let written =
+            std::fs::write(&temp, request.to_string()).and_then(|_| std::fs::rename(&temp, &path));
         if written.is_err() {
             self.status_message = i18n::msg_inspect_no_session(self.settings.lang);
             return;
@@ -6874,12 +6922,8 @@ impl App {
 
     fn handle_inspector_key(&mut self, key: KeyEvent) {
         let Some(inspector) = self.inspector.as_ref() else { return };
-        let (rows, cols) = inspector
-            .watch
-            .slice
-            .as_ref()
-            .map(|s| (s.rows, s.cols))
-            .unwrap_or((0, 0));
+        let (rows, cols) =
+            inspector.watch.slice.as_ref().map(|s| (s.rows, s.cols)).unwrap_or((0, 0));
         let (mut row, mut col) = (inspector.row, inspector.col);
         match key.code {
             KeyCode::Esc => {
@@ -6920,7 +6964,9 @@ impl App {
         let again = self
             .last_terminal_click
             .map(|(was_pane, was_row, when)| {
-                was_pane == pane && was_row == row && now.duration_since(when) < DOUBLE_CLICK_THRESHOLD
+                was_pane == pane
+                    && was_row == row
+                    && now.duration_since(when) < DOUBLE_CLICK_THRESHOLD
             })
             .unwrap_or(false);
         self.last_terminal_click = Some((pane, row, now));
@@ -6962,11 +7008,13 @@ impl App {
         // A URL that parses as a `path:line` — `http://localhost:3000` reads as the file
         // "http://localhost" at line 3000 — is a URL all the same, and not a file worth going
         // to look for.
-        let location = crate::locate::find(&text).filter(|at| !crate::locate::is_http_url(&at.path));
+        let location =
+            crate::locate::find(&text).filter(|at| !crate::locate::is_http_url(&at.path));
         if let Some(at) = &location
             && let Some(path) = crate::locate::resolve(at, &self.root)
         {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name =
+                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.open_file_at(path, at.line.saturating_sub(1), at.column.saturating_sub(1));
             self.status_message = i18n::msg_jumped_to(lang, &name, at.line);
             return true;
@@ -7042,9 +7090,7 @@ impl App {
         let (debug, figures): (crate::wsnap::Debug, Vec<PathBuf>) = watch
             .snapshot
             .as_ref()
-            .map(|s| {
-                (s.debug.clone(), s.figures.iter().map(|f| PathBuf::from(&f.path)).collect())
-            })
+            .map(|s| (s.debug.clone(), s.figures.iter().map(|f| PathBuf::from(&f.path)).collect()))
             .unwrap_or_default();
         if fresh {
             // A new snapshot moves the workspace view, the variables pane and whatever the
@@ -7184,8 +7230,11 @@ impl App {
     /// decision about one picture, and a resize is no reason to overrule it.
     pub fn refit_previews(&mut self) {
         for idx in self.on_screen_editors().into_iter().flatten() {
-            let stale =
-                self.editors.get(idx).and_then(|e| e.preview.as_ref()).is_some_and(|p| p.needs_refit());
+            let stale = self
+                .editors
+                .get(idx)
+                .and_then(|e| e.preview.as_ref())
+                .is_some_and(|p| p.needs_refit());
             if !stale {
                 continue;
             }
@@ -7288,7 +7337,10 @@ impl App {
     /// A figure tab is an ordinary picture tab in every way but this: it has an interpreter
     /// behind it that can be asked to draw it again differently. That is what the keys below
     /// need to know, and it is the only thing that distinguishes the two.
-    fn figure_for(&self, path: Option<&Path>) -> Option<(crate::wsnap::Figure, crate::session::Language)> {
+    fn figure_for(
+        &self,
+        path: Option<&Path>,
+    ) -> Option<(crate::wsnap::Figure, crate::session::Language)> {
         let path = path?.to_string_lossy().into_owned();
         // The session the panel is showing first, because it is already in memory and it is the
         // right answer nearly always.
@@ -7305,11 +7357,10 @@ impl App {
         // no session as far as this was concerned, and its keys fell through to the picture and
         // scrolled it. Which is indistinguishable, from the outside, from controls that do not
         // exist. A handful of small files, read only when a key is pressed on a figure tab.
-        let (figure, lang) = held
-            .or_else(|| {
-                crate::wsnap::figure_owner(&crate::wsnap::snapshot_dir(), &path)
-                    .map(|(figure, snapshot)| (figure, snapshot.lang))
-            })?;
+        let (figure, lang) = held.or_else(|| {
+            crate::wsnap::figure_owner(&crate::wsnap::snapshot_dir(), &path)
+                .map(|(figure, snapshot)| (figure, snapshot.lang))
+        })?;
         let language = match lang.as_str() {
             "python" => crate::session::Language::Python,
             _ => crate::session::Language::Octave,
@@ -7353,7 +7404,9 @@ impl App {
         let axes = figure.axes.first();
         let is3d = axes.map(|a| a.is3d).unwrap_or(false);
         let view = axes
-            .map(|a| (a.view.first().copied().unwrap_or(0.0), a.view.get(1).copied().unwrap_or(90.0)))
+            .map(|a| {
+                (a.view.first().copied().unwrap_or(0.0), a.view.get(1).copied().unwrap_or(90.0))
+            })
             .unwrap_or((0.0, 90.0));
         let nav = match key.code {
             KeyCode::Char('+') | KeyCode::Char('=') => Nav::In,
@@ -7407,7 +7460,8 @@ impl App {
         if !path.exists() {
             return;
         }
-        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        let was =
+            (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
         if !self.split_view && self.last_full.width >= SPLIT_FOR_FIGURES_COLS {
             self.toggle_split_view();
         }
@@ -7465,8 +7519,12 @@ impl App {
     /// where it happens to have been started, not where the editor is. The language server client
     /// keeps its own translation table for exactly this reason.
     fn mcp_state(&self) -> crate::mcp::State {
-        let open_files: Vec<String> =
-            self.editors.iter().filter_map(|e| e.path.as_deref()).map(|p| self.mcp_path(p)).collect();
+        let open_files: Vec<String> = self
+            .editors
+            .iter()
+            .filter_map(|e| e.path.as_deref())
+            .map(|p| self.mcp_path(p))
+            .collect();
         // The same paths, formatted the same way, in the same order — a subset an agent can
         // compare against the list above rather than a second list it has to reconcile with it.
         let dirty_files = self
@@ -7522,21 +7580,18 @@ impl App {
             .iter()
             .enumerate()
             .flat_map(|(window_index, window)| {
-                let labels =
-                    crate::ui::terminal_tab_labels(window, window_index + 1, lang);
-                window.tabs.iter().enumerate().map(move |(tab_index, tab)| {
-                    crate::mcp::Terminal {
-                        id: format!("{}.{}", window_index + 1, tab_index + 1),
-                        name: labels
-                            .get(tab_index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("Terminal {}", window_index + 1)),
-                        cwd: tab.cwd().map(|dir| dir.to_string_lossy().into_owned()),
-                        at_prompt: tab.is_at_prompt(),
-                        active: focused
-                            && window_index == self.active_terminal
-                            && tab_index == window.active,
-                    }
+                let labels = crate::ui::terminal_tab_labels(window, window_index + 1, lang);
+                window.tabs.iter().enumerate().map(move |(tab_index, tab)| crate::mcp::Terminal {
+                    id: format!("{}.{}", window_index + 1, tab_index + 1),
+                    name: labels
+                        .get(tab_index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Terminal {}", window_index + 1)),
+                    cwd: tab.cwd().map(|dir| dir.to_string_lossy().into_owned()),
+                    at_prompt: tab.is_at_prompt(),
+                    active: focused
+                        && window_index == self.active_terminal
+                        && tab_index == window.active,
                 })
             })
             .collect()
@@ -7546,8 +7601,7 @@ impl App {
     /// really there. A path that resolves to nothing — a buffer whose file has been deleted —
     /// still goes out absolute rather than being dropped.
     fn mcp_path(&self, path: &Path) -> String {
-        let absolute =
-            if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) };
+        let absolute = if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) };
         std::fs::canonicalize(&absolute).unwrap_or(absolute).to_string_lossy().into_owned()
     }
 
@@ -7572,7 +7626,8 @@ impl App {
                 let path = self.mcp_resolve(&path);
                 self.show_beside_without_focus(path.clone(), line, end_line, BesideLayout::Keep);
                 if path.is_file() {
-                    self.status_message = i18n::msg_agent_opened(lang, &self.mcp_short(&path), line);
+                    self.status_message =
+                        i18n::msg_agent_opened(lang, &self.mcp_short(&path), line);
                 }
             }
             crate::mcp::Request::Preview { path } => {
@@ -7624,8 +7679,7 @@ impl App {
         submit: bool,
     ) -> crate::mcp::Reply {
         let lang = self.settings.lang;
-        let refuse =
-            |message: String| crate::mcp::Reply { id, ok: false, message };
+        let refuse = |message: String| crate::mcp::Reply { id, ok: false, message };
         let Some((window_index, tab_index)) = self.find_agent_terminal(terminal) else {
             return refuse(crate::mcp::no_such_terminal(terminal, &self.mcp_terminals()));
         };
@@ -7635,10 +7689,8 @@ impl App {
             .find(|t| t.id == format!("{}.{}", window_index + 1, tab_index + 1))
             .map(|t| t.name)
             .unwrap_or_default();
-        let Some(tab) = self
-            .terminals
-            .get_mut(window_index)
-            .and_then(|window| window.tabs.get_mut(tab_index))
+        let Some(tab) =
+            self.terminals.get_mut(window_index).and_then(|window| window.tabs.get_mut(tab_index))
         else {
             return refuse(crate::mcp::no_such_terminal(terminal, &[]));
         };
@@ -7817,7 +7869,8 @@ impl App {
             self.show_beside_without_focus(path, None, None, BesideLayout::Keep);
             return true;
         }
-        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        let was =
+            (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
         if self.split_view {
             self.editor_pane_focus = match was.1 {
                 EditorPane::Left => EditorPane::Right,
@@ -7895,7 +7948,8 @@ impl App {
         if !path.is_file() {
             return;
         }
-        let was = (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
+        let was =
+            (self.focus, self.editor_pane_focus, self.active_editor, self.active_editor_right);
         if layout == BesideLayout::MakeRoom
             && !self.split_view
             && self.last_full.width >= SPLIT_FOR_FIGURES_COLS
@@ -8340,7 +8394,6 @@ impl App {
         }
     }
 
-
     /// The path the server knows a file by.
     ///
     /// Asked of the disk once per file and then remembered, because the server resolves symlinks:
@@ -8729,7 +8782,12 @@ impl App {
                 target.column,
             );
             items.push(crate::picker::PickItem {
-                label: located_label(&root, &target.path, target.line + 1, text.map(String::as_str)),
+                label: located_label(
+                    &root,
+                    &target.path,
+                    target.line + 1,
+                    text.map(String::as_str),
+                ),
                 shortcut: None,
                 action: crate::picker::PickAction::FileLine(
                     target.path.clone(),
@@ -8738,7 +8796,12 @@ impl App {
                 ),
             });
         }
-        self.open_server_list(Key::PickerReferences, crate::picker::PickerKind::References, items, asked.from);
+        self.open_server_list(
+            Key::PickerReferences,
+            crate::picker::PickerKind::References,
+            items,
+            asked.from,
+        );
     }
 
     /// Asks the server what names the file holds.
@@ -8808,7 +8871,12 @@ impl App {
                 ),
             })
             .collect();
-        self.open_server_list(Key::PickerSymbols, crate::picker::PickerKind::Symbols, items, asked.from);
+        self.open_server_list(
+            Key::PickerSymbols,
+            crate::picker::PickerKind::Symbols,
+            items,
+            asked.from,
+        );
     }
 
     // ---- Renaming a name ---------------------------------------------------------------------
@@ -9105,8 +9173,7 @@ impl App {
             _ => {
                 // Which of the two sentences depends on what the box was showing, and the empty
                 // old name is what says so — see [`RenamePreview`].
-                let renaming =
-                    self.rename_preview.as_ref().is_some_and(|p| !p.old_name.is_empty());
+                let renaming = self.rename_preview.as_ref().is_some_and(|p| !p.old_name.is_empty());
                 self.rename_preview = None;
                 self.status_message = if renaming {
                     i18n::msg_rename_cancelled(lang).to_string()
@@ -9395,12 +9462,14 @@ impl App {
         let index = self.active_editor_index();
         let Some(editor) = self.editors.get(index) else { return };
         let Some(path) = editor.path.clone() else { return };
-        let ((start_line, start_col), (end_line, end_col)) = editor
-            .selection_range()
-            .unwrap_or(((editor.cursor_line, editor.cursor_col), (editor.cursor_line, editor.cursor_col)));
+        let ((start_line, start_col), (end_line, end_col)) = editor.selection_range().unwrap_or((
+            (editor.cursor_line, editor.cursor_col),
+            (editor.cursor_line, editor.cursor_col),
+        ));
         // Each end's own line, because each end's column is measured against the line it is on —
         // the mistake `format_spans` exists to avoid, made here instead.
-        let line_of = |line: usize| editor.rope.get_line(line).map(|l| l.to_string()).unwrap_or_default();
+        let line_of =
+            |line: usize| editor.rope.get_line(line).map(|l| l.to_string()).unwrap_or_default();
         let (start_text, end_text) = (line_of(start_line), line_of(end_line));
         let from = (path.clone(), editor.cursor_line, editor.cursor_col);
         let text = editor.rope.to_string();
@@ -9745,7 +9814,8 @@ impl App {
         // The buffer may have been closed, switched or typed into while the answer was in flight.
         // A ladder of char offsets into text that has moved is not a late answer, it is an answer
         // about a different file, so it is dropped rather than applied to whatever is there now.
-        let Some(index) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        let Some(index) =
+            self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
         else {
             return;
         };
@@ -9872,7 +9942,8 @@ impl App {
     /// lines those are, not what happens when one is pressed.
     fn lsp_remember_folds(&mut self, id: i64, ranges: Vec<(usize, usize)>) {
         let Some(path) = self.lsp_folding.remove(&id) else { return };
-        let Some(editor) = self.editors.iter_mut().find(|e| e.path.as_deref() == Some(path.as_path()))
+        let Some(editor) =
+            self.editors.iter_mut().find(|e| e.path.as_deref() == Some(path.as_path()))
         else {
             return;
         };
@@ -10141,7 +10212,11 @@ impl App {
                 .map(|hit| crate::picker::PickItem {
                     label: crate::search::label(hit, &root),
                     shortcut: None,
-                    action: crate::picker::PickAction::FileLine(hit.path.clone(), hit.line, hit.col),
+                    action: crate::picker::PickAction::FileLine(
+                        hit.path.clone(),
+                        hit.line,
+                        hit.col,
+                    ),
                 })
                 .collect();
             self.picker = Some(crate::picker::Picker::new(
@@ -10186,7 +10261,8 @@ impl App {
         let file = self.editor().path.clone();
         let tx = self.git_panel_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(GitMessage::Snapshot(asked, Box::new(crate::git::snapshot(&root, file))));
+            let _ =
+                tx.send(GitMessage::Snapshot(asked, Box::new(crate::git::snapshot(&root, file))));
         });
     }
 
@@ -10443,10 +10519,7 @@ impl App {
                 // which is the whole point of asking.
                 let yes = key.code == KeyCode::Char(i18n::yes_key(lang))
                     || key.code == KeyCode::Char(i18n::yes_key(lang).to_ascii_uppercase());
-                let confirm = std::mem::replace(
-                    confirm,
-                    GitConfirm::DeleteBranch(String::new()),
-                );
+                let confirm = std::mem::replace(confirm, GitConfirm::DeleteBranch(String::new()));
                 panel.prompt = None;
                 if yes {
                     self.run_git_confirm(confirm);
@@ -10495,7 +10568,11 @@ impl App {
     fn run_git_confirm(&mut self, confirm: GitConfirm) {
         match confirm {
             GitConfirm::Discard(change) => {
-                let top = self.git_panel.as_ref().and_then(|p| p.snap.as_ref()).and_then(|s| s.top.clone());
+                let top = self
+                    .git_panel
+                    .as_ref()
+                    .and_then(|p| p.snap.as_ref())
+                    .and_then(|s| s.top.clone());
                 let Some(top) = top else { return };
                 let absolute = crate::git::Change { path: top.join(&change.path), ..change };
                 self.git_write(move |root| crate::git::discard(root, &absolute));
@@ -10593,7 +10670,8 @@ impl App {
         let Some(panel) = self.git_panel.as_mut() else { return };
         // Nothing to put away is worth saying rather than letting git say "No local changes to
         // save", which reads as a failure when it is the tree being clean.
-        if panel.snap.as_ref().is_some_and(|s| s.changes.iter().all(crate::git::Change::untracked)) {
+        if panel.snap.as_ref().is_some_and(|s| s.changes.iter().all(crate::git::Change::untracked))
+        {
             panel.notice = Some((i18n::msg_git_nothing_to_stash(lang).to_string(), true));
             return;
         }
@@ -10714,8 +10792,7 @@ impl App {
         let hash = commit.hash.clone();
         let subject = commit.subject.clone();
         if let Some(panel) = self.git_panel.as_mut() {
-            panel.detail =
-                Some(GitDetail { hash: hash.clone(), subject, lines: None, scroll: 0 });
+            panel.detail = Some(GitDetail { hash: hash.clone(), subject, lines: None, scroll: 0 });
         }
         let root = self.root.clone();
         let tx = self.git_panel_tx.clone();
@@ -10727,7 +10804,8 @@ impl App {
     /// Puts back whatever a half-finished merge, pick, revert or rebase was in the middle of.
     fn git_abort(&mut self) {
         let lang = self.settings.lang;
-        let unfinished = self.git_panel.as_ref().and_then(|p| p.snap.as_ref()).and_then(|s| s.unfinished);
+        let unfinished =
+            self.git_panel.as_ref().and_then(|p| p.snap.as_ref()).and_then(|s| s.unfinished);
         let Some(unfinished) = unfinished else {
             // Nothing to get out of. Said rather than ignored: a key that does nothing and says
             // nothing is a key you press again harder.
@@ -10761,11 +10839,8 @@ impl App {
         // On the frame thread: `git add` on one path is a few milliseconds, and unlike a commit
         // it runs no hooks. The panel's own writes go to a thread because a pre-commit hook can
         // run a test suite; nothing here can.
-        let outcome = if stage {
-            crate::git::stage(&root, &path)
-        } else {
-            crate::git::unstage(&root, &path)
-        };
+        let outcome =
+            if stage { crate::git::stage(&root, &path) } else { crate::git::unstage(&root, &path) };
         self.status_message = match outcome {
             Ok(said) if said.is_empty() => i18n::msg_git_done(lang).to_string(),
             Ok(said) => said,
@@ -11073,7 +11148,9 @@ impl App {
             self.run_path(&path);
             return;
         }
-        if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
+        if let Some(idx) =
+            self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        {
             self.focus_existing_tab(idx);
             self.status_message = i18n::msg_opened(lang, &self.editors[idx].title(lang));
             return;
@@ -11135,7 +11212,9 @@ impl App {
     /// an opened file rearranging your frames would be a surprise every time it was not wanted.
     fn open_preview_tab(&mut self, path: PathBuf, paged: bool) {
         let lang = self.settings.lang;
-        if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path())) {
+        if let Some(idx) =
+            self.editors.iter().position(|e| e.path.as_deref() == Some(path.as_path()))
+        {
             self.focus_existing_tab(idx);
             self.status_message = i18n::msg_opened(lang, &self.editors[idx].title(lang));
             return;
@@ -11144,8 +11223,11 @@ impl App {
         // Never drawn yet, so nothing is known about the pane it will land in; the preview's
         // own default stands in until the first frame records a real width.
         let width_px = crate::preview::Preview::picture().render_width();
-        let mut preview =
-            if paged { crate::preview::Preview::document(1) } else { crate::preview::Preview::picture() };
+        let mut preview = if paged {
+            crate::preview::Preview::document(1)
+        } else {
+            crate::preview::Preview::picture()
+        };
         // A document opens the way documents were last read. A picture never does: inverting one
         // is a negative rather than a dark mode, so it is per-tab and starts off.
         preview.inverted = paged && self.settings.preview_dark;
@@ -11323,7 +11405,14 @@ impl App {
     /// pointer, so the offset falls as the pointer travels — a drag to the right carries the
     /// picture right, bringing its left edge into view. Absolute from the press, so it never
     /// drifts, and a press that has not moved leaves the page where it was.
-    fn drag_preview_pan(&mut self, idx: usize, start: (u16, u16), from: (u32, u32), col: u16, row: u16) {
+    fn drag_preview_pan(
+        &mut self,
+        idx: usize,
+        start: (u16, u16),
+        from: (u32, u32),
+        col: u16,
+        row: u16,
+    ) {
         let Some(preview) = self.editors[idx].preview.as_ref() else { return };
         let (cols, rows) = (preview.area_cols, preview.area_rows);
         if (cols, rows) == (0, 0) {
@@ -11392,7 +11481,8 @@ impl App {
             self.show_frame(idx);
             return;
         }
-        let (page, width_px, source) = (preview.page(), preview.render_width(), preview.source.clone());
+        let (page, width_px, source) =
+            (preview.page(), preview.render_width(), preview.source.clone());
         let (box_px, fit) = (preview.picture_box(), preview.fit);
         let job = match (source, page) {
             (Some(source), page) => {
@@ -11402,7 +11492,12 @@ impl App {
                     .find(|e| e.preview.is_none() && e.path.as_deref() == Some(source.as_path()))
                     .map(|e| e.rope.to_string())
                     .unwrap_or_default();
-                crate::preview::Job::Markdown { path: source, text, page: page.unwrap_or(1), width_px }
+                crate::preview::Job::Markdown {
+                    path: source,
+                    text,
+                    page: page.unwrap_or(1),
+                    width_px,
+                }
             }
             (None, Some(page)) => crate::preview::Job::Page { path, page, width_px },
             (None, None) => crate::preview::Job::Picture { path, box_px, fit },
@@ -11506,7 +11601,8 @@ impl App {
             if self.editors[i].preview.as_ref().is_some_and(|p| p.reading()) {
                 continue;
             }
-            self.editors[i].disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            self.editors[i].disk_mtime =
+                std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
             let width_px =
                 self.editors[i].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
             let (box_px, fit) = self.editors[i]
@@ -11517,7 +11613,9 @@ impl App {
             if let Some(preview) = self.editors[i].preview.as_mut() {
                 let started = crate::preview::start_loading(
                     match page {
-                        Some(page) => crate::preview::Job::Page { path: path.clone(), page, width_px },
+                        Some(page) => {
+                            crate::preview::Job::Page { path: path.clone(), page, width_px }
+                        }
                         None => crate::preview::Job::Picture { path: path.clone(), box_px, fit },
                     },
                     self.preview_tx.clone(),
@@ -11750,7 +11848,9 @@ impl App {
                 // the tab close resume from there. Going ahead would throw the work away,
                 // which is exactly what the prompt exists to prevent.
                 let unnamed = match action {
-                    UnsavedPrompt::Quit => self.editors.iter().position(|e| e.dirty && e.path.is_none()),
+                    UnsavedPrompt::Quit => {
+                        self.editors.iter().position(|e| e.dirty && e.path.is_none())
+                    }
                     UnsavedPrompt::CloseTab(idx) => {
                         Some(idx).filter(|&i| self.editors.get(i).is_some_and(|e| e.path.is_none()))
                     }
@@ -11890,7 +11990,9 @@ impl App {
                 rebuilt.push_str(&self.editor().rope.slice(carried..s).to_string());
             }
             let matched = self.matched_text((s, e));
-            let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else { return };
+            let Some(replace) = self.find.as_ref().map(|f| f.replacement_for(&matched)) else {
+                return;
+            };
             rebuilt.push_str(&replace);
             carried = e;
         }
@@ -12047,11 +12149,7 @@ impl App {
                 let _ = std::fs::create_dir_all(parent);
             }
             // Don't clobber an existing file.
-            if dest.exists() {
-                Ok(())
-            } else {
-                std::fs::write(&dest, "")
-            }
+            if dest.exists() { Ok(()) } else { std::fs::write(&dest, "") }
         };
         match result {
             Ok(()) => {
@@ -12080,13 +12178,15 @@ impl App {
             })
             .collect();
         let title = i18n::t(lang, Key::PickerCommands);
-        self.picker = Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Commands, items));
+        self.picker =
+            Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Commands, items));
     }
 
     fn open_file_picker(&mut self) {
         let (items, truncated) = self.project_file_items();
         let title = file_picker_title(self.settings.lang, truncated);
-        self.picker = Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Files, items));
+        self.picker =
+            Some(crate::picker::Picker::new(title, crate::picker::PickerKind::Files, items));
     }
 
     /// Every file under the project root, the quick-open default: type a few characters to jump
@@ -12094,14 +12194,19 @@ impl App {
     /// missing from it may still be in the project.
     fn project_file_items(&self) -> (Vec<crate::picker::PickItem>, bool) {
         let mut files = Vec::new();
-        let truncated = collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
+        let truncated =
+            collect_project_files(&self.root, &mut files, self.settings.show_hidden_files);
         files.sort();
         let root = self.root.clone();
         let items = files
             .into_iter()
             .map(|p| {
                 let label = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().to_string();
-                crate::picker::PickItem { label, shortcut: None, action: crate::picker::PickAction::OpenFile(p) }
+                crate::picker::PickItem {
+                    label,
+                    shortcut: None,
+                    action: crate::picker::PickAction::OpenFile(p),
+                }
             })
             .collect();
         (items, truncated)
@@ -12137,7 +12242,10 @@ impl App {
                     .into_iter()
                     .map(|path| {
                         let is_dir = path.is_dir();
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
                         crate::picker::PickItem {
                             // The trailing slash is the only cue that Enter will descend rather
                             // than open.
@@ -12255,9 +12363,7 @@ impl App {
                 }
                 crate::picker::PickAction::Inspect(name) => inspect = Some(name.clone()),
                 crate::picker::PickAction::Recover(entry) => recover = Some(entry.clone()),
-                crate::picker::PickAction::CodeAction(action) => {
-                    code_action = Some(action.clone())
-                }
+                crate::picker::PickAction::CodeAction(action) => code_action = Some(action.clone()),
             }
         }
         if let Some(action) = code_action {
@@ -12282,7 +12388,9 @@ impl App {
                     p.items
                         .into_iter()
                         .filter_map(|item| match item.action {
-                            crate::picker::PickAction::Recover(other) if other.file != entry.file => {
+                            crate::picker::PickAction::Recover(other)
+                                if other.file != entry.file =>
+                            {
                                 Some(*other)
                             }
                             _ => None,
@@ -12314,7 +12422,9 @@ impl App {
         }
         if let Some(name) = workspace {
             // Which of the two workspace pickers is open decides what Enter means.
-            if self.picker.as_ref().map(|p| p.kind) == Some(crate::picker::PickerKind::WorkspaceDelete) {
+            if self.picker.as_ref().map(|p| p.kind)
+                == Some(crate::picker::PickerKind::WorkspaceDelete)
+            {
                 self.delete_workspace(&name);
             } else {
                 self.picker = None;
@@ -12327,7 +12437,10 @@ impl App {
                                 i18n::msg_workspace_shadows(self.settings.lang, built_in);
                         }
                     }
-                    None => self.status_message = i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string(),
+                    None => {
+                        self.status_message =
+                            i18n::t(self.settings.lang, Key::MsgNoWorkspaces).to_string()
+                    }
                 }
             }
         } else if let Some(a) = cmd {
@@ -12526,7 +12639,8 @@ impl App {
             return;
         };
         let home = dirs::home_dir();
-        let Some(path) = resolve_save_as_path(&self.save_as_input, &self.root, home.as_deref()) else {
+        let Some(path) = resolve_save_as_path(&self.save_as_input, &self.root, home.as_deref())
+        else {
             return;
         };
         // Never overwrite an existing file from a hand-typed name — one typo would destroy it.
@@ -12715,7 +12829,11 @@ impl App {
         // rather than replaced: the first sweep of a folder has nothing to be a difference from.
         self.follow_seen = None;
         self.follow_queue.clear();
-        spawn_git_status_refresh(self.root.clone(), self.git_status_tx.clone(), self.git_status_pending.clone());
+        spawn_git_status_refresh(
+            self.root.clone(),
+            self.git_status_tx.clone(),
+            self.git_status_pending.clone(),
+        );
         // Changing folder steps *out* of the workspace rather than dragging it along. A saved
         // workspace is the set-up of its own project, and staying attached meant exit wrote this
         // folder's files and shells over it — silently, so the workspace was gone before anyone
@@ -12896,10 +13014,9 @@ impl App {
     /// Opens the name/startup-command box for the focused window's on-screen tab, prefilled
     /// with what it has now. For a single-tab window the name is what shows as the window title.
     pub fn start_terminal_rename(&mut self) {
-        let Some((name, startup)) = self
-            .focused_panel()
-            .map(|p| (p.name.clone().unwrap_or_default(), p.startup_command.clone().unwrap_or_default()))
-        else {
+        let Some((name, startup)) = self.focused_panel().map(|p| {
+            (p.name.clone().unwrap_or_default(), p.startup_command.clone().unwrap_or_default())
+        }) else {
             return;
         };
         self.terminal_rename_input = name;
@@ -12943,7 +13060,8 @@ impl App {
         }
         // Deliberately not run here: it belongs to opening the workspace, and re-running
         // `claude` (or a dev server) just for renaming its tab would be a nasty surprise.
-        self.status_message = i18n::msg_terminal_renamed(lang, &name, (!startup.is_empty()).then_some(&startup));
+        self.status_message =
+            i18n::msg_terminal_renamed(lang, &name, (!startup.is_empty()).then_some(&startup));
         self.cancel_terminal_rename();
     }
 
@@ -13050,8 +13168,17 @@ impl App {
         crate::workspace::Workspace {
             name,
             root: canonical(&self.root),
-            open_files: self.editors.iter().filter_map(|e| e.path.as_ref()).map(canonical).collect(),
-            active_file: self.editors.get(self.active_editor).and_then(|e| e.path.as_ref()).map(canonical),
+            open_files: self
+                .editors
+                .iter()
+                .filter_map(|e| e.path.as_ref())
+                .map(canonical)
+                .collect(),
+            active_file: self
+                .editors
+                .get(self.active_editor)
+                .and_then(|e| e.path.as_ref())
+                .map(canonical),
             active_venv: self.settings.active_venv.clone(),
             debuggee: self.debuggee.clone(),
             active_terminal: self.active_terminal,
@@ -13158,7 +13285,9 @@ impl App {
             }
         }
         if let Some(active) = &ws.active_file {
-            if let Some(idx) = self.editors.iter().position(|e| e.path.as_deref() == Some(active.as_path())) {
+            if let Some(idx) =
+                self.editors.iter().position(|e| e.path.as_deref() == Some(active.as_path()))
+            {
                 let pane = self.pane_holding(idx).unwrap_or(EditorPane::Left);
                 self.set_pane_editor(pane, idx);
                 self.editor_pane_focus = pane;
@@ -13233,10 +13362,7 @@ impl App {
                 let startup = tab.startup_command.as_deref();
                 let (panel, reused) = match spare.pop_front() {
                     Some(p) => (Some(p), true),
-                    None => (
-                        TerminalPanel::with_startup(24, 80, &root, startup).ok(),
-                        false,
-                    ),
+                    None => (TerminalPanel::with_startup(24, 80, &root, startup).ok(), false),
                 };
                 let Some(mut panel) = panel else { continue };
                 panel.name = tab.name.clone();
@@ -13284,7 +13410,10 @@ impl App {
             // twice with two different meanings.
             let shape = self.workspace_shape();
             for name in crate::workspace::BUILT_INS.iter().rev() {
-                if saved.iter().any(|w| crate::workspace::slug(&w.name) == crate::workspace::slug(name)) {
+                if saved
+                    .iter()
+                    .any(|w| crate::workspace::slug(&w.name) == crate::workspace::slug(name))
+                {
                     continue;
                 }
                 if let Some(ws) = crate::workspace::built_in(name, &shape) {
@@ -13386,7 +13515,8 @@ impl App {
                     preview.document_failed = false;
                     preview.settled = None;
                     preview.shown_revision = u64::MAX;
-                    preview.state = crate::preview::State::Rendered { lines: Vec::new(), revision: u64::MAX };
+                    preview.state =
+                        crate::preview::State::Rendered { lines: Vec::new(), revision: u64::MAX };
                 }
             } else if path.is_some() {
                 self.reread_preview(idx, page);
@@ -13410,7 +13540,8 @@ impl App {
     /// has to be told, because nothing about a decoded image knows its source moved on.
     fn reread_preview(&mut self, idx: usize, page: Option<usize>) {
         let Some(path) = self.editors[idx].path.clone() else { return };
-        let width_px = self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
+        let width_px =
+            self.editors[idx].preview.as_ref().map(|p| p.render_width()).unwrap_or_default();
         let (box_px, fit) = self.editors[idx]
             .preview
             .as_ref()
@@ -13504,19 +13635,18 @@ impl App {
         let as_document = crate::preview::markdown_as_document();
         // Gathered first: each preview needs a look at another editor, which cannot be done
         // while holding a mutable borrow of the list.
-        let sources: Vec<(usize, Option<(u64, String)>)> = self
-            .editors
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| {
-                let source = e.preview.as_ref()?.source.as_ref()?;
-                let src = self
-                    .editors
-                    .iter()
-                    .find(|s| s.preview.is_none() && s.path.as_deref() == Some(source.as_path()));
-                Some((i, src.map(|s| (s.revision(), s.rope.to_string()))))
-            })
-            .collect();
+        let sources: Vec<(usize, Option<(u64, String)>)> =
+            self.editors
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    let source = e.preview.as_ref()?.source.as_ref()?;
+                    let src = self.editors.iter().find(|s| {
+                        s.preview.is_none() && s.path.as_deref() == Some(source.as_path())
+                    });
+                    Some((i, src.map(|s| (s.revision(), s.rope.to_string()))))
+                })
+                .collect();
 
         for (i, source) in sources {
             let Some((revision, text)) = source else { continue };
@@ -13595,7 +13725,12 @@ impl App {
         let lang = self.settings.lang;
         let (path, text, selection, cursor_line) = {
             let editor = self.editor();
-            (editor.path.clone(), editor.rope.to_string(), editor.selection_range(), editor.cursor_line)
+            (
+                editor.path.clone(),
+                editor.rope.to_string(),
+                editor.selection_range(),
+                editor.cursor_line,
+            )
         };
         let Some(path) = path else {
             self.status_message = i18n::msg_run_piece_unsaved(lang);
@@ -13669,7 +13804,11 @@ impl App {
         dnd::shell_running(language, &pids).is_some()
     }
 
-    fn send_to_session(&mut self, language: crate::session::Language, command: &str) -> Option<usize> {
+    fn send_to_session(
+        &mut self,
+        language: crate::session::Language,
+        command: &str,
+    ) -> Option<usize> {
         let pids: Vec<Option<u32>> =
             self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
         let idx = dnd::shell_running(language, &pids)?;
@@ -13694,9 +13833,8 @@ impl App {
         // so may have been before the user went and installed one at its invitation. Opening the
         // panel is the moment to ask again — see `drawer::installed`.
         crate::drawer::forget_installed();
-        let drawer = self
-            .drawer
-            .get_or_insert_with(|| crate::drawer::Drawer::with_launcher(remembered));
+        let drawer =
+            self.drawer.get_or_insert_with(|| crate::drawer::Drawer::with_launcher(remembered));
         drawer.open = true;
         self.focus = Focus::Drawer;
     }
@@ -14271,7 +14409,8 @@ impl App {
             .unwrap_or("piece");
         // The name is the user's, sanitised: it shows up in their transcript and in any
         // traceback, and `cell_3f9a.m` tells them nothing about which file it came from.
-        let stem: String = stem.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+        let stem: String =
+            stem.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
         let file = dir.join(format!("{stem}.{}", language.scratch_extension()));
         std::fs::write(&file, format!("{}\n", piece.trim_end())).ok()?;
         Some(file)
@@ -14315,7 +14454,8 @@ impl App {
             }
             // Only the on-screen tab of each window is a candidate: running a script in a hidden
             // tab would be invisible and confusing.
-            let pids: Vec<Option<u32>> = self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
+            let pids: Vec<Option<u32>> =
+                self.terminals.iter().map(|w| w.active_tab().child_pid()).collect();
             if let Some(idx) = dnd::shell_running(language, &pids) {
                 let command = language.run_file(&named.to_string_lossy());
                 // The figures this file's last run left behind, closed before it runs again.
@@ -14340,10 +14480,13 @@ impl App {
                 // between here and the prompt coming back is this run's doing. Read after the
                 // close above was typed rather than before — the numbers just closed are gone,
                 // and counting them as somebody else's would make them immortal.
-                let before = crate::wsnap::open_figures(&crate::wsnap::snapshot_dir(), language.snapshot_lang())
-                    .into_iter()
-                    .filter(|n| !previous.contains(n))
-                    .collect();
+                let before = crate::wsnap::open_figures(
+                    &crate::wsnap::snapshot_dir(),
+                    language.snapshot_lang(),
+                )
+                .into_iter()
+                .filter(|n| !previous.contains(n))
+                .collect();
                 self.run_watch = Some(RunWatch {
                     file: named.clone(),
                     language,
@@ -14401,7 +14544,8 @@ impl App {
         // A registered venv is stored as an absolute path; an auto-discovered one is a
         // folder name relative to the project root.
         let venv_path = std::path::Path::new(venv);
-        let venv_dir = if venv_path.is_absolute() { venv_path.to_path_buf() } else { self.root.join(venv) };
+        let venv_dir =
+            if venv_path.is_absolute() { venv_path.to_path_buf() } else { self.root.join(venv) };
         let venv_bin = venv_dir.join(venv_bin_dir()).join(bin_name);
         if !venv_bin.exists() {
             return template.to_string();
@@ -14522,9 +14666,12 @@ impl App {
         let selected = if is_python_ext(&ext) {
             match &self.settings.active_venv {
                 None => 0,
-                Some(active) => {
-                    self.available_venvs.iter().position(|v| v == active).map(|i| i + 1).unwrap_or(0)
-                }
+                Some(active) => self
+                    .available_venvs
+                    .iter()
+                    .position(|v| v == active)
+                    .map(|i| i + 1)
+                    .unwrap_or(0),
             }
         } else {
             0
@@ -14554,7 +14701,8 @@ impl App {
     /// with tests that would otherwise need a running interpreter. It is read once, when the
     /// drop-down opens, which is the same cost Run itself pays.
     fn run_session_target(&self, ext: &str) -> SessionTarget {
-        let Some(language) = crate::session::Language::of_path(std::path::Path::new(&format!("x.{ext}")))
+        let Some(language) =
+            crate::session::Language::of_path(std::path::Path::new(&format!("x.{ext}")))
         else {
             return SessionTarget::default();
         };
@@ -14741,7 +14889,10 @@ impl App {
     fn select_venv(&mut self, venv: Option<String>) {
         let lang = self.settings.lang;
         self.status_message = match &venv {
-            Some(v) => i18n::msg_venv_selected(lang, &ui::venv_display_name(v, &self.settings.registered_venvs)),
+            Some(v) => i18n::msg_venv_selected(
+                lang,
+                &ui::venv_display_name(v, &self.settings.registered_venvs),
+            ),
             None => i18n::msg_venv_cleared(lang),
         };
         self.settings.active_venv = venv;
@@ -14785,7 +14936,8 @@ impl App {
                 // Same resolution as Save As: absolute, or relative to the project root, with
                 // ~ expanded — this box is typed by hand.
                 let home = dirs::home_dir();
-                let Some(path) = resolve_save_as_path(&self.venv_register_input, &self.root, home.as_deref())
+                let Some(path) =
+                    resolve_save_as_path(&self.venv_register_input, &self.root, home.as_deref())
                 else {
                     return;
                 };
@@ -15176,7 +15328,12 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let reserved = matches!(
             key.code,
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
         ) || shift;
         if self.focus == Focus::Terminal && ctrl && !reserved {
             self.handle_terminal_key(key);
@@ -15488,7 +15645,9 @@ impl App {
             MenuAction::LayoutClassic => self.apply_layout_preset(PRESET_CLASSIC),
             MenuAction::LayoutWide => self.apply_layout_preset(PRESET_WIDE),
             MenuAction::LayoutTriple => self.apply_layout_preset(PRESET_TRIPLE),
-            MenuAction::ToggleTerminalSide => self.settings.terminal_on_right = !self.settings.terminal_on_right,
+            MenuAction::ToggleTerminalSide => {
+                self.settings.terminal_on_right = !self.settings.terminal_on_right
+            }
             MenuAction::ToggleResizeMode => self.resize_mode = !self.resize_mode,
             MenuAction::RunFile => self.run_active_file(),
             MenuAction::RunSelection => self.run_selection(),
@@ -15939,7 +16098,11 @@ impl App {
 
     /// What a scrollbar describes right now: the whole content, where the view sits in it, and
     /// how much is on screen. `None` when it all fits and there is therefore no bar.
-    fn scrollbar_metrics(&self, id: ScrollbarId, areas: &ui::Areas) -> Option<(usize, usize, usize)> {
+    fn scrollbar_metrics(
+        &self,
+        id: ScrollbarId,
+        areas: &ui::Areas,
+    ) -> Option<(usize, usize, usize)> {
         match id {
             ScrollbarId::Editor(pane, axis) => {
                 let panes =
@@ -15978,11 +16141,13 @@ impl App {
         // the resolution is worked back from a pixel count and rounded, so the raster overshoots
         // or undershoots by a hair. Comparing exactly made the bar appear, vanish and reappear
         // as pages were re-made. A page has to be more than one cell too big to be worth a bar.
-        let slack = crate::preview::cell_size().map_or(8, |(w, h)| {
-            u32::from(if axis == ui::Axis::Horizontal { w } else { h })
-        });
-        (total > viewport.saturating_add(slack))
-            .then_some((total as usize, position as usize, viewport as usize))
+        let slack = crate::preview::cell_size()
+            .map_or(8, |(w, h)| u32::from(if axis == ui::Axis::Horizontal { w } else { h }));
+        (total > viewport.saturating_add(slack)).then_some((
+            total as usize,
+            position as usize,
+            viewport as usize,
+        ))
     }
 
     /// Whether the pointer is resting on the drawer's ribbon, which is when it brightens.
@@ -16002,7 +16167,8 @@ impl App {
             return true;
         }
         let Some((col, row)) = self.pointer else { return false };
-        ui::scrollbar_reveal_zone(ui::inner_rect(frame), axis).is_some_and(|zone| within(zone, col, row))
+        ui::scrollbar_reveal_zone(ui::inner_rect(frame), axis)
+            .is_some_and(|zone| within(zone, col, row))
     }
 
     /// The scrollbar under a point, and which part of it.
@@ -16017,7 +16183,9 @@ impl App {
         areas: &ui::Areas,
     ) -> Option<(ScrollbarId, ScrollbarPart)> {
         for (id, frame, axis) in self.scrollbar_frames(areas) {
-            let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else { continue };
+            let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else {
+                continue;
+            };
             if !within(strip, col, row) || self.scrollbar_metrics(id, areas).is_none() {
                 continue;
             }
@@ -16070,11 +16238,14 @@ impl App {
     /// track rather than abandoned when the pointer wanders off it, so a drag that strays
     /// sideways still scrolls — which is what every scrollbar does.
     fn drag_scrollbar(&mut self, id: ScrollbarId, col: u16, row: u16, areas: &ui::Areas) {
-        let Some((_, frame, axis)) = self.scrollbar_frames(areas).into_iter().find(|(i, ..)| *i == id)
+        let Some((_, frame, axis)) =
+            self.scrollbar_frames(areas).into_iter().find(|(i, ..)| *i == id)
         else {
             return;
         };
-        let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else { return };
+        let Some(strip) = ui::scrollbar_strip(self.scrollbar_box(frame, axis), axis) else {
+            return;
+        };
         let layout = ui::scrollbar_layout(strip, axis);
         let (start, len, at) = Self::track_axis(layout.track, axis, col, row);
         let offset = at.saturating_sub(start).min(len.saturating_sub(1));
@@ -16164,7 +16335,11 @@ impl App {
         // pointer means.
         if let Some(drawer) = ui::drawer_rect(areas) {
             let border_x = drawer.x;
-            if row >= drawer.y && row < drawer.y + drawer.height && col + 1 >= border_x && col <= border_x + 1 {
+            if row >= drawer.y
+                && row < drawer.y + drawer.height
+                && col + 1 >= border_x
+                && col <= border_x + 1
+            {
                 // Armed, not started: the closing handle is painted on this same column, and
                 // which of the two the press meant is decided by whether it moves. See
                 // [`DragTarget::DrawerEdgePress`].
@@ -16174,7 +16349,10 @@ impl App {
         }
         if let Some(sidebar) = areas.sidebar {
             let border_x = sidebar.x + sidebar.width;
-            if row >= sidebar.y && row < sidebar.y + sidebar.height && (col == border_x.saturating_sub(1) || col == border_x) {
+            if row >= sidebar.y
+                && row < sidebar.y + sidebar.height
+                && (col == border_x.saturating_sub(1) || col == border_x)
+            {
                 self.dragging = Some(DragTarget::Sidebar);
                 return true;
             }
@@ -16215,10 +16393,14 @@ impl App {
                 let next = term_areas[i + 1];
                 let hit = if self.settings.terminal_on_right {
                     let seam_y = next.y; // stacked: horizontal seam at the next window's top edge
-                    col >= next.x && col < next.x + next.width && (row == seam_y || row + 1 == seam_y)
+                    col >= next.x
+                        && col < next.x + next.width
+                        && (row == seam_y || row + 1 == seam_y)
                 } else {
                     let seam_x = next.x; // side by side: vertical seam at the next window's left edge
-                    row >= next.y && row < next.y + next.height && (col == seam_x || col + 1 == seam_x)
+                    row >= next.y
+                        && row < next.y + next.height
+                        && (col == seam_x || col + 1 == seam_x)
                 };
                 if hit {
                     self.dragging = Some(DragTarget::TerminalSplit(i));
@@ -16343,10 +16525,9 @@ impl App {
             (a.x, b.x + b.width, col) // side by side: drag horizontally
         };
         let span = end.saturating_sub(start) as u32;
-        let (Some(wi), Some(wj)) = (
-            self.terminals.get(i).map(|w| w.weight),
-            self.terminals.get(i + 1).map(|w| w.weight),
-        ) else {
+        let (Some(wi), Some(wj)) =
+            (self.terminals.get(i).map(|w| w.weight), self.terminals.get(i + 1).map(|w| w.weight))
+        else {
             return;
         };
         let total = wi as u32 + wj as u32;
@@ -16365,7 +16546,11 @@ impl App {
         self.show_delete_confirm = false;
         let Some(path) = self.delete_target.take() else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let result = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
         match result {
             Ok(()) => {
                 self.file_tree = FileTree::new(self.root.clone(), self.settings.show_hidden_files);
@@ -16429,7 +16614,8 @@ impl App {
         let Some(old_path) = self.rename_target.take() else { return };
         let new_name = self.rename_input.trim().to_string();
         self.rename_input.clear();
-        let old_name = old_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let old_name =
+            old_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if new_name.is_empty() || new_name == old_name {
             return;
         }
@@ -16452,7 +16638,9 @@ impl App {
                 }
                 self.status_message = i18n::msg_renamed(lang, &old_name, &new_name);
             }
-            Err(e) => self.status_message = i18n::msg_rename_failed(lang, &old_name, &e.to_string()),
+            Err(e) => {
+                self.status_message = i18n::msg_rename_failed(lang, &old_name, &e.to_string())
+            }
         }
     }
 
@@ -16636,7 +16824,8 @@ impl App {
 
     /// Whether the tree's selection is on its last row, which is the edge the arrows spill over.
     fn at_tree_bottom(&self) -> bool {
-        !self.file_tree.visible.is_empty() && self.file_tree.selected + 1 >= self.file_tree.visible.len()
+        !self.file_tree.visible.is_empty()
+            && self.file_tree.selected + 1 >= self.file_tree.visible.len()
     }
 
     /// Keys in the sidebar's shell half.
@@ -16703,8 +16892,12 @@ impl App {
                 KeyCode::Up if paged => Some(ui::NavControl::PageBack),
                 KeyCode::Down if paged => Some(ui::NavControl::PageForward),
                 KeyCode::Char('g') if paged => Some(ui::NavControl::GoToPage),
-                KeyCode::Char('-') | KeyCode::Char('_') if !text_view => Some(ui::NavControl::ZoomOut),
-                KeyCode::Char('+') | KeyCode::Char('=') if !text_view => Some(ui::NavControl::ZoomIn),
+                KeyCode::Char('-') | KeyCode::Char('_') if !text_view => {
+                    Some(ui::NavControl::ZoomOut)
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') if !text_view => {
+                    Some(ui::NavControl::ZoomIn)
+                }
                 KeyCode::Char('f') if !text_view => Some(ui::NavControl::FitPage),
                 KeyCode::Char('w') if !text_view => Some(ui::NavControl::FitWidth),
                 // `d` for a document's dark mode, `i` for a picture's negative: two different
@@ -16746,8 +16939,12 @@ impl App {
                 // match above, and a page fitted whole or to its width has no room to the side,
                 // so `scroll_page` returns false and nothing moves — which is the same as these
                 // arrows being unbound there, without having to special-case it here.
-                KeyCode::Left => { self.scroll_page(-1, 0); }
-                KeyCode::Right => { self.scroll_page(1, 0); }
+                KeyCode::Left => {
+                    self.scroll_page(-1, 0);
+                }
+                KeyCode::Right => {
+                    self.scroll_page(1, 0);
+                }
                 KeyCode::Home => self.editors[idx].top_line = 0,
                 _ => {}
             }
@@ -16793,7 +16990,9 @@ impl App {
             // what macOS uses for this anyway, and it survives every keyboard layout because an
             // Option arrow produces no printable character.
             KeyCode::Left if alt || ctrl => self.move_with_selection(shift, |e| e.move_word_left()),
-            KeyCode::Right if alt || ctrl => self.move_with_selection(shift, |e| e.move_word_right()),
+            KeyCode::Right if alt || ctrl => {
+                self.move_with_selection(shift, |e| e.move_word_right())
+            }
             KeyCode::Backspace if ctrl => self.editor_mut().delete_word_left(),
             KeyCode::Delete if ctrl => self.editor_mut().delete_word_right(),
             KeyCode::Char(c) if !ctrl => {
@@ -16883,8 +17082,13 @@ impl App {
         // is not about. Forwards from the anchor, an empty run included. Backspacing over the dot
         // puts the cursor behind it and the popup shuts, which is the same rule seen from behind.
         if popup.triggered {
-            return crate::complete::prefix_from(&ed.rope, popup.start, ed.cursor_line, ed.cursor_col)
-                .is_some_and(|prefix| prefix == popup.prefix);
+            return crate::complete::prefix_from(
+                &ed.rope,
+                popup.start,
+                ed.cursor_line,
+                ed.cursor_col,
+            )
+            .is_some_and(|prefix| prefix == popup.prefix);
         }
         match crate::complete::prefix_at(&ed.rope, ed.cursor_line, ed.cursor_col) {
             Some((start, prefix)) => start == popup.start && prefix == popup.prefix,
@@ -16955,13 +17159,9 @@ impl App {
         // to the left of the cursor for the trigger, and the anchor's run for a triggered popup.
         let before: String = ed.rope.line(ed.cursor_line).chars().take(ed.cursor_col).collect();
         let cursor = ed.rope.line_to_char(ed.cursor_line) + ed.cursor_col;
-        let anchored = self
-            .completion
-            .as_ref()
-            .filter(|popup| popup.triggered)
-            .and_then(|popup| {
-                crate::complete::prefix_from(&ed.rope, popup.start, ed.cursor_line, ed.cursor_col)
-            });
+        let anchored = self.completion.as_ref().filter(|popup| popup.triggered).and_then(|popup| {
+            crate::complete::prefix_from(&ed.rope, popup.start, ed.cursor_line, ed.cursor_col)
+        });
         if let Some(popup) = self.completion.as_mut() {
             let alive = if popup.triggered {
                 match &anchored {
@@ -17175,7 +17375,8 @@ impl App {
             }
         }
         let index = self.active_terminal;
-        if key.code == KeyCode::Esc && self.window_tab(index).is_some_and(|t| t.selection.is_some()) {
+        if key.code == KeyCode::Esc && self.window_tab(index).is_some_and(|t| t.selection.is_some())
+        {
             if let Some(term) = self.window_tab_mut(index) {
                 term.clear_selection();
             }
@@ -17211,7 +17412,8 @@ impl App {
     /// Ends a mouse selection: a drag that never left its starting cell is a plain click to
     /// focus the pane, so it is dropped rather than highlighting (and copying) one character.
     fn finish_terminal_selection(&mut self, index: usize) {
-        let single = self.window_tab(index).and_then(|t| t.selection).is_some_and(|s| s.is_single_cell());
+        let single =
+            self.window_tab(index).and_then(|t| t.selection).is_some_and(|s| s.is_single_cell());
         if single {
             if let Some(term) = self.window_tab_mut(index) {
                 term.clear_selection();
@@ -17299,7 +17501,8 @@ impl App {
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.rename_preview = None;
-                    self.status_message = i18n::msg_rename_cancelled(self.settings.lang).to_string();
+                    self.status_message =
+                        i18n::msg_rename_cancelled(self.settings.lang).to_string();
                 }
                 _ => {}
             }
@@ -17609,11 +17812,15 @@ impl App {
                         return;
                     }
                 }
-                let panes = ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
-                if let Some((pane_idx, pane_rect)) = panes.iter().enumerate().find(|(_, r)| within(**r, col, row)) {
+                let panes =
+                    ui::editor_pane_rects(areas.editor, self.split_view, self.settings.split_pct);
+                if let Some((pane_idx, pane_rect)) =
+                    panes.iter().enumerate().find(|(_, r)| within(**r, col, row))
+                {
                     let pane_rect = *pane_rect;
                     self.focus = Focus::Editor;
-                    self.editor_pane_focus = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
+                    self.editor_pane_focus =
+                        if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
                     let idx = self.pane_editor_index(self.editor_pane_focus);
                     let (tab_bar, toolbar, content) = ui::pane_areas(self, idx, pane_rect);
                     // A preview's controls sit inside its frame, so they are claimed before the
@@ -17743,7 +17950,9 @@ impl App {
                                 // A second click on the same row is asking to *go* there: a
                                 // traceback names a file and a line, and retyping it into the
                                 // editor is work a double-click can do for you.
-                                if self.second_click_on(i, cell.0) && self.open_location_at(i, cell.0) {
+                                if self.second_click_on(i, cell.0)
+                                    && self.open_location_at(i, cell.0)
+                                {
                                     return;
                                 }
                                 if let Some(term) = self.window_tab_mut(i) {
@@ -17830,11 +18039,8 @@ impl App {
                             // pointing before it selects from its far end back to the pointed
                             // word's start, pointing after it the mirror — never a shrink past
                             // the word that started the drag.
-                            let (new_anchor, cursor) = if (line, col) < astart {
-                                (aend, wstart)
-                            } else {
-                                (astart, wend)
-                            };
+                            let (new_anchor, cursor) =
+                                if (line, col) < astart { (aend, wstart) } else { (astart, wend) };
                             let ed = self.editor_mut();
                             ed.selection_anchor = Some(new_anchor);
                             ed.cursor_line = cursor.0;
@@ -17858,7 +18064,8 @@ impl App {
                     }
                 }
                 Some(DragTarget::TerminalSelection(index)) => {
-                    if let Some(rect) = areas.terminals.as_ref().and_then(|t| t.get(index)).copied() {
+                    if let Some(rect) = areas.terminals.as_ref().and_then(|t| t.get(index)).copied()
+                    {
                         if let Some(cell) = cell_at(ui::terminal_content_rect(rect), col, row) {
                             if let Some(term) = self.window_tab_mut(index) {
                                 term.extend_selection(cell);
@@ -17887,9 +18094,7 @@ impl App {
                 // spare key combination in a terminal pane for an explicit copy (Ctrl+C has to
                 // reach the shell as an interrupt).
                 match self.dragging {
-                    Some(DragTarget::TerminalSelection(index))
-                        if button == MouseButton::Left =>
-                    {
+                    Some(DragTarget::TerminalSelection(index)) if button == MouseButton::Left => {
                         self.finish_terminal_selection(index);
                         self.dragging = None;
                     }
@@ -17900,7 +18105,14 @@ impl App {
                     Some(DragTarget::TerminalMouse(index, held))
                         if held == terminal_panel::mouse_button_code(button) =>
                     {
-                        self.terminal_mouse_drag(index, held, MouseAction::Release, col, row, areas);
+                        self.terminal_mouse_drag(
+                            index,
+                            held,
+                            MouseAction::Release,
+                            col,
+                            row,
+                            areas,
+                        );
                         self.dragging = None;
                     }
                     Some(DragTarget::DrawerSelection) if button == MouseButton::Left => {
@@ -17948,7 +18160,9 @@ impl App {
                 let delta = if down { 3 } else { -3 };
                 // Ctrl and the wheel is zoom everywhere else; without it the wheel keeps
                 // meaning "move", which is what it means over every other frame here.
-                if mouse.modifiers.contains(KeyModifiers::CONTROL) && self.zoom_preview_under(col, row, areas, !down) {
+                if mouse.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.zoom_preview_under(col, row, areas, !down)
+                {
                     return;
                 }
                 self.scroll(col, row, areas, delta)
@@ -17981,7 +18195,8 @@ impl App {
                 continue;
             }
             let pane = if pane_idx == 0 { EditorPane::Left } else { EditorPane::Right };
-            let (tab_bar, _, content) = ui::pane_areas(self, self.pane_editor_index(pane), *pane_rect);
+            let (tab_bar, _, content) =
+                ui::pane_areas(self, self.pane_editor_index(pane), *pane_rect);
             if within(tab_bar, col, row) {
                 // Over the tab strip the wheel scrolls tabs sideways, one per notch, rather
                 // than scrolling the text underneath.
@@ -18066,7 +18281,9 @@ impl App {
             return false;
         }
         let Some(term_areas) = &areas.terminals else { return false };
-        let Some(index) = term_areas.iter().position(|r| within(*r, col, row)) else { return false };
+        let Some(index) = term_areas.iter().position(|r| within(*r, col, row)) else {
+            return false;
+        };
         // Only the interior. `cell_at` clamps — the drags below need that, because a drag that
         // wanders outside is still the program's — but a *press* on the border row is a press on
         // the chrome: the tab chips, the ■, the ✕ all live there, and clamping it into the top
@@ -18120,7 +18337,9 @@ impl App {
         if modifiers.contains(KeyModifiers::SHIFT) {
             return false;
         }
-        let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) else { return false };
+        let Some(rect) = ui::drawer_rect(areas).filter(|r| within(*r, col, row)) else {
+            return false;
+        };
         // Interior only, exactly as in `terminal_takes_press` and for the same reason: the border
         // row carries the chips and their ■, and an agent in mouse mode was swallowing every
         // press on them — the strip could be seen but not clicked.
@@ -18215,8 +18434,7 @@ impl App {
             if let Some((t, tab)) = hit {
                 if tab.close == Some(col) {
                     self.close_drawer_tab(t);
-                } else if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut())
-                {
+                } else if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut()) {
                     window.active = t;
                 }
                 return;
@@ -18397,7 +18615,8 @@ impl App {
         if col < inner.x || row < inner.y {
             return None;
         }
-        let gutter = ui::gutter_width(self.editor().rope.len_lines(), self.settings.show_line_numbers);
+        let gutter =
+            ui::gutter_width(self.editor().rope.len_lines(), self.settings.show_line_numbers);
         let rel_row = (row - inner.y) as usize;
         let rel_col = (col - inner.x) as i32 - gutter as i32;
         let top_line = self.editor().top_line;
@@ -18448,7 +18667,9 @@ impl App {
     fn open_context_menu_for_focus(&mut self) {
         let areas = ui::compute_layout(self.last_full, &ui::LayoutParams::from_app(self));
         let (target, rect) = match self.focus {
-            Focus::FileTree if self.sidebar_pane_focus == SidebarPane::Shell && self.shell_pane_live() => {
+            Focus::FileTree
+                if self.sidebar_pane_focus == SidebarPane::Shell && self.shell_pane_live() =>
+            {
                 (ContextTarget::Shell, areas.shell.unwrap_or(self.last_full))
             }
             Focus::FileTree => (ContextTarget::Sidebar, areas.sidebar.unwrap_or(self.last_full)),
@@ -18500,8 +18721,7 @@ impl App {
                         .into_iter()
                         .position(|tab| col >= tab.full.0 && col < tab.full.1);
                     if let Some(t) = hit {
-                        if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut())
-                        {
+                        if let Some(window) = self.drawer.as_mut().and_then(|d| d.window.as_mut()) {
                             window.active = t;
                         }
                     }
@@ -18561,7 +18781,11 @@ impl App {
     /// A click while the context menu is open: run the item under the pointer, or dismiss it.
     fn mouse_context_menu(&mut self, col: u16, row: u16) {
         let lang = self.settings.lang;
-        let rect = match self.context_menu.as_ref().map(|m| ui::context_menu_rect(m, lang, &self.keymap, self.last_full)) {
+        let rect = match self
+            .context_menu
+            .as_ref()
+            .map(|m| ui::context_menu_rect(m, lang, &self.keymap, self.last_full))
+        {
             Some(rect) => rect,
             None => return,
         };
@@ -18634,8 +18858,7 @@ impl App {
             // the buttons at the far end are not titles and move nothing.
             if row == 0 {
                 let ranges = ui::menu_title_ranges(&self.menu, lang);
-                if let Some(i) =
-                    ranges.iter().position(|(start, end)| col >= *start && col < *end)
+                if let Some(i) = ranges.iter().position(|(start, end)| col >= *start && col < *end)
                 {
                     if i != self.menu.menu_index {
                         self.menu.menu_index = i;
@@ -18828,7 +19051,6 @@ impl App {
             self.follow_mode_switched(followed);
         }
     }
-
 }
 
 /// Whether a figure's picture is one CleeCode has not put on screen yet — a figure it has never
@@ -18870,7 +19092,8 @@ mod tests {
     use super::*;
 
     fn setup_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cleecode_app_test_{}_{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("cleecode_app_test_{}_{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -18999,13 +19222,15 @@ mod tests {
                        target/debug/clee\0node_modules/left-pad/index.js\0.env\0";
         let (names, truncated) = git_listed_names(stdout, false, 100);
         assert!(!truncated);
-        let shown: Vec<String> = names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+        let shown: Vec<String> =
+            names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
         assert_eq!(shown, vec!["src/main.rs", "my notes.txt", "città/relazione.tex"]);
 
         // Asked for the hidden files, the dotfile comes back — but the VCS store and the build
         // outputs never do, whatever was asked.
         let (names, _) = git_listed_names(stdout, true, 100);
-        let shown: Vec<String> = names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+        let shown: Vec<String> =
+            names.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
         assert_eq!(shown, vec!["src/main.rs", "my notes.txt", "città/relazione.tex", ".env"]);
     }
 
@@ -19040,8 +19265,10 @@ mod tests {
         let truncated = walk_project_files(&dir, &mut files, false, 0);
         assert!(!truncated, "a small project is not a truncated one");
 
-        let mut names: Vec<String> =
-            files.iter().map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().to_string()).collect();
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().to_string())
+            .collect();
         names.sort();
         // The link to a *file* is still offered — opening it opens what it names — while the
         // link to a directory is not descended into and the file behind it appears once.
@@ -19059,7 +19286,8 @@ mod tests {
         let mut seen = std::collections::HashMap::new();
         let one = PathBuf::from("/figs/fig1.png");
         let three = PathBuf::from("/figs/fig3.png");
-        let (drawn, later) = (SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+        let (drawn, later) =
+            (SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH + Duration::from_secs(1));
 
         assert!(redrawn(&mut seen, &one, drawn), "a figure never seen before is shown");
         assert!(!redrawn(&mut seen, &one, drawn), "and not again on the next tick");
@@ -19080,7 +19308,11 @@ mod tests {
     fn an_agents_edit_lands_only_where_its_text_sits_exactly_once() {
         let text = "let x = 1;\nlet y = 2;\nlet x = 3;\n";
         assert_eq!(only_match(text, "let y = 2;"), Ok((11, 21)));
-        assert_eq!(only_match(text, "nothing like it"), Err(0), "no match is a buffer that moved on");
+        assert_eq!(
+            only_match(text, "nothing like it"),
+            Err(0),
+            "no match is a buffer that moved on"
+        );
         assert_eq!(only_match(text, "let x = "), Err(2), "and two is a request to be clearer");
         // Counted in characters, not bytes: the offsets go straight to `replace_char_range`, and
         // a file with an accent above the edit would otherwise be cut mid-letter.
@@ -19188,7 +19420,10 @@ mod tests {
         // assumed.
         let elsewhere =
             PathBuf::from(if cfg!(windows) { r"C:\opt\build\thing" } else { "/opt/build/thing" });
-        assert!(elsewhere.is_absolute(), "the fixture is only testing the absolute case if it is one");
+        assert!(
+            elsewhere.is_absolute(),
+            "the fixture is only testing the absolute case if it is one"
+        );
         assert_eq!(debuggee_for(&dir, Some(&elsewhere)), elsewhere);
         assert_eq!(
             debuggee_for(&dir, Some(Path::new("build/thing"))),
@@ -19220,10 +19455,7 @@ mod tests {
         // Nothing published yet: one file, and its lines in order rather than in whatever order
         // they were typed.
         let published = std::collections::BTreeSet::new();
-        assert_eq!(
-            breakpoints_to_publish(&published, &current),
-            vec![(one.clone(), vec![4, 12])]
-        );
+        assert_eq!(breakpoints_to_publish(&published, &current), vec![(one.clone(), vec![4, 12])]);
 
         // Both files known to the adapter, and one of them now empty: it is named with an empty
         // list, which is how the adapter is told to forget it.
@@ -19291,7 +19523,9 @@ mod tests {
             }],
             ..DebugPanel::default()
         };
-        panel.children.insert(100, vec![variable("total", "7", 0), variable("point", "Point", 101)]);
+        panel
+            .children
+            .insert(100, vec![variable("total", "7", 0), variable("point", "Point", 101)]);
         panel.children.insert(101, vec![variable("x", "3", 0)]);
         panel.expanded.insert(100);
         panel.watches.push(DebugWatch {
@@ -19346,11 +19580,7 @@ mod tests {
         };
         assert_eq!(
             names(&panel),
-            vec![
-                (0, "Locals".to_string()),
-                (1, "total".to_string()),
-                (1, "point".to_string()),
-            ],
+            vec![(0, "Locals".to_string()), (1, "total".to_string()), (1, "point".to_string()),],
             "the second level is fetched but not shown until it is opened"
         );
 
@@ -19524,7 +19754,8 @@ mod tests {
         // on Windows, and the name Cargo actually writes there is `clee.exe`. A literal with
         // forward slashes and no suffix is a check that can only pass where it was written, and
         // the one platform it silently stops describing is the one where the suffix is the bug.
-        let tail = Path::new("target").join("debug").join(format!("clee{}", std::env::consts::EXE_SUFFIX));
+        let tail =
+            Path::new("target").join("debug").join(format!("clee{}", std::env::consts::EXE_SUFFIX));
         assert!(debuggee_prefill(&dir, None).ends_with(tail.to_string_lossy().as_ref()));
         // An answer already given is what the box offers next time, which is what "remembered"
         // means from in here. Its own spelling is kept as it was typed — joining a relative path
@@ -19573,7 +19804,10 @@ mod tests {
             );
         }
         // Matched by slug, like everywhere else the built-in is recognised.
-        assert_eq!(workspace_after_root_change(Some("default  LAYOUT")), Some("default  LAYOUT".to_string()));
+        assert_eq!(
+            workspace_after_root_change(Some("default  LAYOUT")),
+            Some("default  LAYOUT".to_string())
+        );
         // Someone's own workspace called "default" is an ordinary one and is left behind.
         assert_eq!(workspace_after_root_change(Some("default")), None);
     }
@@ -19657,7 +19891,8 @@ mod tests {
         let root = setup_dir("venvs_dup");
         make_venv(&root, ".venv");
         // Registering the project's own venv by its relative name must not list it twice.
-        let venvs = available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
+        let venvs =
+            available_venvs(&root, &[crate::settings::RegisteredVenv::Path(".venv".to_string())]);
         assert_eq!(venvs, vec![".venv".to_string()]);
     }
 
@@ -19702,7 +19937,9 @@ mod tests {
         // The directory sorts before the file even though its name is later alphabetically.
         assert_eq!(names(false), vec!["zsub".to_string(), "a.txt".to_string()]);
         let shown = names(true);
-        assert!(shown.contains(&".hidden".to_string()) && shown.contains(&".hidden_dir".to_string()));
+        assert!(
+            shown.contains(&".hidden".to_string()) && shown.contains(&".hidden_dir".to_string())
+        );
         // Still directories first when hidden entries are shown.
         assert_eq!(shown[0], ".hidden_dir");
 
@@ -19731,8 +19968,12 @@ mod tests {
         assert_eq!(resize_command(&sidebar, Left, true), None);
 
         // Terminal on the right: its left edge is the only movable seam.
-        let term_right = ResizeLayout { focus: Focus::Terminal, terminal_on_right: true, ..classic_like() };
-        assert_eq!(resize_command(&term_right, Left, true), Some(ResizeCmd::Terminal(TERMINAL_STEP)));
+        let term_right =
+            ResizeLayout { focus: Focus::Terminal, terminal_on_right: true, ..classic_like() };
+        assert_eq!(
+            resize_command(&term_right, Left, true),
+            Some(ResizeCmd::Terminal(TERMINAL_STEP))
+        );
         assert_eq!(resize_command(&term_right, Up, true), None);
 
         // Split view, right pane focused, terminal on the right: left edge is the split seam,
@@ -19745,12 +19986,18 @@ mod tests {
             ..classic_like()
         };
         assert_eq!(resize_command(&split_right, Left, true), Some(ResizeCmd::Split(-SPLIT_STEP)));
-        assert_eq!(resize_command(&split_right, Right, true), Some(ResizeCmd::Terminal(-TERMINAL_STEP)));
+        assert_eq!(
+            resize_command(&split_right, Right, true),
+            Some(ResizeCmd::Terminal(-TERMINAL_STEP))
+        );
 
         // Left pane's right edge is the split seam; growing it enlarges the left pane.
         let split_left = ResizeLayout { editor_pane: EditorPane::Left, ..split_right };
         assert_eq!(resize_command(&split_left, Right, true), Some(ResizeCmd::Split(SPLIT_STEP)));
-        assert_eq!(resize_command(&split_left, Left, true), Some(ResizeCmd::Sidebar(-SIDEBAR_STEP)));
+        assert_eq!(
+            resize_command(&split_left, Left, true),
+            Some(ResizeCmd::Sidebar(-SIDEBAR_STEP))
+        );
     }
 
     /// The drawer is the rightmost column in both arrangements: Right reaches it from whatever
@@ -19991,7 +20238,11 @@ mod tests {
     #[test]
     fn the_turtle_crosses_and_then_is_gone() {
         const W: u16 = 80;
-        assert_eq!(turtle_column(Duration::ZERO, 0, W), Some(W - 2), "starts against the right edge");
+        assert_eq!(
+            turtle_column(Duration::ZERO, 0, W),
+            Some(W - 2),
+            "starts against the right edge"
+        );
 
         let half = turtle_column(TURTLE_CROSSING / 2, 0, W).expect("still walking half way");
         assert!((38..=42).contains(&half), "half the time is about half the way, got {half}");
@@ -20027,7 +20278,12 @@ mod tests {
         assert_eq!(focus_neighbour(&editor, Up), None);
 
         // Terminals below tile side by side, so they are walked left/right, and up leaves them.
-        let term = ResizeLayout { focus: Focus::Terminal, terminal_count: 3, terminal_index: 1, ..classic_like() };
+        let term = ResizeLayout {
+            focus: Focus::Terminal,
+            terminal_count: 3,
+            terminal_index: 1,
+            ..classic_like()
+        };
         assert_eq!(focus_neighbour(&term, Left), Some(Terminal(0)));
         assert_eq!(focus_neighbour(&term, Right), Some(Terminal(2)));
         assert_eq!(focus_neighbour(&term, Up), Some(Editor(EditorPane::Left)));
@@ -20059,7 +20315,11 @@ mod tests {
         let split = ResizeLayout { split_view: true, ..classic_like() };
 
         assert_eq!(focus_neighbour(&split, Right), Some(Editor(EditorPane::Right)));
-        assert_eq!(focus_neighbour(&split, Left), Some(Tree), "from the left half, out to the tree");
+        assert_eq!(
+            focus_neighbour(&split, Left),
+            Some(Tree),
+            "from the left half, out to the tree"
+        );
 
         let on_right = ResizeLayout { editor_pane: EditorPane::Right, ..split };
         assert_eq!(focus_neighbour(&on_right, Left), Some(Editor(EditorPane::Left)));
@@ -20094,9 +20354,18 @@ mod tests {
         };
         // Growing rightwards takes from the window after it; growing leftwards, from the one
         // before — in both cases the focused window ends up bigger.
-        assert_eq!(resize_command(&strip, Right, true), Some(ResizeCmd::TerminalWeight { seam: 1, delta: WEIGHT_STEP }));
-        assert_eq!(resize_command(&strip, Left, true), Some(ResizeCmd::TerminalWeight { seam: 0, delta: -WEIGHT_STEP }));
-        assert_eq!(resize_command(&strip, Left, false), Some(ResizeCmd::TerminalWeight { seam: 0, delta: WEIGHT_STEP }));
+        assert_eq!(
+            resize_command(&strip, Right, true),
+            Some(ResizeCmd::TerminalWeight { seam: 1, delta: WEIGHT_STEP })
+        );
+        assert_eq!(
+            resize_command(&strip, Left, true),
+            Some(ResizeCmd::TerminalWeight { seam: 0, delta: -WEIGHT_STEP })
+        );
+        assert_eq!(
+            resize_command(&strip, Left, false),
+            Some(ResizeCmd::TerminalWeight { seam: 0, delta: WEIGHT_STEP })
+        );
         // Across the axis it is still the editor seam, and the outer edge is still nothing.
         assert_eq!(resize_command(&strip, Up, true), Some(ResizeCmd::Terminal(TERMINAL_STEP)));
         assert_eq!(resize_command(&strip, Down, true), None);
@@ -20109,7 +20378,8 @@ mod tests {
 
         // Stacked on the right instead: the same seams, now vertical, and the editor seam
         // moves to the left border.
-        let stacked = ResizeLayout { terminal_on_right: true, terminal_index: 0, terminal_count: 2, ..strip };
+        let stacked =
+            ResizeLayout { terminal_on_right: true, terminal_index: 0, terminal_count: 2, ..strip };
         assert_eq!(
             resize_command(&stacked, Down, true),
             Some(ResizeCmd::TerminalWeight { seam: 0, delta: WEIGHT_STEP })
@@ -20138,7 +20408,9 @@ mod tests {
         // Only the venv carries the "venv" flag, and its action targets the real path.
         let venv = &items[0];
         assert_eq!(venv.shortcut.as_deref(), Some("venv"));
-        assert!(matches!(&venv.action, crate::picker::PickAction::VenvDir(p) if p == &dir.join(".venv")));
+        assert!(
+            matches!(&venv.action, crate::picker::PickAction::VenvDir(p) if p == &dir.join(".venv"))
+        );
         assert_eq!(items[1].shortcut, None);
     }
 
@@ -20194,7 +20466,16 @@ mod tests {
         assert!(!rows[0].active && !rows[1].active && !rows[3].active && !rows[4].active);
 
         // With no venv selected, the marker moves to the first row.
-        let rows = run_rows("py", None, &available, &registered, &commands, &none, SessionTarget::default(), Lang::En);
+        let rows = run_rows(
+            "py",
+            None,
+            &available,
+            &registered,
+            &commands,
+            &none,
+            SessionTarget::default(),
+            Lang::En,
+        );
         assert!(rows[0].active);
     }
 
@@ -20207,14 +20488,32 @@ mod tests {
 
         // A venv means nothing to pdflatex, so the venv list stays out of the way entirely and
         // the two command rows are the whole of what decides how a .tex file runs.
-        let rows = run_rows("tex", Some(".venv"), &available, &[], &commands, &none, SessionTarget::default(), Lang::En);
+        let rows = run_rows(
+            "tex",
+            Some(".venv"),
+            &available,
+            &[],
+            &commands,
+            &none,
+            SessionTarget::default(),
+            Lang::En,
+        );
         assert_eq!(rows.len(), 2);
         assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
         assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
         assert!(matches!(rows[1].action, RunRowAction::EditCommand(RunScope::Project)));
 
         // An extension with no command still gets both rows — that is how one is set.
-        let rows = run_rows("md", None, &available, &[], &commands, &none, SessionTarget::default(), Lang::En);
+        let rows = run_rows(
+            "md",
+            None,
+            &available,
+            &[],
+            &commands,
+            &none,
+            SessionTarget::default(),
+            Lang::En,
+        );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].detail, None);
         assert!(matches!(rows[0].action, RunRowAction::EditCommand(RunScope::Global)));
@@ -20227,7 +20526,8 @@ mod tests {
     /// on the interpreter Run will actually start.
     #[test]
     fn the_session_row_is_ticked_only_when_there_is_a_session() {
-        let commands = std::collections::HashMap::from([("py".to_string(), "python3 {file}".to_string())]);
+        let commands =
+            std::collections::HashMap::from([("py".to_string(), "python3 {file}".to_string())]);
         let none = std::collections::HashMap::new();
         let available = vec![".venv".to_string()];
         let rows = |session: SessionTarget| {
@@ -20247,7 +20547,9 @@ mod tests {
         // and one answer each is exactly right.
         let interpreters = |rows: &[RunRow]| {
             rows.iter()
-                .filter(|r| matches!(r.action, RunRowAction::UseSession | RunRowAction::SelectVenv(_)))
+                .filter(|r| {
+                    matches!(r.action, RunRowAction::UseSession | RunRowAction::SelectVenv(_))
+                })
                 .filter(|r| r.active)
                 .count()
         };
@@ -20256,11 +20558,19 @@ mod tests {
         // Wanted and none open: Run falls back to the chosen venv, so the tick goes there.
         let fallen = rows(SessionTarget { possible: true, open: true, wanted: false });
         assert!(!fallen[0].active);
-        assert!(fallen.iter().any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_)))));
+        assert!(
+            fallen
+                .iter()
+                .any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_))))
+        );
         assert_eq!(interpreters(&fallen), 1);
         let no_prompt = rows(SessionTarget { possible: true, open: false, wanted: true });
         assert!(!no_prompt[0].active, "there is nothing to hand the file to");
-        assert!(no_prompt.iter().any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_)))));
+        assert!(
+            no_prompt
+                .iter()
+                .any(|r| r.active && matches!(r.action, RunRowAction::SelectVenv(Some(_))))
+        );
 
         assert_eq!(interpreters(&no_prompt), 1);
         // And it says which of the two it is, because the row means different things either way.
@@ -20276,20 +20586,31 @@ mod tests {
         let none = std::collections::HashMap::new();
 
         // No override: the shared command is in force.
-        let rows = run_rows("tex", None, &[], &[], &global, &none, SessionTarget::default(), Lang::En);
+        let rows =
+            run_rows("tex", None, &[], &[], &global, &none, SessionTarget::default(), Lang::En);
         assert!(rows[0].active && !rows[1].active);
         assert_eq!(rows[1].detail, None, "nothing to show for a project that overrides nothing");
 
         // Overridden: the marker moves, and both commands stay visible so the one being
         // shadowed is not a mystery.
-        let rows = run_rows("tex", None, &[], &[], &global, &overridden, SessionTarget::default(), Lang::En);
+        let rows = run_rows(
+            "tex",
+            None,
+            &[],
+            &[],
+            &global,
+            &overridden,
+            SessionTarget::default(),
+            Lang::En,
+        );
         assert!(!rows[0].active && rows[1].active);
         assert_eq!(rows[0].detail.as_deref(), Some("pdflatex {file}"));
         assert_eq!(rows[1].detail.as_deref(), Some("latexmk main.tex"));
 
         // An override with no global command behind it still wins, and nothing is marked as
         // shared because there is nothing shared to mark.
-        let rows = run_rows("tex", None, &[], &[], &none, &overridden, SessionTarget::default(), Lang::En);
+        let rows =
+            run_rows("tex", None, &[], &[], &none, &overridden, SessionTarget::default(), Lang::En);
         assert!(!rows[0].active && rows[1].active);
     }
 
@@ -20352,7 +20673,8 @@ mod tests {
 
         // {name} is the file name with its extension; a bare relative path has no folder of
         // its own, which as a directory means "here".
-        let expanded = expand_placeholders("cd {dir} && lint {name}", std::path::Path::new("main.py"));
+        let expanded =
+            expand_placeholders("cd {dir} && lint {name}", std::path::Path::new("main.py"));
         assert_eq!(expanded, "cd . && lint main.py");
     }
 
@@ -20461,7 +20783,10 @@ mod tests {
         assert_eq!(quote_for_cmd("a&b"), "\"a&b\"");
         assert_eq!(quote_for_cmd(""), "\"\"");
         // What POSIX quoting does to the same path, and why it is not used there.
-        assert_eq!(shell_words::quote(r"C:\Users\me\octave-cli.exe"), r"'C:\Users\me\octave-cli.exe'");
+        assert_eq!(
+            shell_words::quote(r"C:\Users\me\octave-cli.exe"),
+            r"'C:\Users\me\octave-cli.exe'"
+        );
     }
 
     #[test]
@@ -20686,7 +21011,9 @@ mod tests {
         editor.path = Some(path.clone());
         let (text, target) = sweep_text_and_target(Some(&editor), &path).expect("a tab holds it");
         assert_eq!(text, "what is in the buffer\n", "the text the user can see");
-        assert!(matches!(target, SweepTarget::OpenBuffer { revision } if revision == editor.revision()));
+        assert!(
+            matches!(target, SweepTarget::OpenBuffer { revision } if revision == editor.revision())
+        );
 
         let (text, target) = sweep_text_and_target(None, &path).expect("and without a tab");
         assert_eq!(text, "what is on disk\n");
@@ -20785,10 +21112,7 @@ mod tests {
     fn two_disjoint_format_edits_become_one_replacement() {
         let editor = buffer("fn a() {\n        one();\n  two();\n}\n");
         let lines = lines_of(&editor);
-        let edits = vec![
-            span((1, 0), (1, 8), "    "),
-            span((2, 0), (2, 2), "    "),
-        ];
+        let edits = vec![span((1, 0), (1, 8), "    "), span((2, 0), (2, 2), "    ")];
         let converted = format_spans(&editor.rope, &lines, &as_bytes, &edits).unwrap();
         assert_eq!(converted.len(), 2);
         let (start, end, rebuilt) = edits_as_one_span(&editor, &converted).unwrap();

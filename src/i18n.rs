@@ -518,8 +518,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ItemToggleResizeMode) => "Resize mode",
         (Lang::It, ItemToggleResizeMode) => "Modalita ridimensiona",
 
-        (Lang::En, ResizeModeHint) => "Resize mode: arrows grow the focused frame, Shift+arrow shrinks, Esc/Enter to exit",
-        (Lang::It, ResizeModeHint) => "Modalita ridimensiona: le frecce allargano il frame sotto focus, Shift+freccia restringe, Esc/Invio per uscire",
+        (Lang::En, ResizeModeHint) => {
+            "Resize mode: arrows grow the focused frame, Shift+arrow shrinks, Esc/Enter to exit"
+        }
+        (Lang::It, ResizeModeHint) => {
+            "Modalita ridimensiona: le frecce allargano il frame sotto focus, Shift+freccia restringe, Esc/Invio per uscire"
+        }
 
         (Lang::En, MenuRun) => "Run",
         (Lang::It, MenuRun) => "Esegui",
@@ -964,8 +968,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, ManualTitle) => "CleeCode manual",
         (Lang::It, ManualTitle) => "Manuale CleeCode",
 
-        (Lang::En, ManualHint) => "↑↓ section · Space/⇧Space page · digit jumps · Home/End · Esc closes",
-        (Lang::It, ManualHint) => "↑↓ sezione · Spazio/⇧Spazio pagina · cifra salta · Home/Fine · Esc chiude",
+        (Lang::En, ManualHint) => {
+            "↑↓ section · Space/⇧Space page · digit jumps · Home/End · Esc closes"
+        }
+        (Lang::It, ManualHint) => {
+            "↑↓ sezione · Spazio/⇧Spazio pagina · cifra salta · Home/Fine · Esc chiude"
+        }
 
         (Lang::En, MsgNoWorkspaces) => "No saved workspaces yet — use Workspace ▸ Save workspace",
         (Lang::It, MsgNoWorkspaces) => "Nessun workspace salvato — usa Workspace ▸ Salva workspace",
@@ -980,7 +988,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, PickerOpenFile) => "Apri file (digita / o ~ per sfogliare)",
 
         (Lang::En, PickerOpenFileCapped) => "Open file (first 8000 only — type / or ~ to browse)",
-        (Lang::It, PickerOpenFileCapped) => "Apri file (solo i primi 8000 — digita / o ~ per sfogliare)",
+        (Lang::It, PickerOpenFileCapped) => {
+            "Apri file (solo i primi 8000 — digita / o ~ per sfogliare)"
+        }
 
         (Lang::En, PickerSearchResults) => "Search results",
         (Lang::It, PickerSearchResults) => "Risultati della ricerca",
@@ -1081,8 +1091,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, WsWaiting) => "Waiting for a session…",
         (Lang::It, WsWaiting) => "In attesa di una sessione…",
 
-        (Lang::En, WsWaitingWhere) => "Start an interpreter in one of the terminals and this fills in.",
-        (Lang::It, WsWaitingWhere) => "Avvia un interprete in uno dei terminali e questo si riempie.",
+        (Lang::En, WsWaitingWhere) => {
+            "Start an interpreter in one of the terminals and this fills in."
+        }
+        (Lang::It, WsWaitingWhere) => {
+            "Avvia un interprete in uno dei terminali e questo si riempie."
+        }
 
         (Lang::En, WsWaitingQuiet) => "Nothing is typed at your prompt to ask it.",
         (Lang::It, WsWaitingQuiet) => "Non viene digitato niente al tuo prompt per chiederlo.",
@@ -1198,7 +1212,9 @@ pub fn msg_unsaved_choices(lang: Lang) -> &'static str {
 pub fn msg_find_hint(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Enter/↑↓ next/prev · Tab field · Ctrl+R replace · Ctrl+A all · Esc close",
-        Lang::It => "Invio/↑↓ succ/prec · Tab campo · Ctrl+R sostituisci · Ctrl+A tutti · Esc chiudi",
+        Lang::It => {
+            "Invio/↑↓ succ/prec · Tab campo · Ctrl+R sostituisci · Ctrl+A tutti · Esc chiudi"
+        }
     }
 }
 
@@ -1209,16 +1225,10 @@ pub fn msg_find_flags(lang: Lang, case_sensitive: bool, regex: bool) -> String {
     let mark = |on: bool| if on { "on" } else { "off" };
     let segno = |on: bool| if on { "sì" } else { "no" };
     match lang {
-        Lang::En => format!(
-            "Ctrl+U case {} · Ctrl+N regex {}",
-            mark(case_sensitive),
-            mark(regex)
-        ),
-        Lang::It => format!(
-            "Ctrl+U maiuscole {} · Ctrl+N regex {}",
-            segno(case_sensitive),
-            segno(regex)
-        ),
+        Lang::En => format!("Ctrl+U case {} · Ctrl+N regex {}", mark(case_sensitive), mark(regex)),
+        Lang::It => {
+            format!("Ctrl+U maiuscole {} · Ctrl+N regex {}", segno(case_sensitive), segno(regex))
+        }
     }
 }
 
@@ -1238,12 +1248,24 @@ pub fn msg_git_panel_title(lang: Lang) -> &'static str {
 pub fn msg_git_keys(lang: Lang, tab: crate::app::GitTab) -> &'static str {
     use crate::app::GitTab::*;
     match (lang, tab) {
-        (Lang::En, Status) => "S stage · U unstage · A all · C commit · E amend · Z stash · X discard · Enter open",
-        (Lang::It, Status) => "S in stage · U toglie · A tutto · C commit · E emenda · Z stash · X scarta · Invio apre",
-        (Lang::En, Graph) => "Enter show · B branch here · T tag · K cherry-pick · V revert · H reset --hard",
-        (Lang::It, Graph) => "Invio mostra · B branch qui · T tag · K cherry-pick · V revert · H reset --hard",
-        (Lang::En, Branches) => "Enter switch · N new · D delete · M merge here · F fetch · L pull · P push",
-        (Lang::It, Branches) => "Invio passa · N nuovo · D elimina · M unisce qui · F fetch · L pull · P push",
+        (Lang::En, Status) => {
+            "S stage · U unstage · A all · C commit · E amend · Z stash · X discard · Enter open"
+        }
+        (Lang::It, Status) => {
+            "S in stage · U toglie · A tutto · C commit · E emenda · Z stash · X scarta · Invio apre"
+        }
+        (Lang::En, Graph) => {
+            "Enter show · B branch here · T tag · K cherry-pick · V revert · H reset --hard"
+        }
+        (Lang::It, Graph) => {
+            "Invio mostra · B branch qui · T tag · K cherry-pick · V revert · H reset --hard"
+        }
+        (Lang::En, Branches) => {
+            "Enter switch · N new · D delete · M merge here · F fetch · L pull · P push"
+        }
+        (Lang::It, Branches) => {
+            "Invio passa · N nuovo · D elimina · M unisce qui · F fetch · L pull · P push"
+        }
         (Lang::En, Stashes) => "Enter apply · O pop · D drop · Z stash what is here now",
         (Lang::It, Stashes) => "Invio applica · O pop · D elimina · Z mette via quello che c'è ora",
         (Lang::En, Diff) => "PgUp/PgDn a page · Home the top",
@@ -1268,8 +1290,12 @@ pub fn msg_git_unfinished(lang: Lang, what: crate::git::Unfinished) -> String {
         (Lang::It, Rebase) => "Un rebase",
     };
     match lang {
-        Lang::En => format!("{name} stopped part-way — stage the files it marked and commit, or press Q to put it back"),
-        Lang::It => format!("{name} si è fermato a metà — metti in stage i file che ha segnato e committa, oppure Q per tornare indietro"),
+        Lang::En => format!(
+            "{name} stopped part-way — stage the files it marked and commit, or press Q to put it back"
+        ),
+        Lang::It => format!(
+            "{name} si è fermato a metà — metti in stage i file che ha segnato e committa, oppure Q per tornare indietro"
+        ),
     }
 }
 
@@ -1382,7 +1408,9 @@ pub fn msg_git_nothing_to_abort(lang: Lang) -> &'static str {
 /// thing that happened *to* you rather than the thing you asked for.
 pub fn msg_git_in_terminal(lang: Lang, command: &str) -> String {
     match lang {
-        Lang::En => format!("{command} — running in the terminal, where it can ask you for a password"),
+        Lang::En => {
+            format!("{command} — running in the terminal, where it can ask you for a password")
+        }
         Lang::It => format!("{command} — gira nel terminale, dove può chiederti una password"),
     }
 }
@@ -1413,16 +1441,32 @@ pub fn msg_git_text_prompt(lang: Lang, kind: &crate::app::GitText, staged: usize
     use crate::app::GitText::*;
     match (lang, kind) {
         (_, Commit) => msg_git_commit_prompt(lang, staged),
-        (Lang::En, Amend) => format!("Rewrite the last commit — {staged} staged go into it · Enter · Esc cancels"),
-        (Lang::It, Amend) => format!("Riscrive l'ultimo commit — ci finiscono {staged} in stage · Invio · Esc annulla"),
-        (Lang::En, Branch { at: Some(at) }) => format!("Name for a branch starting at {at} · Enter · Esc cancels"),
-        (Lang::It, Branch { at: Some(at) }) => format!("Nome del branch che parte da {at} · Invio · Esc annulla"),
-        (Lang::En, Branch { at: None }) => "Name for a branch starting here · Enter · Esc cancels".to_string(),
-        (Lang::It, Branch { at: None }) => "Nome del branch che parte da qui · Invio · Esc annulla".to_string(),
+        (Lang::En, Amend) => {
+            format!("Rewrite the last commit — {staged} staged go into it · Enter · Esc cancels")
+        }
+        (Lang::It, Amend) => format!(
+            "Riscrive l'ultimo commit — ci finiscono {staged} in stage · Invio · Esc annulla"
+        ),
+        (Lang::En, Branch { at: Some(at) }) => {
+            format!("Name for a branch starting at {at} · Enter · Esc cancels")
+        }
+        (Lang::It, Branch { at: Some(at) }) => {
+            format!("Nome del branch che parte da {at} · Invio · Esc annulla")
+        }
+        (Lang::En, Branch { at: None }) => {
+            "Name for a branch starting here · Enter · Esc cancels".to_string()
+        }
+        (Lang::It, Branch { at: None }) => {
+            "Nome del branch che parte da qui · Invio · Esc annulla".to_string()
+        }
         (Lang::En, Tag { at }) => format!("Name for a tag on {at} · Enter · Esc cancels"),
         (Lang::It, Tag { at }) => format!("Nome del tag su {at} · Invio · Esc annulla"),
-        (Lang::En, Stash) => "A name for what you are putting away — or none, and git writes one · Enter".to_string(),
-        (Lang::It, Stash) => "Un nome per quello che metti via — o nessuno, e lo scrive git · Invio".to_string(),
+        (Lang::En, Stash) => {
+            "A name for what you are putting away — or none, and git writes one · Enter".to_string()
+        }
+        (Lang::It, Stash) => {
+            "Un nome per quello che metti via — o nessuno, e lo scrive git · Invio".to_string()
+        }
     }
 }
 
@@ -1439,7 +1483,9 @@ pub fn msg_git_confirm_prompt(lang: Lang, confirm: &crate::app::GitConfirm) -> S
         Lang::It => 'N',
     };
     let body = match (lang, confirm) {
-        (_, Discard(change)) => return msg_git_discard_prompt(lang, &change.path.display().to_string()),
+        (_, Discard(change)) => {
+            return msg_git_discard_prompt(lang, &change.path.display().to_string());
+        }
         (Lang::En, DeleteBranch(name)) => format!(
             "Delete the branch {name}? Anything on it and nowhere else is only in the reflog afterwards."
         ),
@@ -1452,8 +1498,12 @@ pub fn msg_git_confirm_prompt(lang: Lang, confirm: &crate::app::GitConfirm) -> S
         (Lang::It, ResetHard { hash, subject }) => format!(
             "Riporto il branch a {hash} ({subject}) e allineo i file? I commit dopo restano nel reflog; le modifiche non committate no."
         ),
-        (Lang::En, DropStash(name)) => format!("Throw away {name}? A dropped stash is not in any branch."),
-        (Lang::It, DropStash(name)) => format!("Butto via {name}? Uno stash eliminato non è in nessun branch."),
+        (Lang::En, DropStash(name)) => {
+            format!("Throw away {name}? A dropped stash is not in any branch.")
+        }
+        (Lang::It, DropStash(name)) => {
+            format!("Butto via {name}? Uno stash eliminato non è in nessun branch.")
+        }
     };
     format!("{body}  {yes} / {no}")
 }
@@ -1470,7 +1520,9 @@ pub fn msg_git_clean(lang: Lang) -> &'static str {
 pub fn msg_git_commit_prompt(lang: Lang, staged: usize) -> String {
     match lang {
         Lang::En => format!("Commit message — {staged} staged · Enter commits · Esc cancels"),
-        Lang::It => format!("Messaggio del commit — {staged} in stage · Invio conferma · Esc annulla"),
+        Lang::It => {
+            format!("Messaggio del commit — {staged} in stage · Invio conferma · Esc annulla")
+        }
     }
 }
 
@@ -1487,8 +1539,12 @@ pub fn msg_git_nothing_staged(lang: Lang) -> &'static str {
 /// the only action here that is not in some reflog afterwards.
 pub fn msg_git_discard_prompt(lang: Lang, file: &str) -> String {
     match lang {
-        Lang::En => format!("Throw away every change to {file}? It is in no commit and no stash, and nothing brings it back.  Y / N"),
-        Lang::It => format!("Butto via tutte le modifiche a {file}? Non sono in nessun commit né stash, e non le riporta indietro niente.  S / N"),
+        Lang::En => format!(
+            "Throw away every change to {file}? It is in no commit and no stash, and nothing brings it back.  Y / N"
+        ),
+        Lang::It => format!(
+            "Butto via tutte le modifiche a {file}? Non sono in nessun commit né stash, e non le riporta indietro niente.  S / N"
+        ),
     }
 }
 
@@ -1665,7 +1721,9 @@ pub fn msg_replace_nothing_left(lang: Lang) -> &'static str {
 pub fn msg_replace_refused_moved(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "A file changed under the preview — nothing was changed, search again",
-        Lang::It => "Un file è cambiato sotto l'anteprima — non ho cambiato niente, ricerca di nuovo",
+        Lang::It => {
+            "Un file è cambiato sotto l'anteprima — non ho cambiato niente, ricerca di nuovo"
+        }
     }
 }
 
@@ -1779,10 +1837,18 @@ pub fn msg_run_piece(
 ) -> String {
     let selection = what == crate::session::Piece::Selection;
     match (lang, selection) {
-        (Lang::En, true) => format!("Selection ({lines} lines) → {language}, terminal {}", terminal + 1),
-        (Lang::En, false) => format!("Cell ({lines} lines) → {language}, terminal {}", terminal + 1),
-        (Lang::It, true) => format!("Selezione ({lines} righe) → {language}, terminale {}", terminal + 1),
-        (Lang::It, false) => format!("Cella ({lines} righe) → {language}, terminale {}", terminal + 1),
+        (Lang::En, true) => {
+            format!("Selection ({lines} lines) → {language}, terminal {}", terminal + 1)
+        }
+        (Lang::En, false) => {
+            format!("Cell ({lines} lines) → {language}, terminal {}", terminal + 1)
+        }
+        (Lang::It, true) => {
+            format!("Selezione ({lines} righe) → {language}, terminale {}", terminal + 1)
+        }
+        (Lang::It, false) => {
+            format!("Cella ({lines} righe) → {language}, terminale {}", terminal + 1)
+        }
     }
 }
 
@@ -1824,9 +1890,13 @@ pub fn msg_recovery_age(lang: Lang, seconds: u64) -> String {
 /// session ended, and Ctrl+Z is still holding what is on disk.
 pub fn msg_recovery_restored(lang: Lang, name: &str) -> String {
     match lang {
-        Lang::En => format!("{name} restored, unsaved — Ctrl+S to keep it, Ctrl+Z for the file on disk"),
+        Lang::En => {
+            format!("{name} restored, unsaved — Ctrl+S to keep it, Ctrl+Z for the file on disk")
+        }
         Lang::It => {
-            format!("{name} ripristinato, non salvato — Ctrl+S per tenerlo, Ctrl+Z per il file su disco")
+            format!(
+                "{name} ripristinato, non salvato — Ctrl+S per tenerlo, Ctrl+Z per il file su disco"
+            )
         }
     }
 }
@@ -1934,7 +2004,9 @@ pub fn shortcut_label(lang: Lang, shortcut: &str) -> &str {
 /// "unknown action" would leave the reader looking for it in a file they have written by hand.
 pub fn msg_keys_unknown_action(lang: Lang, name: &str) -> String {
     match lang {
-        Lang::En => format!("[keys]: no action is called \"{name}\" — see Keybindings... for the list"),
+        Lang::En => {
+            format!("[keys]: no action is called \"{name}\" — see Keybindings... for the list")
+        }
         Lang::It => {
             format!("[keys]: nessuna azione si chiama \"{name}\" — la lista è in Scorciatoie...")
         }
@@ -1944,7 +2016,9 @@ pub fn msg_keys_unknown_action(lang: Lang, name: &str) -> String {
 pub fn msg_keys_bad_chord(lang: Lang, name: &str, chord: &str) -> String {
     match lang {
         Lang::En => format!("[keys]: \"{chord}\" is not a chord — {name} keeps its usual key"),
-        Lang::It => format!("[keys]: \"{chord}\" non è una corda — {name} tiene il tasto di sempre"),
+        Lang::It => {
+            format!("[keys]: \"{chord}\" non è una corda — {name} tiene il tasto di sempre")
+        }
     }
 }
 
@@ -2003,7 +2077,9 @@ pub fn keys_section_header(lang: Lang) -> &'static [&'static str] {
 pub fn msg_workspace_panel(lang: Lang) -> String {
     match lang {
         Lang::En => "Watching for a session — start octave or python in a terminal".to_string(),
-        Lang::It => "In ascolto di una sessione — avvia octave o python in un terminale".to_string(),
+        Lang::It => {
+            "In ascolto di una sessione — avvia octave o python in un terminale".to_string()
+        }
     }
 }
 
@@ -2081,8 +2157,12 @@ pub fn msg_debugger_no_adapter(lang: Lang, os: &str) -> String {
 /// filled-in guess is that the reader can see what it guessed.
 pub fn msg_debugger_no_debuggee(lang: Lang, program: &str) -> String {
     match lang {
-        Lang::En => format!("Nothing to debug at {program} — build it first, or set debuggee in the workspace file"),
-        Lang::It => format!("Niente da debuggare in {program} — compilalo, o scrivi debuggee nel file di workspace"),
+        Lang::En => format!(
+            "Nothing to debug at {program} — build it first, or set debuggee in the workspace file"
+        ),
+        Lang::It => format!(
+            "Niente da debuggare in {program} — compilalo, o scrivi debuggee nel file di workspace"
+        ),
     }
 }
 
@@ -2315,14 +2395,18 @@ pub fn msg_inspect_hint(lang: Lang) -> &'static str {
 pub fn msg_inspect_no_session(lang: Lang) -> String {
     match lang {
         Lang::En => "No live session — start Octave or Python in a terminal first".to_string(),
-        Lang::It => "Nessuna sessione viva — avvia prima Octave o Python in un terminale".to_string(),
+        Lang::It => {
+            "Nessuna sessione viva — avvia prima Octave o Python in un terminale".to_string()
+        }
     }
 }
 
 pub fn msg_figure_no_session(lang: Lang, language: &str) -> String {
     match lang {
         Lang::En => format!("The {language} session that drew this is gone — the picture stays"),
-        Lang::It => format!("La sessione {language} che l'ha disegnato non c'è più — resta l'immagine"),
+        Lang::It => {
+            format!("La sessione {language} che l'ha disegnato non c'è più — resta l'immagine")
+        }
     }
 }
 
@@ -2341,7 +2425,12 @@ pub fn msg_run_piece_unsaved(lang: Lang) -> String {
 /// The drawer is named rather than numbered because it has no number — it is not one of the
 /// terminal panel's windows, and calling it "terminal 3" would send the reader looking for a
 /// third terminal that is not there.
-pub fn msg_agent_sent_to_terminal(lang: Lang, reference: &str, agent: &str, terminal: usize) -> String {
+pub fn msg_agent_sent_to_terminal(
+    lang: Lang,
+    reference: &str,
+    agent: &str,
+    terminal: usize,
+) -> String {
     match lang {
         Lang::En => {
             format!("{reference} → {agent}, terminal {} — Enter sends it", terminal + 1)
@@ -2681,7 +2770,9 @@ pub fn msg_rename_no_changes(lang: Lang) -> &'static str {
 pub fn msg_rename_refused_file_ops(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "That rename would also create, move or delete files — nothing was changed",
-        Lang::It => "Quel rename creerebbe, sposterebbe o cancellerebbe file — non ho cambiato niente",
+        Lang::It => {
+            "Quel rename creerebbe, sposterebbe o cancellerebbe file — non ho cambiato niente"
+        }
     }
 }
 
@@ -2705,8 +2796,12 @@ pub fn msg_rename_refused_overlap(lang: Lang) -> &'static str {
 /// refusal into an instruction, since opening those files and pressing the key again works.
 pub fn msg_rename_refused_outside(lang: Lang, count: usize) -> String {
     match lang {
-        Lang::En => format!("{count} file(s) this rename touches are not open — open them and try again"),
-        Lang::It => format!("{count} file toccati da questo rename non sono aperti — aprili e riprova"),
+        Lang::En => {
+            format!("{count} file(s) this rename touches are not open — open them and try again")
+        }
+        Lang::It => {
+            format!("{count} file toccati da questo rename non sono aperti — aprili e riprova")
+        }
     }
 }
 
@@ -2714,7 +2809,9 @@ pub fn msg_rename_refused_outside(lang: Lang, count: usize) -> String {
 pub fn msg_rename_refused_read_only(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "One of the files this rename touches is open read-only — nothing was changed",
-        Lang::It => "Uno dei file toccati da questo rename è aperto in sola lettura — non ho cambiato niente",
+        Lang::It => {
+            "Uno dei file toccati da questo rename è aperto in sola lettura — non ho cambiato niente"
+        }
     }
 }
 
@@ -2795,8 +2892,12 @@ pub fn msg_rename_applied(
         };
     }
     match lang {
-        Lang::En => format!("Renamed {old_name} to {new_name}: {edits} change(s) in {files} file(s)"),
-        Lang::It => format!("Rinominato {old_name} in {new_name}: {edits} modifiche in {files} file"),
+        Lang::En => {
+            format!("Renamed {old_name} to {new_name}: {edits} change(s) in {files} file(s)")
+        }
+        Lang::It => {
+            format!("Rinominato {old_name} in {new_name}: {edits} modifiche in {files} file")
+        }
     }
 }
 
@@ -2877,8 +2978,12 @@ pub fn msg_format_refused_overlap(lang: Lang) -> &'static str {
 /// distinguishing causes nobody can act on differently.
 pub fn msg_format_refused_moved(lang: Lang) -> &'static str {
     match lang {
-        Lang::En => "The text changed while the server was answering — nothing was changed, ask again",
-        Lang::It => "Il testo è cambiato mentre il server rispondeva — non ho cambiato niente, richiedi",
+        Lang::En => {
+            "The text changed while the server was answering — nothing was changed, ask again"
+        }
+        Lang::It => {
+            "Il testo è cambiato mentre il server rispondeva — non ho cambiato niente, richiedi"
+        }
     }
 }
 
@@ -3153,7 +3258,9 @@ pub fn msg_project_folder(lang: Lang, path: &str) -> String {
 pub fn msg_externally_modified_kept(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("{name} changed on disk (unsaved local changes kept)"),
-        Lang::It => format!("{name} modificato esternamente (modifiche locali non salvate mantenute)"),
+        Lang::It => {
+            format!("{name} modificato esternamente (modifiche locali non salvate mantenute)")
+        }
     }
 }
 
@@ -3189,7 +3296,9 @@ pub fn msg_follow_mode(lang: Lang, on: bool) -> &'static str {
 pub fn msg_follow_full(lang: Lang, limit: usize) -> String {
     match lang {
         Lang::En => format!("Follow mode has opened its {limit} tabs; close some to see more"),
-        Lang::It => format!("Il modo segui ha aperto le sue {limit} schede; chiudine per vederne altre"),
+        Lang::It => {
+            format!("Il modo segui ha aperto le sue {limit} schede; chiudine per vederne altre")
+        }
     }
 }
 
@@ -3209,7 +3318,9 @@ pub fn msg_navigate_hidden(lang: Lang, path: &str) -> String {
 pub fn msg_navigate_outside(lang: Lang, path: &str) -> String {
     match lang {
         Lang::En => format!("{path} is outside this project — use Open as project to go there"),
-        Lang::It => format!("{path} è fuori da questo progetto — usa Apri come progetto per andarci"),
+        Lang::It => {
+            format!("{path} è fuori da questo progetto — usa Apri come progetto per andarci")
+        }
     }
 }
 
@@ -3328,8 +3439,12 @@ pub fn msg_copy_failed(lang: Lang, dest: &str, err: &str) -> String {
 pub fn msg_scp_confirm(lang: Lang, count: usize, target: &str) -> String {
     let yes = yes_key(lang).to_ascii_uppercase();
     match lang {
-        Lang::En => format!("Upload {count} item(s) to {target} with scp? They leave this machine.  {yes} / N"),
-        Lang::It => format!("Carico {count} elemento/i su {target} con scp? Escono da questa macchina.  {yes} / N"),
+        Lang::En => format!(
+            "Upload {count} item(s) to {target} with scp? They leave this machine.  {yes} / N"
+        ),
+        Lang::It => format!(
+            "Carico {count} elemento/i su {target} con scp? Escono da questa macchina.  {yes} / N"
+        ),
     }
 }
 
@@ -3406,8 +3521,12 @@ pub fn msg_update_available(lang: Lang, version: &str, command: Option<&str>) ->
 /// The offer's question, naming the exact command so consent is to something spelled out.
 pub fn msg_update_question(lang: Lang, version: &str, command: &str) -> String {
     match lang {
-        Lang::En => format!("CleeCode {version} is out. Update in the background with `{command}`?"),
-        Lang::It => format!("È uscita CleeCode {version}. Aggiornare in background con `{command}`?"),
+        Lang::En => {
+            format!("CleeCode {version} is out. Update in the background with `{command}`?")
+        }
+        Lang::It => {
+            format!("È uscita CleeCode {version}. Aggiornare in background con `{command}`?")
+        }
     }
 }
 
@@ -3432,7 +3551,9 @@ pub fn msg_update_running(lang: Lang, command: &str) -> String {
 pub fn msg_update_done(lang: Lang, version: &str) -> String {
     match lang {
         Lang::En => format!("Updated to {version} — the new version starts on the next launch"),
-        Lang::It => format!("Aggiornata alla {version} — la nuova versione parte al prossimo avvio"),
+        Lang::It => {
+            format!("Aggiornata alla {version} — la nuova versione parte al prossimo avvio")
+        }
     }
 }
 
@@ -3473,17 +3594,29 @@ pub fn msg_font_installing(lang: Lang) -> &'static str {
 /// with the font *it* is set to, and only Ghostty's config is ours to point.
 pub fn msg_font_done(lang: Lang, ghostty_updated: bool) -> &'static str {
     match (lang, ghostty_updated) {
-        (Lang::En, true) => "Font installed — Ghostty's config now points at it; restart Ghostty to see the icons",
-        (Lang::It, true) => "Font installato — la config di Ghostty ora lo usa; riavvia Ghostty per vedere le icone",
-        (Lang::En, false) => "Font installed — select \"JetBrainsMono Nerd Font Mono\" in your terminal's settings",
-        (Lang::It, false) => "Font installato — seleziona \"JetBrainsMono Nerd Font Mono\" nelle impostazioni del terminale",
+        (Lang::En, true) => {
+            "Font installed — Ghostty's config now points at it; restart Ghostty to see the icons"
+        }
+        (Lang::It, true) => {
+            "Font installato — la config di Ghostty ora lo usa; riavvia Ghostty per vedere le icone"
+        }
+        (Lang::En, false) => {
+            "Font installed — select \"JetBrainsMono Nerd Font Mono\" in your terminal's settings"
+        }
+        (Lang::It, false) => {
+            "Font installato — seleziona \"JetBrainsMono Nerd Font Mono\" nelle impostazioni del terminale"
+        }
     }
 }
 
 pub fn msg_font_failed(lang: Lang, error: &str) -> String {
     match lang {
-        Lang::En => format!("Font install failed ({error}) — try `clee --install-font` from a shell"),
-        Lang::It => format!("Installazione del font fallita ({error}) — prova `clee --install-font` da una shell"),
+        Lang::En => {
+            format!("Font install failed ({error}) — try `clee --install-font` from a shell")
+        }
+        Lang::It => format!(
+            "Installazione del font fallita ({error}) — prova `clee --install-font` da una shell"
+        ),
     }
 }
 
@@ -3525,7 +3658,9 @@ pub fn msg_extra_installed(lang: Lang, name: &str) -> String {
 pub fn msg_extra_typed(lang: Lang, name: &str, command: &str) -> String {
     match lang {
         Lang::En => format!("{name}: `{command}` is at a shell prompt, unsent. Enter is yours."),
-        Lang::It => format!("{name}: `{command}` è al prompt della shell, non inviato. L'Invio è tuo."),
+        Lang::It => {
+            format!("{name}: `{command}` è al prompt della shell, non inviato. L'Invio è tuo.")
+        }
     }
 }
 
@@ -3565,7 +3700,9 @@ pub fn msg_column_selection(lang: Lang, on: bool) -> String {
     match (lang, on) {
         (Lang::En, true) => "Column selection on — Shift+arrows draw the rectangle".to_string(),
         (Lang::En, false) => "Column selection off".to_string(),
-        (Lang::It, true) => "Selezione verticale attiva — Shift+frecce disegnano il rettangolo".to_string(),
+        (Lang::It, true) => {
+            "Selezione verticale attiva — Shift+frecce disegnano il rettangolo".to_string()
+        }
         (Lang::It, false) => "Selezione verticale disattivata".to_string(),
     }
 }
@@ -3591,10 +3728,18 @@ pub fn msg_line_endings_converted(lang: Lang, to_crlf: bool) -> String {
 /// time somebody checked which way the two agreed.
 pub fn msg_transparent_background(lang: Lang, on: bool) -> String {
     match (lang, on) {
-        (Lang::En, true) => "Transparent background on — the terminal shows through again".to_string(),
-        (Lang::En, false) => "Transparent background off — the theme paints its own surface".to_string(),
-        (Lang::It, true) => "Sfondo trasparente attivo — il terminale torna a trasparire".to_string(),
-        (Lang::It, false) => "Sfondo trasparente disattivato — il tema dipinge la propria superficie".to_string(),
+        (Lang::En, true) => {
+            "Transparent background on — the terminal shows through again".to_string()
+        }
+        (Lang::En, false) => {
+            "Transparent background off — the theme paints its own surface".to_string()
+        }
+        (Lang::It, true) => {
+            "Sfondo trasparente attivo — il terminale torna a trasparire".to_string()
+        }
+        (Lang::It, false) => {
+            "Sfondo trasparente disattivato — il tema dipinge la propria superficie".to_string()
+        }
     }
 }
 
@@ -3919,8 +4064,12 @@ pub fn msg_run_no_file(lang: Lang) -> String {
 
 pub fn msg_run_no_command(lang: Lang, ext: &str) -> String {
     match lang {
-        Lang::En => format!("No run command for .{ext} files — set one from the button left of Run"),
-        Lang::It => format!("Nessun comando per i file .{ext} — impostalo dal pulsante a sinistra di Esegui"),
+        Lang::En => {
+            format!("No run command for .{ext} files — set one from the button left of Run")
+        }
+        Lang::It => format!(
+            "Nessun comando per i file .{ext} — impostalo dal pulsante a sinistra di Esegui"
+        ),
     }
 }
 
@@ -4029,8 +4178,12 @@ pub fn msg_save_as_exists(lang: Lang, path: &str) -> String {
 
 pub fn msg_saved_all_unnamed(lang: Lang, saved: usize, unnamed: usize) -> String {
     match lang {
-        Lang::En => format!("Saved {saved} file(s); {unnamed} still need a name (Ctrl+S to name one)"),
-        Lang::It => format!("Salvati {saved} file; {unnamed} senza nome (Ctrl+S per dargliene uno)"),
+        Lang::En => {
+            format!("Saved {saved} file(s); {unnamed} still need a name (Ctrl+S to name one)")
+        }
+        Lang::It => {
+            format!("Salvati {saved} file; {unnamed} senza nome (Ctrl+S per dargliene uno)")
+        }
     }
 }
 
@@ -4064,8 +4217,11 @@ pub fn msg_terminal_rename_prompt(lang: Lang) -> String {
 
 pub fn msg_terminal_startup_prompt(lang: Lang) -> String {
     match lang {
-        Lang::En => "Startup command, run when the workspace opens (e.g. claude, octave):".to_string(),
-        Lang::It => "Comando di avvio, eseguito all'apertura del workspace (es. claude, octave):".to_string(),
+        Lang::En => {
+            "Startup command, run when the workspace opens (e.g. claude, octave):".to_string()
+        }
+        Lang::It => "Comando di avvio, eseguito all'apertura del workspace (es. claude, octave):"
+            .to_string(),
     }
 }
 
@@ -4086,10 +4242,14 @@ pub fn msg_terminal_renamed(lang: Lang, name: &str, startup: Option<&str>) -> St
         format!("\"{name}\"")
     };
     match (lang, startup) {
-        (Lang::En, Some(cmd)) => format!("Terminal: {label} · startup command: {cmd} (runs when the workspace opens)"),
+        (Lang::En, Some(cmd)) => {
+            format!("Terminal: {label} · startup command: {cmd} (runs when the workspace opens)")
+        }
         (Lang::En, None) => format!("Terminal: {label}"),
         (Lang::It, Some(cmd)) => {
-            format!("Terminale: {label} · comando di avvio: {cmd} (eseguito all'apertura del workspace)")
+            format!(
+                "Terminale: {label} · comando di avvio: {cmd} (eseguito all'apertura del workspace)"
+            )
         }
         (Lang::It, None) => format!("Terminale: {label}"),
     }
@@ -4114,8 +4274,12 @@ pub fn msg_workspace_saved(lang: Lang, name: &str, terminals: usize) -> String {
 /// exists so that fact is on screen rather than being a preset that mysteriously does nothing.
 pub fn msg_workspace_shadows(lang: Lang, built_in: &str) -> String {
     match lang {
-        Lang::En => format!("Opened yours — \"{built_in}\" is also built in; rename yours to reach it"),
-        Lang::It => format!("Aperto il tuo — \"{built_in}\" è anche un preset; rinomina il tuo per averlo"),
+        Lang::En => {
+            format!("Opened yours — \"{built_in}\" is also built in; rename yours to reach it")
+        }
+        Lang::It => {
+            format!("Aperto il tuo — \"{built_in}\" è anche un preset; rinomina il tuo per averlo")
+        }
     }
 }
 
@@ -4153,7 +4317,9 @@ pub fn msg_workspace_error(lang: Lang, err: &str) -> String {
 pub fn msg_resize_edge(lang: Lang) -> String {
     match lang {
         Lang::En => "That border is the window edge — nothing to resize there".to_string(),
-        Lang::It => "Quel bordo è il bordo della finestra — niente da ridimensionare lì".to_string(),
+        Lang::It => {
+            "Quel bordo è il bordo della finestra — niente da ridimensionare lì".to_string()
+        }
     }
 }
 
@@ -4218,7 +4384,8 @@ mod tests {
             );
             // And no two of them are the same sentence, which is the failure this would have:
             // one arm written and three copies of it.
-            let all = ["macos", "linux", "windows", "plan9"].map(|os| msg_debugger_no_adapter(lang, os));
+            let all =
+                ["macos", "linux", "windows", "plan9"].map(|os| msg_debugger_no_adapter(lang, os));
             for (i, one) in all.iter().enumerate() {
                 for other in &all[i + 1..] {
                     assert_ne!(one, other, "{lang:?}: two platforms are told the same thing");
@@ -4279,7 +4446,10 @@ mod tests {
         for lang in [Lang::En, Lang::It] {
             let question = msg_scp_confirm(lang, 3, "build-box");
             let key = yes_key(lang).to_ascii_uppercase();
-            assert!(question.contains(&format!("{key} / N")), "{lang:?}: {question:?} does not offer {key}");
+            assert!(
+                question.contains(&format!("{key} / N")),
+                "{lang:?}: {question:?} does not offer {key}"
+            );
             assert!(question.contains("build-box"), "{lang:?}: the host has to be named");
             assert!(question.contains('3'), "{lang:?}: how many files has to be said");
         }

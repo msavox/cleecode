@@ -120,7 +120,10 @@ pub fn looks_like_dropped_paths(text: &str) -> bool {
 fn all_rooted_paths(tokens: &[String]) -> bool {
     !tokens.is_empty()
         && tokens.iter().all(|t| {
-            (t.starts_with('/') || t.starts_with("~/") || t.starts_with("file://") || is_drive_path(t))
+            (t.starts_with('/')
+                || t.starts_with("~/")
+                || t.starts_with("file://")
+                || is_drive_path(t))
                 && !t.ends_with('.')
                 && t.len() > 2
         })
@@ -167,12 +170,7 @@ pub fn detect_ssh_target(shell_pid: u32) -> Option<String> {
         if process.parent() != Some(parent) {
             continue;
         }
-        let cmd = process
-            .cmd()
-            .iter()
-            .map(|s| s.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let cmd = process.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
         if let Some(target) = parse_ssh_command(cmd.trim()) {
             return Some(target);
         }
@@ -218,7 +216,10 @@ pub fn shell_is_busy(shell_pid: u32) -> bool {
 /// so a script can be handed to the session that is already open instead of starting a second
 /// one. Takes a single process-table snapshot for all the shells, since this runs on every Run
 /// and a refresh is not cheap. Returns `None` if the table can't be read.
-pub fn shell_running(language: crate::session::Language, shell_pids: &[Option<u32>]) -> Option<usize> {
+pub fn shell_running(
+    language: crate::session::Language,
+    shell_pids: &[Option<u32>],
+) -> Option<usize> {
     let sys = process_snapshot();
     shell_pids.iter().position(|pid| {
         pid.is_some_and(|pid| {
@@ -311,10 +312,7 @@ mod tests {
         let found = super::shell_cwd(std::process::id()).expect("a live process has a folder");
         // Compared resolved: the answer comes back from the kernel fully resolved, and a test run
         // from a symlinked path would otherwise disagree with itself.
-        assert_eq!(
-            std::fs::canonicalize(found).unwrap(),
-            std::fs::canonicalize(here).unwrap()
-        );
+        assert_eq!(std::fs::canonicalize(found).unwrap(), std::fs::canonicalize(here).unwrap());
     }
 
     /// The opener is the platform's, and on Windows it is a shell builtin with an empty window
@@ -341,7 +339,10 @@ mod tests {
         if !running_over_ssh() {
             return;
         }
-        assert_eq!(open_with_the_desktop(std::path::Path::new("/etc/hosts")), Err("over ssh".into()));
+        assert_eq!(
+            open_with_the_desktop(std::path::Path::new("/etc/hosts")),
+            Err("over ssh".into())
+        );
         assert_eq!(open_url("https://example.com"), Err("over ssh".into()));
     }
 
@@ -349,7 +350,13 @@ mod tests {
     /// spawned — so this is safe to run on a machine that is not ssh-ing anywhere.
     #[test]
     fn only_http_urls_are_handed_to_the_opener() {
-        for url in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com", "ssh://x", "mailto:a@b.c"] {
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ftp://example.com",
+            "ssh://x",
+            "mailto:a@b.c",
+        ] {
             assert_eq!(open_url(url), Err("not an http(s) URL".into()), "{url}");
         }
     }
@@ -421,7 +428,10 @@ mod tests {
         );
         assert!(quoted_tokens("   ").is_empty());
         // What the POSIX splitter does to the same line, and why it is not used there.
-        assert_eq!(shell_words::split(r"C:\Users\me\notes.txt").unwrap(), vec!["C:Usersmenotes.txt"]);
+        assert_eq!(
+            shell_words::split(r"C:\Users\me\notes.txt").unwrap(),
+            vec!["C:Usersmenotes.txt"]
+        );
     }
 
     /// What may be offered for upload, and what may not. The paths exist in both halves of this
@@ -470,11 +480,13 @@ mod tests {
     #[test]
     fn parses_ssh_target() {
         assert_eq!(parse_ssh_command("ssh myserver"), Some("myserver".to_string()));
-        assert_eq!(parse_ssh_command("ssh -p 2222 user@host.com"), Some("user@host.com".to_string()));
+        assert_eq!(
+            parse_ssh_command("ssh -p 2222 user@host.com"),
+            Some("user@host.com".to_string())
+        );
         assert_eq!(parse_ssh_command("/usr/bin/ssh host"), Some("host".to_string()));
         assert_eq!(parse_ssh_command("bash"), None);
     }
-
 
     /// A drop that cannot be honoured has to be recognised without the files being there, since
     /// not being there is the whole problem. It must not mistake ordinary pasted prose for one,
@@ -499,7 +511,6 @@ mod tests {
         assert!(!looks_like_dropped_paths("   "));
     }
 }
-
 
 /// The command this desktop opens a file with, as a program and the arguments that go before the
 /// path. Split out from the spawning so the choice can be tested on a machine that is not the
@@ -576,7 +587,6 @@ fn url_opener() -> (&'static str, &'static [&'static str]) {
 /// address is a second address the day one of them is edited.
 pub const KOFI_URL: &str = "https://ko-fi.com/msavox";
 
-
 /// Hands a URL to the desktop's browser.
 ///
 /// Only http(s) is a URL worth opening — anything else is a scheme the opener might hand to a
@@ -592,7 +602,9 @@ pub fn open_url(url: &str) -> Result<(), String> {
         return Err("not an http(s) URL".to_string());
     }
     if url.chars().any(|c| {
-        c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|')
     }) {
         return Err("not an http(s) URL".to_string());
     }

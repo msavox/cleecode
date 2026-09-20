@@ -339,10 +339,7 @@ pub fn snapshots_in(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .filter(|entry| {
             entry.path().extension().map(|e| e == "json").unwrap_or(false)
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with(SNAPSHOT_PREFIX))
+                && entry.file_name().to_str().is_some_and(|n| n.starts_with(SNAPSHOT_PREFIX))
         })
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
         .collect();
@@ -517,7 +514,12 @@ fn write_plots_file() {
 /// Both are set on every shell CleeCode starts. Octave's block only fires when the variable is
 /// there, Python's startup file does nothing without it, and a shell that never starts either
 /// interpreter simply carries two unread variables.
-pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path) -> Vec<(String, String)> {
+pub fn shell_env(
+    dir: &Path,
+    pane_id: u64,
+    lib_octave: &Path,
+    lib_python: &Path,
+) -> Vec<(String, String)> {
     let snapshot = snapshot_path(dir, pane_id);
     // One directory per language, not one for everything.
     //
@@ -542,10 +544,7 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         // Where this session's plots are meant to go, read by both languages' hooks. One name
         // for both, because it is one decision: an Octave that keeps its qt windows and a
         // matplotlib that keeps its own are the same answer to the same question.
-        (
-            "CLEECODE_PLOTS".to_string(),
-            if in_tabs { "tabs" } else { "windows" }.to_string(),
-        ),
+        ("CLEECODE_PLOTS".to_string(), if in_tabs { "tabs" } else { "windows" }.to_string()),
         // The same answer, somewhere it can still change. Read by both hooks in preference to
         // the variable above, which is only ever as fresh as the shell that carries it.
         ("CLEECODE_PLOTS_FILE".to_string(), plots_file().to_string_lossy().into_owned()),
@@ -597,14 +596,20 @@ pub fn shell_env(dir: &Path, pane_id: u64, lib_octave: &Path, lib_python: &Path)
         // its load path from this, and a session that lost the user's own directories would be
         // a far worse bug than the one being fixed. The standard library is unaffected —
         // measured, 42 path entries either way.
-        ("OCTAVE_PATH".to_string(), match std::env::var("OCTAVE_PATH") {
-            Ok(theirs) if !theirs.is_empty() => {
-                format!("{}:{}", lib_octave.to_string_lossy(), theirs)
-            }
-            _ => lib_octave.to_string_lossy().into_owned(),
-        }),
+        (
+            "OCTAVE_PATH".to_string(),
+            match std::env::var("OCTAVE_PATH") {
+                Ok(theirs) if !theirs.is_empty() => {
+                    format!("{}:{}", lib_octave.to_string_lossy(), theirs)
+                }
+                _ => lib_octave.to_string_lossy().into_owned(),
+            },
+        ),
         ("CLEECODE_PY_WS".to_string(), snapshot.to_string_lossy().into_owned()),
-        ("PYTHONSTARTUP".to_string(), lib_python.join("pythonstartup.py").to_string_lossy().into_owned()),
+        (
+            "PYTHONSTARTUP".to_string(),
+            lib_python.join("pythonstartup.py").to_string_lossy().into_owned(),
+        ),
         ("PYTHONPATH".to_string(), lib_python.to_string_lossy().into_owned()),
     ];
     // Qt's own logging, off — and only the part of it that is noise. Octave's figures are
@@ -811,7 +816,8 @@ mod tests {
     /// rather than coming back empty and leaving the panel to invent a reason.
     #[test]
     fn something_with_no_grid_says_why() {
-        let gone = Slice::parse(r#"{"name":"x","error":"'x' undefined","rows":0,"cols":0}"#).unwrap();
+        let gone =
+            Slice::parse(r#"{"name":"x","error":"'x' undefined","rows":0,"cols":0}"#).unwrap();
         assert!(gone.error.contains("undefined"));
         assert!(gone.grid().is_empty());
         let cell = Slice::parse(r#"{"name":"c","error":"c is a cell"}"#).unwrap();
@@ -861,9 +867,10 @@ mod tests {
     /// these is newest" a coin toss there.
     fn filetime_bump(path: &Path) {
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
-        let _ = std::fs::OpenOptions::new().write(true).open(path).and_then(|f| {
-            f.set_times(std::fs::FileTimes::new().set_modified(later))
-        });
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(later)));
     }
 
     #[test]
@@ -925,7 +932,8 @@ mod tests {
     /// what the user is about to type.
     #[test]
     fn a_shell_is_given_what_either_interpreter_would_need() {
-        let env = shell_env(Path::new("/snaps"), 2, Path::new("/lib/octave"), Path::new("/lib/python"));
+        let env =
+            shell_env(Path::new("/snaps"), 2, Path::new("/lib/octave"), Path::new("/lib/python"));
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"CLEECODE_OCTAVE_WS"));
         // Every Octave started from a CleeCode terminal, not only the preset's: the library
@@ -943,7 +951,11 @@ mod tests {
         assert!(names.contains(&"CLEECODE_OCTAVE_FIGS"));
         assert!(names.contains(&"PYTHONPATH"));
         let by = |key: &str| env.iter().find(|(k, _)| k == key).unwrap().1.clone();
-        assert_eq!(by("CLEECODE_OCTAVE_WS"), by("CLEECODE_PY_WS"), "one file per pane, not per language");
+        assert_eq!(
+            by("CLEECODE_OCTAVE_WS"),
+            by("CLEECODE_PY_WS"),
+            "one file per pane, not per language"
+        );
         // The figures are the other way round, and for the reason a snapshot is not: both
         // languages number their figures from one, so a shared directory made Octave's figure 1
         // and matplotlib's figure 1 the same file — one tab, showing whichever drew last.

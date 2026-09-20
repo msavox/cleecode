@@ -13,7 +13,7 @@
 //! dies. It is a program printing a table, and that is the whole of it.
 
 use crate::i18n::{self, Key, Lang};
-use crate::wsnap::{ordered, Snapshot, Watch};
+use crate::wsnap::{Snapshot, Watch, ordered};
 use std::io::Write;
 use std::path::Path;
 
@@ -56,10 +56,10 @@ pub fn watch(dir: &Path) -> std::io::Result<()> {
         }
         let changed = current.as_mut().map(|w| w.poll()).unwrap_or(false);
 
-        let state = current.as_ref().and_then(|w| w.snapshot.as_ref()).map(|s| (
-            current.as_ref().map(|w| w.path.clone()).unwrap_or_default(),
-            s.seq,
-        ));
+        let state = current
+            .as_ref()
+            .and_then(|w| w.snapshot.as_ref())
+            .map(|s| (current.as_ref().map(|w| w.path.clone()).unwrap_or_default(), s.seq));
         if changed || resized || state != shown {
             shown = state;
             let snapshot = current.as_ref().and_then(|w| w.snapshot.as_ref());
@@ -99,7 +99,10 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16, lang: Lang) -> 
     // not know, so guessing is the one thing not to do.
     if snapshot.v != 0 && snapshot.v != 1 {
         return vec![
-            format!("{dim}This session is writing version {} of the workspace format.{off}", snapshot.v),
+            format!(
+                "{dim}This session is writing version {} of the workspace format.{off}",
+                snapshot.v
+            ),
             format!("{dim}This CleeCode reads version 1. Update it, or the two will disagree{off}"),
             format!("{dim}quietly rather than loudly.{off}"),
         ];
@@ -138,7 +141,14 @@ pub fn render(snapshot: Option<&Snapshot>, cols: u16, rows: u16, lang: Lang) -> 
 /// Cutting silently would be its own bug — a panel that shows nine of your twelve variables and
 /// looks complete is worse than one that shows eight and says so. The last line says how many
 /// are not shown, which is also the sentence that tells you to make the pane taller.
-fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &str, lang: Lang) -> Vec<String> {
+fn fit_to_pane(
+    mut lines: Vec<String>,
+    cols: u16,
+    rows: u16,
+    dim: &str,
+    off: &str,
+    lang: Lang,
+) -> Vec<String> {
     let rows = rows as usize;
     if lines.len() <= rows {
         return lines;
@@ -146,7 +156,7 @@ fn fit_to_pane(mut lines: Vec<String>, cols: u16, rows: u16, dim: &str, off: &st
     if rows == 0 {
         return Vec::new();
     }
-    let hidden = lines.len() - rows + 1;        // +1: the note takes a row of its own
+    let hidden = lines.len() - rows + 1; // +1: the note takes a row of its own
     lines.truncate(rows);
     if let Some(last) = lines.last_mut() {
         // The advice is worth a line only if the line has room for it. Cut mid-word — "make
@@ -223,7 +233,7 @@ fn stack(snapshot: &Snapshot, cols: u16, off: &str, lang: Lang) -> Vec<String> {
     if !snapshot.debug.stopped {
         return Vec::new();
     }
-    let mark = "\x1b[33m";      // the same yellow the editor marks the stopped line with
+    let mark = "\x1b[33m"; // the same yellow the editor marks the stopped line with
     let mut out = vec![format!(
         "{mark}{}{off}",
         i18n::msg_ws_stopped(lang, &snapshot.debug.name, snapshot.debug.line)
@@ -318,7 +328,12 @@ impl Layout {
         // each only if the one before it fitted.
         let mut used = name + 1 + shape + 1;
         let class = widest(|v| v.class.chars().count(), 5, 14);
-        let class = if used + class < cols { used += class + 1; class } else { 0 };
+        let class = if used + class < cols {
+            used += class + 1;
+            class
+        } else {
+            0
+        };
         let stats = used + 3 * 11 <= cols;
         if stats {
             used += 3 * 11;
@@ -328,7 +343,10 @@ impl Layout {
     }
 
     fn width(&self) -> usize {
-        self.name + 1 + self.shape + 1
+        self.name
+            + 1
+            + self.shape
+            + 1
             + if self.class > 0 { self.class + 1 } else { 0 }
             + if self.stats { 33 } else { 0 }
             + self.preview
@@ -342,7 +360,11 @@ impl Layout {
         let size = clip(i18n::t(lang, Key::WsColSize), self.shape);
         let mut out = format!("{name:<w$} {size:<s$} ", w = self.name, s = self.shape);
         if self.class > 0 {
-            out.push_str(&format!("{:<c$} ", clip(i18n::t(lang, Key::WsColClass), self.class), c = self.class));
+            out.push_str(&format!(
+                "{:<c$} ",
+                clip(i18n::t(lang, Key::WsColClass), self.class),
+                c = self.class
+            ));
         }
         if self.stats {
             out.push_str(&format!(
@@ -360,13 +382,26 @@ impl Layout {
 
     fn row(&self, var: &crate::wsnap::Var) -> String {
         let name = clip(&var.name, self.name);
-        let mut out = format!("\x1b[36m{name:<w$}\x1b[0m {:<s$} ", clip(&var.shape(), self.shape),
-                              w = self.name, s = self.shape);
+        let mut out = format!(
+            "\x1b[36m{name:<w$}\x1b[0m {:<s$} ",
+            clip(&var.shape(), self.shape),
+            w = self.name,
+            s = self.shape
+        );
         if self.class > 0 {
-            out.push_str(&format!("\x1b[90m{:<c$}\x1b[0m ", clip(&var.class, self.class), c = self.class));
+            out.push_str(&format!(
+                "\x1b[90m{:<c$}\x1b[0m ",
+                clip(&var.class, self.class),
+                c = self.class
+            ));
         }
         if self.stats {
-            out.push_str(&format!("{:>10} {:>10} {:>10} ", num(var.min), num(var.max), num(var.mean)));
+            out.push_str(&format!(
+                "{:>10} {:>10} {:>10} ",
+                num(var.min),
+                num(var.max),
+                num(var.mean)
+            ));
         }
         if self.preview > 0 {
             let mut preview = clip(&var.preview, self.preview);
@@ -471,12 +506,20 @@ mod tests {
         assert!(Snapshot::parse(whole).is_some(), "the whole thing has to parse first");
         for cut in 0..whole.len() {
             if let Some(s) = Snapshot::parse(&whole[..cut]) {
-                let _ = render(Some(&s), 80, 24);          // truncated but parsed: still drawable
+                let _ = render(Some(&s), 80, 24); // truncated but parsed: still drawable
             }
         }
-        for junk in ["", " ", "{", "[]", "null", "{\"v\":1}", "\u{0}\u{1}\u{2}",
-                     "{\"vars\":[{\"name\":\"a\",\"size\":[-1,-1]}]}",
-                     "{\"vars\":[{\"name\":\"a\",\"size\":[99999999999,2]}]}"] {
+        for junk in [
+            "",
+            " ",
+            "{",
+            "[]",
+            "null",
+            "{\"v\":1}",
+            "\u{0}\u{1}\u{2}",
+            "{\"vars\":[{\"name\":\"a\",\"size\":[-1,-1]}]}",
+            "{\"vars\":[{\"name\":\"a\",\"size\":[99999999999,2]}]}",
+        ] {
             if let Some(s) = Snapshot::parse(junk) {
                 let _ = render(Some(&s), 80, 24);
             }
@@ -559,7 +602,8 @@ mod tests {
     fn the_table_lists_the_variables_by_name() {
         let lines = plain(&render(Some(&sample()), 100, 24));
         assert!(lines[0].contains("octave") && lines[0].contains("2 variables"), "{lines:?}");
-        let rows: Vec<&String> = lines.iter().filter(|l| l.starts_with("alpha") || l.starts_with("gamma")).collect();
+        let rows: Vec<&String> =
+            lines.iter().filter(|l| l.starts_with("alpha") || l.starts_with("gamma")).collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].starts_with("alpha"), "sorted by name: {rows:?}");
         assert!(rows[0].contains("1x4") && rows[0].contains("char"));
@@ -597,8 +641,14 @@ mod tests {
     #[test]
     fn no_row_is_wider_than_the_pane() {
         let mut snap = sample();
-        snap.vars.push(var("a_really_long_variable_name_here", "containers.Map", &[1000, 2000], 16_000_000));
-        snap.vars[2].preview = "a very long preview that would run off the end of any pane".to_string();
+        snap.vars.push(var(
+            "a_really_long_variable_name_here",
+            "containers.Map",
+            &[1000, 2000],
+            16_000_000,
+        ));
+        snap.vars[2].preview =
+            "a very long preview that would run off the end of any pane".to_string();
         for cols in [20u16, 30, 46, 60, 100, 200] {
             for line in plain(&render(Some(&snap), cols, 24)) {
                 assert!(
@@ -628,7 +678,8 @@ mod tests {
             ],
         };
         let lines = plain(&render(Some(&snap), 90, 24));
-        let stopped = lines.iter().position(|l| l.contains("stopped in calcola at line 3")).unwrap();
+        let stopped =
+            lines.iter().position(|l| l.contains("stopped in calcola at line 3")).unwrap();
         let table = lines.iter().position(|l| l.starts_with("Name")).unwrap();
         assert!(stopped < table, "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("called from principale at line 12")), "{lines:?}");

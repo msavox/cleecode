@@ -207,11 +207,7 @@ const RELEVANT: KeyModifiers =
 /// which one is shown, and that is worth deciding: `Super` on a Mac names a key no Mac keyboard
 /// has ever had printed on it, and `Cmd` on Linux names one nobody there calls that.
 fn super_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Cmd"
-    } else {
-        "Super"
-    }
+    if cfg!(target_os = "macos") { "Cmd" } else { "Super" }
 }
 
 /// One key press: modifiers, and the key they are held with.
@@ -390,8 +386,10 @@ impl Default for Keymap {
         // The relabels are built even here, where nothing has been remapped, because on the Super
         // layer there is something to rewrite before anybody has moved anything: the prose spells
         // that key `Super` on every platform and a Mac calls it `Cmd`. See [`Self::build_relabels`].
-        let mut map =
-            Keymap { chords: table().iter().map(|(_, _, chord)| *chord).collect(), relabels: Vec::new() };
+        let mut map = Keymap {
+            chords: table().iter().map(|(_, _, chord)| *chord).collect(),
+            relabels: Vec::new(),
+        };
         map.relabels = map.build_relabels();
         map
     }
@@ -421,7 +419,9 @@ impl Keymap {
         let actions: Vec<Action> = Action::all().collect();
         for (later, action) in actions.iter().enumerate() {
             let chord = map.chords[later];
-            if let Some(earlier) = actions[..later].iter().position(|a| map.chords[a.index()] == chord) {
+            if let Some(earlier) =
+                actions[..later].iter().position(|a| map.chords[a.index()] == chord)
+            {
                 warnings.push(i18n::msg_keys_conflict(
                     lang,
                     &chord.display(),
@@ -568,7 +568,10 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         for action in &actions {
             let chord = action.default_chord().display();
-            assert!(!seen.contains(&chord), "{chord} is the default for two actions, one of them {action:?}");
+            assert!(
+                !seen.contains(&chord),
+                "{chord} is the default for two actions, one of them {action:?}"
+            );
             seen.push(chord);
         }
     }
@@ -623,10 +626,8 @@ mod tests {
     /// The Command key by each of its names, and back out again in the reader's own.
     #[test]
     fn the_super_layer_is_written_down_and_read_back() {
-        let expected = Chord {
-            mods: KeyModifiers::CONTROL | KeyModifiers::SUPER,
-            code: KeyCode::Up,
-        };
+        let expected =
+            Chord { mods: KeyModifiers::CONTROL | KeyModifiers::SUPER, code: KeyCode::Up };
         for text in ["Ctrl+Super+↑", "ctrl+cmd+up", "Ctrl+Command+↑", "CTRL+WIN+UP"] {
             assert_eq!(Chord::parse(text), Ok(expected), "{text} is the same chord");
         }
@@ -637,7 +638,10 @@ mod tests {
         assert_eq!(Chord::parse(&written), Ok(expected));
         // Order is Ctrl, Super, Alt, Shift, and the whole of it round-trips too.
         let all = Chord {
-            mods: KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT | KeyModifiers::SHIFT,
+            mods: KeyModifiers::CONTROL
+                | KeyModifiers::SUPER
+                | KeyModifiers::ALT
+                | KeyModifiers::SHIFT,
             code: KeyCode::Char('k'),
         };
         assert_eq!(all.display(), format!("Ctrl+{}+Alt+Shift+K", super_name()));
@@ -753,14 +757,16 @@ mod tests {
         let (map, warnings) = Keymap::build(&keys(&[("save-all", "Ctrl+Shift+M")]), Lang::En);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Ctrl+Shift+M"), "{}", warnings[0]);
-        let pressed = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let pressed =
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
         assert_eq!(map.action_for(pressed), Some(Action::Manual), "the manual is declared first");
     }
 
     /// The whole point of `relabel`: prose written years ago says the chord in force today.
     #[test]
     fn moved_chords_are_rewritten_in_text_and_untouched_ones_are_not() {
-        let (map, _) = Keymap::build(&keys(&[("manual", "F1"), ("git-panel", "Ctrl+Alt+G")]), Lang::En);
+        let (map, _) =
+            Keymap::build(&keys(&[("manual", "F1"), ("git-panel", "Ctrl+Alt+G")]), Lang::En);
         let line = "Ctrl+Shift+M opens this manual, Ctrl+Shift+D the git panel, Ctrl+Shift+R runs.";
         assert_eq!(
             map.relabel(line),
@@ -775,8 +781,10 @@ mod tests {
     /// replacement after another.
     #[test]
     fn swapping_two_chords_does_not_undo_itself() {
-        let (map, _) =
-            Keymap::build(&keys(&[("manual", "Ctrl+Shift+D"), ("git-panel", "Ctrl+Shift+M")]), Lang::En);
+        let (map, _) = Keymap::build(
+            &keys(&[("manual", "Ctrl+Shift+D"), ("git-panel", "Ctrl+Shift+M")]),
+            Lang::En,
+        );
         assert_eq!(map.relabel("Ctrl+Shift+M and Ctrl+Shift+D"), "Ctrl+Shift+D and Ctrl+Shift+M");
     }
 

@@ -132,8 +132,22 @@ jobs:
       # Xcode's lldb-dap answers.
       - run: python3 scripts/drive_dap.py target/debug/clee
 
-  # Reported, not enforced: the tree is not rustfmt-formatted and clippy has warnings.
-  # Adopting either is a repo-wide change, so it stays a deliberate decision.
+  # Enforced, now that the tree is formatted: the whole value of a formatter is that nobody
+  # argues with it, and a check that is allowed to fail is one nobody reads. Its settings are in
+  # rustfmt.toml, which is one line and says why.
+  formatting:
+    name: Formatting
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+
+  # Reported, not enforced: clippy has warnings, and clearing them is a repo-wide change of its
+  # own — the sort this job's other half has just stopped being.
   lints:
     name: Lints (informational)
     continue-on-error: true
@@ -142,7 +156,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
       - run: cargo clippy --all-targets

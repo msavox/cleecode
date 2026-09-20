@@ -253,7 +253,6 @@ mod tests {
         lay_out(commits).iter().map(Row::art).collect::<Vec<_>>().join("\n")
     }
 
-
     #[test]
     fn a_line_of_commits_is_one_lane() {
         let commits = [commit("c", &["b"]), commit("b", &["a"]), commit("a", &[])];
@@ -265,12 +264,8 @@ mod tests {
     /// says the branch started where it ended.
     #[test]
     fn a_branch_and_its_merge() {
-        let commits = [
-            commit("m", &["a", "b"]),
-            commit("a", &["c"]),
-            commit("b", &["c"]),
-            commit("c", &[]),
-        ];
+        let commits =
+            [commit("m", &["a", "b"]), commit("a", &["c"]), commit("b", &["c"]), commit("c", &[])];
         assert_eq!(drawing(&commits), ["*", "|\\", "* |", "| *", "|/", "*"].join("\n"));
     }
 
@@ -335,12 +330,8 @@ mod tests {
     /// diagonal belongs to the line that is moving, not to the lane it is passing through.
     #[test]
     fn a_diagonal_is_coloured_as_the_line_that_moves() {
-        let commits = [
-            commit("m", &["a", "b"]),
-            commit("a", &["c"]),
-            commit("b", &["c"]),
-            commit("c", &[]),
-        ];
+        let commits =
+            [commit("m", &["a", "b"]), commit("a", &["c"]), commit("b", &["c"]), commit("c", &[])];
         let rows = lay_out(&commits);
         let opening = &rows[1];
         assert_eq!(opening.art(), "|\\");

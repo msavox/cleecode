@@ -75,8 +75,7 @@ impl Language {
         // its own reasons. This is the Octave-on-headless-Linux bug below wearing a different
         // hat, and it was found the same way: by running the check that had never been run.
         let known = |name: &str| {
-            !name.is_empty()
-                && self.programs().iter().any(|p| p.eq_ignore_ascii_case(name))
+            !name.is_empty() && self.programs().iter().any(|p| p.eq_ignore_ascii_case(name))
         };
         if known(stem) {
             return true;
@@ -175,8 +174,7 @@ impl Language {
     /// Neither form prints anything, and neither touches a figure it was not given — a plot made
     /// by hand at the prompt is not part of any run and must survive one.
     pub fn close_figures(self, numbers: &[i64]) -> String {
-        let list =
-            numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        let list = numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
         match self {
             // `intersect` with what the session actually holds, because `close` on a number
             // that is not a figure is an error — and a figure the user closed by hand between
@@ -259,7 +257,9 @@ impl Language {
                     (Nav::Left, true) => format!("view({}, {});", view.0 - 15.0, view.1),
                     (Nav::Right, true) => format!("view({}, {});", view.0 + 15.0, view.1),
                     (Nav::Up, true) => format!("view({}, {});", view.0, (view.1 + 15.0).min(90.0)),
-                    (Nav::Down, true) => format!("view({}, {});", view.0, (view.1 - 15.0).max(-90.0)),
+                    (Nav::Down, true) => {
+                        format!("view({}, {});", view.0, (view.1 - 15.0).max(-90.0))
+                    }
                 };
                 format!("{select}{body}{}", self.marker())
             }
@@ -524,11 +524,7 @@ impl Agent {
             Context::Selection { from, to, text } => {
                 let head = self.range_reference(path, *from, *to);
                 let body = text.trim_end();
-                if body.is_empty() || !fits(body) {
-                    head
-                } else {
-                    format!("{head}\n{body}")
-                }
+                if body.is_empty() || !fits(body) { head } else { format!("{head}\n{body}") }
             }
             // On one line with the reference: a diagnostic is a sentence, and a sentence about
             // a place reads as one thing.
@@ -650,9 +646,11 @@ mod tests {
     #[test]
     fn each_language_is_told_to_run_a_file_in_its_own_words() {
         assert!(Language::Octave.run_file("/tmp/cell.m").starts_with("run('/tmp/cell.m')"));
-        assert!(Language::Python
-            .run_file("/tmp/cell.py")
-            .starts_with("exec(open(\"/tmp/cell.py\").read())"));
+        assert!(
+            Language::Python
+                .run_file("/tmp/cell.py")
+                .starts_with("exec(open(\"/tmp/cell.py\").read())")
+        );
         // Everything CleeCode types carries its mark, so the transcript says who did it and the
         // history panel can leave it out.
         for language in [Language::Octave, Language::Python] {
@@ -681,14 +679,26 @@ mod tests {
     #[test]
     fn moving_around_a_figure_is_said_in_the_language_of_the_session() {
         let octave = Language::Octave;
-        assert!(octave.nav_command(Nav::In, 1, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 1); zoom(2);"));
-        assert!(octave.nav_command(Nav::Out, 3, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 3); zoom(0.5);"));
+        assert!(
+            octave
+                .nav_command(Nav::In, 1, false, (0.0, 90.0))
+                .starts_with("set(0, 'currentfigure', 1); zoom(2);")
+        );
+        assert!(
+            octave
+                .nav_command(Nav::Out, 3, false, (0.0, 90.0))
+                .starts_with("set(0, 'currentfigure', 3); zoom(0.5);")
+        );
         assert!(octave.nav_command(Nav::Right, 1, false, (0.0, 90.0)).contains("xlim(xl + 0.25"));
         assert!(octave.nav_command(Nav::Down, 1, false, (0.0, 90.0)).contains("ylim(yl - 0.25"));
         // Every figure is named before it is acted on, or the command lands on whichever one
         // the session last drew.
         for nav in [Nav::In, Nav::Out, Nav::Left, Nav::Right, Nav::Up, Nav::Down, Nav::Reset] {
-            assert!(octave.nav_command(nav, 7, false, (0.0, 90.0)).starts_with("set(0, 'currentfigure', 7);"));
+            assert!(
+                octave
+                    .nav_command(nav, 7, false, (0.0, 90.0))
+                    .starts_with("set(0, 'currentfigure', 7);")
+            );
         }
     }
 
@@ -697,12 +707,24 @@ mod tests {
     #[test]
     fn arrows_rotate_a_surface_instead_of_panning_it() {
         let octave = Language::Octave;
-        assert!(octave.nav_command(Nav::Right, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(60, 30);"));
-        assert!(octave.nav_command(Nav::Left, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(30, 30);"));
+        assert!(
+            octave
+                .nav_command(Nav::Right, 2, true, (45.0, 30.0))
+                .starts_with("set(0, 'currentfigure', 2); view(60, 30);")
+        );
+        assert!(
+            octave
+                .nav_command(Nav::Left, 2, true, (45.0, 30.0))
+                .starts_with("set(0, 'currentfigure', 2); view(30, 30);")
+        );
         // Elevation stops at the poles rather than turning the surface inside out.
         assert!(octave.nav_command(Nav::Up, 2, true, (45.0, 85.0)).contains("view(45, 90)"));
         assert!(octave.nav_command(Nav::Down, 2, true, (45.0, -85.0)).contains("view(45, -90)"));
-        assert!(octave.nav_command(Nav::Reset, 2, true, (45.0, 30.0)).starts_with("set(0, 'currentfigure', 2); view(-37.5, 30);"));
+        assert!(
+            octave
+                .nav_command(Nav::Reset, 2, true, (45.0, 30.0))
+                .starts_with("set(0, 'currentfigure', 2); view(-37.5, 30);")
+        );
     }
 
     #[test]
@@ -716,14 +738,18 @@ mod tests {
             assert!(zoom.contains(name), "{zoom}");
         }
         assert!(!zoom.contains(" plt") && !zoom.contains("= f "), "{zoom}");
-        assert!(python.nav_command(Nav::Right, 1, true, (45.0, 30.0)).contains("view_init(30, 60)"));
+        assert!(
+            python.nav_command(Nav::Right, 1, true, (45.0, 30.0)).contains("view_init(30, 60)")
+        );
     }
 
     #[test]
     fn a_figure_leaves_as_a_vector_file() {
-        assert!(Language::Octave
-            .export_command(1, "/proj/fig1.pdf")
-            .starts_with("print(1, '-dpdf', '/proj/fig1.pdf');"));
+        assert!(
+            Language::Octave
+                .export_command(1, "/proj/fig1.pdf")
+                .starts_with("print(1, '-dpdf', '/proj/fig1.pdf');")
+        );
         let python = Language::Python.export_command(2, "/proj/fig2.pdf");
         assert!(python.contains("figure(2).savefig(\"/proj/fig2.pdf\")"), "{python}");
         // A path with a quote in it still parses at the prompt it is going to.
@@ -776,7 +802,10 @@ mod tests {
         );
         // Flags to node itself sit before the script and are stepped over.
         assert_eq!(
-            Agent::of_process("node", &argv(&["node", "--no-warnings", "/opt/npm/bin/claude", "--resume"])),
+            Agent::of_process(
+                "node",
+                &argv(&["node", "--no-warnings", "/opt/npm/bin/claude", "--resume"])
+            ),
             Some(Agent::Claude)
         );
         // gemini-cli is installed from npm the same way, so it is found the same way.
@@ -791,14 +820,20 @@ mod tests {
         assert_eq!(Agent::of_process("node", &[]), None);
         // A table that does not repeat argv[0] is read the same way, since the interpreter is
         // taken off the front by what it is rather than by counting.
-        assert_eq!(Agent::of_process("node", &argv(&["/usr/local/bin/claude"])), Some(Agent::Claude));
+        assert_eq!(
+            Agent::of_process("node", &argv(&["/usr/local/bin/claude"])),
+            Some(Agent::Claude)
+        );
         // Nor is a script that merely has an agent's name inside its own: the file npm installs
         // has no extension, and `claude.js` is somebody's own program.
         assert_eq!(Agent::of_process("node", &argv(&["node", "/srv/claude.js"])), None);
 
         // A real binary still answers by name, arguments or no arguments — the argument list is
         // read only where the name is an interpreter's.
-        assert_eq!(Agent::of_process("codex", &argv(&["codex", "--model", "o3"])), Some(Agent::Codex));
+        assert_eq!(
+            Agent::of_process("codex", &argv(&["codex", "--model", "o3"])),
+            Some(Agent::Codex)
+        );
         assert_eq!(Agent::of_process("opencode", &[]), Some(Agent::OpenCode));
         // And a shell that happens to have been handed a path is not an agent: only the runtime
         // the wrapper actually uses gets its arguments read.
@@ -838,16 +873,23 @@ mod tests {
 
         // A long one goes as the reference alone: the agent reads the file better than a wall
         // of it in front of the question.
-        let text = (0..AGENT_INLINE_LINES + 1).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let text =
+            (0..AGENT_INLINE_LINES + 1).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
         let long = Context::Selection { from: 1, to: AGENT_INLINE_LINES + 1, text };
-        assert_eq!(agent.context(path, &long, true), format!("src/app.rs:1-{}", AGENT_INLINE_LINES + 1));
+        assert_eq!(
+            agent.context(path, &long, true),
+            format!("src/app.rs:1-{}", AGENT_INLINE_LINES + 1)
+        );
 
         // A diagnostic is a sentence about a place, so it goes on the line with it.
         let diag = Context::Diagnostic {
             line: 40,
             message: "cannot borrow `self` as mutable".to_string(),
         };
-        assert_eq!(agent.context(path, &diag, true), "src/app.rs:40 cannot borrow `self` as mutable");
+        assert_eq!(
+            agent.context(path, &diag, true),
+            "src/app.rs:40 cannot borrow `self` as mutable"
+        );
         // Nothing to say is not an empty line at somebody's prompt.
         let empty = Context::Diagnostic { line: 40, message: "   ".to_string() };
         assert_eq!(agent.context(path, &empty, true), "src/app.rs:40");
@@ -894,11 +936,11 @@ mod tests {
     #[test]
     fn a_cell_runs_from_its_marker_to_the_next() {
         let lines = vec![
-            "%% first",      // 0
-            "a = 1;",        // 1
-            "b = 2;",        // 2
-            "%% second",     // 3
-            "c = 3;",        // 4
+            "%% first",  // 0
+            "a = 1;",    // 1
+            "b = 2;",    // 2
+            "%% second", // 3
+            "c = 3;",    // 4
         ];
         assert_eq!(cell_at(&lines, 0), (0, 3), "on the marker itself");
         assert_eq!(cell_at(&lines, 2), (0, 3), "inside the first cell");

@@ -76,12 +76,14 @@ mod macos {
             );
             return;
         }
-        let script = std::env::temp_dir().join(format!("cleecode-launcher-{}.applescript", std::process::id()));
+        let script = std::env::temp_dir()
+            .join(format!("cleecode-launcher-{}.applescript", std::process::id()));
         if let Err(e) = std::fs::write(&script, applescript(&clee)) {
             eprintln!("Could not write the launcher script: {e}");
             return;
         }
-        let compiled = run("/usr/bin/osacompile", &["-o".as_ref(), app.as_os_str(), script.as_os_str()]);
+        let compiled =
+            run("/usr/bin/osacompile", &["-o".as_ref(), app.as_os_str(), script.as_os_str()]);
         let _ = std::fs::remove_file(&script);
         if let Err(e) = compiled {
             eprintln!("osacompile failed: {e}");
@@ -96,7 +98,10 @@ mod macos {
         // osacompile signs the applet as it builds it, and everything above changed the
         // bundle underneath that signature. Signing again, ad hoc, leaves the seal matching
         // what is actually on disk — without it macOS can decide the app is damaged.
-        if let Err(e) = run("/usr/bin/codesign", &["--force".as_ref(), "--sign".as_ref(), "-".as_ref(), app.as_os_str()]) {
+        if let Err(e) = run(
+            "/usr/bin/codesign",
+            &["--force".as_ref(), "--sign".as_ref(), "-".as_ref(), app.as_os_str()],
+        ) {
             eprintln!("Note: could not re-sign the bundle ({e}); it may still work.");
         }
         // Tell LaunchServices about it now, rather than waiting for it to notice: until it
@@ -382,12 +387,27 @@ end openNewInstance
             ),
         ];
         for (op, key, value) in set {
-            let _ = run("/usr/bin/plutil", &[op.as_ref(), key.as_ref(), "-string".as_ref(), value.as_ref(), plist.as_os_str()]);
+            let _ = run(
+                "/usr/bin/plutil",
+                &[op.as_ref(), key.as_ref(), "-string".as_ref(), value.as_ref(), plist.as_os_str()],
+            );
         }
-        let _ = run("/usr/bin/plutil", &["-replace".as_ref(), "CFBundleDocumentTypes".as_ref(), "-json".as_ref(), doc_types.as_ref(), plist.as_os_str()]);
+        let _ = run(
+            "/usr/bin/plutil",
+            &[
+                "-replace".as_ref(),
+                "CFBundleDocumentTypes".as_ref(),
+                "-json".as_ref(),
+                doc_types.as_ref(),
+                plist.as_os_str(),
+            ],
+        );
         // Points at an asset catalog the applet template ships and we have replaced; left in
         // place it wins over CFBundleIconFile and the icon stays a blank droplet.
-        let _ = run("/usr/bin/plutil", &["-remove".as_ref(), "CFBundleIconName".as_ref(), plist.as_os_str()]);
+        let _ = run(
+            "/usr/bin/plutil",
+            &["-remove".as_ref(), "CFBundleIconName".as_ref(), plist.as_os_str()],
+        );
         // Boilerplate the applet template declares for scripts that drive Music, Photos,
         // HomeKit and the rest. This one asks Ghostty for a window and nothing else, and a
         // launcher that announces it may want the camera is a launcher nobody should trust.
@@ -411,10 +431,11 @@ end openNewInstance
     /// What to do with it, and the one thing that could still be missing.
     fn report(clee: &Path) {
         println!("It runs: {}", clee.display());
-        if !["/Applications", "~/Applications"]
-            .iter()
-            .any(|d| Path::new(&d.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy())).join(format!("{TERMINAL}.app")).exists())
-        {
+        if !["/Applications", "~/Applications"].iter().any(|d| {
+            Path::new(&d.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy()))
+                .join(format!("{TERMINAL}.app"))
+                .exists()
+        }) {
             println!("\n{TERMINAL} is not installed — the launcher needs it:");
             println!("    brew install --cask ghostty");
         }
@@ -455,7 +476,11 @@ end openNewInstance
         }
         let why = String::from_utf8_lossy(&out.stderr);
         let why = why.trim();
-        Err(std::io::Error::other(if why.is_empty() { out.status.to_string() } else { why.to_string() }))
+        Err(std::io::Error::other(if why.is_empty() {
+            out.status.to_string()
+        } else {
+            why.to_string()
+        }))
     }
 
     #[cfg(test)]
@@ -484,12 +509,14 @@ end openNewInstance
                 eprintln!("SKIP: {TERMINAL} is not installed, so its terminology cannot resolve");
                 return;
             }
-            let dir = std::env::temp_dir().join(format!("cleecode-applescript-test-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("cleecode-applescript-test-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             let src = dir.join("launcher.applescript");
             std::fs::write(&src, applescript(Path::new("/opt/homebrew/bin/clee"))).unwrap();
             let out = dir.join("Test.app");
-            let compiled = run("/usr/bin/osacompile", &["-o".as_ref(), out.as_os_str(), src.as_os_str()]);
+            let compiled =
+                run("/usr/bin/osacompile", &["-o".as_ref(), out.as_os_str(), src.as_os_str()]);
             let _ = std::fs::remove_dir_all(&dir);
             compiled.expect("osacompile rejected the launcher script");
         }
@@ -559,7 +586,8 @@ end openNewInstance
             assert!(script.contains("set wait after command of surface to false"));
             // The command line built for the other branch, read as one line so that the flag
             // is checked where it is passed rather than where it is talked about in a comment.
-            let open = script.lines().find(|l| l.contains("open -na")).expect("the fallback branch");
+            let open =
+                script.lines().find(|l| l.contains("open -na")).expect("the fallback branch");
             let flag = open.find("--wait-after-command=false").expect("the flag is passed");
             let e = open.find(" -e /bin/sh").expect("the command follows -e");
             // Before the `-e`, which takes everything after it as the command to run.

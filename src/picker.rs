@@ -216,9 +216,21 @@ mod tests {
     #[test]
     fn refilter_orders_by_score() {
         let items = vec![
-            PickItem { label: "File: Save".into(), shortcut: None, action: PickAction::Command(MenuAction::Save) },
-            PickItem { label: "File: Save All".into(), shortcut: None, action: PickAction::Command(MenuAction::SaveAll) },
-            PickItem { label: "Edit: Copy".into(), shortcut: None, action: PickAction::Command(MenuAction::Copy) },
+            PickItem {
+                label: "File: Save".into(),
+                shortcut: None,
+                action: PickAction::Command(MenuAction::Save),
+            },
+            PickItem {
+                label: "File: Save All".into(),
+                shortcut: None,
+                action: PickAction::Command(MenuAction::SaveAll),
+            },
+            PickItem {
+                label: "Edit: Copy".into(),
+                shortcut: None,
+                action: PickAction::Command(MenuAction::Copy),
+            },
         ];
         let mut p = Picker::new("Commands", PickerKind::Commands, items);
         p.query = "save".into();

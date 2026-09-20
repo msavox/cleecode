@@ -173,7 +173,11 @@ impl Palette {
 pub fn readable_on(colour: Color) -> Color {
     match colour {
         Color::Rgb(r, g, b) => {
-            if luma(r, g, b) >= 128 { Color::Black } else { Color::White }
+            if luma(r, g, b) >= 128 {
+                Color::Black
+            } else {
+                Color::White
+            }
         }
         _ => Color::White,
     }
@@ -855,7 +859,9 @@ mod tests {
         const APART: i32 = 24;
         let channels = |c: Color| match c {
             Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
-            other => panic!("a band has to be a colour, not a name the terminal decides: {other:?}"),
+            other => {
+                panic!("a band has to be a colour, not a name the terminal decides: {other:?}")
+            }
         };
         for theme in Theme::ALL {
             let stripes = theme.palette().handle_stripes;
@@ -1086,9 +1092,12 @@ mod tests {
     fn a_changed_line_cannot_be_mistaken_for_the_other_marks() {
         for theme in Theme::ALL {
             let p = theme.palette();
-            for (name, other) in
-                [("danger", p.danger), ("warning", p.warning), ("dim", p.text_dim), ("accent", p.accent)]
-            {
+            for (name, other) in [
+                ("danger", p.danger),
+                ("warning", p.warning),
+                ("dim", p.text_dim),
+                ("accent", p.accent),
+            ] {
                 assert_ne!(
                     p.changed_line,
                     other,

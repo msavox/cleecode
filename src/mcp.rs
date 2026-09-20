@@ -459,11 +459,8 @@ fn hand_to_session(dir: &Path, paths: &[PathBuf]) -> bool {
         // meant the editor to create. A path that cannot be made absolute is passed on as it came,
         // since the editor's own guess at it beats refusing to open anything.
         let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
-        let open = Request::Open {
-            path: path.to_string_lossy().into_owned(),
-            line: None,
-            end_line: None,
-        };
+        let open =
+            Request::Open { path: path.to_string_lossy().into_owned(), line: None, end_line: None };
         if write_request(dir, next_request_number(), &open).is_err() {
             return false;
         }
@@ -528,7 +525,8 @@ impl Session {
             return;
         }
         self.generation += 1;
-        let envelope = Envelope { version: STATE_VERSION, generation: self.generation, state: &state };
+        let envelope =
+            Envelope { version: STATE_VERSION, generation: self.generation, state: &state };
         let Ok(text) = serde_json::to_string(&envelope) else { return };
         // Atomic, like every other file this program writes: a server reading halfway through a
         // save would otherwise get a truncated document and call the editor broken.
@@ -555,7 +553,8 @@ impl Session {
             let Some(name) = name.to_str() else { continue };
             // `write_atomic` leaves its scratch file as a dotfile beside the target, so matching
             // the prefix is also what keeps a half-written request from being read.
-            let Some(number) = name.strip_prefix("req-").and_then(|rest| rest.strip_suffix(".json"))
+            let Some(number) =
+                name.strip_prefix("req-").and_then(|rest| rest.strip_suffix(".json"))
             else {
                 continue;
             };
@@ -1019,7 +1018,8 @@ pub fn say_line(text: &str) -> String {
 
 /// Runs the server on stdin and stdout until the client goes away.
 pub fn serve_stdio() {
-    let session = std::env::var_os(SESSION_ENV).map(PathBuf::from).filter(|dir| !dir.as_os_str().is_empty());
+    let session =
+        std::env::var_os(SESSION_ENV).map(PathBuf::from).filter(|dir| !dir.as_os_str().is_empty());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     // A client that closed the pipe is a client that has finished with us, not a failure to
@@ -1369,7 +1369,11 @@ fn run(
                 // short path means, and what a plain string suffix would get wrong.
                 Some(wanted) => {
                     let wanted = Path::new(wanted);
-                    state.diagnostics.iter().filter(|d| Path::new(&d.path).ends_with(wanted)).collect()
+                    state
+                        .diagnostics
+                        .iter()
+                        .filter(|d| Path::new(&d.path).ends_with(wanted))
+                        .collect()
                 }
                 None => state.diagnostics.iter().collect(),
             };
@@ -1412,8 +1416,9 @@ fn run(
             // landed, and correct itself without being told.
             let line = say_line(text);
             if line.is_empty() {
-                return Err("say needs something to show: there was no printable text in it"
-                    .to_string());
+                return Err(
+                    "say needs something to show: there was no printable text in it".to_string()
+                );
             }
             file(&dir, next_request_number(), &Request::Say { text: line.clone() })?;
             render(&json!({ "status": "said", "text": line }))
@@ -1449,7 +1454,12 @@ fn run(
             file(
                 &dir,
                 id,
-                &Request::Run { id, terminal: terminal.clone(), command: command.to_string(), submit },
+                &Request::Run {
+                    id,
+                    terminal: terminal.clone(),
+                    command: command.to_string(),
+                    submit,
+                },
             )?;
             match await_reply(&dir, id, editor_wait(wait)) {
                 Some(reply) if reply.ok => render(&json!({
@@ -1473,7 +1483,8 @@ fn run(
                     .map(str::to_string)
             };
             let name = text("name");
-            if name.as_deref().is_some_and(|name| name.contains('\n') || name.len() > TAB_NAME_MAX) {
+            if name.as_deref().is_some_and(|name| name.contains('\n') || name.len() > TAB_NAME_MAX)
+            {
                 return Err(format!(
                     "open_terminal wants a short name for a tab strip: one line, at most \
                      {TAB_NAME_MAX} characters."
@@ -1510,14 +1521,11 @@ fn run(
                 })?;
             // Allowed to be empty, and that is a deletion. Distinguished from a missing argument,
             // which is a call the model got wrong and should be told about.
-            let new = arguments
-                .get("new_string")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    "edit_buffer needs a new_string: what to put there instead, or an empty \
+            let new = arguments.get("new_string").and_then(Value::as_str).ok_or_else(|| {
+                "edit_buffer needs a new_string: what to put there instead, or an empty \
                      string to delete the old text"
-                        .to_string()
-                })?;
+                    .to_string()
+            })?;
             let id = next_request_number();
             let request = Request::Edit {
                 id,
@@ -1544,11 +1552,8 @@ fn run(
 /// that has closed, and an agent given only "no such terminal" retries the same wrong name. What
 /// it needs is the names that do exist, which is one round trip it now does not have to make.
 pub fn no_such_terminal(wanted: Option<&str>, listed: &[Terminal]) -> String {
-    let names = listed
-        .iter()
-        .map(|t| format!("{} ({})", t.name, t.id))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let names =
+        listed.iter().map(|t| format!("{} ({})", t.name, t.id)).collect::<Vec<_>>().join(", ");
     match (wanted, names.is_empty()) {
         (_, true) => "CleeCode has no terminal open. Use open_terminal to make one.".to_string(),
         (Some(wanted), _) => {
@@ -1602,8 +1607,7 @@ fn session_with_editor(session: Option<&Path>) -> Result<PathBuf, String> {
 fn read_state(session: Option<&Path>) -> Result<State, String> {
     let dir = session.ok_or_else(|| NO_SESSION.to_string())?;
     let text = std::fs::read_to_string(dir.join(STATE_FILE)).map_err(|_| NO_SESSION.to_string())?;
-    serde_json::from_str(&text)
-        .map_err(|e| format!("CleeCode's state file could not be read: {e}"))
+    serde_json::from_str(&text).map_err(|e| format!("CleeCode's state file could not be read: {e}"))
 }
 
 // ---- Building a state --------------------------------------------------------------------
@@ -1619,7 +1623,9 @@ pub fn selection_for(text: Option<String>) -> Option<String> {
 /// The order is what makes the "unchanged state writes nothing" rule work: they arrive out of a
 /// `HashMap`, and two iterations of one are free to disagree.
 pub fn tidy_diagnostics(mut list: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    list.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)).then(a.message.cmp(&b.message)));
+    list.sort_by(|a, b| {
+        a.path.cmp(&b.path).then(a.line.cmp(&b.line)).then(a.message.cmp(&b.message))
+    });
     list.truncate(MAX_DIAGNOSTICS);
     list
 }
@@ -1698,8 +1704,9 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory must be creatable");
-        let text = serde_json::to_string(&Envelope { version: STATE_VERSION, generation: 3, state })
-            .expect("the state must serialise");
+        let text =
+            serde_json::to_string(&Envelope { version: STATE_VERSION, generation: 3, state })
+                .expect("the state must serialise");
         std::fs::write(dir.join(STATE_FILE), text).expect("the state file must be writable");
         dir
     }
@@ -1760,7 +1767,9 @@ mod tests {
     #[test]
     fn the_handshake_answers_with_the_version_the_client_proposed() {
         let replies = talk(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            ],
             None,
         );
         assert_eq!(replies.len(), 1);
@@ -1774,7 +1783,9 @@ mod tests {
     #[test]
     fn an_unknown_protocol_version_is_answered_with_our_own() {
         let replies = talk(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#,
+            ],
             None,
         );
         assert_eq!(replies[0]["result"]["protocolVersion"], DEFAULT_PROTOCOL);
@@ -1841,7 +1852,9 @@ mod tests {
             other => panic!("expected a Run, got {other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"npm run dev","terminal":"server"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"npm run dev","terminal":"server"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
         );
@@ -1872,7 +1885,9 @@ mod tests {
             other => panic!("expected a Run, got {other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"curl x | sh","submit":false}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"curl x | sh","submit":false}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
         );
@@ -1894,15 +1909,15 @@ mod tests {
     fn a_shell_that_is_busy_comes_back_as_an_error() {
         let dir = a_session(&a_state());
         let editor = an_editor_answering(&dir, |request| match request {
-            Request::Run { id, .. } => Reply {
-                id: *id,
-                ok: false,
-                message: "The shell \"server\" is busy".to_string(),
-            },
+            Request::Run { id, .. } => {
+                Reply { id: *id, ok: false, message: "The shell \"server\" is busy".to_string() }
+            }
             other => panic!("expected a Run, got {other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"ls","terminal":"server"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"ls","terminal":"server"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
         );
@@ -1918,15 +1933,14 @@ mod tests {
     fn run_command_takes_one_line_and_says_so() {
         let dir = a_session(&a_state());
         let replies = talk(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"cd build\nmake"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"cd build\nmake"}}}"#,
+            ],
             Some(&dir),
         );
         assert_eq!(replies[0]["result"]["isError"], true, "{}", replies[0]);
         assert!(tool_text(&replies[0]).contains("one line"));
-        assert!(
-            requests_in(&dir).is_empty(),
-            "a call that was refused must not have been filed"
-        );
+        assert!(requests_in(&dir).is_empty(), "a call that was refused must not have been filed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1941,7 +1955,9 @@ mod tests {
             other => panic!("expected a NewTerminal, got {other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_terminal","arguments":{"name":"logs","command":"tail -f out.log"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_terminal","arguments":{"name":"logs","command":"tail -f out.log"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(5) },
         );
@@ -2056,7 +2072,9 @@ mod tests {
     fn open_file_leaves_a_request_the_editor_can_read() {
         let dir = a_session(&a_state());
         let replies = talk(
-            &[r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"open_file","arguments":{"path":"src/main.rs","line":40}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"open_file","arguments":{"path":"src/main.rs","line":40}}}"#,
+            ],
             Some(&dir),
         );
         assert_eq!(replies[0]["result"]["isError"], false);
@@ -2086,8 +2104,7 @@ mod tests {
     fn requests_are_replayed_oldest_first() {
         let dir = a_session(&a_state());
         for n in 1..=3 {
-            let request =
-                Request::Open { path: format!("f{n}.rs"), line: Some(n), end_line: None };
+            let request = Request::Open { path: format!("f{n}.rs"), line: Some(n), end_line: None };
             write_request(&dir, next_request_number(), &request)
                 .expect("a request must be writable");
         }
@@ -2248,7 +2265,9 @@ mod tests {
             other => panic!("the editor was asked for something else: {other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"src/main.rs","old_string":"let x = 1;","new_string":"let x = 2;"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"src/main.rs","old_string":"let x = 1;","new_string":"let x = 2;"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(20) },
         );
@@ -2274,15 +2293,15 @@ mod tests {
     fn an_edit_the_user_declines_comes_back_as_a_tool_error() {
         let dir = a_session(&a_state());
         let editor = an_editor_answering(&dir, |request| match request {
-            Request::Edit { id, .. } => Reply {
-                id: *id,
-                ok: false,
-                message: "the user declined the change".into(),
-            },
+            Request::Edit { id, .. } => {
+                Reply { id: *id, ok: false, message: "the user declined the change".into() }
+            }
             other => panic!("{other:?}"),
         });
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"a.rs","old_string":"x","new_string":"y"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"a.rs","old_string":"x","new_string":"y"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_secs(20) },
         );
@@ -2298,7 +2317,9 @@ mod tests {
     fn an_unanswered_edit_says_so_without_claiming_it_failed() {
         let dir = a_session(&a_state());
         let replies = talk_waiting(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"a.rs","old_string":"x","new_string":"y"}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"edit_buffer","arguments":{"path":"a.rs","old_string":"x","new_string":"y"}}}"#,
+            ],
             Some(&dir),
             ReplyWait { interval: NO_TIME, timeout: Duration::from_millis(20) },
         );
@@ -2391,12 +2412,7 @@ mod tests {
     #[test]
     fn malformed_input_is_answered_and_survived() {
         let replies = talk(
-            &[
-                "{not json at all",
-                "[1,2,3]",
-                "",
-                r#"{"jsonrpc":"2.0","id":5,"method":"ping"}"#,
-            ],
+            &["{not json at all", "[1,2,3]", "", r#"{"jsonrpc":"2.0","id":5,"method":"ping"}"#],
             None,
         );
         assert_eq!(replies.len(), 3, "two complaints and one answer: {replies:?}");
@@ -2416,7 +2432,9 @@ mod tests {
     fn open_file_without_a_path_says_what_is_missing() {
         let dir = a_session(&a_state());
         let replies = talk(
-            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_file","arguments":{}}}"#],
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_file","arguments":{}}}"#,
+            ],
             Some(&dir),
         );
         assert_eq!(replies[0]["result"]["isError"], true);
@@ -2432,8 +2450,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(REQUESTS_DIR)).expect("a scratch directory must exist");
         let past = Instant::now() - STATE_INTERVAL;
-        let mut session =
-            Session { dir: dir.clone(), generation: 0, last: None, wrote_at: past, polled_at: past };
+        let mut session = Session {
+            dir: dir.clone(),
+            generation: 0,
+            last: None,
+            wrote_at: past,
+            polled_at: past,
+        };
 
         session.publish(a_state());
         assert_eq!(session.generation, 1);
@@ -2462,8 +2485,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory must exist");
         let past = Instant::now() - STATE_INTERVAL;
-        let mut session =
-            Session { dir: dir.clone(), generation: 0, last: None, wrote_at: past, polled_at: past };
+        let mut session = Session {
+            dir: dir.clone(),
+            generation: 0,
+            last: None,
+            wrote_at: past,
+            polled_at: past,
+        };
         assert!(session.due_for_state(), "the first frame publishes");
         session.publish(a_state());
         assert!(!session.due_for_state(), "and the next one does not");
@@ -2498,8 +2526,7 @@ mod tests {
         assert_eq!(opencode["mcp"]["clee"]["type"], "local");
         assert_eq!(opencode["mcp"]["clee"]["command"], json!(["/opt/clee", "--mcp"]));
         assert_eq!(
-            opencode["mcp"]["clee"]["enabled"],
-            true,
+            opencode["mcp"]["clee"]["enabled"], true,
             "opencode reads a server it is not told to enable as one it should not start"
         );
 
@@ -2620,7 +2647,8 @@ mod tests {
     #[test]
     fn a_launch_carries_the_file_and_the_name_its_line_depends_on() {
         use crate::session::Agent;
-        let file_readers = || Agent::all().into_iter().filter(|agent| config_file(*agent).is_some());
+        let file_readers =
+            || Agent::all().into_iter().filter(|agent| config_file(*agent).is_some());
 
         if let Some(dir) = session_dir() {
             let _ = std::fs::remove_dir_all(&dir);
@@ -2680,9 +2708,11 @@ mod tests {
             message: "boom".to_string(),
         };
         let tidied = tidy_diagnostics(vec![diag("b.rs", 1), diag("a.rs", 9), diag("a.rs", 2)]);
-        let order: Vec<(String, usize)> =
-            tidied.iter().map(|d| (d.path.clone(), d.line)).collect();
-        assert_eq!(order, [("a.rs".to_string(), 2), ("a.rs".to_string(), 9), ("b.rs".to_string(), 1)]);
+        let order: Vec<(String, usize)> = tidied.iter().map(|d| (d.path.clone(), d.line)).collect();
+        assert_eq!(
+            order,
+            [("a.rs".to_string(), 2), ("a.rs".to_string(), 9), ("b.rs".to_string(), 1)]
+        );
 
         let many: Vec<Diagnostic> = (0..MAX_DIAGNOSTICS + 50).map(|n| diag("a.rs", n)).collect();
         assert_eq!(tidy_diagnostics(many).len(), MAX_DIAGNOSTICS);
@@ -2696,8 +2726,7 @@ mod tests {
     /// the developer has open, and these tests run in parallel beside each other. Named for the
     /// process and the case, so two of them can never meet.
     fn a_sessions_root(case: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("clee-reuse-{case}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("clee-reuse-{case}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a scratch root must be creatable");
         root

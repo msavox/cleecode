@@ -573,15 +573,16 @@ fn finish(keys: Keys, payload: &[u8]) -> Decoded {
 
 /// Turns the picture's own bytes — however they arrived — into the picture.
 fn decode(keys: Keys, bytes: Vec<u8>) -> Decoded {
-    let image = match keys.format {
-        24 => image::RgbImage::from_raw(keys.width, keys.height, bytes).map(DynamicImage::ImageRgb8),
-        32 => {
-            image::RgbaImage::from_raw(keys.width, keys.height, bytes).map(DynamicImage::ImageRgba8)
-        }
-        // A PNG states its own size, so `s` and `v` are not consulted.
-        100 => image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok(),
-        _ => return Decoded::Unsupported,
-    };
+    let image =
+        match keys.format {
+            24 => image::RgbImage::from_raw(keys.width, keys.height, bytes)
+                .map(DynamicImage::ImageRgb8),
+            32 => image::RgbaImage::from_raw(keys.width, keys.height, bytes)
+                .map(DynamicImage::ImageRgba8),
+            // A PNG states its own size, so `s` and `v` are not consulted.
+            100 => image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok(),
+            _ => return Decoded::Unsupported,
+        };
     match image {
         Some(image) => Decoded::Picture { keys, image },
         None => Decoded::Unsupported,
@@ -622,7 +623,9 @@ fn load_medium(keys: &Keys, name: &[u8]) -> Option<Vec<u8>> {
     // the picture the wrong length. A PNG states its own size, so there `S` — or the whole of
     // the file — is the answer.
     let want = match bytes_per_pixel(keys.format) {
-        Some(bytes) => (keys.width as usize).checked_mul(keys.height as usize)?.checked_mul(bytes)?,
+        Some(bytes) => {
+            (keys.width as usize).checked_mul(keys.height as usize)?.checked_mul(bytes)?
+        }
         None => keys.size as usize,
     };
     let offset = u64::from(keys.offset);
@@ -764,9 +767,8 @@ fn read_mapping(fd: libc::c_int, offset: u64, want: usize) -> Option<Vec<u8>> {
         return None;
     }
     // SAFETY: a read-only mapping of the whole object, unmapped below with the same length.
-    let map = unsafe {
-        libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0)
-    };
+    let map =
+        unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
     if map == libc::MAP_FAILED {
         return None;
     }
@@ -801,10 +803,15 @@ pub struct Placement {
 /// What the reader thread has to tell the pane about.
 pub enum Event {
     Place(Box<Placement>),
-    Forget { id: u32, all: bool },
+    Forget {
+        id: u32,
+        all: bool,
+    },
     /// The screen was wiped. Only the pictures on the grid it happened on go: a full-screen
     /// program clearing the alternate screen has nothing to say about the shell underneath it.
-    ClearScreen { alternate: bool },
+    ClearScreen {
+        alternate: bool,
+    },
     /// A picture arrived that cannot be drawn — a format this does not read, a size that cannot
     /// be meant, a file or segment that was not there. Reported so the pane can say so rather
     /// than stay blank.
@@ -1096,7 +1103,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_delete_after_reading_is_only_obeyed_in_a_temporary_directory() {
-        let dir = std::env::current_dir().unwrap().join(format!("clee-keep-{}", std::process::id()));
+        let dir =
+            std::env::current_dir().unwrap().join(format!("clee-keep-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("six-bytes.rgb");
         std::fs::write(&path, [0xff, 0, 0, 0, 0xff, 0]).unwrap();
@@ -1120,7 +1128,11 @@ mod tests {
             let created = std::ffi::CString::new(slashed.clone()).unwrap();
             // SAFETY: a nul-terminated name; the descriptor is closed below.
             let fd = unsafe {
-                libc::shm_open(created.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600 as libc::c_uint)
+                libc::shm_open(
+                    created.as_ptr(),
+                    libc::O_CREAT | libc::O_RDWR,
+                    0o600 as libc::c_uint,
+                )
             };
             assert!(fd >= 0, "could not make a segment to read back");
             let frame = [0xffu8, 0, 0, 0, 0xff, 0];
@@ -1131,7 +1143,8 @@ mod tests {
                 libc::close(fd);
             }
 
-            let sent = if bare { slashed.trim_start_matches('/').to_string() } else { slashed.clone() };
+            let sent =
+                if bare { slashed.trim_start_matches('/').to_string() } else { slashed.clone() };
             let name = base64::engine::general_purpose::STANDARD.encode(&sent);
             let command = format!("Ga=T,f=24,t=s,s=2,v=1,C=1,q=2,m=1;{name}");
             let done = Decoder::default().feed(command.as_bytes(), &mut Pace::default());
@@ -1157,7 +1170,10 @@ mod tests {
         let mut decoder = Decoder::default();
         // Unsupported, not Nothing: the segment is not there, which is a picture that could not
         // be drawn rather than a chunk of one still arriving...
-        assert!(matches!(decoder.feed(command.as_bytes(), &mut Pace::default()), Decoded::Unsupported));
+        assert!(matches!(
+            decoder.feed(command.as_bytes(), &mut Pace::default()),
+            Decoded::Unsupported
+        ));
         // ...and nothing was left half-open, so the sign-off that follows is still a delete.
         assert!(matches!(decoder.feed(b"Ga=d", &mut Pace::default()), Decoded::Forget(_)));
     }
@@ -1237,4 +1253,3 @@ mod tests {
         assert!(store.get(MAX_STORED as u32 + 2).is_none());
     }
 }
-

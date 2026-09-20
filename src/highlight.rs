@@ -266,15 +266,12 @@ mod tests {
     /// A file long enough to span several rungs of the ladder, with one line of the caller's
     /// choosing in the middle of it.
     fn sample(at: usize, line: &str) -> Rope {
-        let text: Vec<String> = (0..130)
-            .map(|i| {
-                if i == at {
-                    line.to_string()
-                } else {
-                    format!("fn f{i}() {{ let v = {i}; }}")
-                }
-            })
-            .collect();
+        let text: Vec<String> =
+            (0..130)
+                .map(|i| {
+                    if i == at { line.to_string() } else { format!("fn f{i}() {{ let v = {i}; }}") }
+                })
+                .collect();
         Rope::from_str(&text.join("\n"))
     }
 
@@ -301,7 +298,11 @@ mod tests {
         assert_eq!(cache.valid_lines(), before.len_lines());
 
         spans.truncate(cache.invalidate_from(70));
-        assert_eq!(cache.valid_lines(), 64, "resumed from the rung below the edit, not from the top");
+        assert_eq!(
+            cache.valid_lines(),
+            64,
+            "resumed from the rung below the edit, not from the top"
+        );
         hl.extend_to(path, &after, usize::MAX, &mut cache, &mut spans);
 
         assert_eq!(spans, from_scratch(&hl, &after));
@@ -393,4 +394,3 @@ mod tests {
         assert_eq!(syntax_name("dump.qqq", "zzz\n"), "Plain Text");
     }
 }
-

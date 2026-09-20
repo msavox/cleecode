@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 /// whichever of five shells they use, to parse a list back out of it. A handful of known
 /// prefixes is smaller, and does not depend on the shell being willing to answer.
 const TOOL_DIRS: [&str; 6] = [
-    "/opt/homebrew/bin",   // Homebrew on Apple silicon
-    "/usr/local/bin",      // Homebrew on Intel, MacTeX's Ghostscript, and npm's global bin
-    "/opt/local/bin",      // MacPorts
+    "/opt/homebrew/bin",                       // Homebrew on Apple silicon
+    "/usr/local/bin", // Homebrew on Intel, MacTeX's Ghostscript, and npm's global bin
+    "/opt/local/bin", // MacPorts
     "/Library/TeX/texbin", // MacTeX and TeX Live, the /etc/paths.d case above
     "/usr/local/texlive/bin/universal-darwin", // a TeX Live installed without the symlinks
     "/home/linuxbrew/.linuxbrew/bin", // Homebrew on Linux, at its shared default
@@ -73,7 +73,8 @@ pub fn lookup(dirs: impl Iterator<Item = PathBuf>, name: &str) -> Option<PathBuf
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            std::fs::metadata(path)
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         }
         #[cfg(not(unix))]
         path.is_file()

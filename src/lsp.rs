@@ -45,7 +45,7 @@ use lsp_types::{
     TextDocumentClientCapabilities, Uri, WindowClientCapabilities,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -476,7 +476,11 @@ pub const QUIET: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Whether an edit is settled enough to send. Named, so the rule is one thing rather than a
 /// comparison spelled out wherever it is needed.
-pub fn should_send(last_sent: Option<u64>, current: u64, since_change: std::time::Duration) -> bool {
+pub fn should_send(
+    last_sent: Option<u64>,
+    current: u64,
+    since_change: std::time::Duration,
+) -> bool {
     last_sent != Some(current) && since_change >= QUIET
 }
 
@@ -549,7 +553,9 @@ pub enum Ask {
     /// with no edit in it is one to ask again about when the server can be asked again, and one to
     /// drop when it cannot. The reader thread never sees a handshake reply, so what the server
     /// said it could do is written down here, at the moment the question goes out.
-    CodeActions { resolves: bool },
+    CodeActions {
+        resolves: bool,
+    },
     CodeActionResolve,
     SelectionRange,
     FoldingRanges,
@@ -823,8 +829,7 @@ fn one_edit(value: &Value) -> Option<SpanEdit> {
 fn edits_for(uri: &str, edits: Option<&Value>) -> Option<FileEdits> {
     let uri: Uri = uri.parse().ok()?;
     let path = path_for(&uri)?;
-    let edits: Vec<SpanEdit> =
-        edits?.as_array()?.iter().filter_map(one_edit).collect();
+    let edits: Vec<SpanEdit> = edits?.as_array()?.iter().filter_map(one_edit).collect();
     Some(FileEdits { path, edits })
 }
 
@@ -1399,11 +1404,7 @@ impl Client {
     /// hover requests sent the character column raw, which is right in English and wrong on
     /// every line with an accent in it.
     fn column_for(&self, line_text: &str, col: usize) -> usize {
-        if self.utf16 {
-            chars_to_utf16(line_text, col)
-        } else {
-            chars_to_utf8(line_text, col)
-        }
+        if self.utf16 { chars_to_utf16(line_text, col) } else { chars_to_utf8(line_text, col) }
     }
 
     pub fn did_open(&mut self, path: &Path, text: &str) {
@@ -1446,10 +1447,8 @@ impl Client {
     pub fn did_close(&mut self, path: &Path) {
         let Some(uri) = uri_for(path) else { return };
         self.open.retain(|p| p != path);
-        let _ = self.notify(
-            "textDocument/didClose",
-            json!({"textDocument": {"uri": uri.as_str()}}),
-        );
+        let _ =
+            self.notify("textDocument/didClose", json!({"textDocument": {"uri": uri.as_str()}}));
     }
 
     /// Asks what could be typed at a position, and returns the id the question went out with.
@@ -1510,7 +1509,13 @@ impl Client {
     /// Same position arithmetic as [`Self::completion`], and the same reason it goes out without
     /// waiting for the debounce: the question is about *this* text, and an answer about the text
     /// of four hundred milliseconds ago is not a slower right answer, it is a wrong one.
-    pub fn definition(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+    pub fn definition(
+        &mut self,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+    ) -> Option<i64> {
         self.position_request(
             "textDocument/definition",
             Ask::Definition,
@@ -1526,7 +1531,13 @@ impl Client {
     /// It is the honest answer to "where is this name" — the place it comes from is one of the
     /// places it appears — and a list that silently left out the one row somebody was looking
     /// for would be read as the server not knowing about it.
-    pub fn references(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
+    pub fn references(
+        &mut self,
+        path: &Path,
+        line: usize,
+        line_text: &str,
+        col: usize,
+    ) -> Option<i64> {
         self.position_request(
             "textDocument/references",
             Ask::References,
@@ -1538,7 +1549,13 @@ impl Client {
 
     /// Asks what the thing under the cursor is.
     pub fn hover(&mut self, path: &Path, line: usize, line_text: &str, col: usize) -> Option<i64> {
-        self.position_request("textDocument/hover", Ask::Hover, path, (line, line_text, col), Value::Null)
+        self.position_request(
+            "textDocument/hover",
+            Ask::Hover,
+            path,
+            (line, line_text, col),
+            Value::Null,
+        )
     }
 
     /// Asks what would have to change for the thing under the cursor to be called `new_name`.
@@ -1967,12 +1984,8 @@ fn read_loop(
                         Ask::Completion => {
                             Event::Completion { id, words: completion_words(result) }
                         }
-                        Ask::Definition => {
-                            Event::Definition { id, target: first_location(result) }
-                        }
-                        Ask::References => {
-                            Event::References { id, targets: all_locations(result) }
-                        }
+                        Ask::Definition => Event::Definition { id, target: first_location(result) },
+                        Ask::References => Event::References { id, targets: all_locations(result) },
                         Ask::Symbols => Event::Symbols { id, symbols: symbol_rows(result) },
                         Ask::Hover => Event::Hover { id, text: hover_text(result) },
                         // The two places an `error` member is read rather than passed over. For
@@ -2209,7 +2222,11 @@ mod tests {
         let first = "let città = 1;";
         let second = "    x = \"è\";";
         assert_eq!(utf16_to_chars(first, span.start_col), 4);
-        assert_eq!(utf16_to_chars(second, span.end_col), 6, "UTF-16 and characters agree up to the accent");
+        assert_eq!(
+            utf16_to_chars(second, span.end_col),
+            6,
+            "UTF-16 and characters agree up to the accent"
+        );
         // The same numbers from a server counting bytes are two different places.
         assert_eq!(utf8_to_chars(first, span.start_col), 4);
         assert_eq!(utf8_to_chars(second, span.end_col), 6);
@@ -2622,7 +2639,11 @@ mod tests {
         }
         match &events[1] {
             Event::Diagnostics { path, raw } => {
-                assert_eq!(path, &PathBuf::from("/tmp/prova nuova/main.rs"), "the space is decoded");
+                assert_eq!(
+                    path,
+                    &PathBuf::from("/tmp/prova nuova/main.rs"),
+                    "the space is decoded"
+                );
                 assert_eq!(raw.len(), 1);
                 assert_eq!(raw[0].severity, Some(DiagnosticSeverity::WARNING));
                 let lines = vec![String::new(), String::new(), "    let x = 1;".to_string()];
@@ -2701,10 +2722,7 @@ mod tests {
     #[test]
     fn the_users_own_table_wins_over_the_built_in_one() {
         // A language the built-in table says nothing about.
-        assert_eq!(
-            argv("thing.ml", &[("ml", "ocamllsp")]),
-            Some(vec!["ocamllsp".to_string()])
-        );
+        assert_eq!(argv("thing.ml", &[("ml", "ocamllsp")]), Some(vec!["ocamllsp".to_string()]));
         // And one it does — replaced, arguments and all.
         assert_eq!(
             argv("main.rs", &[("rs", "my-analyzer --stdio")]),
@@ -2872,7 +2890,8 @@ mod tests {
         // The two older shapes, both still sent by servers in use.
         assert_eq!(hover_text(Some(&json!({ "contents": "usize" }))).as_deref(), Some("usize"));
         assert_eq!(
-            hover_text(Some(&json!({ "contents": [{ "language": "go", "value": "var x int" }] }))).as_deref(),
+            hover_text(Some(&json!({ "contents": [{ "language": "go", "value": "var x int" }] })))
+                .as_deref(),
             Some("var x int")
         );
         // Nothing to say, said as nothing rather than as an empty line.
@@ -2888,15 +2907,21 @@ mod tests {
     fn an_answer_is_read_as_the_question_it_answers() {
         let bodies = [
             (1, Ask::Completion, json!(["alpha"])),
-            (2, Ask::Definition, json!({
-                "uri": "file:///a.rs",
-                "range": { "start": { "line": 3, "character": 1 }, "end": { "line": 3, "character": 4 } }
-            })),
+            (
+                2,
+                Ask::Definition,
+                json!({
+                    "uri": "file:///a.rs",
+                    "range": { "start": { "line": 3, "character": 1 }, "end": { "line": 3, "character": 4 } }
+                }),
+            ),
             (3, Ask::Hover, json!({ "contents": "usize" })),
         ];
         let mut wire = Vec::new();
         for (id, _, result) in &bodies {
-            wire.extend(frame(&json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()));
+            wire.extend(frame(
+                &json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+            ));
         }
         let (tx, rx) = mpsc::channel();
         let asks: Vec<(i64, Ask)> = bodies.iter().map(|(id, ask, _)| (*id, *ask)).collect();
@@ -2942,11 +2967,8 @@ mod tests {
         assert_eq!(path, file, "the URI made the round trip and named the file back");
         assert_eq!(raw.len(), 2);
 
-        let lines: Vec<String> = std::fs::read_to_string(&file)
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect();
+        let lines: Vec<String> =
+            std::fs::read_to_string(&file).unwrap().lines().map(str::to_string).collect();
         let marks = marks_from(&raw, &lines, utf16);
         assert_eq!(marks[0].severity, Severity::Warning);
         assert_eq!((marks[0].line, marks[0].start, marks[0].end), (1, 8, 13));
@@ -3106,12 +3128,20 @@ mod tests {
                 "error":{"code":-32602,"message":"cannot rename this element"}}"#,
         );
         let (tx, rx) = mpsc::channel();
-        read_loop(BufReader::new(&wire[..]), tx, "stub".to_string(), pending_asks(&[(7, Ask::Rename)]));
+        read_loop(
+            BufReader::new(&wire[..]),
+            tx,
+            "stub".to_string(),
+            pending_asks(&[(7, Ask::Rename)]),
+        );
         let events: Vec<Event> = rx.into_iter().collect();
         match &events[0] {
             Event::Rename { id, plan } => {
                 assert_eq!(*id, 7);
-                assert_eq!(plan.as_ref().err().map(String::as_str), Some("cannot rename this element"));
+                assert_eq!(
+                    plan.as_ref().err().map(String::as_str),
+                    Some("cannot rename this element")
+                );
             }
             _ => panic!("the error did not come back as the answer to the rename"),
         }
@@ -3201,10 +3231,7 @@ mod tests {
     fn what_a_server_can_do_about_code_is_read_off_the_handshake() {
         // The bare form: it answers the request and cannot resolve.
         let plain = json!({ "codeActionProvider": true });
-        assert_eq!(
-            action_support(Some(&plain)),
-            ActionSupport { offered: true, resolves: false }
-        );
+        assert_eq!(action_support(Some(&plain)), ActionSupport { offered: true, resolves: false });
         // The options form, which is where the second flag lives. rust-analyzer answers this way.
         let full = json!({
             "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true }
@@ -3212,15 +3239,21 @@ mod tests {
         assert_eq!(action_support(Some(&full)), ActionSupport { offered: true, resolves: true });
         // An options object that says nothing about resolving has said it cannot.
         let kinds = json!({ "codeActionProvider": { "codeActionKinds": ["quickfix"] } });
-        assert_eq!(
-            action_support(Some(&kinds)),
-            ActionSupport { offered: true, resolves: false }
-        );
+        assert_eq!(action_support(Some(&kinds)), ActionSupport { offered: true, resolves: false });
         // Said no, said nothing, or said something out of a protocol this predates: all of them
         // are "do not ask", which is the reading that costs nobody a request.
-        assert_eq!(action_support(Some(&json!({ "codeActionProvider": false }))), ActionSupport::default());
-        assert_eq!(action_support(Some(&json!({ "hoverProvider": true }))), ActionSupport::default());
-        assert_eq!(action_support(Some(&json!({ "codeActionProvider": "yes" }))), ActionSupport::default());
+        assert_eq!(
+            action_support(Some(&json!({ "codeActionProvider": false }))),
+            ActionSupport::default()
+        );
+        assert_eq!(
+            action_support(Some(&json!({ "hoverProvider": true }))),
+            ActionSupport::default()
+        );
+        assert_eq!(
+            action_support(Some(&json!({ "codeActionProvider": "yes" }))),
+            ActionSupport::default()
+        );
         assert_eq!(action_support(None), ActionSupport::default());
     }
 

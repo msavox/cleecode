@@ -87,7 +87,8 @@ mod tests {
         let mut out = Vec::new();
         for (at, _) in body.match_indices("cleecode_") {
             let rest = &body[at..];
-            let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+            let end =
+                rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
             let (name, after) = rest.split_at(end);
             // A call, not a comment: the next thing that is not a space has to be an opening
             // bracket. `cleecode_grid (f)` counts and "see cleecode_grid for why" does not.
@@ -138,7 +139,8 @@ mod tests {
             // Either it has a file of its own, or it is a subfunction of one that ships. Both
             // are fine; what is not fine is a name that reaches Octave and resolves to nothing.
             assert!(
-                OCTAVE.iter().any(|(file, _)| *file == format!("{name}.m")) || defined.contains(&name),
+                OCTAVE.iter().any(|(file, _)| *file == format!("{name}.m"))
+                    || defined.contains(&name),
                 "{name} is called by the interpreter code but does not travel with it"
             );
         }
@@ -162,8 +164,17 @@ mod tests {
         // inside a `try` that must not break the user's REPL, so a name that failed to travel
         // has exactly one symptom: a panel that quietly stops changing.
         let hook = PYTHON.iter().find(|(n, _)| *n == "cleecode_pyws.py").unwrap().1;
-        for called in ["_answer_slice", "_breakpoints", "_arm", "_history", "_debug_state",
-                       "_frame_vars", "_figures", "_snapshot", "_log"] {
+        for called in [
+            "_answer_slice",
+            "_breakpoints",
+            "_arm",
+            "_history",
+            "_debug_state",
+            "_frame_vars",
+            "_figures",
+            "_snapshot",
+            "_log",
+        ] {
             assert!(
                 hook.contains(&format!("def {called}(")),
                 "{called} is called by the Python hook but is not defined in it"

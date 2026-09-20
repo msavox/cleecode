@@ -374,7 +374,11 @@ pub fn load_in(dir: &Path, name: &str) -> Option<Workspace> {
 /// is refused, so a clash can only be one of those older files: irreplaceable, where the built-in
 /// is documented and reproducible. The caller is told, so the shadowing is a sentence on screen
 /// rather than a workspace that quietly stopped existing.
-pub fn resolve_in(dir: &Path, name: &str, shape: &Shape) -> (Option<Workspace>, Option<&'static str>) {
+pub fn resolve_in(
+    dir: &Path,
+    name: &str,
+    shape: &Shape,
+) -> (Option<Workspace>, Option<&'static str>) {
     match (load_in(dir, name), built_in_named(name)) {
         (Some(theirs), Some(built_in)) => (Some(theirs), Some(built_in)),
         (Some(theirs), None) => (Some(theirs), None),
@@ -433,7 +437,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cleecode_ws_test_{}_{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("cleecode_ws_test_{}_{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -477,7 +482,10 @@ mod tests {
                     active: 1,
                     tabs: vec![
                         WorkspaceTab::default(),
-                        WorkspaceTab { name: Some("octave".to_string()), startup_command: Some("octave".to_string()) },
+                        WorkspaceTab {
+                            name: Some("octave".to_string()),
+                            startup_command: Some("octave".to_string()),
+                        },
                     ],
                 },
             ],
@@ -565,7 +573,10 @@ mod tests {
         assert_eq!(names, vec!["Alpha".to_string(), "middle".to_string(), "zeta".to_string()]);
 
         assert!(delete_in(&dir, "middle"));
-        assert!(!delete_in(&dir, "middle"), "deleting twice reports failure rather than pretending");
+        assert!(
+            !delete_in(&dir, "middle"),
+            "deleting twice reports failure rather than pretending"
+        );
         let names: Vec<String> = list_in(&dir).into_iter().map(|w| w.name).collect();
         assert_eq!(names, vec!["Alpha".to_string(), "zeta".to_string()]);
     }
@@ -643,7 +654,9 @@ mod tests {
         // window, not about replacing what you have open.
         let built = built_in(DEFAULT_NAME, &shape(200)).unwrap();
         assert_eq!(built.root, PathBuf::from("/somewhere"));
-        assert!(built.layout.show_sidebar && built.layout.show_terminal && !built.layout.split_view);
+        assert!(
+            built.layout.show_sidebar && built.layout.show_terminal && !built.layout.split_view
+        );
         assert!(built.terminals.is_empty() && built.open_files.is_empty());
         assert!(built_in("nothing of the sort", &shape(200)).is_none());
     }

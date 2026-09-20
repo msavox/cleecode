@@ -15,8 +15,8 @@
 // same one about `claude`. The rationale for not trusting the PATH alone moved with it.
 use crate::tools::tool;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
+use std::sync::mpsc::Sender;
 
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -435,7 +435,28 @@ impl Preview {
     }
 
     pub fn picture() -> Self {
-        Preview { state: State::Loading, pages: None, source: None, settled: None, shown_revision: 0, document_failed: false, area_cols: 0, area_rows: 0, fitted_for: (0, 0), adjusted: false, zoom: 1.0, inverted: false, fit: Fit::Page, full: None, scroll_px: 0, scroll_x: 0, text_only: false, reloading: false, animation: None, animation_refused: false }
+        Preview {
+            state: State::Loading,
+            pages: None,
+            source: None,
+            settled: None,
+            shown_revision: 0,
+            document_failed: false,
+            area_cols: 0,
+            area_rows: 0,
+            fitted_for: (0, 0),
+            adjusted: false,
+            zoom: 1.0,
+            inverted: false,
+            fit: Fit::Page,
+            full: None,
+            scroll_px: 0,
+            scroll_x: 0,
+            text_only: false,
+            reloading: false,
+            animation: None,
+            animation_refused: false,
+        }
     }
 
     pub fn document(page: usize) -> Self {
@@ -516,7 +537,8 @@ impl Preview {
             return;
         }
         self.text_only = text_only;
-        self.pages = (!text_only && markdown_as_document()).then(|| Pages { current: 1, total: None });
+        self.pages =
+            (!text_only && markdown_as_document()).then(|| Pages { current: 1, total: None });
         self.settled = None;
         self.scroll_px = 0;
         self.scroll_x = 0;
@@ -552,8 +574,6 @@ impl Preview {
         let scale = (f64::from(pixel_budget()) / pixels as f64).sqrt() as f32;
         (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1))
     }
-
-
 
     /// How many pixels wide the next render of this should be, from the pane it last had and
     /// the zoom in force. Falls back to a sensible page when it has never been drawn.
@@ -935,16 +955,16 @@ fn markdown_to_pdf(source: &Path, text: &str) -> Result<TempFile, String> {
         .arg(format!("--resource-path={}", resources.display()));
     // Named explicitly rather than left to pandoc's own search, which only looks at the PATH.
     let Some(engine) = pdf_engine() else {
-        return Err("no PDF engine found - install tectonic, typst or a TeX distribution".to_string());
+        return Err(
+            "no PDF engine found - install tectonic, typst or a TeX distribution".to_string()
+        );
     };
     command.arg(format!("--pdf-engine={}", engine.display()));
     command.args(engine_options(&engine));
-    let out = command
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "pandoc is not installed".to_string(),
-            _ => e.to_string(),
-        })?;
+    let out = command.output().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "pandoc is not installed".to_string(),
+        _ => e.to_string(),
+    })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("pandoc: {}", engine_error(&stderr)));
@@ -1098,7 +1118,11 @@ fn decode_animation(path: &Path, allowed: Option<usize>) -> Option<(image::Dynam
 ///
 /// A zero box means the pane has never been drawn and there is nothing to scale against, so the
 /// picture is passed through untouched.
-pub fn scale_picture(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -> image::DynamicImage {
+pub fn scale_picture(
+    image: image::DynamicImage,
+    box_px: (u32, u32),
+    fit: Fit,
+) -> image::DynamicImage {
     scaled(image, box_px, fit, image::imageops::FilterType::Lanczos3)
 }
 
@@ -1108,7 +1132,11 @@ pub fn scale_picture(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -
 /// are going to sit and look at; on a frame that is gone in eighty milliseconds it is tens of
 /// milliseconds of the main loop for a sharpness nobody has time to see — and that loop is also
 /// the keyboard. Triangle is what the widget itself uses on a photograph, for the same reason.
-pub fn scale_frame(image: image::DynamicImage, box_px: (u32, u32), fit: Fit) -> image::DynamicImage {
+pub fn scale_frame(
+    image: image::DynamicImage,
+    box_px: (u32, u32),
+    fit: Fit,
+) -> image::DynamicImage {
     scaled(image, box_px, fit, image::imageops::FilterType::Triangle)
 }
 
@@ -1118,7 +1146,8 @@ fn scaled(
     fit: Fit,
     filter: image::imageops::FilterType,
 ) -> image::DynamicImage {
-    let Some((width, height)) = picture_size_in((image.width(), image.height()), box_px, fit) else {
+    let Some((width, height)) = picture_size_in((image.width(), image.height()), box_px, fit)
+    else {
         return image;
     };
     // Already that size: the worker scaled it on the way in, and resampling it a second time
@@ -1486,7 +1515,10 @@ fn redraw_as(
 /// Deliberately not wrapped here: the lines are logical, and the widget wraps them to whatever
 /// the pane is at the time. Wrapping at render time would mean re-rendering on every resize and
 /// caching something that is only right at one width.
-pub fn render_markdown(source: &str, pal: crate::theme::Palette) -> Vec<ratatui::text::Line<'static>> {
+pub fn render_markdown(
+    source: &str,
+    pal: crate::theme::Palette,
+) -> Vec<ratatui::text::Line<'static>> {
     use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -1597,13 +1629,17 @@ pub fn render_markdown(source: &str, pal: crate::theme::Palette) -> Vec<ratatui:
                     Style::default().fg(pal.warning),
                 ));
             }
-            Event::End(TagEnd::Item) => flush(&mut lines, &mut spans, &quote_prefix(quote_depth), pal),
+            Event::End(TagEnd::Item) => {
+                flush(&mut lines, &mut spans, &quote_prefix(quote_depth), pal)
+            }
             Event::Start(Tag::Emphasis) => style = style.add_modifier(Modifier::ITALIC),
             Event::End(TagEnd::Emphasis) => style = style.remove_modifier(Modifier::ITALIC),
             Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
             Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
             Event::Start(Tag::Strikethrough) => style = style.add_modifier(Modifier::CROSSED_OUT),
-            Event::End(TagEnd::Strikethrough) => style = style.remove_modifier(Modifier::CROSSED_OUT),
+            Event::End(TagEnd::Strikethrough) => {
+                style = style.remove_modifier(Modifier::CROSSED_OUT)
+            }
             Event::Start(Tag::Link { .. }) => {
                 style = style.fg(pal.info).add_modifier(Modifier::UNDERLINED);
             }
@@ -1699,13 +1735,13 @@ mod tests {
     fn a_malformed_reply_is_refused() {
         for reply in [
             "",
-            "\x1b]11;rgb:zz/zz/zz\x07",         // not hex
-            "\x1b]11;rgb:ffff/ffff\x07",        // two components
-            "\x1b]11;rgb:ff/ff/ff/ff\x07",      // four
-            "\x1b]11;rgb:fffff/0/0\x07",        // wider than a component can be
-            "\x1b]11;rgb://\x07",               // empty components
-            "\x1b]11;#ffffff\x07",              // the other spelling, which no terminal sends
-            "\x1b]10;rgb:ff/ff/ff\x07x",        // the foreground, answered without the background
+            "\x1b]11;rgb:zz/zz/zz\x07",    // not hex
+            "\x1b]11;rgb:ffff/ffff\x07",   // two components
+            "\x1b]11;rgb:ff/ff/ff/ff\x07", // four
+            "\x1b]11;rgb:fffff/0/0\x07",   // wider than a component can be
+            "\x1b]11;rgb://\x07",          // empty components
+            "\x1b]11;#ffffff\x07",         // the other spelling, which no terminal sends
+            "\x1b]10;rgb:ff/ff/ff\x07x",   // the foreground, answered without the background
         ] {
             assert_eq!(parse_background(reply), None, "{reply:?} was read as a colour");
         }
@@ -1776,10 +1812,7 @@ mod tests {
     #[test]
     fn a_path_with_parens_or_a_backslash_is_escaped_before_it_reaches_ghostscript() {
         assert_eq!(escape_postscript_string("/tmp/plain.pdf"), "/tmp/plain.pdf");
-        assert_eq!(
-            escape_postscript_string("/tmp/evil(name).pdf"),
-            "/tmp/evil\\(name\\).pdf"
-        );
+        assert_eq!(escape_postscript_string("/tmp/evil(name).pdf"), "/tmp/evil\\(name\\).pdf");
         assert_eq!(escape_postscript_string(r"C:\docs\report.pdf"), r"C:\\docs\\report.pdf");
         // Backslash must be escaped first: a name already ending in `\)` should come out with
         // the backslash doubled and the paren escaped, not the other way around.
@@ -1796,7 +1829,10 @@ mod tests {
         assert!(engine_error(tex).starts_with("! LaTeX Error"));
         // Nothing that names itself an error: the last line is still better than nothing, and
         // an empty stderr still has to say something.
-        assert_eq!(engine_error("something went wrong\nError producing PDF."), "Error producing PDF.");
+        assert_eq!(
+            engine_error("something went wrong\nError producing PDF."),
+            "Error producing PDF."
+        );
         assert_eq!(engine_error("   \n\n"), "failed");
     }
 
@@ -1828,7 +1864,13 @@ mod tests {
     #[test]
     fn the_next_frame_of_a_figure_keeps_the_id_the_terminal_already_knows() {
         let picker = kitty_picker();
-        let frame = |shade| image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([shade, shade, shade])));
+        let frame = |shade| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                64,
+                48,
+                image::Rgb([shade, shade, shade]),
+            ))
+        };
 
         let mut first = picker.new_resize_protocol(frame(10));
         let id = kitty_id(&mut first);
@@ -1936,7 +1978,11 @@ mod tests {
             "cut to the pane, this is the corner the reader saw"
         );
         assert!(preview.shown_whole());
-        assert_eq!(preview.window_of(&figure).dimensions(), (1000, 600), "the whole figure, always");
+        assert_eq!(
+            preview.window_of(&figure).dimensions(),
+            (1000, 600),
+            "the whole figure, always"
+        );
         assert_eq!(preview.pan_room(), (0, 0), "and nothing to pan, since none of it is off-pane");
 
         let fitted = scale_picture(figure.clone(), preview.picture_box(), preview.fit);
@@ -1950,7 +1996,10 @@ mod tests {
         // The seam is dragged: same picture, different pane, and the fit it was given is now
         // for a pane that is gone.
         preview.area_cols = 40;
-        assert!(preview.needs_refit(), "a pane that changed under a picture is a picture to re-fit");
+        assert!(
+            preview.needs_refit(),
+            "a pane that changed under a picture is a picture to re-fit"
+        );
         let fitted = scale_picture(figure.clone(), preview.picture_box(), preview.fit);
         assert_eq!(fitted.dimensions(), (320, 192), "fitted to the narrower pane");
         assert_eq!(
@@ -2037,7 +2086,11 @@ mod tests {
         for name in ["pandoc", "pdfinfo", "pdftoppm", "gs", "tectonic"] {
             // Whatever comes back, it is a path to a file that can be run.
             if let Some(found) = tool(name) {
-                assert!(found.is_file(), "{name} resolved to {} which is not a file", found.display());
+                assert!(
+                    found.is_file(),
+                    "{name} resolved to {} which is not a file",
+                    found.display()
+                );
             }
         }
     }
@@ -2068,7 +2121,8 @@ mod tests {
         let frames: Vec<image::Frame> = shades
             .iter()
             .map(|&shade| {
-                let pixels = image::RgbaImage::from_pixel(8, 8, image::Rgba([shade, shade, shade, 255]));
+                let pixels =
+                    image::RgbaImage::from_pixel(8, 8, image::Rgba([shade, shade, shade, 255]));
                 image::Frame::from_parts(
                     pixels,
                     0,
@@ -2193,7 +2247,11 @@ mod tests {
     #[test]
     fn frames_take_their_turn_by_the_clock_and_the_last_hands_back_to_the_first() {
         let frame = |shade: u8| {
-            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([shade; 3])))
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                4,
+                4,
+                image::Rgb([shade; 3]),
+            ))
         };
         let mut animation = Animation::new(
             vec![frame(1), frame(2), frame(3)],

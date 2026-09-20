@@ -11,9 +11,9 @@
 //! `poll_*` that picks the answer up when it arrives.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 /// One matching line. A hit is a line, not a match: two matches on one line are one place to
 /// go, and a list that says the same line twice is a list you have to read twice.
@@ -74,11 +74,23 @@ pub fn spawn(
     });
 }
 
-fn run(root: &Path, query: String, regex: bool, case_sensitive: bool, show_hidden: bool) -> Outcome {
+fn run(
+    root: &Path,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    show_hidden: bool,
+) -> Outcome {
     let compiled = match crate::find::compile(&query, regex, case_sensitive) {
         Ok(re) => re,
         Err(error) => {
-            return Outcome { query, hits: Vec::new(), files_searched: 0, truncated: false, error: Some(error) };
+            return Outcome {
+                query,
+                hits: Vec::new(),
+                files_searched: 0,
+                truncated: false,
+                error: Some(error),
+            };
         }
     };
 
@@ -152,7 +164,11 @@ mod tests {
     use super::*;
 
     fn temp_project(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cleecode_search_test_{}_{}", std::process::id(), name));
+        let dir = std::env::temp_dir().join(format!(
+            "cleecode_search_test_{}_{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         dir
@@ -162,7 +178,8 @@ mod tests {
     fn finds_lines_across_files_and_says_where() {
         let dir = temp_project("basic");
         std::fs::write(dir.join("src/main.rs"), "fn main() {\n    let needle = 1;\n}\n").unwrap();
-        std::fs::write(dir.join("notes.txt"), "no match here\nNEEDLE in the second file\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "no match here\nNEEDLE in the second file\n")
+            .unwrap();
 
         let out = run(&dir, "needle".to_string(), false, false, false);
         assert!(out.error.is_none());

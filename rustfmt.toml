@@ -1,0 +1,14 @@
+# The one setting, and it is not a preference: this tree was hand-formatted to about a hundred
+# columns — the ninety-fifth percentile of its lines was ninety-seven — and rustfmt's default
+# max_width is already that. What its defaults do NOT keep is the guard clause on one line:
+#
+#     let Some(rest) = body.strip_prefix(b"G") else { return Decoded::Nothing };
+#
+# which this codebase uses everywhere and which the small-width heuristics break into three
+# lines each. "Max" lets every one of those heuristics run to max_width instead of to the
+# narrow defaults, so a line that fits stays a line. Adopting rustfmt cost some ten thousand
+# lines of churn with the defaults and under four thousand with this.
+#
+# Nothing else is set. Where rustfmt and the hand disagree from here, rustfmt wins — that is
+# the point of having one.
+use_small_heuristics = "Max"

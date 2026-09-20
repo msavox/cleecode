@@ -359,8 +359,8 @@ pub fn spawn_upgrade(method: InstallMethod, version: String, tx: Sender<UpdateEv
                 );
                 // The tail, not the whole transcript: this is a note for debugging one failed
                 // run, and brew's full download log would bury the line that matters.
-                state.last_output = text.chars().rev().take(2000).collect::<String>()
-                    .chars().rev().collect();
+                state.last_output =
+                    text.chars().rev().take(2000).collect::<String>().chars().rev().collect();
                 save_state(&state);
             }
             let _ = tx.send(UpdateEvent::UpgradeFinished { ok, version, method });
@@ -393,7 +393,10 @@ mod tests {
     fn the_install_method_is_read_off_the_executable_path() {
         let of = |p: &str| install_method(&PathBuf::from(p));
         assert_eq!(of("/opt/homebrew/Cellar/clee/0.24.2/bin/clee"), InstallMethod::Brew);
-        assert_eq!(of("/home/linuxbrew/.linuxbrew/Cellar/clee/0.24.2/bin/clee"), InstallMethod::Brew);
+        assert_eq!(
+            of("/home/linuxbrew/.linuxbrew/Cellar/clee/0.24.2/bin/clee"),
+            InstallMethod::Brew
+        );
         assert_eq!(of(r"C:\Users\x\scoop\shims\clee.exe"), InstallMethod::Scoop);
         assert_eq!(of(r"C:\Users\x\Scoop\apps\clee\current\clee.exe"), InstallMethod::Scoop);
         assert_eq!(of("/Users/x/GitHub/cleecode/target/release/clee"), InstallMethod::Source);
@@ -417,8 +420,12 @@ mod tests {
         std::fs::create_dir_all(&cellar).expect("a scratch Cellar must be creatable");
         std::fs::create_dir_all(&bin).expect("a scratch bin must be creatable");
         let real = cellar.join("clee");
-        std::fs::write(&real, b"#!/bin/sh
-").expect("a stand-in binary must be writable");
+        std::fs::write(
+            &real,
+            b"#!/bin/sh
+",
+        )
+        .expect("a stand-in binary must be writable");
         let link = bin.join("clee");
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
@@ -451,7 +458,10 @@ mod tests {
     #[test]
     fn a_version_is_notified_once_and_a_newer_one_still_gets_through() {
         assert!(!should_notify("v0.25.0", "0.24.2", InstallMethod::Brew, "v0.25.0"));
-        assert!(!should_notify("0.25.0", "0.24.2", InstallMethod::Brew, "v0.25.0"), "same version, either spelling");
+        assert!(
+            !should_notify("0.25.0", "0.24.2", InstallMethod::Brew, "v0.25.0"),
+            "same version, either spelling"
+        );
         assert!(should_notify("v0.26.0", "0.24.2", InstallMethod::Brew, "v0.25.0"));
     }
 
@@ -468,7 +478,10 @@ mod tests {
     /// The one field pulled out of GitHub's answer, and silence for anything malformed.
     #[test]
     fn the_tag_is_read_from_the_release_json_and_garbage_is_silence() {
-        assert_eq!(tag_from_json(r#"{"tag_name":"v0.25.0","name":"v0.25.0"}"#).as_deref(), Some("v0.25.0"));
+        assert_eq!(
+            tag_from_json(r#"{"tag_name":"v0.25.0","name":"v0.25.0"}"#).as_deref(),
+            Some("v0.25.0")
+        );
         assert_eq!(tag_from_json("not json"), None);
         assert_eq!(tag_from_json(r#"{"message":"Not Found"}"#), None);
     }

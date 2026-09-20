@@ -24,14 +24,7 @@ impl FileNode {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        FileNode {
-            path,
-            name,
-            is_dir,
-            expanded: false,
-            loaded: false,
-            children: Vec::new(),
-        }
+        FileNode { path, name, is_dir, expanded: false, loaded: false, children: Vec::new() }
     }
 
     /// A directory's entries, folders first and then by name, with each entry's kind carried
@@ -163,12 +156,7 @@ impl FileTree {
         let mut root = FileNode::new(root_path);
         root.load_children();
         root.expanded = true;
-        let mut tree = FileTree {
-            root,
-            selected: 0,
-            visible: Vec::new(),
-            show_hidden,
-        };
+        let mut tree = FileTree { root, selected: 0, visible: Vec::new(), show_hidden };
         tree.rebuild_visible();
         tree
     }
@@ -186,7 +174,9 @@ impl FileTree {
     pub fn visible_paths(&self) -> Vec<Option<PathBuf>> {
         self.visible
             .iter()
-            .map(|entry| if entry.is_up { None } else { Some(self.node_at(&entry.node_index).path.clone()) })
+            .map(|entry| {
+                if entry.is_up { None } else { Some(self.node_at(&entry.node_index).path.clone()) }
+            })
             .collect()
     }
 
@@ -200,11 +190,7 @@ impl FileTree {
     /// gave a tree with no root and no way back. Asked through here by `has_parent`, so the row
     /// only ever appears where it leads somewhere.
     pub fn parent_dir(&self) -> Option<PathBuf> {
-        self.root
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
+        self.root.path.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf())
     }
 
     pub fn rebuild_visible(&mut self) {
@@ -259,7 +245,9 @@ impl FileTree {
             // A folder on the way down has to be open for the one below it to exist as a node.
             // Already-open folders and files alike take this as a no-op.
             parent.expand();
-            let Some(at) = parent.children.iter().position(|child| child.path.file_name() == Some(name)) else {
+            let Some(at) =
+                parent.children.iter().position(|child| child.path.file_name() == Some(name))
+            else {
                 // The path names something this tree does not have — deleted since, or never
                 // there. What was opened on the way stays open; it is a folder of the project
                 // either way.
@@ -297,7 +285,13 @@ impl FileTree {
         self.visible.iter().position(|entry| !entry.is_up && entry.node_index == index)
     }
 
-    fn walk(node: &FileNode, depth: usize, path: &mut Vec<usize>, out: &mut Vec<VisibleEntry>, show_hidden: bool) {
+    fn walk(
+        node: &FileNode,
+        depth: usize,
+        path: &mut Vec<usize>,
+        out: &mut Vec<VisibleEntry>,
+        show_hidden: bool,
+    ) {
         // root itself is not shown as a row; only its children are shown starting at depth 0
         for (i, child) in node.children.iter().enumerate() {
             if !show_hidden && child.name.starts_with('.') {
@@ -481,13 +475,7 @@ impl ShellList {
     /// requires it: the preference is one thing, and two panes disagreeing about it is a bug
     /// that looks like a missing file.
     pub fn new(show_hidden: bool) -> Self {
-        ShellList {
-            dir: None,
-            rows: Vec::new(),
-            selected: 0,
-            overflow: 0,
-            show_hidden,
-        }
+        ShellList { dir: None, rows: Vec::new(), selected: 0, overflow: 0, show_hidden }
     }
 
     /// Shows another folder, from the top. The selection does not travel: it belonged to the
@@ -538,12 +526,7 @@ impl ShellList {
                 self.overflow += 1;
                 continue;
             }
-            self.rows.push(ShellRow {
-                name,
-                path,
-                is_dir,
-                is_up: false,
-            });
+            self.rows.push(ShellRow { name, path, is_dir, is_up: false });
         }
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
@@ -568,7 +551,8 @@ mod tests {
     use super::*;
 
     fn setup_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("clicode_tree_test_{}_{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("clicode_tree_test_{}_{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), "a").unwrap();
@@ -721,10 +705,17 @@ mod tests {
 
         let mut tree = FileTree::new(dir.clone(), false);
         let names = |t: &FileTree| t.visible.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
-        assert!(!names(&tree).iter().any(|n| n.starts_with('.') && n != ".."), "{:?}", names(&tree));
+        assert!(
+            !names(&tree).iter().any(|n| n.starts_with('.') && n != ".."),
+            "{:?}",
+            names(&tree)
+        );
 
         tree.refresh();
-        assert!(!names(&tree).iter().any(|n| n.starts_with('.') && n != ".."), "refresh revealed them");
+        assert!(
+            !names(&tree).iter().any(|n| n.starts_with('.') && n != ".."),
+            "refresh revealed them"
+        );
 
         // Descending into a subfolder is a fresh tree, and it must inherit the preference.
         let sub = FileTree::new(dir.join("sub"), false);
@@ -738,11 +729,7 @@ mod tests {
     }
 
     fn up_row_offset(tree: &FileTree) -> usize {
-        if tree.has_parent() {
-            1
-        } else {
-            0
-        }
+        if tree.has_parent() { 1 } else { 0 }
     }
 
     #[test]

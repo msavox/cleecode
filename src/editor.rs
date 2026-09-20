@@ -294,8 +294,11 @@ impl Editor {
                 } else {
                     match String::from_utf8(bytes) {
                         Ok(content) => {
-                            editor.line_ending =
-                                if content.contains("\r\n") { LineEnding::Crlf } else { LineEnding::Lf };
+                            editor.line_ending = if content.contains("\r\n") {
+                                LineEnding::Crlf
+                            } else {
+                                LineEnding::Lf
+                            };
                             editor.final_newline = content.ends_with('\n');
                             // Store normalized to '\n' internally; the ending is reapplied on save.
                             editor.rope = Rope::from_str(&content.replace("\r\n", "\n"));
@@ -640,7 +643,11 @@ impl Editor {
     // ---- Undo / redo ----------------------------------------------------------------
 
     fn snapshot(&self) -> Snapshot {
-        Snapshot { text: self.rope.to_string(), cursor_line: self.cursor_line, cursor_col: self.cursor_col }
+        Snapshot {
+            text: self.rope.to_string(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+        }
     }
 
     /// How many undo steps this buffer keeps: shallower in the declared large-file mode, where
@@ -661,7 +668,8 @@ impl Editor {
             return;
         }
         self.redo_stack.clear();
-        let coalesce = kind != EditKind::Other && kind == self.last_edit && !self.undo_stack.is_empty();
+        let coalesce =
+            kind != EditKind::Other && kind == self.last_edit && !self.undo_stack.is_empty();
         if !coalesce {
             // The history's whole cost is depth × file size, because a snapshot is the text.
             // See `MAX_UNDO`/`MAX_UNDO_LARGE` for the arithmetic that picks the two numbers.
@@ -802,7 +810,8 @@ impl Editor {
         // an indented line, clamping to its new length keeps a stale wide column from landing
         // past end-of-line, which is what let the next edit index past `len_chars()`.
         if (sl..=end_line).contains(&self.cursor_line) {
-            self.cursor_col = (self.cursor_col + tab_size).min(self.line_char_len(self.cursor_line));
+            self.cursor_col =
+                (self.cursor_col + tab_size).min(self.line_char_len(self.cursor_line));
         }
         if let Some((al, ac)) = self.selection_anchor {
             if (sl..=end_line).contains(&al) {
@@ -909,11 +918,7 @@ impl Editor {
 
     fn char_before_cursor(&self) -> Option<char> {
         let idx = self.cursor_char_idx();
-        if idx == 0 {
-            None
-        } else {
-            self.rope.get_char(idx - 1)
-        }
+        if idx == 0 { None } else { self.rope.get_char(idx - 1) }
     }
 
     fn char_at_cursor(&self) -> Option<char> {
@@ -946,8 +951,9 @@ impl Editor {
         if let Some(close) = close_partner(ch) {
             // For quotes, skip pairing next to a word (apostrophes, string suffixes, …).
             let is_quote = matches!(ch, '"' | '\'' | '`');
-            let touches_word = self.char_before_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false)
-                || self.char_at_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false);
+            let touches_word =
+                self.char_before_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false)
+                    || self.char_at_cursor().map(|c| c.is_alphanumeric()).unwrap_or(false);
             if is_quote && touches_word {
                 self.insert_char(ch);
                 return;
@@ -972,7 +978,8 @@ impl Editor {
         }
         if auto_pairs {
             if let (Some(open), Some(close)) = (self.char_before_cursor(), self.char_at_cursor()) {
-                if close_partner(open) == Some(close) && open != '"' && open != '\'' && open != '`' {
+                if close_partner(open) == Some(close) && open != '"' && open != '\'' && open != '`'
+                {
                     let base: String = self
                         .rope
                         .line(self.cursor_line)
@@ -1088,7 +1095,8 @@ impl Editor {
         }
         // A line reaching the column has a character at `col - 1`; a shorter one has nothing
         // under the block at all, and is left alone. Same rule, same reason, as writing.
-        let lines: Vec<usize> = (first..=last).filter(|&line| self.line_char_len(line) >= col).collect();
+        let lines: Vec<usize> =
+            (first..=last).filter(|&line| self.line_char_len(line) >= col).collect();
         if lines.is_empty() {
             return true;
         }
@@ -1174,7 +1182,9 @@ impl Editor {
     /// If the cursor ended up inside a collapsed region, snap it back to that fold's
     /// visible start line so it never becomes invisible.
     fn clamp_out_of_folds(&mut self) {
-        if let Some(&(s, _)) = self.folds.iter().find(|&&(s, e)| self.cursor_line > s && self.cursor_line <= e) {
+        if let Some(&(s, _)) =
+            self.folds.iter().find(|&&(s, e)| self.cursor_line > s && self.cursor_line <= e)
+        {
             self.cursor_line = s;
             self.cursor_col = self.cursor_col.min(self.line_char_len(s));
         }
@@ -1567,11 +1577,8 @@ impl Editor {
             Some(s) => (s, true),
             None => (b_text.as_str(), false),
         };
-        let new_text = if b_had_nl {
-            format!("{b_line}\n{a_line}\n")
-        } else {
-            format!("{b_line}\n{a_line}")
-        };
+        let new_text =
+            if b_had_nl { format!("{b_line}\n{a_line}\n") } else { format!("{b_line}\n{a_line}") };
         self.rope.remove(a_start..b_end);
         self.rope.insert(a_start, &new_text);
     }
@@ -1771,15 +1778,12 @@ impl Editor {
         let (outside, inside) = if star {
             let present = |run: usize| if unit == 1 { run % 2 == 1 } else { run >= 2 };
             let outer = self.md_run_before(start, '*').min(self.md_run_after(end, '*'));
-            let inner = self
-                .md_run_after(start, '*')
-                .min(self.md_run_before(end, '*'))
-                .min(inner_len / 2);
+            let inner =
+                self.md_run_after(start, '*').min(self.md_run_before(end, '*')).min(inner_len / 2);
             (present(outer), present(inner))
         } else {
-            let outer = start >= unit
-                && self.md_reads(start - unit, marker)
-                && self.md_reads(end, marker);
+            let outer =
+                start >= unit && self.md_reads(start - unit, marker) && self.md_reads(end, marker);
             let inner = inner_len >= 2 * unit
                 && self.md_reads(start, marker)
                 && self.md_reads(end - unit, marker);
@@ -1926,10 +1930,9 @@ impl Editor {
 
     /// `> ` on every line of the span, or off it.
     pub fn md_toggle_quote(&mut self) -> bool {
-        self.md_line_prefix(
-            &|rest| rest.starts_with("> ").then_some(2),
-            &|_, _| (0, "> ".to_string()),
-        )
+        self.md_line_prefix(&|rest| rest.starts_with("> ").then_some(2), &|_, _| {
+            (0, "> ".to_string())
+        })
     }
 
     /// `1. `, `2. `, … down the span, or off it.
@@ -2011,9 +2014,11 @@ impl Editor {
                 let end = self.rope.line_to_char(el) + ec;
                 (start, self.rope.slice(start..end).to_string(), true)
             }
-            None => {
-                (self.cursor_char_idx().min(self.rope.len_chars()), placeholder_text.to_string(), false)
-            }
+            None => (
+                self.cursor_char_idx().min(self.rope.len_chars()),
+                placeholder_text.to_string(),
+                false,
+            ),
         };
         let end = (start + label.chars().count()).min(self.rope.len_chars());
         self.checkpoint(EditKind::Other);
@@ -2363,11 +2368,7 @@ fn is_closer(ch: char) -> bool {
 /// Character class for word-wise motion: word chars (identifiers) vs punctuation. Runs of
 /// one class are skipped as a unit; whitespace is handled separately by the callers.
 fn word_class(c: char) -> u8 {
-    if c.is_alphanumeric() || c == '_' {
-        1
-    } else {
-        2
-    }
+    if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
 }
 
 /// The checkbox at the head of `rest` (already past its indentation), and whether it is ticked.
@@ -2417,26 +2418,28 @@ fn md_heading_prefix_len(rest: &str) -> usize {
 /// `<!--` on every line would be worse than nothing.
 pub fn comment_token(path: Option<&std::path::Path>) -> Option<&'static str> {
     let path = path?;
-    let token = match path.extension().or_else(|| path.file_name())?.to_str()?.to_lowercase().as_str() {
-        "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" | "hh" | "cs" | "js" | "jsx" | "mjs"
-        | "cjs" | "ts" | "tsx" | "mts" | "cts" | "jsonc" | "json5" | "go" | "java" | "kt"
-        | "kts" | "swift" | "scala" | "sbt" | "groovy" | "gradle" | "php" | "dart" | "zig"
-        | "mm" | "d" | "v" | "sv" | "proto" | "sol" | "glsl" | "hlsl" | "wgsl" | "scss"
-        | "less" | "styl" | "rego" | "jsonnet" => "//",
-        "py" | "pyi" | "rb" | "gemspec" | "rake" | "sh" | "bash" | "zsh" | "fish" | "ps1"
-        | "psm1" | "toml" | "yaml" | "yml" | "pl" | "r" | "jl" | "ex" | "exs" | "cr" | "nim"
-        | "nix" | "tf" | "tfvars" | "hcl" | "awk" | "tcl" | "gd" | "cmake" | "pp" | "just"
-        | "star" | "bzl" | "bazel" | "mk" | "conf" | "cfg" | "ini" | "env" | "makefile"
-        | "dockerfile" | "containerfile" | "justfile" | "gemfile" | "rakefile" | "vagrantfile"
-        | "brewfile" | "podfile" | "cmakelists.txt" | "gitignore" | ".gitignore" => "#",
-        "lua" | "sql" | "hs" | "elm" | "purs" | "adb" | "ads" | "vhd" | "vhdl" => "--",
-        "vim" | "vimrc" => "\"",
-        "lisp" | "clj" | "cljs" | "cljc" | "scm" | "rkt" | "el" | "asm" => ";",
-        // `.m` is Octave/MATLAB here — that is the language the Run button knows it as — not
-        // Objective-C, whose `.mm` sibling is in the `//` list above.
-        "tex" | "sty" | "cls" | "bib" | "erl" | "hrl" | "m" | "mat" => "%",
-        _ => return None,
-    };
+    let token =
+        match path.extension().or_else(|| path.file_name())?.to_str()?.to_lowercase().as_str() {
+            "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" | "hh" | "cs" | "js" | "jsx"
+            | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "jsonc" | "json5" | "go" | "java"
+            | "kt" | "kts" | "swift" | "scala" | "sbt" | "groovy" | "gradle" | "php" | "dart"
+            | "zig" | "mm" | "d" | "v" | "sv" | "proto" | "sol" | "glsl" | "hlsl" | "wgsl"
+            | "scss" | "less" | "styl" | "rego" | "jsonnet" => "//",
+            "py" | "pyi" | "rb" | "gemspec" | "rake" | "sh" | "bash" | "zsh" | "fish" | "ps1"
+            | "psm1" | "toml" | "yaml" | "yml" | "pl" | "r" | "jl" | "ex" | "exs" | "cr"
+            | "nim" | "nix" | "tf" | "tfvars" | "hcl" | "awk" | "tcl" | "gd" | "cmake" | "pp"
+            | "just" | "star" | "bzl" | "bazel" | "mk" | "conf" | "cfg" | "ini" | "env"
+            | "makefile" | "dockerfile" | "containerfile" | "justfile" | "gemfile" | "rakefile"
+            | "vagrantfile" | "brewfile" | "podfile" | "cmakelists.txt" | "gitignore"
+            | ".gitignore" => "#",
+            "lua" | "sql" | "hs" | "elm" | "purs" | "adb" | "ads" | "vhd" | "vhdl" => "--",
+            "vim" | "vimrc" => "\"",
+            "lisp" | "clj" | "cljs" | "cljc" | "scm" | "rkt" | "el" | "asm" => ";",
+            // `.m` is Octave/MATLAB here — that is the language the Run button knows it as — not
+            // Objective-C, whose `.mm` sibling is in the `//` list above.
+            "tex" | "sty" | "cls" | "bib" | "erl" | "hrl" | "m" | "mat" => "%",
+            _ => return None,
+        };
     Some(token)
 }
 
@@ -2599,7 +2602,8 @@ mod tests {
 
     /// A buffer of `lines` lines of Rust, named so the highlighter reads it as Rust.
     fn sample_buffer(lines: usize) -> Editor {
-        let text: Vec<String> = (0..lines).map(|i| format!("fn f{i}() {{ let v = {i}; }}")).collect();
+        let text: Vec<String> =
+            (0..lines).map(|i| format!("fn f{i}() {{ let v = {i}; }}")).collect();
         let mut ed = Editor::empty();
         ed.path = Some(PathBuf::from("sample.rs"));
         ed.rope = Rope::from_str(&text.join("\n"));
@@ -2628,7 +2632,10 @@ mod tests {
         ed.cursor_col = 3;
         ed.insert_char('x');
         let kept = ed.highlighted.len();
-        assert!(kept > 100 && kept <= 150, "most of the file survives a keystroke in the middle of it");
+        assert!(
+            kept > 100 && kept <= 150,
+            "most of the file survives a keystroke in the middle of it"
+        );
 
         ed.refresh_highlight(&highlighter, 199);
         assert_eq!(ed.highlighted, coloured_whole(&ed.rope));
@@ -3371,7 +3378,11 @@ mod tests {
 
         assert_eq!(ed.rope.to_string(), text_before, "a read-only buffer must not be mutated");
         assert_eq!(ed.dirty, dirty_before);
-        assert_eq!(ed.undo_stack.len(), undo_depth_before, "no checkpoint should have been pushed either");
+        assert_eq!(
+            ed.undo_stack.len(),
+            undo_depth_before,
+            "no checkpoint should have been pushed either"
+        );
     }
 
     // ---- Markdown formatting --------------------------------------------------------
@@ -3749,7 +3760,10 @@ mod tests {
         assert!(!ed.line_arrived(0) && !ed.line_arrived(2));
 
         ed.insert_char('x');
-        assert!(ed.arrived_lines().is_empty(), "typing leaves the marks describing a file that is gone");
+        assert!(
+            ed.arrived_lines().is_empty(),
+            "typing leaves the marks describing a file that is gone"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3916,14 +3930,17 @@ mod tests {
         const ROWS: usize = 10;
         let mut ed = Editor::empty();
         // Every line three rows wide at this width, so ten lines are thirty rows.
-        ed.rope = Rope::from_str(&(0..200).map(|_| format!("{}\n", "x".repeat(WIDTH * 2 + 1))).collect::<String>());
+        ed.rope = Rope::from_str(
+            &(0..200).map(|_| format!("{}\n", "x".repeat(WIDTH * 2 + 1))).collect::<String>(),
+        );
         ed.cursor_line = 50;
 
         ed.follow_cursor(ROWS, WIDTH, true);
         // Three lines of three rows is nine, and a fourth would be twelve: the view starts as far
         // up as it can with the cursor's line still whole.
         assert_eq!(ed.top_line, 48);
-        let rows_above: usize = (ed.top_line..ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
+        let rows_above: usize =
+            (ed.top_line..ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
         assert!(
             rows_above + ed.wrapped_rows(ed.cursor_line, WIDTH) <= ROWS,
             "the cursor's line has to fit inside the pane, not merely be near it"
@@ -3937,7 +3954,8 @@ mod tests {
         naive.cursor_line = 50;
         naive.follow_cursor(ROWS, WIDTH, false);
         assert_eq!(naive.top_line, 41);
-        let naive_above: usize = (naive.top_line..naive.cursor_line).map(|l| naive.wrapped_rows(l, WIDTH)).sum();
+        let naive_above: usize =
+            (naive.top_line..naive.cursor_line).map(|l| naive.wrapped_rows(l, WIDTH)).sum();
         assert!(naive_above > ROWS, "which is exactly why the line was never on screen");
     }
 
@@ -4069,7 +4087,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\necho new\n");
         assert!(!ed.dirty);
         // The scratch file is a means, not a leftover: nothing but the file itself remains.
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        let left: Vec<_> =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left.len(), 1, "{left:?}");
 
         #[cfg(unix)]

@@ -133,8 +133,12 @@ pub fn install() {
             println!("Font installed: {}", done.dest.display());
             #[cfg(unix)]
             match done.ghostty_updated {
-                true => println!("Ghostty config updated to use it; restart Ghostty (or run `ghostty +reload-config` if supported) to pick it up."),
-                false => println!("Select \"{FONT_FAMILY}\" in your terminal's settings to use it."),
+                true => println!(
+                    "Ghostty config updated to use it; restart Ghostty (or run `ghostty +reload-config` if supported) to pick it up."
+                ),
+                false => {
+                    println!("Select \"{FONT_FAMILY}\" in your terminal's settings to use it.")
+                }
             }
             #[cfg(windows)]
             println!(
@@ -187,7 +191,8 @@ fn update_ghostty_config(path: &std::path::Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    let mut lines: Vec<&str> = existing.lines().filter(|l| !l.trim_start().starts_with("font-family")).collect();
+    let mut lines: Vec<&str> =
+        existing.lines().filter(|l| !l.trim_start().starts_with("font-family")).collect();
     lines.push(&wanted_line);
 
     if let Some(parent) = path.parent() {
@@ -229,10 +234,10 @@ fn install_windows() -> Result<Installed, String> {
 #[cfg(windows)]
 fn register_font_windows(dest: &std::path::Path) -> anyhow::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::AddFontResourceW;
-    use winreg::enums::HKEY_CURRENT_USER;
+    use windows::core::PCWSTR;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     // Persist the mapping so the font is registered on every future login. The full path is
     // required for per-user fonts (system fonts under the Fonts dir may use a bare filename).

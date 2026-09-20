@@ -38,7 +38,7 @@
 // the two-step handshake is this module's own bookkeeping and no pane ever needed to see it.
 
 use crate::lsp::{frame, read_message};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -203,9 +203,8 @@ pub struct Capabilities {
 /// deserialises: an adapter that grows a capability we have never heard of must not cost us the
 /// three we have.
 fn capabilities_from(body: Option<&Value>) -> Capabilities {
-    let flag = |name: &str| {
-        body.and_then(|b| b.get(name)).and_then(Value::as_bool).unwrap_or(false)
-    };
+    let flag =
+        |name: &str| body.and_then(|b| b.get(name)).and_then(Value::as_bool).unwrap_or(false);
     Capabilities {
         configuration_done: flag("supportsConfigurationDoneRequest"),
         terminate: flag("supportsTerminateRequest"),
@@ -339,8 +338,7 @@ fn xcrun_adapter(_tool: &str) -> Option<String> {
 
 /// What a program says when asked for its version, or nothing if asking did not work.
 fn ask_version(program: &str) -> Option<String> {
-    let output =
-        Command::new(program).arg("--version").stderr(Stdio::null()).output().ok()?;
+    let output = Command::new(program).arg("--version").stderr(Stdio::null()).output().ok()?;
     String::from_utf8(output.stdout).ok()
 }
 
@@ -402,8 +400,12 @@ enum Ask {
     Initialize,
     Launch,
     ConfigurationDone,
-    Breakpoints { path: PathBuf },
-    Continue { thread: i64 },
+    Breakpoints {
+        path: PathBuf,
+    },
+    Continue {
+        thread: i64,
+    },
     Threads,
     StackTrace,
     Scopes,
@@ -418,7 +420,10 @@ enum Ask {
     /// it is what makes a pending request legible in a debugger or a log, and the alternative is
     /// a variant that says only "something is out".
     Acknowledged {
-        #[allow(dead_code, reason = "the wire's own copy of the command is what a refusal reports")]
+        #[allow(
+            dead_code,
+            reason = "the wire's own copy of the command is what a refusal reports"
+        )]
         command: String,
     },
 }
@@ -622,9 +627,10 @@ impl Client {
         });
         match self.request("initialize", arguments, Ask::Initialize) {
             Some(_) => Ok(()),
-            None => Err(self.trouble.take().unwrap_or_else(|| {
-                format!("{} would not take the handshake", self.name)
-            })),
+            None => Err(self
+                .trouble
+                .take()
+                .unwrap_or_else(|| format!("{} would not take the handshake", self.name))),
         }
     }
 
@@ -983,11 +989,8 @@ impl Client {
             // sent before a restart. Dropped rather than guessed at.
             return;
         };
-        let command = value
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("that request")
-            .to_string();
+        let command =
+            value.get("command").and_then(Value::as_str).unwrap_or("that request").to_string();
         if !value.get("success").and_then(Value::as_bool).unwrap_or(false) {
             let message = text_at(Some(value), "message")
                 .unwrap_or_else(|| format!("{} refused {command}", self.name));
@@ -1050,8 +1053,7 @@ impl Client {
     /// rather than a surprise: an adapter asking anyway is asking for something we said we did
     /// not have, and "no" is the honest and immediate answer.
     fn refuse(&mut self, request: &Value) {
-        let command =
-            request.get("command").and_then(Value::as_str).unwrap_or("that").to_string();
+        let command = request.get("command").and_then(Value::as_str).unwrap_or("that").to_string();
         let request_seq = request.get("seq").and_then(Value::as_i64).unwrap_or(0);
         let message = format!("CleeCode does not offer {command}");
         let reply = json!({
@@ -1168,11 +1170,7 @@ fn threads_from(body: Option<&Value>) -> Vec<ThreadInfo> {
                 // rather than listed: a row in the panel that answers no question is worse than
                 // no row.
                 id: item.get("id").and_then(Value::as_i64)?,
-                name: item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("thread")
-                    .to_string(),
+                name: item.get("name").and_then(Value::as_str).unwrap_or("thread").to_string(),
             })
         })
         .collect()
@@ -1209,10 +1207,7 @@ fn scopes_from(body: Option<&Value>) -> Vec<Scope> {
     list.iter()
         .map(|item| Scope {
             name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-            reference: item
-                .get("variablesReference")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+            reference: item.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
             expensive: item.get("expensive").and_then(Value::as_bool).unwrap_or(false),
         })
         .collect()
@@ -1227,10 +1222,7 @@ fn variables_from(body: Option<&Value>) -> Vec<Variable> {
             name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
             value: item.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
             type_name: item.get("type").and_then(Value::as_str).map(str::to_string),
-            reference: item
-                .get("variablesReference")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+            reference: item.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
         })
         .collect()
 }
@@ -1480,7 +1472,9 @@ mod tests {
         let found = events
             .iter()
             .find_map(|e| match e {
-                Event::Breakpoints { path, breakpoints } => Some((path.clone(), breakpoints.clone())),
+                Event::Breakpoints { path, breakpoints } => {
+                    Some((path.clone(), breakpoints.clone()))
+                }
                 _ => None,
             })
             .expect("the breakpoints came back");
@@ -1639,10 +1633,7 @@ mod tests {
         let interesting: Vec<&Event> = events
             .iter()
             .filter(|e| {
-                matches!(
-                    e,
-                    Event::Threads { .. } | Event::StackTrace { .. } | Event::Output { .. }
-                )
+                matches!(e, Event::Threads { .. } | Event::StackTrace { .. } | Event::Output { .. })
             })
             .collect();
         assert!(
@@ -1756,7 +1747,9 @@ mod tests {
             match command_of(message).as_str() {
                 "initialize" => answer(response(seq, "initialize", json!({}))),
                 // Answered, and with no `continued` event, exactly as the specification permits.
-                "continue" => answer(response(seq, "continue", json!({"allThreadsContinued": true}))),
+                "continue" => {
+                    answer(response(seq, "continue", json!({"allThreadsContinued": true})))
+                }
                 _ => {}
             }
             true

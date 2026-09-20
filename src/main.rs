@@ -1,6 +1,6 @@
 mod app;
-mod assets;
 mod app_install;
+mod assets;
 mod clipboard;
 mod complete;
 mod dap;
@@ -41,11 +41,12 @@ mod wsview;
 use anyhow::Result;
 use app::App;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
 };
 use ratatui::layout::Rect;
 use settings::Settings;
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -90,18 +91,26 @@ fn install_panic_hook() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".to_string());
-        let where_ = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let where_ =
+            info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         let text = if where_.is_empty() { payload } else { format!("{payload} ({where_})") };
 
         let n = logged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n < PANIC_LOG_LIMIT {
             if let Some(dir) = settings::config_dir() {
                 let _ = std::fs::create_dir_all(&dir);
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("panic.log"))
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("panic.log"))
                 {
                     let _ = writeln!(f, "clee {}: {}", env!("CARGO_PKG_VERSION"), text);
                     if n + 1 == PANIC_LOG_LIMIT {
-                        let _ = writeln!(f, "clee {}: (further panics this session not logged)", env!("CARGO_PKG_VERSION"));
+                        let _ = writeln!(
+                            f,
+                            "clee {}: (further panics this session not logged)",
+                            env!("CARGO_PKG_VERSION")
+                        );
                     }
                 }
             }
@@ -303,10 +312,7 @@ fn main() -> Result<()> {
     // `-edit` is accepted alongside the usual spellings: it is what the request asked for, and
     // refusing a flag over a missing dash helps nobody.
     let mut edit_file: Option<std::path::PathBuf> = None;
-    if let Some(i) = args
-        .iter()
-        .position(|a| a == "-e" || a == "--edit" || a == "-edit")
-    {
+    if let Some(i) = args.iter().position(|a| a == "-e" || a == "--edit" || a == "-edit") {
         match args.get(i + 1) {
             Some(path) => edit_file = Some(std::path::PathBuf::from(path)),
             None => {
@@ -323,7 +329,9 @@ fn main() -> Result<()> {
             None => {
                 let saved = workspace::list();
                 if saved.is_empty() {
-                    println!("No saved workspaces of your own yet — save one from the Workspace menu.");
+                    println!(
+                        "No saved workspaces of your own yet — save one from the Workspace menu."
+                    );
                 } else {
                     println!("Saved workspaces:");
                     for ws in &saved {
@@ -334,7 +342,8 @@ fn main() -> Result<()> {
                 for name in workspace::BUILT_INS {
                     // A name the user has already saved under is theirs, and saying it is built
                     // in here would be the same silent shadowing this listing exists to expose.
-                    let shadowed = saved.iter().any(|w| workspace::slug(&w.name) == workspace::slug(name));
+                    let shadowed =
+                        saved.iter().any(|w| workspace::slug(&w.name) == workspace::slug(name));
                     let note = if shadowed { "(shadowed by yours, above)" } else { "" };
                     println!("    {name:<24} {note}");
                 }
@@ -525,9 +534,11 @@ fn run(
         // the directory you were standing in ignored. `.` is how you say it, and it works in any
         // position — `clee . -w work` too.
         Some(p) if p.is_dir() => p.clone(),
-        _ if resumed.is_some() && named.is_some() => {
-            resumed.as_ref().map(|w| w.root.clone()).filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone())
-        }
+        _ if resumed.is_some() && named.is_some() => resumed
+            .as_ref()
+            .map(|w| w.root.clone())
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| cwd.clone()),
         Some(_) => cwd.clone(),
         // Started from the Dock, where there is no directory you were standing in: the last
         // project is the only sensible answer, and it makes the restore below match.
@@ -576,40 +587,41 @@ fn run(
     // below are skipped entirely — `clee -w work` should not also try to open "-w" as a file.
     let opened_by_name = edit_file.is_some()
         || match named {
-        Some((name, found)) => {
-            match found {
-                Some(ws) => {
-                    // `app.root` is already the answer the match above settled — the workspace's
-                    // own root, or the directory typed next to `-w`. Handing the workspace over
-                    // as it came would undo that: `apply_workspace` sets the root from the file.
-                    let here = app.root.clone();
-                    app.apply_workspace(rerooted(ws, &here));
-                    if let Some(built_in) = workspace::built_in_named(&name) {
-                        app.status_message = i18n::msg_workspace_shadows(app.settings.lang, built_in);
-                    }
-                }
-                None => match workspace::built_in(&name, &app.workspace_shape()) {
-                    Some(ws) => app.apply_workspace(ws),
-                    // Unknown, but not necessarily meaningless: the four agent presets used to
-                    // live here, and `clee -w claude` was a published command before the drawer
-                    // replaced it. Someone still typing it deserves the retirement said out loud
-                    // rather than the generic "no such workspace" — every other unknown name gets
-                    // that one.
-                    None => {
-                        app.status_message = match session::Agent::of_program(&name) {
-                            Some(agent) => i18n::msg_agent_preset_retired(
-                                app.settings.lang,
-                                agent.workspace_name(),
-                            ),
-                            None => i18n::msg_workspace_unknown(app.settings.lang, &name),
+            Some((name, found)) => {
+                match found {
+                    Some(ws) => {
+                        // `app.root` is already the answer the match above settled — the workspace's
+                        // own root, or the directory typed next to `-w`. Handing the workspace over
+                        // as it came would undo that: `apply_workspace` sets the root from the file.
+                        let here = app.root.clone();
+                        app.apply_workspace(rerooted(ws, &here));
+                        if let Some(built_in) = workspace::built_in_named(&name) {
+                            app.status_message =
+                                i18n::msg_workspace_shadows(app.settings.lang, built_in);
                         }
                     }
-                },
+                    None => match workspace::built_in(&name, &app.workspace_shape()) {
+                        Some(ws) => app.apply_workspace(ws),
+                        // Unknown, but not necessarily meaningless: the four agent presets used to
+                        // live here, and `clee -w claude` was a published command before the drawer
+                        // replaced it. Someone still typing it deserves the retirement said out loud
+                        // rather than the generic "no such workspace" — every other unknown name gets
+                        // that one.
+                        None => {
+                            app.status_message = match session::Agent::of_program(&name) {
+                                Some(agent) => i18n::msg_agent_preset_retired(
+                                    app.settings.lang,
+                                    agent.workspace_name(),
+                                ),
+                                None => i18n::msg_workspace_unknown(app.settings.lang, &name),
+                            }
+                        }
+                    },
+                }
+                true
             }
-            true
-        }
-        None => false,
-    };
+            None => false,
+        };
 
     // A file typed next to `-w` is still a file to open: the workspace decided the shape and the
     // project, and the argument is what you want in front of you inside it. Not in minimal mode,
@@ -622,33 +634,38 @@ fn run(
 
     if !opened_by_name {
         match arg {
-        Some(path) if !arg_is_dir => app.open_file_in_tab(path),
-        Some(_) => {} // directory: already the root, nothing to open
-        None => match resumed {
-            Some(ws) => app.apply_workspace(ws),
-            None => {
-                // The files come back only where they belong. Reopening the last session's
-                // buffers in a different project would put somebody else's files in front of
-                // you, named after a folder you are not in.
-                // Compared after resolving symlinks, since the remembered path was written
-                // that way and the one you typed may not be.
-                let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
-                let same_project =
-                    saved.last_root.as_deref().is_some_and(|last| real(last) == real(&app.root));
-                for path in saved.last_open_files.iter().filter(|_| same_project) {
-                    if path.exists() {
-                        app.open_file_in_tab(path.clone());
+            Some(path) if !arg_is_dir => app.open_file_in_tab(path),
+            Some(_) => {} // directory: already the root, nothing to open
+            None => match resumed {
+                Some(ws) => app.apply_workspace(ws),
+                None => {
+                    // The files come back only where they belong. Reopening the last session's
+                    // buffers in a different project would put somebody else's files in front of
+                    // you, named after a folder you are not in.
+                    // Compared after resolving symlinks, since the remembered path was written
+                    // that way and the one you typed may not be.
+                    let real =
+                        |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+                    let same_project = saved
+                        .last_root
+                        .as_deref()
+                        .is_some_and(|last| real(last) == real(&app.root));
+                    for path in saved.last_open_files.iter().filter(|_| same_project) {
+                        if path.exists() {
+                            app.open_file_in_tab(path.clone());
+                        }
+                    }
+                    if let Some(active_path) = &saved.last_active_file {
+                        if let Some(idx) = app
+                            .editors
+                            .iter()
+                            .position(|e| e.path.as_deref() == Some(active_path.as_path()))
+                        {
+                            app.active_editor = idx;
+                        }
                     }
                 }
-                if let Some(active_path) = &saved.last_active_file {
-                    if let Some(idx) =
-                        app.editors.iter().position(|e| e.path.as_deref() == Some(active_path.as_path()))
-                    {
-                        app.active_editor = idx;
-                    }
-                }
-            }
-        },
+            },
         }
     }
 
@@ -858,8 +875,10 @@ fn run(
     // cwd happens to be rather than the file it actually pointed to.
     let canonical = |p: std::path::PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
     app.settings.last_root = Some(canonical(app.root.clone()));
-    app.settings.last_open_files = app.editors.iter().filter_map(|e| e.path.clone()).map(canonical).collect();
-    app.settings.last_active_file = app.editors.get(app.active_editor).and_then(|e| e.path.clone()).map(canonical);
+    app.settings.last_open_files =
+        app.editors.iter().filter_map(|e| e.path.clone()).map(canonical).collect();
+    app.settings.last_active_file =
+        app.editors.get(app.active_editor).and_then(|e| e.path.clone()).map(canonical);
     // The workspace in use is written back as it stands, so a terminal renamed or a seam
     // nudged during the session is still there next time it is opened. The built-in is the
     // exception and is never written: it is the layout you go back to, so it has to stay put.

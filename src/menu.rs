@@ -618,7 +618,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // Both belong to a running session rather than to a file, which is why they sit
                 // below the separator: they were reachable only from the keyboard before, and a
                 // feature nobody can find is a feature nobody has.
-                group(Key::ItemToggleBreakpoint, MenuAction::ToggleBreakpoint, Some("Ctrl+Shift+P")),
+                group(
+                    Key::ItemToggleBreakpoint,
+                    MenuAction::ToggleBreakpoint,
+                    Some("Ctrl+Shift+P"),
+                ),
                 item(Key::ItemInspectVariable, MenuAction::InspectVariable, Some("Ctrl+Shift+I")),
                 // Where the next session's plots go. Here rather than in View because it is not
                 // about how CleeCode looks: it changes what the interpreter is told to do.
@@ -691,7 +695,11 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 item(Key::ItemNewTerminal, MenuAction::NewTerminal, Some("Ctrl+Shift+N")),
                 item(Key::ItemNewTerminalTab, MenuAction::NewTerminalTab, Some("Ctrl+Shift+T")),
                 item(Key::ItemRenameTerminal, MenuAction::RenameTerminal, Some("Ctrl+Shift+E")),
-                group(Key::ItemCloseTerminalTab, MenuAction::CloseTerminalTab, Some("Ctrl+Shift+K")),
+                group(
+                    Key::ItemCloseTerminalTab,
+                    MenuAction::CloseTerminalTab,
+                    Some("Ctrl+Shift+K"),
+                ),
                 item(Key::ItemCloseTerminal, MenuAction::CloseTerminal, None),
                 group(Key::ItemNextTerminal, MenuAction::NextTerminal, Some("Ctrl+Shift+↓")),
                 item(Key::ItemPrevTerminal, MenuAction::PrevTerminal, Some("Ctrl+Shift+↑")),
@@ -976,12 +984,7 @@ pub struct MenuBar {
 
 impl MenuBar {
     pub fn new() -> Self {
-        MenuBar {
-            active: false,
-            menu_index: 0,
-            item_index: 0,
-            defs: menu_defs(),
-        }
+        MenuBar { active: false, menu_index: 0, item_index: 0, defs: menu_defs() }
     }
 
     pub fn open(&mut self) {
@@ -1012,10 +1015,7 @@ impl MenuBar {
     }
 
     pub fn selected_action(&self) -> Option<MenuAction> {
-        self.defs[self.menu_index]
-            .items
-            .get(self.item_index)
-            .map(|i| i.action)
+        self.defs[self.menu_index].items.get(self.item_index).map(|i| i.action)
     }
 }
 
@@ -1029,14 +1029,32 @@ mod tests {
     /// menu that highlights one row and runs another.
     #[test]
     fn display_rows_map_to_items_and_rules_and_captions_map_to_nothing() {
-        let plain = |key, action| MenuItemDef { label_key: key, action, shortcut: None, new_group: false, header: false };
+        let plain = |key, action| MenuItemDef {
+            label_key: key,
+            action,
+            shortcut: None,
+            new_group: false,
+            header: false,
+        };
         let items = vec![
             plain(Key::ItemCopy, MenuAction::Copy),
             plain(Key::ItemPaste, MenuAction::Paste),
             // A new group: one separator row above this item.
-            MenuItemDef { label_key: Key::ItemNewAgentTab, action: MenuAction::NewAgentTab, shortcut: None, new_group: true, header: false },
+            MenuItemDef {
+                label_key: Key::ItemNewAgentTab,
+                action: MenuAction::NewAgentTab,
+                shortcut: None,
+                new_group: true,
+                header: false,
+            },
             // A caption: occupies its row, answers to nothing.
-            MenuItemDef { label_key: Key::ItemToggleDrawer, action: MenuAction::ToggleDrawer, shortcut: None, new_group: false, header: true },
+            MenuItemDef {
+                label_key: Key::ItemToggleDrawer,
+                action: MenuAction::ToggleDrawer,
+                shortcut: None,
+                new_group: false,
+                header: true,
+            },
             plain(Key::ItemCloseAgentTab, MenuAction::CloseTerminalTab),
         ];
         assert_eq!(item_at_display_row(&items, 0), Some(0));
@@ -1055,10 +1073,26 @@ mod tests {
     #[test]
     fn the_plot_item_says_which_of_the_two_it_is() {
         for lang in [Lang::En, Lang::It] {
-            let tabs =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false, drawer_open: false });
-            let windows =
-                item_value(lang, MenuAction::TogglePlotsInTabs, MenuStates { plots_in_tabs: false, md_toolbar: true, follow_agent_edits: false, drawer_open: false });
+            let tabs = item_value(
+                lang,
+                MenuAction::TogglePlotsInTabs,
+                MenuStates {
+                    plots_in_tabs: true,
+                    md_toolbar: true,
+                    follow_agent_edits: false,
+                    drawer_open: false,
+                },
+            );
+            let windows = item_value(
+                lang,
+                MenuAction::TogglePlotsInTabs,
+                MenuStates {
+                    plots_in_tabs: false,
+                    md_toolbar: true,
+                    follow_agent_edits: false,
+                    drawer_open: false,
+                },
+            );
             assert!(tabs.is_some() && windows.is_some(), "{lang:?}");
             assert_ne!(tabs, windows, "{lang:?}: both states read the same");
             // Wide enough for either, so the dropdown does not resize under the cursor at the
@@ -1077,8 +1111,17 @@ mod tests {
             for item in def.items {
                 assert!(
                     item.shortcut.is_none()
-                        || item_value(Lang::En, item.action, MenuStates { plots_in_tabs: true, md_toolbar: true, follow_agent_edits: false, drawer_open: false })
-                            .is_none(),
+                        || item_value(
+                            Lang::En,
+                            item.action,
+                            MenuStates {
+                                plots_in_tabs: true,
+                                md_toolbar: true,
+                                follow_agent_edits: false,
+                                drawer_open: false
+                            }
+                        )
+                        .is_none(),
                     "\"{}\" has both a shortcut and a state to read out",
                     i18n::t(Lang::En, item.label_key)
                 );
@@ -1105,7 +1148,10 @@ mod tests {
     fn the_palette_offers_each_action_once_and_only_known_ones() {
         let entries = command_entries();
         for (_, it) in &entries {
-            assert!(MenuAction::ALL.contains(&it.action), "menus offer an action missing from MenuAction::ALL");
+            assert!(
+                MenuAction::ALL.contains(&it.action),
+                "menus offer an action missing from MenuAction::ALL"
+            );
         }
         let mut actions: Vec<usize> = entries
             .iter()
@@ -1131,7 +1177,11 @@ mod tests {
         let labels: Vec<String> = command_entries()
             .into_iter()
             .map(|(menu, it)| {
-                format!("{}: {}", crate::i18n::t(crate::i18n::Lang::En, menu), crate::i18n::t(crate::i18n::Lang::En, it.label_key))
+                format!(
+                    "{}: {}",
+                    crate::i18n::t(crate::i18n::Lang::En, menu),
+                    crate::i18n::t(crate::i18n::Lang::En, it.label_key)
+                )
             })
             .collect();
         assert!(
@@ -1152,10 +1202,8 @@ mod tests {
         assert!(items.iter().all(|i| i.action != MenuAction::Rename));
         // The close row is the panel's own action wearing the agent's name: in a column where
         // every tab holds an agent, a row that said "terminal" would name the wrong thing.
-        assert!(items
-            .iter()
-            .any(|i| i.action == MenuAction::CloseTerminalTab
-                && matches!(i.label_key, crate::i18n::Key::ItemCloseAgentTab)));
+        assert!(items.iter().any(|i| i.action == MenuAction::CloseTerminalTab
+            && matches!(i.label_key, crate::i18n::Key::ItemCloseAgentTab)));
         // The rows the sidebar gains when `versioned` turns true are exactly the git ones, so
         // the difference is the list of what must not appear here — kept as a difference
         // rather than spelled out, so a git row added tomorrow is covered without editing this.
@@ -1188,8 +1236,9 @@ mod tests {
                 !(sc.contains("Alt+") && is_letter_or_digit),
                 "{sc} needs Option-as-Meta, which macOS does not give non-US layouts"
             );
-            let f_key =
-                pressed.strip_prefix('F').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            let f_key = pressed
+                .strip_prefix('F')
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
             assert!(!f_key, "{sc} is a function key, which needs Fn on a laptop");
             assert!(!sc.contains("PgUp") && !sc.contains("PgDn"), "{sc} needs Fn on a laptop");
         }

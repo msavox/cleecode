@@ -98,7 +98,9 @@ fn readable_tail(path: &Path) -> String {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
+        .map(
+            |c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' },
+        )
         .collect();
     // Every character above is ASCII, so this cannot split one in half.
     out.truncate(40);
@@ -353,8 +355,15 @@ mod tests {
     #[test]
     fn an_entry_names_itself_the_same_way_twice_and_reads_back_as_what_it_was() {
         let file = Path::new("/tmp/some project/src/main.rs");
-        assert_eq!(entry_name(Some(file), 0), entry_name(Some(file), 7), "the id is not part of a named copy");
-        assert_ne!(entry_name(Some(file), 0), entry_name(Some(Path::new("/tmp/other/src/main.rs")), 0));
+        assert_eq!(
+            entry_name(Some(file), 0),
+            entry_name(Some(file), 7),
+            "the id is not part of a named copy"
+        );
+        assert_ne!(
+            entry_name(Some(file), 0),
+            entry_name(Some(Path::new("/tmp/other/src/main.rs")), 0)
+        );
         // Readable at a glance, and safe as a file name: no slashes, no spaces.
         let named = entry_name(Some(file), 0);
         assert!(named.ends_with(&format!("-main.rs{SUFFIX}")), "{named}");
@@ -376,7 +385,8 @@ mod tests {
         // A path with a newline in it is legal on Unix and would otherwise turn one header line
         // into two, silently truncating the buffer below it at the first line break.
         let awkward = PathBuf::from("/tmp/one\ntwo\\three/x.rs");
-        let (original, _) = parse_header(&header(Some(&awkward), 0)).expect("an awkward path parses");
+        let (original, _) =
+            parse_header(&header(Some(&awkward), 0)).expect("an awkward path parses");
         assert_eq!(original, Some(awkward));
 
         // Anything this version does not understand is not a copy it may delete.
