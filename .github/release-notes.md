@@ -1,3 +1,42 @@
+## What's new in 0.28.4
+
+**Three things that only ever went wrong on Linux**, and a way to find the next one without a
+Linux machine.
+
+**An agent could not run a command in a terminal it had just opened.** `open_terminal` followed
+straight away by `run_command` — the obvious way to use the pair — was refused every time with
+"that shell is busy". It was not busy: it was a shell that had not finished starting, and those
+are different answers. Busy is a program the shell started holding the terminal, where there is
+nothing to do but wait and the refusal is right. Not-yet-ready is a shell that will read in a
+moment, and a pane already knows how to hold a line until then. Refusal is now kept for the case
+that earns it.
+
+**A startup command took twelve seconds.** The pane asked whether the shell was reading keys one
+at a time, which is what a line editor does at its prompt — and a shell without one never does.
+`/bin/sh` is dash on Debian and Ubuntu, so every pane there waited out the clock fallback before
+typing anything. It now asks the whole question: who holds the terminal, and whether the shell is
+ready.
+
+Using quiet as a signal has a price, and it is paid in the right place. An rc waiting on a
+command it started is exactly as quiet as a prompt, and a form feed sent then is not a command,
+it is a character echoed back as `^L` above a banner that is still arriving. What tells the two
+apart is who holds the terminal — the command the rc started, not the shell — which is why the
+foreground check is inside the question rather than beside it.
+
+**The pane-graphics driver could not run on Linux at all.** It asked the pane for its size with
+`read -t 2 -d t`, which is bash and nothing else; dash has neither option. Rewritten in POSIX.
+
+**And the lever that found all of them.** The test harness forced `SHELL=/bin/sh`, which is not
+the same shell on the two systems the CI runs: bash with a line editor on macOS, dash without one
+on Ubuntu. That difference has been the shape of more than one failure visible only on the Linux
+runner, and there was no way to reproduce it from a Mac. `CLEE_DRIVE_SHELL` now points the
+harness at another shell:
+
+    CLEE_DRIVE_SHELL=/bin/dash python3 scripts/drive_mcp.py target/debug/clee
+
+Eleven drivers out of eleven pass under dash, and the Linux driver gate in CI is green again for
+the first time in several releases.
+
 ## What's new in 0.28.3
 
 **Video plays in a terminal pane, and `ytfzf -t` shows its thumbnails.** Both were refused or
