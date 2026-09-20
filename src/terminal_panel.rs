@@ -2046,8 +2046,23 @@ impl TerminalPanel {
             self.spare = spare;
             return;
         };
+        // The two sizes the resampling question turns on, and the size of the frame itself, all
+        // read before the picture is lent to the protocol below. A player asked for `c` columns
+        // by `r` rows should already have scaled to exactly the rectangle it is drawn into, and
+        // where it has, the `Fit` further down is a resample that changes nothing.
+        let font = picker.font_size();
+        let source = (held.placement.image.width(), held.placement.image.height());
+        let destination = (
+            u32::from(rect.width) * u32::from(font.width),
+            u32::from(rect.height) * u32::from(font.height),
+        );
+        let bytes = held.placement.image.as_bytes().len() as u64;
+        crate::graphics_profile::drew(source, destination);
         if held.drawn.is_none() {
+            let copy = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Clone);
             let image = held.placement.image.clone();
+            copy.close(bytes, bytes);
+            let build = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Build);
             held.drawn = Some(match spare {
                 // The drawing of a picture that has gone, carrying the name the host terminal
                 // knows it by — see `spare`. This is the same swap `preview::redraw_as` makes
@@ -2060,10 +2075,16 @@ impl TerminalPanel {
                 )),
                 None => Box::new(picker.new_resize_protocol(image)),
             });
+            // The building looks like bookkeeping and is not: `ratatui-image` hashes the whole
+            // picture here to know whether it has changed since the last drawing, so this stage
+            // reads every byte of the frame whatever else it does.
+            build.close(bytes, 0);
+            crate::graphics_profile::built();
         } else {
             self.spare = spare;
         }
         let Some(protocol) = held.drawn.as_mut() else { return };
+        let drawing = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Render);
         // `Fit` shrinks the picture to the cells it was given and never enlarges it, which is
         // what the program asking for `c` columns and `r` rows meant.
         ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None)).render(
@@ -2071,6 +2092,10 @@ impl TerminalPanel {
             f.buffer_mut(),
             protocol.as_mut(),
         );
+        // Everything the relay would remove is inside that call: the resample, the conversion
+        // to RGBA and the base64 of the whole frame. Charged with the pixels that went in; what
+        // comes out is an escape sequence in the cell buffer, counted where it leaves instead.
+        drawing.close(bytes, 0);
     }
 }
 

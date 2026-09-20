@@ -30,8 +30,39 @@ static PICKER: OnceLock<Picker> = OnceLock::new();
 /// has its own timeout inside `ratatui-image` and falls back to half-blocks, so a terminal that
 /// answers nothing costs a moment and a coarser picture rather than a hang.
 pub fn detect_terminal() {
-    if let Ok(picker) = Picker::from_query_stdio() {
+    if let Ok(mut picker) = Picker::from_query_stdio() {
+        if let Some(kind) = forced_protocol() {
+            picker.set_protocol_type(kind);
+        }
         let _ = PICKER.set(picker);
+    }
+}
+
+/// The protocol a driver insists on, when the terminal it is running in cannot be asked.
+///
+/// A sibling of `CLEE_UPDATE_CHECK` and `CLEE_DRIVE_SHELL`, and it exists for the same reason
+/// they do: a bare pty answers no graphics query at all, so a driven session always falls back
+/// to half-blocks and the code that draws real pixels is never the code under test. That is
+/// harmless while what is being checked is where a picture landed — half-blocks land in the
+/// same cells — and useless the moment the question is what drawing one *costs*, because the
+/// expensive half of the kitty road (the resample, the RGBA conversion, the base64) has no
+/// half-blocks counterpart at all.
+///
+/// Named values only, and a name that is not one of them is ignored rather than guessed at:
+///
+///     CLEE_GRAPHICS_PROTOCOL=kitty python3 scripts/drive_panegfx.py target/debug/clee
+///
+/// It overrides only *which* protocol is used. The cell size still comes from the terminal —
+/// or, where nothing answered, from `ratatui-image`'s own fallback — because inventing one
+/// would put every measurement taken through this hook on a screen that does not exist.
+fn forced_protocol() -> Option<ratatui_image::picker::ProtocolType> {
+    use ratatui_image::picker::ProtocolType;
+    match std::env::var("CLEE_GRAPHICS_PROTOCOL").ok()?.as_str() {
+        "kitty" => Some(ProtocolType::Kitty),
+        "iterm2" => Some(ProtocolType::Iterm2),
+        "sixel" => Some(ProtocolType::Sixel),
+        "halfblocks" => Some(ProtocolType::Halfblocks),
+        _ => None,
     }
 }
 

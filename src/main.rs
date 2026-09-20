@@ -14,6 +14,7 @@ mod font_install;
 mod git;
 mod git_graph;
 mod git_status;
+mod graphics_profile;
 mod highlight;
 mod i18n;
 mod keymap;
@@ -188,7 +189,12 @@ More in the manual (Ctrl+Shift+M) and in man clee.
 fn draw_synchronised(terminal: &mut BufferedTerminal, app: &mut App) -> std::io::Result<()> {
     use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
     let _ = crossterm::execute!(stdout(), BeginSynchronizedUpdate);
+    // Taken across the draw so that the frame can be charged with the pictures that went into
+    // it: a frame that drew one is a frame whose stdout bytes carry a whole picture, and the
+    // difference between those and the frames that drew none is the picture's cost on the wire.
+    let before = graphics_profile::renders();
     let drawn = terminal.draw(|f| ui::draw(f, app)).map(|_| ());
+    graphics_profile::frame_drawn((graphics_profile::renders() - before) as u32);
     // Ended whether or not the frame went well: a terminal left holding its screen would show
     // nothing at all from here on.
     let _ = crossterm::execute!(stdout(), EndSynchronizedUpdate);
@@ -233,8 +239,16 @@ fn apply_event(app: &mut App, event: Event, size: ratatui::layout::Size) -> Resu
 }
 
 /// A terminal whose writes go through a large buffer. See where it is built for why.
-type BufferedTerminal =
-    ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::BufWriter<std::io::Stdout>>>;
+///
+/// The handle underneath the buffer is a counted one rather than `Stdout` itself. It is the
+/// same handle either way — the counting is a relaxed load and a branch when nothing is being
+/// measured, which is every session but a profiled one — and having it here is what lets the
+/// graphics profile say how many bytes a frame with a picture in it costs the host against one
+/// without. That number cannot be recovered anywhere else: by the time a picture has become an
+/// escape sequence it is indistinguishable from the rest of the frame.
+type BufferedTerminal = ratatui::Terminal<
+    ratatui::backend::CrosstermBackend<std::io::BufWriter<graphics_profile::CountingStdout>>,
+>;
 
 fn main() -> Result<()> {
     // Flags are checked before the terminal is taken over, so their output stays visible.
@@ -365,9 +379,13 @@ fn main() -> Result<()> {
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    // Before the backend, because the writer it is built over is counted and the counters have
+    // to exist before the first byte goes through them. Off unless `CLEE_GRAPHICS_PROFILE` names
+    // a file; see `graphics_profile`.
+    graphics_profile::init();
     let backend = ratatui::backend::CrosstermBackend::new(std::io::BufWriter::with_capacity(
         FRAME_BUFFER,
-        stdout(),
+        graphics_profile::CountingStdout::new(),
     ));
     let mut terminal = ratatui::Terminal::new(backend)?;
     // Both capability questions go out *before* the mouse is captured, and the order is the
@@ -422,6 +440,10 @@ fn main() -> Result<()> {
     // Even a panic the loop couldn't shield must not skip the teardown below: leaving the
     // terminal in raw mode on the alternate screen hands the user an unusable shell.
     let result = shielded(|| run(&mut terminal, open_workspace, edit_file, path_arg, resume));
+    // Written here rather than at the end of `run`: a session that ended in a panic the shield
+    // caught is exactly the one whose numbers are worth having, and the teardown below has not
+    // yet begun to write to the terminal on its own account.
+    graphics_profile::finish();
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.

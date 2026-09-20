@@ -191,6 +191,26 @@ impl PaneStream {
     /// the text *before* the command put it — so the two cannot be separated into two passes
     /// and reunited afterwards.
     pub fn feed(&mut self, data: &[u8]) -> Vec<Piece> {
+        let span = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Split);
+        let out = self.split(data);
+        // Charged with everything the pane wrote, and credited only with what was taken out of
+        // it — which is the honest shape of this stage: the scan is paid for by every byte of
+        // output, graphics or not, and that is precisely the cost a relay could not remove.
+        // Counted only while something is measuring, because walking the pieces to add them up
+        // is itself work.
+        span.close_with(data.len() as u64, || {
+            out.iter()
+                .map(|piece| match piece {
+                    Piece::Apc(body) => body.len() as u64,
+                    _ => 0,
+                })
+                .sum()
+        });
+        out
+    }
+
+    /// The scan itself, split out only so that `feed` can time it as one stage.
+    fn split(&mut self, data: &[u8]) -> Vec<Piece> {
         let mut out = Vec::new();
         for &b in data {
             // The tail of a broken graphics command is counted down a byte at a time, whatever
@@ -565,7 +585,14 @@ fn finish(keys: Keys, payload: &[u8]) -> Decoded {
     if absurd(&keys) {
         return Decoded::Unsupported;
     }
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+    // Timed apart from the wrapping below because the two answer different questions. This is
+    // the cost of a frame that arrived *in* the escape sequence rather than in a segment, which
+    // is what `mpv` does unless `--vo-kitty-use-shm` is asked for — and no relay on the way out
+    // changes a byte of it.
+    let span = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Base64);
+    let decoded = base64::engine::general_purpose::STANDARD.decode(payload);
+    span.close(payload.len() as u64, decoded.as_ref().map_or(0, |bytes| bytes.len() as u64));
+    let Ok(bytes) = decoded else {
         return Decoded::Nothing;
     };
     decode(keys, bytes)
@@ -573,6 +600,21 @@ fn finish(keys: Keys, payload: &[u8]) -> Decoded {
 
 /// Turns the picture's own bytes — however they arrived — into the picture.
 fn decode(keys: Keys, bytes: Vec<u8>) -> Decoded {
+    let span = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Wrap);
+    let length = bytes.len() as u64;
+    let decoded = wrap(keys, bytes);
+    // Nothing comes out of this stage that was not already in memory — for a raw format it is
+    // the same allocation under a new name — so the bytes out are the bytes in, and a timing
+    // that says otherwise would be saying the raw path is not the move it claims to be.
+    span.close(length, length);
+    if let Decoded::Picture { keys, image } = &decoded {
+        crate::graphics_profile::decoded(image.width(), image.height(), keys.format);
+    }
+    decoded
+}
+
+/// The wrapping itself. See `decode`.
+fn wrap(keys: Keys, bytes: Vec<u8>) -> Decoded {
     let image =
         match keys.format {
             24 => image::RgbImage::from_raw(keys.width, keys.height, bytes)
@@ -629,7 +671,12 @@ fn load_medium(keys: &Keys, name: &[u8]) -> Option<Vec<u8>> {
         None => keys.size as usize,
     };
     let offset = u64::from(keys.offset);
-    match keys.medium {
+    // Timed as one stage whichever road it takes. The open, the `fstat`, the mapping, the copy
+    // out of it and the unlink are one indivisible cost from the pane's point of view, and the
+    // question being asked of them — would a relay still have to pay this? — has one answer for
+    // all five.
+    let span = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::ShmRead);
+    let bytes = match keys.medium {
         // `t=t` is a file the terminal is expected to delete once it has read it; `t=f` is one
         // it must leave alone.
         b'f' | b't' => {
@@ -639,7 +686,9 @@ fn load_medium(keys: &Keys, name: &[u8]) -> Option<Vec<u8>> {
         }
         b's' => read_shared(name, offset, want),
         _ => None,
-    }
+    };
+    span.close(0, bytes.as_ref().map_or(0, |bytes| bytes.len() as u64));
+    bytes
 }
 
 /// Windows reads a picture out of the escape and nowhere else, for now.
@@ -854,6 +903,10 @@ impl Pace {
     /// Whether a picture may be decoded now.
     pub fn admit(&mut self) -> bool {
         if self.queued.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            // Counted after the decision and never before it: this is the one place in the
+            // pipeline where reading a clock to measure it would change what it measures, so
+            // the refusals are tallied and nothing here is timed. See `graphics_profile`.
+            crate::graphics_profile::paced_out();
             return false;
         }
         let now = Instant::now();
@@ -861,6 +914,7 @@ impl Pace {
             self.recent.pop_front();
         }
         if self.recent.len() >= MAX_DECODES_PER_SEC {
+            crate::graphics_profile::paced_out();
             return false;
         }
         self.recent.push_back(now);
