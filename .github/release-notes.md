@@ -1,3 +1,25 @@
+## What's new in 0.28.5
+
+**Nothing, if you are running it.** No behaviour changed, no key moved, no bug was fixed: this
+release is the tree adopting `rustfmt`, and it is here only so that the version in the source and
+the version on the shelf do not drift apart.
+
+The formatting check had been red since it was added and was declared "reported, not enforced",
+which is the polite way of saying nobody read it. The tree is now formatted, and the check is
+split in two: `Formatting` blocks, and `Lints (informational)` keeps clippy, whose seventy-one
+warnings are a separate change of the same kind.
+
+One setting in `rustfmt.toml`, and it is not a preference. This tree was hand-formatted to about
+a hundred columns — the ninety-fifth percentile of its lines sat at ninety-seven — and rustfmt's
+default `max_width` is already that. What the defaults do not keep is the one-line guard clause,
+
+    let Some(rest) = body.strip_prefix(b"G") else { return Decoded::Nothing };
+
+which this codebase uses everywhere and which the narrow width heuristics break into three lines
+each. `use_small_heuristics = "Max"` lets those heuristics run to `max_width`, so a line that fits
+stays a line: adopting rustfmt cost some ten thousand lines of churn with the defaults and under
+four thousand with that one line set.
+
 ## What's new in 0.28.4
 
 **Three things that only ever went wrong on Linux**, and a way to find the next one without a
