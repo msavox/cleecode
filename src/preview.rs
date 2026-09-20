@@ -210,6 +210,512 @@ fn component(text: &str) -> Option<u8> {
     Some(((value * 255 + max / 2) / max) as u8)
 }
 
+/// Which road a picture can take to the host terminal, other than by value.
+///
+/// `Direct` is the road CleeCode takes today and the only one it has ever taken: the pixels go
+/// down the pty inside the escape sequence itself, converted to RGBA and base64-encoded, which
+/// is a megabyte of escape for one frame of video. The other two are ways of not sending the
+/// pixels at all — `File` names a file the terminal opens, `Shared` names a POSIX shared-memory
+/// segment it maps — and they are precisely what `mpv --vo=kitty` already does *to* a pane of
+/// ours, so the road is known to work in the direction we are on the receiving end of.
+///
+/// Nothing draws through any of this yet, and that is deliberate. What is recorded here is what
+/// the host said it would accept, so that the measurement deciding whether the fast road is
+/// worth building rests on an answer from the terminal rather than on an assumption about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Medium {
+    /// The pixels in the escape sequence. Works everywhere the graphics protocol works at all,
+    /// and is the answer to every doubt — see `decide`.
+    #[default]
+    Direct,
+    /// A file the terminal opens by name. No base64 and no pty flood; pays the filesystem.
+    File,
+    /// A POSIX shared-memory segment the terminal maps by name. The cheapest road there is.
+    Shared,
+}
+
+/// What the pixels would look like on the road above.
+///
+/// Only meaningful beside a `Medium` that is not `Direct`: it is the format the host answered
+/// `OK` to, not a preference of ours. `Rgb` is the one worth having — it is what a decoded
+/// frame already is, so a relay that could use it would not have to touch the pixels at all,
+/// whereas `Rgba` means a conversion pass per frame before the copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    #[default]
+    Rgb,
+    Rgba,
+}
+
+/// What the host terminal turned out to be able to take, beyond a picture by value.
+///
+/// A struct rather than one enum because the next question about the host — whether it will
+/// take a PNG by name, how big a segment it will map, whether it unlinks what it read — belongs
+/// beside these two and should not require rewriting everything that reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostAbilities {
+    pub medium: Medium,
+    pub format: Format,
+}
+
+/// The answer, asked once at startup and then fixed. Held like `PICKER` and `BACKGROUND` above
+/// and for the same reason: it is a fact about the session, and the question cannot be asked
+/// again once the event loop owns stdin.
+static ABILITIES: OnceLock<HostAbilities> = OnceLock::new();
+
+/// How long the whole probe waits before giving up on a terminal that says nothing.
+///
+/// The same order as `BACKGROUND_TIMEOUT` beside it, and for the same reason: it is not a budget
+/// being spent but the ceiling on a mistake. In the ordinary case nothing waits anywhere near
+/// this long, because the Primary Device Attributes request sent behind the queries is answered
+/// by every terminal there is — so the probe ends when that answer lands, not when the clock
+/// runs out. What this actually covers is the terminal that answers neither, which is a pty with
+/// nothing on the other end of it: a driven session, and CleeCode running under a test.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The questions, in the order the answers are preferred.
+///
+/// The whole ladder goes out in one breath because the round trip is the cost and the questions
+/// are free — three queries and one device-attributes request is one wait, not three. The order
+/// is the order `decide` takes the first `OK` from: shared memory before a file because a copy
+/// into a mapping is cheaper than a write through the filesystem, and raw RGB before RGBA
+/// because a decoded frame is already RGB and the other spelling costs a conversion pass.
+///
+/// The ids are far out of the way, and the reason is not politeness. `a=q` stores nothing, so an
+/// id reused here overwrites nothing and deletes nothing; what the id is for is the *reply*,
+/// which is keyed to it — so an id somebody else is also asking under is an answer to their
+/// question that would be read as an answer to ours. That is not hypothetical and it is not
+/// remote: `ratatui-image` opens every session by sending
+/// `ESC _ G i=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \` followed by `ESC [ c`, which is the same
+/// technique against the same protocol under id **31** — the id kitty's own documentation uses
+/// in its worked example, which is presumably why. That query is made by `detect_terminal` one
+/// line before this one, and a terminal slow enough to answer it late would have its `OK` land
+/// in this probe's read window. Under id 31 that is a yes to a question about shared memory
+/// answered by a question about a picture sent by value: a false yes, which is the one outcome
+/// here that ends in somebody else's pages on screen. Nine thousand and something is nobody's:
+/// far above what a program counting its own pictures from one will ever reach, far from 31, and
+/// the last two digits still read as the rung of the ladder in a trace.
+///
+/// The stale reply in the other direction is harmless and stays unguarded: `ratatui-image`'s
+/// device-attributes answer arriving late would end this probe's reading early, and an answer
+/// cut short is a `Direct` — the direction every doubt here resolves in.
+const PROBES: [(u32, Medium, Format); 3] = [
+    (9931, Medium::Shared, Format::Rgb),
+    (9932, Medium::Shared, Format::Rgba),
+    (9933, Medium::File, Format::Rgb),
+];
+
+/// Asks the host terminal what it can be handed a picture by, and records the answer for the
+/// session.
+///
+/// **Where this has to be called from, and why it cannot be called anywhere else.** It belongs
+/// in `main`, in the same passage that already calls `detect_terminal` and `detect_background`
+/// and explains why those questions are asked there — immediately after `detect_terminal`, and
+/// before the event loop begins. Both ends of that are load-bearing. After the picker, because
+/// the probe reads `Picker::protocol_type` and a host with no graphics protocol at all is not
+/// asked anything further; before the loop, because the probe writes to stdout and then reads
+/// the reply off stdin, and that is only sound while stdin is still ours alone. Once the loop is
+/// running, the mouse is captured and every twitch of the pointer is in that same stdin — the
+/// trap already documented at the call site — and once a pane exists its output is interleaved
+/// with ours. Later is not "slower", it is "wrong answer".
+///
+pub fn detect_host_abilities() {
+    let _ = ABILITIES.set(probe());
+}
+
+/// What the host said it would take, or `Direct` where it was never asked.
+///
+/// There is no third state and deliberately so: "not asked" and "asked and answered nothing"
+/// are the same fact to every caller — the picture goes the way it has always gone.
+pub fn host_abilities() -> HostAbilities {
+    ABILITIES.get().copied().unwrap_or_default()
+}
+
+/// The two hard gates, and then the asking.
+///
+/// Over `ssh` nothing is asked at all. The segment would be created on this machine and the
+/// terminal would look the name up on the machine the user is sitting at, where a name that
+/// happened to exist would answer `OK` about somebody else's memory — a false yes, which is the
+/// worst outcome available here by a distance, since the road it opens ends in frames of another
+/// process's pages on screen. `running_over_ssh` is the same gate the clipboard, drag-and-drop
+/// and the font offer already stand behind.
+///
+/// And only the kitty protocol has a `t=` key at all, so a host drawing with sixel, iTerm2 or
+/// half-blocks is not asked a question whose `OK` could not be used. Multiplexers need no gate
+/// of their own: a `tmux` that swallows the APC simply does not answer, and silence already
+/// means no.
+fn probe() -> HostAbilities {
+    if crate::dnd::running_over_ssh() {
+        return HostAbilities::default();
+    }
+    if !matches!(
+        picker().map(Picker::protocol_type),
+        Some(ratatui_image::picker::ProtocolType::Kitty)
+    ) {
+        return HostAbilities::default();
+    }
+    ask_host(&PROBES)
+}
+
+/// Writes the ladder of queries, waits for the replies, and cleans up after itself.
+///
+/// The fixtures are made first and one per question. A terminal that reads a segment is entitled
+/// to unlink it — that is what the protocol asks of the receiving side, and it is what CleeCode's
+/// own receiving side does — so two questions sharing one fixture would have the second answer
+/// `ENOENT` about a road the host can perfectly well take. They are also destroyed here whatever
+/// happened, by `Fixture`'s `Drop`: a host that consumed them leaves nothing to remove, and a
+/// host that did not must not leave one segment per launch sitting in the kernel.
+///
+/// Nothing about the real road may be inferred from what survives. `a=q` stores nothing and
+/// draws nothing, so a terminal is under no obligation to treat its fixture the way it would
+/// treat an `a=T`; the leftovers are worth looking at by hand and worth nothing to this code.
+#[cfg(unix)]
+fn ask_host(sent: &[(u32, Medium, Format)]) -> HostAbilities {
+    use std::io::Write;
+
+    let pid = std::process::id();
+    let mut fixtures = Vec::new();
+    let mut queries = Vec::new();
+    for &(id, medium, format) in sent {
+        let bytes = match format {
+            Format::Rgb => 3,
+            Format::Rgba => 4,
+        };
+        // macOS caps a shared-memory name at 31 characters including the leading slash
+        // (`PSHMNAMLEN`) and answers `ENAMETOOLONG` to anything longer. That failure arrives
+        // here as a segment that was never created and would then read as a host that said no,
+        // which is why the name is this short: `/clee-probe-<pid>-<id>` is twenty-seven
+        // characters at the widest a pid can be written, and there is a test that says so.
+        let fixture = match medium {
+            Medium::Shared => make_shared(&format!("/clee-probe-{pid}-{id}"), bytes),
+            Medium::File => {
+                make_file(std::env::temp_dir().join(format!("clee-probe-{pid}-{id}")), bytes)
+            }
+            Medium::Direct => None,
+        };
+        let Some(fixture) = fixture else { continue };
+        queries.extend_from_slice(&query(id, medium, format, &fixture.name));
+        fixtures.push(fixture);
+    }
+    if fixtures.is_empty() {
+        return HostAbilities::default();
+    }
+
+    // The request that makes a "no" free. Every terminal in existence answers Primary Device
+    // Attributes, and it is answered in order behind the queries — so whatever graphics replies
+    // arrived before it are the complete answer, and a terminal that has no graphics protocol
+    // has said so in one round trip rather than in one timeout. `preview.rs` already carries the
+    // complaint about waiting on silence for the background query; this is the way out of it.
+    queries.extend_from_slice(b"\x1b[c");
+    let mut out = std::io::stdout();
+    if out.write_all(&queries).is_err() || out.flush().is_err() {
+        return HostAbilities::default();
+    }
+
+    let abilities = decide(&read_replies(), sent);
+    // Explicit, and after the reading rather than before it: the host may still be mapping the
+    // segment while we wait, and unlinking one it has not opened yet turns a yes into a no.
+    drop(fixtures);
+    abilities
+}
+
+/// POSIX shared memory has no Windows counterpart, and a file named across that boundary is a
+/// road nobody has asked for. `load_medium` refuses the same thing in the same shape on the
+/// receiving side — one clean refusal rather than half a feature — and this matches it.
+#[cfg(not(unix))]
+fn ask_host(_sent: &[(u32, Medium, Format)]) -> HostAbilities {
+    HostAbilities::default()
+}
+
+/// One query, spelled the way the protocol requires and not the way `mpv` spells it.
+///
+/// Three things here are the whole difference between an answer and silence. The first is that
+/// `q` is left at its default: `q=1` suppresses exactly the `OK` being asked for and `q=2`
+/// suppresses everything, and `q=2` is what `mpv` sends — because `mpv` does not want answers,
+/// and we want nothing else. The second is `i=`: a query with no id gives the terminal nothing
+/// to key a reply to and it sends none at all, which would make "cannot" and "does not
+/// implement any of this" the same silence. The third is that the payload is the base64 of the
+/// *name*, not the name — the same shape CleeCode's own receiving side decodes before it opens
+/// anything, so what goes out is what we already know how to read.
+#[cfg(unix)]
+fn query(id: u32, medium: Medium, format: Format, name: &[u8]) -> Vec<u8> {
+    use base64::Engine as _;
+    let bits = match format {
+        Format::Rgb => 24,
+        Format::Rgba => 32,
+    };
+    let carrier = match medium {
+        Medium::Shared => 's',
+        Medium::File => 'f',
+        Medium::Direct => 'd',
+    };
+    let payload = base64::engine::general_purpose::STANDARD.encode(name);
+    // One pixel, because the question is whether the road exists and not how wide it is. A
+    // raw format must state its size, and `s=1,v=1` is the smallest thing that is still a
+    // picture — three bytes of fixture for `f=24`, four for `f=32`.
+    format!("\x1b_Ga=q,i={id},f={bits},t={carrier},s=1,v=1;{payload}\x1b\\").into_bytes()
+}
+
+/// Reads until the device attributes come back, and gives up at `PROBE_TIMEOUT`.
+///
+/// Synchronous and not a thread, for the reason `query_background` gives above: a thread parked
+/// in `read` on a terminal that never answers would still be there when the user types and would
+/// swallow the first key. `stdin_is_ready` asks before reading, so a silent terminal costs the
+/// timeout and takes nothing with it.
+///
+/// Two things are thrown away here and both are meant to be. Whatever arrived in the same read
+/// as the device attributes but after them is discarded — a key pressed while CleeCode was
+/// starting, most likely, which is what the background query already does with it and the price
+/// of asking anything at all before the event loop exists. And a graphics reply that arrives
+/// *behind* the device attributes is never read, so a terminal that answers in that order is a
+/// terminal this reads as a no. Both are losses in the direction everything here resolves in.
+#[cfg(unix)]
+fn read_replies() -> Vec<u8> {
+    use std::io::Read;
+    use std::time::Instant;
+
+    /// Enough for three replies and a device-attributes answer several times over. A terminal
+    /// that keeps talking without ever finishing — or a key held down while CleeCode starts —
+    /// must not be able to keep this loop going all the way to the deadline.
+    const MAX_REPLY: usize = 4096;
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut reply = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !stdin_is_ready(left) {
+            return reply;
+        }
+        let mut buf = [0u8; 256];
+        let Ok(read) = std::io::stdin().read(&mut buf) else { return reply };
+        if read == 0 {
+            return reply;
+        }
+        reply.extend_from_slice(&buf[..read]);
+        if device_attributes_seen(&reply) || reply.len() > MAX_REPLY {
+            return reply;
+        }
+    }
+}
+
+/// Whether the Primary Device Attributes reply — `ESC [ ? <numbers> c` — has arrived, which is
+/// the signal that every graphics reply the host meant to send already has.
+///
+/// The parameters are checked rather than skipped to. An error message in a graphics reply is
+/// free text and can hold a `c`, so "an escape, a bracket, a question mark and a `c` somewhere
+/// after it" would end the wait on somebody else's sentence; a run of digits and semicolons
+/// closed by `c` is the reply and nothing else is.
+fn device_attributes_seen(reply: &[u8]) -> bool {
+    let mut rest = reply;
+    while let Some(at) = rest.windows(3).position(|window| window == b"\x1b[?") {
+        let tail = &rest[at + 3..];
+        // The first byte that is not a parameter is the one that says what this was, and only
+        // `c` says device attributes. A tail that is still all digits has not finished arriving.
+        if tail.iter().find(|&&b| !b.is_ascii_digit() && b != b';') == Some(&b'c') {
+            return true;
+        }
+        rest = tail;
+    }
+    false
+}
+
+/// What the bytes that came back mean. The pure half of the probe, and the half that will be
+/// wrong: everything above it is a write, a wait and a read, and everything difficult is here.
+///
+/// **Every doubt resolves to `Direct`.** No reply, a reply that never finished arriving, a reply
+/// carrying an id nobody asked under, an error code, a message that is not exactly `OK`, bytes
+/// that are not a reply at all: all of them are the road CleeCode already takes, which works on
+/// every terminal there is. The next person to read this will be tempted to treat a reply that
+/// is nearly an `OK` as one, or to match a stray id onto the question next to it, and both are
+/// the same mistake in the same direction — a false yes here does not end in a fallback, it ends
+/// in the host being handed a name it cannot read, or worse, one it can.
+///
+/// `sent` is in preference order and the first question in it that was answered `OK` wins, which
+/// is not the same as the first reply to arrive: terminals are free to answer in any order, and
+/// what we want is the cheapest road the host has, not the one it happened to mention first.
+fn decide(replies: &[u8], sent: &[(u32, Medium, Format)]) -> HostAbilities {
+    let mut yes = Vec::new();
+    for body in graphics_replies(replies) {
+        // Kitty's commands and Kitty's answers both begin with `G`; an APC that does not is
+        // somebody else's private sequence and guessing at it is how you misread one.
+        let Some(rest) = body.strip_prefix(b"G") else { continue };
+        // `<keys>;<message>`. No semicolon means no message, and so nothing that could be a yes.
+        let Some(at) = rest.iter().position(|&b| b == b';') else { continue };
+        if &rest[at + 1..] != b"OK" {
+            continue;
+        }
+        if let Some(id) = reply_id(&rest[..at]) {
+            yes.push(id);
+        }
+    }
+    sent.iter().find(|(id, ..)| yes.contains(id)).map_or_else(
+        HostAbilities::default,
+        |&(_, medium, format)| HostAbilities { medium, format },
+    )
+}
+
+/// The bodies of the APC strings in a stretch of terminal output — everything between `ESC _`
+/// and the `ESC \` that closes it.
+///
+/// Scanned for rather than positioned at, because the replies share stdin with everything else
+/// the terminal has to say: another query's answer, a paste, a key pressed while CleeCode was
+/// starting. A body with no terminator is not returned at all — the read stopped in the middle
+/// of it, and half a reply is not a reply — which is also what keeps a truncated tail from
+/// running off the end of the buffer.
+fn graphics_replies(replies: &[u8]) -> Vec<&[u8]> {
+    let mut bodies = Vec::new();
+    let mut rest = replies;
+    while let Some(at) = rest.windows(2).position(|window| window == b"\x1b_") {
+        let body = &rest[at + 2..];
+        // ST and only ST. The protocol says an APC ends with `ESC \`, and a terminal that ended
+        // one some other way is a terminal this reads as silence — which is the direction every
+        // doubt here resolves in anyway.
+        let Some(end) = body.windows(2).position(|window| window == b"\x1b\\") else { break };
+        bodies.push(&body[..end]);
+        rest = &body[end + 2..];
+    }
+    bodies
+}
+
+/// The `i=` of a reply's key half. `None` where there is none, which is a reply that cannot be
+/// matched to a question and so is not matched to one.
+fn reply_id(keys: &[u8]) -> Option<u32> {
+    keys.split(|&b| b == b',').find_map(|field| {
+        let value = field.strip_prefix(b"i=")?;
+        std::str::from_utf8(value).ok()?.parse().ok()
+    })
+}
+
+/// A fixture the host is invited to read, and which does not outlive the question it was made
+/// for. The name is kept as bytes because that is what goes into the query and what comes back
+/// out of `shm_unlink` and `remove_file`.
+#[cfg(unix)]
+struct Fixture {
+    name: Vec<u8>,
+    shared: bool,
+}
+
+#[cfg(unix)]
+impl Drop for Fixture {
+    /// Failure is ignored on purpose, and it is the expected case on a host that did its job: a
+    /// terminal which read the segment has already unlinked it, so `ENOENT` here is the good
+    /// outcome and not a thing to report. What must not happen is the other one — a launch that
+    /// leaves a segment behind, every launch, for as long as the machine is up.
+    fn drop(&mut self) {
+        if self.shared {
+            if let Ok(name) = std::ffi::CString::new(self.name.clone()) {
+                // SAFETY: a nul-terminated name, and nothing of ours is mapped by now.
+                unsafe { libc::shm_unlink(name.as_ptr()) };
+            }
+        } else {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&self.name));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Creates a shared-memory segment of exactly `bytes` and puts a pixel in it.
+///
+/// `O_EXCL` rather than a plain create: the name carries this process's pid, so a segment of
+/// that name already existing means somebody else's — a previous clee that was killed before it
+/// could clean up, or a name collision after a pid wrapped — and writing into it would be
+/// writing into a stranger's pages. A refusal here costs one question out of three.
+///
+/// The leading slash is part of the name and stays part of what is transmitted. `mpv` strips it
+/// and gets away with it because glibc accepts a name spelled either way; macOS does not, and
+/// the note on `read_shared` in `pane_graphics.rs` is the story of finding that out from the
+/// other side. Sent whole, both hosts look up the same thing.
+#[cfg(unix)]
+fn make_shared(name: &str, bytes: usize) -> Option<Fixture> {
+    let spelling = std::ffi::CString::new(name).ok()?;
+    // SAFETY: a nul-terminated name, which is all `shm_open_create` reads.
+    let fd = unsafe { shm_open_create(spelling.as_ptr()) };
+    if fd < 0 {
+        return None;
+    }
+    // Built before anything else can fail, so that every road out of here unlinks it.
+    let fixture = Fixture { name: name.as_bytes().to_vec(), shared: true };
+    // SAFETY: `fd` came back from `shm_open` above.
+    let sized = unsafe { libc::ftruncate(fd, bytes as libc::off_t) } == 0;
+    let filled = sized && fill_mapping(fd, bytes);
+    // SAFETY: the same descriptor, closed exactly once; the mapping above is already gone.
+    unsafe { libc::close(fd) };
+    filled.then_some(fixture)
+}
+
+/// Writes one opaque white pixel into the segment through a mapping, which is the only way in:
+/// a POSIX shared-memory object supports `ftruncate` and `mmap`, and `write` on one is not a
+/// portable thing to do.
+#[cfg(unix)]
+fn fill_mapping(fd: libc::c_int, bytes: usize) -> bool {
+    // SAFETY: a writable shared mapping of exactly the length just truncated to.
+    let map = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if map == libc::MAP_FAILED {
+        return false;
+    }
+    // SAFETY: `bytes` bytes were just mapped writable at this address and nothing else holds it;
+    // unmapped with the same address and length, exactly once.
+    unsafe {
+        std::ptr::write_bytes(map.cast::<u8>(), 0xff, bytes);
+        libc::munmap(map, bytes);
+    }
+    true
+}
+
+/// Creates the segment, spelled the way each platform declares `shm_open`.
+///
+/// The same split as `shm_open_read` in `pane_graphics.rs`, and the same reason: macOS declares
+/// the variadic C function and Linux the three-argument form, so a single spelling compiles on
+/// one machine and on no other. The mode matters on both — `O_CREAT` is among the flags here,
+/// which is exactly when it is read — and `0600` is the answer, because a picture of the user's
+/// screen is the user's.
+///
+/// # Safety
+/// `name` must point at a nul-terminated string.
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
+    unsafe {
+        libc::shm_open(name, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600 as libc::c_uint)
+    }
+}
+
+/// See the macOS spelling above.
+///
+/// # Safety
+/// `name` must point at a nul-terminated string.
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
+    unsafe {
+        libc::shm_open(name, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600 as libc::mode_t)
+    }
+}
+
+/// Creates the file fixture, with the same exclusivity and the same mode as the segment and for
+/// the same reasons. In the temporary directory because that is where a file made for one escape
+/// sequence belongs — it is the line `load_medium` draws for a `t=t` it is asked to delete, and
+/// drawing it in the same place here keeps one rule in the codebase rather than two.
+#[cfg(unix)]
+fn make_file(path: std::path::PathBuf, bytes: usize) -> Option<Fixture> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
+    let fixture = Fixture { name: path.as_os_str().as_bytes().to_vec(), shared: false };
+    file.write_all(&vec![0xff; bytes]).ok().map(|()| fixture)
+}
+
 /// How the picture will actually be drawn, for saying so in the tab.
 pub fn protocol_name() -> &'static str {
     match picker().map(Picker::protocol_type) {
@@ -1787,6 +2293,271 @@ mod tests {
         assert_eq!(of("\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Theme::CleeCodeLight);
         assert_eq!(of("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\"), Theme::CleeCode);
         assert_eq!(of("garbage"), Theme::CleeCode);
+    }
+
+    /// A graphics reply as the protocol spells one, for the tests below to be written in the
+    /// shape the wire has rather than in a string of escapes each time.
+    fn reply(id: u32, message: &str) -> Vec<u8> {
+        format!("\x1b_Gi={id};{message}\x1b\\").into_bytes()
+    }
+
+    /// The Primary Device Attributes answer, which is what ends the wait on a real terminal —
+    /// so every case that is meant to look like a finished conversation carries one.
+    const DA: &[u8] = b"\x1b[?62;1;6c";
+
+    /// Everything the probe is for, in the order it prefers: the cheapest road the host will
+    /// take, not the first one it happened to mention.
+    #[test]
+    fn the_cheapest_road_the_host_will_take_is_the_one_chosen() {
+        let all = [reply(9931, "OK"), reply(9932, "OK"), reply(9933, "OK"), DA.to_vec()].concat();
+        assert_eq!(
+            decide(&all, &PROBES),
+            HostAbilities { medium: Medium::Shared, format: Format::Rgb },
+        );
+
+        // The first question answered with an error, the second with a yes: RGBA it is.
+        let rgba = [reply(9931, "EINVAL:bad format"), reply(9932, "OK"), DA.to_vec()].concat();
+        assert_eq!(
+            decide(&rgba, &PROBES),
+            HostAbilities { medium: Medium::Shared, format: Format::Rgba },
+        );
+
+        // Neither segment, but a file: a host that will not map anything may still open one.
+        let file = [
+            reply(9931, "ENOENT:no such"),
+            reply(9932, "ENOENT:no such"),
+            reply(9933, "OK"),
+            DA.to_vec(),
+        ]
+        .concat();
+        assert_eq!(
+            decide(&file, &PROBES),
+            HostAbilities { medium: Medium::File, format: Format::Rgb },
+        );
+    }
+
+    /// The order the answers arrive in is the terminal's business. The order they are preferred
+    /// in is ours, and it is the order of `PROBES`.
+    #[test]
+    fn the_order_replies_arrive_in_is_not_the_order_they_are_preferred_in() {
+        let backwards =
+            [reply(9933, "OK"), reply(9932, "OK"), reply(9931, "OK"), DA.to_vec()].concat();
+        assert_eq!(decide(&backwards, &PROBES).medium, Medium::Shared);
+        assert_eq!(decide(&backwards, &PROBES).format, Format::Rgb);
+
+        // And the device attributes need not come last for the bytes to be read: what ends the
+        // *wait* and what ends the *conversation* are two different questions.
+        let early = [DA.to_vec(), reply(9933, "OK")].concat();
+        assert_eq!(decide(&early, &PROBES).medium, Medium::File);
+    }
+
+    /// Nothing but the device attributes means a terminal that does not implement any of this,
+    /// and that is the answer the whole design turns on being cheap.
+    #[test]
+    fn a_terminal_that_only_answered_the_device_attributes_can_take_nothing() {
+        assert_eq!(decide(DA, &PROBES), HostAbilities::default());
+        assert_eq!(decide(b"", &PROBES), HostAbilities::default());
+        assert_eq!(HostAbilities::default().medium, Medium::Direct);
+    }
+
+    /// The replies share stdin with everything else the terminal has to say — another query's
+    /// answer, a key pressed while CleeCode was starting, a paste. An answer buried in that is
+    /// still an answer, and the noise around it is not one.
+    #[test]
+    fn an_answer_buried_in_other_output_is_still_an_answer() {
+        let noisy = [
+            b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07".to_vec(),
+            b"hello".to_vec(),
+            reply(9931, "ENOENT:no such file"),
+            b"\x1b[4;1R".to_vec(),
+            reply(9932, "OK"),
+            b"\x1b_Xsomebody elses private sequence\x1b\\".to_vec(),
+            DA.to_vec(),
+        ]
+        .concat();
+        assert_eq!(
+            decide(&noisy, &PROBES),
+            HostAbilities { medium: Medium::Shared, format: Format::Rgba },
+        );
+    }
+
+    /// A yes has to be a yes to a question we asked. An id beside ours is not ours, an id with
+    /// our digits in it is not ours, and neither is matched onto the question next to it.
+    ///
+    /// The first of them is the one that matters and the reason the ids are where they are:
+    /// **31** is what `ratatui-image` asks its own `a=q` under, one line before this probe runs.
+    /// Read as an answer to ours it would be a yes about shared memory given by a terminal that
+    /// was talking about a picture sent by value.
+    #[test]
+    fn an_id_nobody_asked_under_is_not_somebody_elses_yes() {
+        for stray in [31, 9930, 9934, 993, 99311, 0, 1] {
+            let bytes = [reply(stray, "OK"), DA.to_vec()].concat();
+            assert_eq!(
+                decide(&bytes, &PROBES),
+                HostAbilities::default(),
+                "a reply for id {stray} was taken as an answer",
+            );
+        }
+        // A reply with no id at all cannot be matched to anything either.
+        assert_eq!(decide(b"\x1b_G;OK\x1b\\", &PROBES), HostAbilities::default());
+        assert_eq!(decide(b"\x1b_GOK\x1b\\", &PROBES), HostAbilities::default());
+    }
+
+    /// A read can stop in the middle of a reply, and half of one is not one. The terminator is
+    /// what says the sentence finished.
+    #[test]
+    fn half_a_reply_is_not_a_reply() {
+        assert_eq!(decide(b"\x1b_Gi=9931;OK", &PROBES), HostAbilities::default());
+        assert_eq!(decide(b"\x1b_Gi=9931;O", &PROBES), HostAbilities::default());
+        assert_eq!(decide(b"\x1b_Gi=9931;OK\x1b", &PROBES), HostAbilities::default());
+        assert_eq!(decide(b"\x1b_", &PROBES), HostAbilities::default());
+        // One that did finish is still read when a truncated one follows it.
+        let mixed = [reply(9933, "OK"), b"\x1b_Gi=9931;OK".to_vec()].concat();
+        assert_eq!(decide(&mixed, &PROBES).medium, Medium::File);
+    }
+
+    /// `OK` and nothing else. Every other message the protocol defines is a refusal, and a
+    /// message that merely resembles one is not a yes either — a false yes here ends with the
+    /// host handed a name it cannot read, or worse, one it can.
+    #[test]
+    fn anything_that_is_not_exactly_ok_is_a_no() {
+        for message in [
+            "ENOENT:No such file or directory",
+            "EBADF",
+            "EINVAL:Unsupported format",
+            "ENOTSUP",
+            "ok",
+            "OKAY",
+            "OK!",
+            " OK",
+            "OK ",
+            "",
+        ] {
+            let bytes = [reply(9931, message), DA.to_vec()].concat();
+            assert_eq!(
+                decide(&bytes, &PROBES),
+                HostAbilities::default(),
+                "{message:?} was read as a yes",
+            );
+        }
+        // No semicolon at all: keys and no message, so nothing that could be one.
+        assert_eq!(decide(b"\x1b_Gi=9931\x1b\\", &PROBES), HostAbilities::default());
+    }
+
+    /// One answer and nothing after it — no device attributes, no terminator of the
+    /// conversation — is still decided rather than waited on. The deciding is over bytes that
+    /// have already arrived; what ends the reading is somebody else's problem.
+    #[test]
+    fn an_ok_with_nothing_else_is_still_an_answer() {
+        assert_eq!(
+            decide(b"\x1b_Gi=9931;OK\x1b\\", &PROBES),
+            HostAbilities { medium: Medium::Shared, format: Format::Rgb },
+        );
+    }
+
+    /// Bytes that are not a conversation at all. None of them is an answer and none of them is
+    /// a panic: the probe runs on whatever was in stdin when CleeCode started.
+    #[test]
+    fn rubbish_on_the_wire_decides_nothing_and_panics_on_nothing() {
+        for rubbish in [
+            &b""[..],
+            b"\x1b",
+            b"\x1b\\",
+            b"\x1b_\x1b\\",
+            b"\x1b_G\x1b\\",
+            b"\x1b_G;\x1b\\",
+            b"\x1b_Gi=;OK\x1b\\",
+            b"\x1b_Gi=nonsense;OK\x1b\\",
+            b"\x1b_Gi=99999999999999999999;OK\x1b\\",
+            b"\x1b_\x1b_\x1b_\x1b_",
+            b"\xff\xfe\x00\x1b_G\xff;OK\x1b\\",
+            b"the terminal typed a sentence",
+        ] {
+            assert_eq!(decide(rubbish, &PROBES), HostAbilities::default(), "{rubbish:?}");
+        }
+    }
+
+    /// What ends the wait. A device-attributes answer is digits and semicolons closed by a `c`;
+    /// an error message with a `c` in it after a question mark is not, and reading one as the
+    /// other would cut the conversation off before the graphics replies had all arrived.
+    #[test]
+    fn the_device_attributes_answer_is_recognised_and_a_sentence_is_not() {
+        assert!(device_attributes_seen(b"\x1b[?62;1;6c"));
+        assert!(device_attributes_seen(b"\x1b[?6c"));
+        assert!(device_attributes_seen(b"noise\x1b[?1;2cmore noise"));
+        assert!(!device_attributes_seen(b""));
+        assert!(!device_attributes_seen(b"\x1b[?62;1;6"), "the final byte has not arrived");
+        assert!(!device_attributes_seen(b"\x1b[?no such file: cannot open"));
+        assert!(!device_attributes_seen(b"\x1b[c"), "that is the question, not the answer");
+        // A truncated one followed by a real one: still seen.
+        assert!(device_attributes_seen(b"\x1b[?62;\x1b[?62;1;6c"));
+    }
+
+    /// The three things without which no terminal replies at all, checked on the bytes that go
+    /// out: the id the answer is keyed to, a `q` left at its default, and the base64 of the
+    /// *name* rather than the name.
+    #[cfg(unix)]
+    #[test]
+    fn a_query_carries_an_id_a_default_q_and_the_name_in_base64() {
+        let bytes = query(9931, Medium::Shared, Format::Rgb, b"/clee-probe-1-9931");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("\x1b_Ga=q,i=9931,f=24,t=s,s=1,v=1;"), "{text:?}");
+        assert!(text.ends_with("\x1b\\"), "{text:?}");
+        assert!(!text.contains(",q="), "q must stay at its default or the OK is suppressed");
+        assert!(!text.contains("/clee-probe"), "the name goes in base64, not as itself");
+        assert!(text.contains("L2NsZWUtcHJvYmUtMS05OTMx"), "{text:?}");
+
+        // The other two rungs of the ladder, spelled from the same table the probe sends.
+        let rgba = String::from_utf8(query(9932, Medium::Shared, Format::Rgba, b"x")).unwrap();
+        assert!(rgba.contains("i=9932,f=32,t=s"), "{rgba:?}");
+        let file = String::from_utf8(query(9933, Medium::File, Format::Rgb, b"/tmp/x")).unwrap();
+        assert!(file.contains("i=9933,f=24,t=f"), "{file:?}");
+    }
+
+    /// A fixture does not outlive the question it was made for, whatever the host did with it.
+    /// The segment half is checked through `O_EXCL`: while the fixture is alive the name cannot
+    /// be created again, and once it is dropped it can — which is the unlink having happened.
+    #[cfg(unix)]
+    #[test]
+    fn a_fixture_does_not_outlive_the_question_it_was_made_for() {
+        let name = format!("/clee-test-{}", std::process::id());
+        assert!(name.len() <= 31, "macOS caps a shared-memory name at 31: {name:?}");
+
+        let segment = make_shared(&name, 3).expect("the segment could not be created");
+        assert!(make_shared(&name, 3).is_none(), "O_EXCL must refuse a name already taken");
+        drop(segment);
+        let again = make_shared(&name, 3).expect("the name was not unlinked");
+        drop(again);
+
+        let path = std::env::temp_dir().join(format!("clee-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = make_file(path.clone(), 3).expect("the file could not be created");
+        assert!(path.exists());
+        assert!(make_file(path.clone(), 3).is_none(), "an existing file must not be overwritten");
+        drop(file);
+        assert!(!path.exists(), "the fixture was left behind");
+    }
+
+    /// Every name the probe sends fits what macOS allows, at any pid this machine hands out.
+    /// Over that and `shm_open` answers `ENAMETOOLONG`, which arrives as a segment that was
+    /// never created and reads exactly like a host that said no.
+    #[test]
+    fn every_shared_memory_name_fits_what_macos_allows() {
+        for pid in [1u32, u32::MAX] {
+            for (id, ..) in PROBES {
+                let name = format!("/clee-probe-{pid}-{id}");
+                assert!(name.len() <= 31, "{name:?} is {} characters", name.len());
+            }
+        }
+    }
+
+    /// The gate that comes before any of it. With no picker there is no graphics protocol to
+    /// speak, so nothing is written, nothing is waited for, and the answer is the road CleeCode
+    /// already takes — which is also what every test in this file runs under.
+    #[test]
+    fn a_host_with_no_graphics_protocol_is_not_asked_anything() {
+        assert_eq!(probe(), HostAbilities::default());
+        assert_eq!(host_abilities(), HostAbilities::default());
     }
 
     /// typst is told where its root is, because pandoc hands it absolute paths into the

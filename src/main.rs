@@ -412,6 +412,14 @@ fn main() -> Result<()> {
     // Both have their own timeout, so a silent terminal costs a coarser picture rather than a
     // stall, and neither can happen once frames are being drawn.
     preview::detect_terminal();
+    // And, of a host that turned out to draw real pixels, one more: can it be handed a picture
+    // by *name* — a shared-memory segment, a file — rather than by value? Asked here and not
+    // later for the same reason as the two above, and for one of its own: the answer is only
+    // sound while stdin is still ours, before the mouse is reporting into it and before any pane
+    // can interleave its output with the reply. It costs one round trip, and on a terminal that
+    // cannot do any of it the reply to the device-attributes request that rides along ends the
+    // wait — so a "no" is as cheap as a "yes". See `preview::detect_host_abilities`.
+    preview::detect_host_abilities();
     // A third question, asked only by those who need the answer: what colour is the terminal's
     // background? It settles `theme = "auto"`, and for anyone who chose a theme by name it would
     // be a hundred and fifty milliseconds spent on a fact nothing reads — so the setting is read

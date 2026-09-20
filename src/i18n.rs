@@ -3936,10 +3936,34 @@ pub fn msg_scp_result(lang: Lang, ok: usize, failed: usize, target: &str) -> Str
 /// Names the protocol the picture is being drawn with. Worth saying once on opening: "kitty"
 /// and "half-blocks" look very different on screen, and knowing which one you got is the
 /// difference between "my terminal cannot do better" and "something is wrong".
-pub fn msg_preview_opened(lang: Lang, protocol: &str) -> String {
+///
+/// The medium is a second fact and is deliberately worded as one. It is what the host answered
+/// it would *accept* when it was asked at startup, not how this picture was drawn — every
+/// picture still goes down the pty inside the escape sequence, and saying "drawn via shared
+/// memory" would be a straightforwardly false line on the status bar. It is said at all because
+/// it is otherwise invisible without a debugger, and because the whole point of asking was to
+/// find out how common a yes is.
+pub fn msg_preview_opened(lang: Lang, protocol: &str, medium: crate::preview::Medium) -> String {
+    use crate::preview::Medium;
+    let takes = match medium {
+        Medium::Direct => {
+            return match lang {
+                Lang::En => format!("Preview drawn with {protocol}"),
+                Lang::It => format!("Anteprima disegnata con {protocol}"),
+            };
+        }
+        Medium::File => match lang {
+            Lang::En => "a file",
+            Lang::It => "un file",
+        },
+        Medium::Shared => match lang {
+            Lang::En => "shared memory",
+            Lang::It => "la memoria condivisa",
+        },
+    };
     match lang {
-        Lang::En => format!("Preview drawn with {protocol}"),
-        Lang::It => format!("Anteprima disegnata con {protocol}"),
+        Lang::En => format!("Preview drawn with {protocol} (the host also takes {takes})"),
+        Lang::It => format!("Anteprima disegnata con {protocol} (l'host accetta anche {takes})"),
     }
 }
 

@@ -11252,7 +11252,11 @@ impl App {
         };
         self.place_in_pane(pane, idx);
         self.focus = Focus::Editor;
-        self.status_message = i18n::msg_preview_opened(lang, crate::preview::protocol_name());
+        self.status_message = i18n::msg_preview_opened(
+            lang,
+            crate::preview::protocol_name(),
+            crate::preview::host_abilities().medium,
+        );
     }
 
     /// Runs one of the navigation bar's controls. The bar and the keyboard both come through

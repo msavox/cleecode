@@ -19,13 +19,15 @@ real path rather than a testing artefact, and makes the picture visible to pyte.
 Skips the picture half if chafa is not installed, rather than passing quietly.
 """
 
+import glob
 import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pty_drive import Report, Session, binary_from_argv  # noqa: E402
+from pty_drive import PATIENCE, Report, Session, binary_from_argv  # noqa: E402
 
 
 def focus_terminal(session):
@@ -218,7 +220,109 @@ def main(argv):
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)
+
+    host_graphics_probe(binary, report)
     return report.finish()
+
+
+def host_graphics_probe(binary, report):
+    """What CleeCode asks the terminal it is running in, before it draws anything.
+
+    At startup CleeCode asks the host whether it would take a picture by name rather than by
+    value — a shared-memory segment or a file — which is three kitty `a=q` queries. A bare pty
+    answers none of them, and waiting for an answer that never comes is the entire cost of
+    asking, so a Primary Device Attributes request goes out in the same breath: every terminal
+    there is answers that one, and its arrival is what ends the wait.
+
+    That pairing is what is checked here, and it is checked on the wire rather than on the
+    clock. The clock cannot do it: a probe that lost its device-attributes request would cost
+    the timeout, a hundred and fifty milliseconds, and a hundred and fifty milliseconds cannot
+    be told from a busy runner. What can be told apart is whether the request was sent at all —
+    so the bytes CleeCode wrote are kept and read. The elapsed time is printed beside the check
+    for a human to look at, and asserted only at the loose bound that catches a probe which
+    hangs rather than times out.
+
+    Driven with the protocol forced, because a bare pty reports no graphics protocol at all and
+    a host without one is deliberately never asked — so without this the probe would not run in
+    a driver, and the code under test would not be the code shipped.
+    """
+    leftovers = lambda: set(glob.glob(os.path.join(tempfile.gettempdir(), "clee-probe-*")))
+    before = leftovers()
+
+    root = tempfile.mkdtemp(prefix="clee-probe-drive-")
+    started = time.time()
+    session = Session(binary, root, env={"CLEE_GRAPHICS_PROTOCOL": "kitty"})
+    # Everything the editor writes, kept as it goes past. `drain` hands each chunk it reads to
+    # pyte, so wrapping that is a copy of the wire with no second reader on the pty — and it is
+    # in place before the first `wait`, which is where reading starts.
+    wire = bytearray()
+    feed = session.stream.feed
+
+    def watch(data):
+        wire.extend(data)
+        feed(data)
+
+    session.stream.feed = watch
+    try:
+        drew = session.wait(lambda s: "Project Files" in s.text(), 20)
+        elapsed = time.time() - started
+        report.check("the editor still comes up with the probe asking", drew, session)
+        report.check(
+            "the probe does not hang: the first frame arrives in its own time",
+            drew and elapsed < 10 * PATIENCE,
+            session,
+            f"{elapsed * 1000:.0f} ms to the first frame",
+        )
+
+        asked = bytes(wire)
+        ladder = [b"a=q,i=9931,f=24,t=s", b"a=q,i=9932,f=32,t=s", b"a=q,i=9933,f=24,t=f"]
+        # Nothing was asked at all, which is not a failure of the probe but the absence of one:
+        # the question is asked from a single line in `main`, and until that line is there this
+        # half has nothing to look at. Skipped out loud rather than passed quietly, the way the
+        # picture half above skips when chafa is not installed.
+        if b"i=9931" not in asked:
+            print("skip: this build asks the host nothing, so the probe is not checked")
+            return
+        report.check(
+            "the whole ladder of questions goes out",
+            all(rung in asked for rung in ladder),
+            None,
+            ", ".join(rung.decode() for rung in ladder if rung not in asked) or "all three",
+        )
+        # The device attributes request behind the last query, and behind it in the same
+        # stretch of output: that is what makes a "no" cost a round trip instead of a timeout.
+        last = max((asked.find(rung) for rung in ladder), default=-1)
+        report.check(
+            "a device attributes request follows them, which is what ends the wait",
+            last >= 0 and asked.find(b"\x1b[c", last) > last,
+            None,
+            "ESC [ c must be sent behind the queries",
+        )
+        # And on our own queries rather than on everything CleeCode wrote: `ratatui-image` asks
+        # a question of its own in the same breath, and its spelling is its business.
+        def one_query(rung):
+            at = asked.find(rung)
+            return asked[at : asked.find(b"\x1b\\", at)] if at >= 0 else b""
+
+        report.check(
+            "no answer is suppressed: q stays at its default",
+            all(b",q=" not in one_query(rung) for rung in ladder),
+            None,
+            "q=1 hides the OK and q=2 hides everything",
+        )
+    finally:
+        session.close()
+        shutil.rmtree(root, ignore_errors=True)
+
+    # And the fixtures do not outlive the question. Compared against what was there beforehand
+    # rather than to an empty set, because somebody else's CleeCode may be starting up on this
+    # machine at the same moment and its segment is not this check's business.
+    report.check(
+        "the fixtures the probe made are cleaned up after it",
+        not (leftovers() - before),
+        None,
+        ", ".join(sorted(leftovers() - before)) or "nothing left behind",
+    )
 
 
 if __name__ == "__main__":
