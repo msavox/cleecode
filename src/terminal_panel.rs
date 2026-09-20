@@ -2056,8 +2056,18 @@ impl TerminalPanel {
             u32::from(rect.width) * u32::from(font.width),
             u32::from(rect.height) * u32::from(font.height),
         );
-        let bytes = held.placement.image.as_bytes().len() as u64;
         crate::graphics_profile::drew(source, destination);
+        // Padded here, where it is whole rows, rather than there, where it is pixels. See
+        // `padded_to`. Done after the measurement above so that the profile still reports the
+        // size the picture *arrived* at, which is the thing worth watching.
+        if let Some(padded) = padded_to(
+            &held.placement.image,
+            destination,
+            spare.as_ref().and_then(|s| s.background_color()),
+        ) {
+            held.placement.image = padded;
+        }
+        let bytes = held.placement.image.as_bytes().len() as u64;
         if held.drawn.is_none() {
             let copy = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Clone);
             let image = held.placement.image.clone();
@@ -2096,6 +2106,68 @@ impl TerminalPanel {
         // to RGBA and the base64 of the whole frame. Charged with the pixels that went in; what
         // comes out is an escape sequence in the cell buffer, counted where it leaves instead.
         drawing.close(bytes, 0);
+    }
+}
+
+/// Grows a frame to the exact pixel size of the rectangle it is about to be drawn into, where
+/// the only thing between the two is height.
+///
+/// `ratatui-image` already does this, and does it a pixel at a time: where the picture does not
+/// fill the rectangle, `Resize::resize` builds a canvas of the right size and lays the picture
+/// on it through `imageops::overlay`, which is a `get_pixel` and a `put_pixel` for every pixel
+/// of a megabyte. For a picture opened in a tab that is paid once and nobody could measure it.
+/// For a film it is paid thirty times a second, and — this is the part that is not obvious — it
+/// is paid on *every* frame rather than occasionally, because a player that honours the aspect
+/// ratio can almost never land on the cell grid. The grid rounds a picture's height up to whole
+/// cells, so a four-by-three clip asked for fifty-eight columns by twenty-two rows comes back
+/// 580x435 for a 580x440 hole, and those five rows of nothing measured as the larger half of
+/// the entire drawing stage: a fifth of what CleeCode spends while a film plays.
+///
+/// Done here it is an allocation and one copy, because the missing part is whole rows at the
+/// bottom of a buffer that is already contiguous — a border would not be this cheap, and this
+/// is not a border. What it buys is the branch inside `Fit` never running at all.
+///
+/// Narrow on purpose. Only the one case is taken: a width that already matches, and a height
+/// that falls short. A picture wider than its rectangle, or taller, is one `Fit` must genuinely
+/// resample, and it is handed over untouched exactly as before. `None` says "not this case".
+fn padded_to(
+    image: &image::DynamicImage,
+    destination: (u32, u32),
+    background: Option<image::Rgba<u8>>,
+) -> Option<image::DynamicImage> {
+    if image.width() != destination.0 || image.height() >= destination.1 || destination.0 == 0 {
+        return None;
+    }
+    // The colour `Resize::resize` would have filled with, so that the five rows look the same as
+    // they did: whatever the protocol was given, and transparent black where it was given
+    // nothing, which is `ratatui-image`'s own default.
+    let fill = background.unwrap_or(image::Rgba([0, 0, 0, 0]));
+    let rows = (destination.1 - image.height()) as usize;
+    match image {
+        image::DynamicImage::ImageRgb8(buffer) => {
+            let width = destination.0 as usize;
+            let mut bytes = Vec::with_capacity(width * destination.1 as usize * 3);
+            bytes.extend_from_slice(buffer.as_raw());
+            for _ in 0..rows * width {
+                bytes.extend_from_slice(&fill.0[..3]);
+            }
+            image::RgbImage::from_raw(destination.0, destination.1, bytes)
+                .map(image::DynamicImage::ImageRgb8)
+        }
+        image::DynamicImage::ImageRgba8(buffer) => {
+            let width = destination.0 as usize;
+            let mut bytes = Vec::with_capacity(width * destination.1 as usize * 4);
+            bytes.extend_from_slice(buffer.as_raw());
+            for _ in 0..rows * width {
+                bytes.extend_from_slice(&fill.0);
+            }
+            image::RgbaImage::from_raw(destination.0, destination.1, bytes)
+                .map(image::DynamicImage::ImageRgba8)
+        }
+        // Every other layout would have to be converted before it could be padded, and a
+        // conversion here is the cost this exists to avoid. `mpv` and the rest of the kitty
+        // protocol's raw formats are these two.
+        _ => None,
     }
 }
 
@@ -3318,5 +3390,37 @@ mod tests {
         parser.process(b"\x1b[?1049l"); // and back out
         assert!(!parser.screen().alternate_screen());
         assert!(held_lines(&mut parser) > 0, "the real screen keeps its history");
+    }
+
+    /// The case a film is in on every single frame: right width, a few rows short.
+    #[test]
+    fn a_frame_that_falls_short_is_grown_to_the_hole_it_goes_in() {
+        let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([9, 8, 7]),
+        ));
+        let grown = super::padded_to(&frame, (4, 5), None).expect("this is the case it takes");
+        assert_eq!((grown.width(), grown.height()), (4, 5));
+        let bytes = grown.as_bytes();
+        // What arrived is where it was, byte for byte: the growing is rows added underneath and
+        // never a resampling of what was already there.
+        assert_eq!(&bytes[..4 * 3 * 3], &[9, 8, 7].repeat(4 * 3)[..]);
+        // And the two new rows are the colour `Resize` would have filled them with.
+        assert!(bytes[4 * 3 * 3..].iter().all(|&b| b == 0), "the rows added are the background");
+    }
+
+    /// Everything that is not that case is left alone, because `Fit` must genuinely resample it
+    /// and half a resize here would be worse than none.
+    #[test]
+    fn a_frame_of_any_other_shape_is_handed_over_untouched() {
+        let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([1, 2, 3]),
+        ));
+        assert!(super::padded_to(&frame, (6, 5), None).is_none(), "a different width");
+        assert!(super::padded_to(&frame, (4, 3), None).is_none(), "already the right height");
+        assert!(super::padded_to(&frame, (4, 2), None).is_none(), "taller than the hole");
     }
 }
