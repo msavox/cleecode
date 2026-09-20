@@ -189,6 +189,16 @@ pub struct TerminalPanel {
     /// every frame arrives under the name the one before it had, which is the protocol's own
     /// way of saying "this replaces that".
     spare: Option<Box<ratatui_image::protocol::StatefulProtocol>>,
+    /// The same thing for the road that does not go through `ratatui-image`: the name the host
+    /// terminal knows the last picture by, kept for the next one.
+    ///
+    /// Two of these rather than one because the two roads hold the name in different hands. On
+    /// the crate's road it is inside the protocol, and the protocol has to be kept whole to keep
+    /// it; on the kitty road it is an id and two buffers, which is all `pane_kitty::PaneKitty`
+    /// is. A pane uses one road or the other for the life of a picture, so only one of these is
+    /// ever holding anything, and a session on a terminal without kitty graphics never fills
+    /// this one at all.
+    kitty_spare: Option<crate::pane_kitty::PaneKitty>,
     /// Something a program tried to draw and could not be. Read and cleared by the app, which
     /// puts it on the status line — a picture that cannot appear should say why rather than
     /// leave a pane looking broken.
@@ -206,6 +216,15 @@ struct PaneImage {
     /// of itself ten times a second, which is not a picture, it is a flicker. The resizing to
     /// whatever rectangle the pane offers is the protocol's own job and it caches it.
     drawn: Option<Box<ratatui_image::protocol::StatefulProtocol>>,
+    /// What it is transmitted through instead, where the host speaks the kitty protocol and the
+    /// picture is already in a layout that protocol takes as it stands.
+    ///
+    /// The same thing as `drawn` and held for the same reason — it carries the identity the host
+    /// knows the picture by — but written here rather than in `ratatui-image`, so that a frame
+    /// goes out as the three bytes a pixel it arrived as instead of being converted to four. See
+    /// `pane_kitty`. Never both at once: a picture takes one road or the other, asked of
+    /// `pane_kitty::placement` each frame and answered the same way every time for a film.
+    kitty: Option<crate::pane_kitty::PaneKitty>,
 }
 
 /// Why a picture a pane asked for is not there.
@@ -1290,6 +1309,7 @@ impl TerminalPanel {
             graphics,
             graphics_queued,
             spare: None,
+            kitty_spare: None,
             images: Vec::new(),
             graphics_note: None,
         })
@@ -1886,16 +1906,23 @@ impl TerminalPanel {
     }
 
     /// Lets go of the pictures the test says are gone, keeping the last one's drawing in
-    /// `spare` for whatever is placed next.
+    /// `spare` — or, where it went out the other way, its name in `kitty_spare` — for whatever
+    /// is placed next.
     fn drop_images(&mut self, mut keep: impl FnMut(&PaneImage) -> bool) {
         let held = std::mem::take(&mut self.images);
-        for image in held {
+        for mut image in held {
             if keep(&image) {
                 self.images.push(image);
-            } else if image.drawn.is_some() {
-                // Moved rather than copied: what is wanted is the name the host terminal knows
-                // the picture by, and only one picture may hold it at a time.
-                self.spare = image.drawn;
+                continue;
+            }
+            // Moved rather than copied: what is wanted is the name the host terminal knows
+            // the picture by, and only one picture may hold it at a time. Both roads are asked,
+            // and a picture only ever went down one of them, so at most one of these fires.
+            if image.drawn.is_some() {
+                self.spare = image.drawn.take();
+            }
+            if image.kitty.is_some() {
+                self.kitty_spare = image.kitty.take();
             }
         }
     }
@@ -1921,12 +1948,13 @@ impl TerminalPanel {
                     self.drop_images(|held| {
                         !(held.placement.anchor == anchor && held.placement.col == col)
                     });
-                    self.images.push(PaneImage { placement: *placement, drawn: None });
+                    self.images.push(PaneImage { placement: *placement, drawn: None, kitty: None });
                     // Oldest first, because the oldest is the one nearest the top of the pane
                     // and so the one about to scroll off anyway.
                     while self.images.len() > crate::pane_graphics::MAX_PLACED {
                         let gone = self.images.remove(0);
                         self.spare = gone.drawn.or_else(|| self.spare.take());
+                        self.kitty_spare = gone.kitty.or_else(|| self.kitty_spare.take());
                     }
                 }
                 Event::Forget { id, all } => {
@@ -2042,8 +2070,10 @@ impl TerminalPanel {
         let Some(picker) = crate::preview::pane_picker() else { return };
         // Taken before the picture is borrowed, and put back untouched if it is not wanted.
         let spare = self.spare.take();
+        let mut spare_kitty = self.kitty_spare.take();
         let Some(held) = self.images.get_mut(index) else {
             self.spare = spare;
+            self.kitty_spare = spare_kitty;
             return;
         };
         // The two sizes the resampling question turns on, and the size of the frame itself, all
@@ -2068,6 +2098,50 @@ impl TerminalPanel {
             held.placement.image = padded;
         }
         let bytes = held.placement.image.as_bytes().len() as u64;
+
+        // The road that writes the kitty protocol itself, taken where the host speaks it and the
+        // picture is already in a shape the protocol will carry as it stands — which, for a film,
+        // is every frame. It is a road beside the one below rather than a replacement for it:
+        // half-blocks, sixel, iTerm2 and a terminal that draws no pictures at all still go the
+        // way they always have, and so does a picture this encoder cannot take, because a
+        // terminal without graphics is a supported terminal and must not notice any of this.
+        //
+        // What it buys is three things the call below pays for every frame: the frame is not
+        // cloned, because the encoder borrows it; it is not hashed, because the slot is *told*
+        // when the picture changed rather than working it out; and it is not converted to RGBA,
+        // which is both a pass over the whole picture and a quarter more bytes on the wire.
+        if matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Kitty) {
+            if let Some(cells) = crate::pane_kitty::placement(&held.placement.image, font, rect) {
+                if held.kitty.is_none() {
+                    // The name the picture before this one was known by, or a new one. The same
+                    // handover `spare` makes, and it matters for the same reason: see `spare`.
+                    held.kitty = match spare_kitty.take() {
+                        Some(mut slot) => {
+                            slot.adopt();
+                            Some(slot)
+                        }
+                        None => crate::pane_kitty::PaneKitty::new(),
+                    };
+                }
+                if let Some(slot) = held.kitty.as_mut() {
+                    // Charged to the same stage as the call below, and with the same bytes, so
+                    // that a profile taken before this existed and one taken after are two
+                    // measurements of the same thing. What comes out is an escape sequence in
+                    // the cell buffer, counted where it leaves rather than here.
+                    let drawing =
+                        crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Render);
+                    slot.draw(&held.placement.image, rect, f.buffer_mut(), cells);
+                    drawing.close(bytes, 0);
+                    self.spare = spare;
+                    self.kitty_spare = spare_kitty;
+                    return;
+                }
+            }
+        }
+        // Nothing above wanted it, so the name goes back where it came from rather than being
+        // dropped — dropping it would hand the id back and leave the next picture to start again.
+        self.kitty_spare = spare_kitty;
+
         if held.drawn.is_none() {
             let copy = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Clone);
             let image = held.placement.image.clone();

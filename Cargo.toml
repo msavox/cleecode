@@ -24,6 +24,12 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 arboard = "3.4.1"
 base64 = "0.23.1"
+# The encoder for the way *out*, where `base64` above is the decoder for the way in. Asked for
+# by name rather than reused because this is the one on the hot path: a film is a megabyte a
+# frame, thirty frames a second, and this is the vectorised encoder — the same one `ratatui-image`
+# already uses, so it is compiled into the binary whether this line is here or not. See
+# `pane_kitty`.
+base64-simd = "0.8.0"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 # The regex engine for Find. Deliberately fancy-regex rather than `regex`: syntect already pulls

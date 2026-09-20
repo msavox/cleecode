@@ -24,6 +24,7 @@ mod manual;
 mod mcp;
 mod menu;
 mod pane_graphics;
+mod pane_kitty;
 mod picker;
 mod preview;
 mod recovery;
