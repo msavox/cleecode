@@ -73,7 +73,14 @@ class Session:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm-256color"
-            os.environ["SHELL"] = "/bin/sh"
+            # `/bin/sh`, which is not the same shell on the two systems the CI runs: on macOS it
+            # is bash in sh mode and has a line editor, on Debian and Ubuntu it is dash and has
+            # none. That difference is not cosmetic — an editor turns canonical mode off at its
+            # prompt and a shell without one never does — so it has been the shape of more than
+            # one failure that only ever appeared on the Linux runner. CLEE_DRIVE_SHELL points
+            # this at another one, which is how that half of the CI gets reproduced on a Mac:
+            #     CLEE_DRIVE_SHELL=/bin/dash python3 scripts/drive_mcp.py target/debug/clee
+            os.environ["SHELL"] = os.environ.get("CLEE_DRIVE_SHELL") or "/bin/sh"
             os.environ["XDG_CONFIG_HOME"] = self.config
             # The update check's kill switch: a driven session must stay offline and
             # deterministic, and a "new version" modal arriving mid-run would eat the next

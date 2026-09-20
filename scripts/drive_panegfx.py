@@ -134,10 +134,27 @@ def main(argv):
 
         # The size questions. The reply comes back as input, so it is read rather than typed
         # at the prompt — which is also what a program asking one does.
+        #
+        # Read with stty and dd rather than with `read -t 2 -d t`, which is bash and nothing
+        # else: dash has neither option, and dash is `/bin/sh` on Debian and Ubuntu — so the one
+        # check in this file that asks the pane a question could never have run on the system
+        # half of the CI. `min 0 time 20` is a read that gives up after two seconds, which is
+        # what the timeout was for, and the reply has no newline to wait for either way.
+        #
+        # Two details, each of which cost a run to find. The mode is changed *before* the
+        # question is asked: the reply comes back on its own schedule, and a terminal still in
+        # canonical mode when it lands buffers it against a newline that never comes — and
+        # echoes it across the prompt on the way, which `-echo` also keeps off the screen. And
+        # the whole thing is one `sh -c` rather than a row of commands at the prompt, because
+        # an interactive shell takes the terminal back between jobs and puts its own modes on
+        # it: dash restores them, so `stty` in one job and `dd` in the next read a terminal
+        # that had been set back to canonical in between, and `dd` returned nothing every time.
         run(session, "clear", lambda s: True, 3)
         run(
             session,
-            r"printf '\033[18t'; read -t 2 -d t -r r; echo CELLS-${r#*[}",
+            "sh -c 'o=$(stty -g); stty -icanon -echo min 0 time 20; "
+            "printf \"\\033[18t\"; r=$(dd bs=64 count=1 2>/dev/null); "
+            "stty $o; echo CELLS-${r#*[}'",
             lambda s: "CELLS-" in s.text(),
             10,
         )

@@ -1327,6 +1327,24 @@ impl TerminalPanel {
         self.pending_unsent = Some(command.to_string());
     }
 
+    /// Queues one line to be typed *and run* once the shell is reading, which is the twin of
+    /// `queue_line_unsent` and exists for the same reason.
+    ///
+    /// A shell that has only just been opened is not busy, it is not ready yet — and those are
+    /// different answers. Refusing it was what an agent got: `open_terminal` followed straight
+    /// away by `run_command`, which is the obvious way to use the pair, was turned down every
+    /// time on a shell with no line editor, because nothing there ever said "now".
+    ///
+    /// `false` when a line is already waiting: two lines queued at one prompt would arrive glued
+    /// together, and the caller has something truthful to say instead.
+    pub fn queue_line(&mut self, command: &str) -> bool {
+        if self.pending_command.is_some() || self.pending_unsent.is_some() {
+            return false;
+        }
+        self.pending_command = Some(command.to_string());
+        true
+    }
+
     /// Marks the one-time startup banner scrub as done without sending it, because a line has
     /// just been typed here on purpose.
     ///
@@ -1379,10 +1397,31 @@ impl TerminalPanel {
         // character or eaten by whatever *is* reading. Past the deadline it goes anyway: a shell
         // whose rc never gives the terminal back would otherwise never get its startup command,
         // which is worse than a command typed into something unexpected.
-        if !self.shell_is_reading_keys() && self.spawn.elapsed() < STARTUP_MAX {
+        // The whole question, not half of it. A shell whose rc is waiting on a command it
+        // started is exactly as quiet as a shell at its prompt — so quiet alone says "ready"
+        // in the middle of somebody's rc, and a form feed sent then is not a command, it is a
+        // character echoed back as `^L` above a banner still arriving. What tells the two apart
+        // is who holds the terminal: the command the rc started does, and `is_at_prompt` asks.
+        if !self.is_at_prompt() && self.spawn.elapsed() < STARTUP_MAX {
             return;
         }
-        if !self.cleared {
+        // The scrub is a form feed, and it means "clear and redraw" only to a shell that binds
+        // it. A shell with no line editor binds nothing: it keeps the form feed as a literal
+        // `^L` dropped into whatever is on the line — which is why `suppress_banner_scrub`
+        // exists at all. So it is not sent to one. The banner stays where it is, which is what
+        // it did before there was a scrub, and is a great deal better than a corrupted command.
+        //
+        // This used to be hidden by the clock rather than decided: the wait above let a shell
+        // without an editor through only at `STARTUP_MAX`, twelve seconds in, by which time
+        // nothing was being typed for the `^L` to land in the middle of. Letting that shell
+        // through as soon as it is quiet — which is the point of the change this sits in — put
+        // the form feed back among the keystrokes, and the marks a driven pane types went
+        // missing.
+        // Marked done only when it is actually sent. The gate above can now let a shell through
+        // on a quiet pane rather than on the line discipline, and that is a moment when the
+        // shell may not be reading keys yet — setting the flag there spent the one scrub there
+        // is on a form feed that was never written, and the banner stayed for good.
+        if !self.cleared && self.shell_is_reading_keys() {
             self.cleared = true;
             self.write_input(b"\x0c");
         }
@@ -1422,7 +1461,25 @@ impl TerminalPanel {
     /// typed into it. So where the line discipline says nothing, a quiet pane says it instead:
     /// output that has stopped for `STARTUP_IDLE` is a shell that has finished what it was doing.
     pub fn is_at_prompt(&self) -> bool {
-        self.shell_holds_the_terminal() && (self.shell_is_reading_keys() || self.output_settled())
+        self.shell_holds_the_terminal() && self.shell_is_ready_for_a_line()
+    }
+
+    /// Whether a program the shell started is in front of it. The honest "busy": a line sent now
+    /// would be keystrokes for that program.
+    pub fn program_in_front(&self) -> bool {
+        !self.shell_holds_the_terminal()
+    }
+
+    /// Whether the shell would read a line as a line.
+    ///
+    /// A shell with a line editor says so by turning canonical mode off. One without never does,
+    /// and for it the answer is a pane that has stopped printing: `STARTUP_IDLE` of quiet is a
+    /// shell that has finished what it was doing. That second clause can in principle fire on an
+    /// rc that pauses a quarter second in the middle — but the alternative for such a shell was
+    /// waiting out `STARTUP_MAX` and typing anyway, so this moves an existing risk earlier
+    /// rather than inventing one, and it moves twelve seconds of dead waiting with it.
+    fn shell_is_ready_for_a_line(&self) -> bool {
+        self.shell_is_reading_keys() || self.output_settled()
     }
 
     /// Whether the shell itself is the terminal's foreground group, rather than something it

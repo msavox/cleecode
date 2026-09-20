@@ -7642,17 +7642,37 @@ impl App {
         else {
             return refuse(crate::mcp::no_such_terminal(terminal, &[]));
         };
-        if !tab.is_at_prompt() {
+        // Busy and not-yet-ready are different answers, and only the first is a refusal. A
+        // program the shell started is in front of it: a line sent now would be keystrokes for
+        // that program, and there is nothing to do but wait. A shell that has merely not
+        // finished starting will be ready in a moment, and the pane already knows how to hold a
+        // line until then — which is what `open_terminal` followed straight away by
+        // `run_command` needs, the obvious way to use the pair and the way that used to be
+        // turned down on every shell without a line editor.
+        if tab.program_in_front() {
             return refuse(format!(
                 "The shell \"{name}\" is busy: something is running in it, and a line sent now \
                  would be typed at that program rather than at the shell. Wait for it, or open a \
                  terminal of its own with open_terminal."
             ));
         }
-        if submit {
-            tab.type_line(command);
-        } else {
-            tab.queue_line_unsent(command);
+        let queued = !tab.is_at_prompt();
+        let accepted = match (queued, submit) {
+            (false, true) => {
+                tab.type_line(command);
+                true
+            }
+            (false, false) | (true, false) => {
+                tab.queue_line_unsent(command);
+                true
+            }
+            (true, true) => tab.queue_line(command),
+        };
+        if !accepted {
+            return refuse(format!(
+                "The shell \"{name}\" is still starting and already has a line waiting for its \
+                 prompt. Let that one run first, or open a terminal of its own with open_terminal."
+            ));
         }
         // Brought into view, because a command an agent ran in a pane nobody can see is a
         // command that appears not to have run. The keyboard is not moved: that rule is the
