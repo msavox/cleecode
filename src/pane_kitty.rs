@@ -22,6 +22,14 @@
 //! carries the picture with it. Break the placement and the pictures stop working; only the
 //! bytes between `_G` and `\` are ours.
 //!
+//! It also stopped resizing, which was not part of the original idea and turned out to be the
+//! larger half of it. `ratatui-image` resamples every picture to the exact pixel size of the
+//! cells it will cover, because its transmission says nothing about cells and the host has to
+//! infer them; the transmission written here says `c` and `r`, so the host is told the box and
+//! scales the picture into it on the way to the screen. What the editor then does to a frame
+//! between `mpv` and the host is nothing at all: it is base64-encoded and written. See
+//! `encode`, where those two keys go, for what that changes about how a picture looks.
+//!
 //! The other half of what this saves does not show up on the wire. On the crate's road every
 //! frame is a fresh `StatefulProtocol`, which owns its picture — so the frame is cloned — and
 //! which hashes the whole picture on the way in to decide whether it changed. Here the encoder
@@ -48,7 +56,6 @@ use std::sync::{Mutex, OnceLock};
 use image::DynamicImage;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
-use ratatui_image::FontSize;
 
 /// The lowest image id this hands out, and how many follow it.
 ///
@@ -141,34 +148,34 @@ fn raw(image: &DynamicImage) -> Option<(&[u8], u32)> {
     }
 }
 
-/// Whether this picture can go out on this road, and how many cells it covers if it can.
+/// Whether this picture can go out on this road, and the cell box it is placed across if it can.
 ///
-/// The placement carries no size of its own: the host works out how many rows and columns the
-/// picture occupies from its pixels and the cell size, so the picture has to be a whole number of
-/// cells in both directions or the last row and column would be a fraction of one. That is not a
-/// restriction in the case this exists for — a player scales to the rectangle it was given, and
-/// `terminal_panel::padded_to` has already made up whatever it left short — and everything else
-/// is a picture `ratatui-image` would have resampled anyway, so it is handed back to it untouched
-/// rather than resampled here.
+/// This used to be a list of refusals about size, and all of them came from one omission: the
+/// transmission carried no `c` and `r`, so the host had to work out how many rows and columns the
+/// picture covered from its pixels and the cell size, and the picture therefore had to be a whole
+/// number of cells in both directions and no bigger than the rectangle. A frame that was five
+/// pixels short of the grid — which is nearly every frame of a film that honours its aspect
+/// ratio — failed that test and took the crate's road instead.
 ///
-/// The height is also capped at the number of diacritics the protocol defines, which is the same
-/// clamp the crate applies: a row beyond the last one has no character to name it.
-pub fn placement(image: &DynamicImage, font: FontSize, area: Rect) -> Option<(u16, u16)> {
+/// The transmission now says `c` and `r`, which is the protocol's own way of saying "this
+/// picture belongs in that many cells", and a host that is given them scales the picture into the
+/// box in both directions with filtering. So the size refusals are gone: the box is the rectangle
+/// the picture was laid out into, and whatever arrived goes out at whatever size it arrived.
+///
+/// What is left are the two refusals that were never about fitting. A layout the protocol cannot
+/// carry as it stands has to be converted first, and a conversion is the cost this road exists to
+/// avoid; and a picture is placed by naming each of its rows with a combining character, of which
+/// the protocol defines 297, so a box taller than that has rows no character can name. The box is
+/// clamped there rather than refused, because `place` clamps to the same number and the two must
+/// agree — a placement that asked for more rows than it filled would have the host scale the
+/// picture to a box whose bottom is never drawn.
+pub fn placement(image: &DynamicImage, area: Rect) -> Option<(u16, u16)> {
     raw(image)?;
-    let (cell_width, cell_height) = (u32::from(font.width), u32::from(font.height));
-    if cell_width == 0 || cell_height == 0 {
+    if image.width() == 0 || image.height() == 0 {
         return None;
     }
-    let (width, height) = (image.width(), image.height());
-    if width == 0 || height == 0 || width % cell_width != 0 || height % cell_height != 0 {
-        return None;
-    }
-    let columns = u16::try_from(width / cell_width).ok()?;
-    let rows = u16::try_from(height / cell_height).ok()?;
-    if columns > area.width || rows > area.height || usize::from(rows) > DIACRITICS.len() {
-        return None;
-    }
-    Some((columns, rows))
+    let rows = area.height.min(DIACRITICS.len() as u16);
+    (area.width > 0 && rows > 0).then_some((area.width, rows))
 }
 
 /// One pane picture's place in the host terminal's image store, kept across frames.
@@ -186,15 +193,20 @@ pub struct PaneKitty {
     /// The top byte of the id, which travels as the third diacritic on each placeholder rather
     /// than in the colour — a foreground colour has only three bytes to carry.
     id_extra: u16,
-    /// The size in pixels of the picture the sequence below carries, or `None` when the slot has
-    /// just been handed a new picture and does not yet carry it.
+    /// The size in pixels of the picture the sequence below carries and the cell box it was
+    /// transmitted for, or `None` when the slot has just been handed a new picture and does not
+    /// yet carry it.
     ///
     /// This is the whole of the "has it changed?" test, and it is sound for a reason worth saying
-    /// out loud: within one placement the picture's bytes never change after the first frame
-    /// padded them, and a *new* picture always arrives as a new placement, which clears this. So
-    /// the question is never "are these the same pixels" — which would mean reading them all, the
-    /// very hash this road exists to skip — but "is this still the same placement".
-    encoded: Option<(u32, u32)>,
+    /// out loud: within one placement the picture's bytes never change after the first frame, and
+    /// a *new* picture always arrives as a new placement, which clears this. So the question is
+    /// never "are these the same pixels" — which would mean reading them all, the very hash this
+    /// road exists to skip — but "is this still the same placement".
+    ///
+    /// The cell box is half of the answer because it travels *inside* the transmission, as `c`
+    /// and `r`: a pane resized around a picture that has not changed a pixel is a picture the
+    /// host is now scaling into the wrong box, and only sending it again puts that right.
+    encoded: Option<(u32, u32, u16, u16)>,
     /// The transmit-and-place sequence for the picture on this slot, kept between frames so the
     /// megabyte of base64 is written into an allocation that already exists. A slot that once
     /// held a film keeps a film-sized buffer for as long as it lives, which is the trade.
@@ -242,7 +254,7 @@ impl PaneKitty {
     /// Puts the picture on screen: transmits it if the host has not been given it yet, and writes
     /// the placeholders that place it.
     pub fn draw(&mut self, image: &DynamicImage, area: Rect, buf: &mut Buffer, cells: (u16, u16)) {
-        self.encode(image);
+        self.encode(image, cells);
         self.place(area, buf, cells);
     }
 
@@ -254,13 +266,24 @@ impl PaneKitty {
     /// nobody here to read an answer, and an unread reply would arrive in the editor's own input.
     /// Only the first chunk carries the keys that describe the picture, which is where `f=24`
     /// goes and why this function exists.
-    fn encode(&mut self, image: &DynamicImage) {
-        let size = (image.width(), image.height());
+    ///
+    /// `c` and `r` are the other half of why. They say how many columns and rows the placement
+    /// occupies, and a host given them scales the picture into that box — which is what lets the
+    /// frame go out at whatever size it arrived at, with nothing resampled here. Two consequences
+    /// follow and are deliberate. A frame that comes back 580x435 for a 580x440 box used to be
+    /// letterboxed with five black rows; it is now stretched by about one per cent, because "fit
+    /// into these cells" is what the keys mean, and at that ratio it cannot be seen. And a
+    /// picture *smaller* than its box is now enlarged into it rather than sitting small in the
+    /// corner, which is what a real kitty terminal does with the same escape sequence and what a
+    /// program that asked for `c` columns and `r` rows was asking for.
+    fn encode(&mut self, image: &DynamicImage, cells: (u16, u16)) {
+        let size = (image.width(), image.height(), cells.0, cells.1);
         if self.encoded == Some(size) {
             return;
         }
         let Some((bytes, format)) = raw(image) else { return };
-        let (id, (width, height)) = (self.id, size);
+        let (id, (columns, rows)) = (self.id, cells);
+        let (width, height) = (image.width(), image.height());
         let (start, escape, end) = tmux_wrapping();
 
         // 4096 base64 characters is the protocol's limit for one command, and four characters
@@ -279,7 +302,11 @@ impl PaneKitty {
             data.push_str(start);
             write!(data, "{escape}_Gq=2,").unwrap();
             if index == 0 {
-                write!(data, "i={id},a=T,U=1,f={format},t=d,s={width},v={height},").unwrap();
+                write!(
+                    data,
+                    "i={id},a=T,U=1,f={format},t=d,s={width},v={height},c={columns},r={rows},"
+                )
+                .unwrap();
             }
             let more = u8::from(count > index + 1);
             write!(data, "m={more};").unwrap();
@@ -664,7 +691,7 @@ static DIACRITICS: [char; 297] = [
 ];
 
 /// The character that names a row, or the first one for a row beyond the table — which cannot
-/// happen here, since `placement` refuses a picture taller than the table, and is written the
+/// happen here, since `placement` clamps the box to the table's height, and is written the
 /// crate's way rather than as a panic all the same.
 #[inline]
 fn diacritic(row: u16) -> char {
@@ -676,8 +703,6 @@ mod tests {
     use super::*;
     use base64::Engine;
     use ratatui::layout::Size;
-
-    const FONT: FontSize = FontSize { width: 10, height: 20 };
 
     fn rgb(width: u32, height: u32) -> DynamicImage {
         let bytes: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8).collect();
@@ -712,11 +737,14 @@ mod tests {
     fn rgb_goes_out_as_itself() {
         let image = rgb(20, 20);
         let mut slot = PaneKitty::new().unwrap();
-        slot.encode(&image);
+        slot.encode(&image, (2, 1));
         let header = slot.transmit.split(';').next().unwrap();
         assert!(header.contains("f=24"), "{header}");
         assert!(header.contains("a=T,U=1"), "{header}");
         assert!(header.contains("t=d,s=20,v=20"), "{header}");
+        // The box the host is to scale it into, which is what makes the size above free to be
+        // whatever the picture happened to arrive at.
+        assert!(header.contains("c=2,r=1"), "{header}");
         assert!(header.contains("q=2"), "{header}");
         assert!(header.contains(&format!("i={}", slot.id)), "{header}");
         assert_eq!(decoded(&slot.transmit), image.as_bytes());
@@ -726,7 +754,7 @@ mod tests {
     fn a_picture_with_alpha_still_goes_out_as_rgba() {
         let image = rgba(20, 20);
         let mut slot = PaneKitty::new().unwrap();
-        slot.encode(&image);
+        slot.encode(&image, (2, 1));
         assert!(slot.transmit.split(';').next().unwrap().contains("f=32"));
         assert_eq!(decoded(&slot.transmit), image.as_bytes());
     }
@@ -735,7 +763,7 @@ mod tests {
     fn chunks_are_the_protocols_size_and_the_last_one_says_so() {
         let image = rgb(100, 100);
         let mut slot = PaneKitty::new().unwrap();
-        slot.encode(&image);
+        slot.encode(&image, (10, 5));
         let chunks = payloads(&slot.transmit);
         assert!(chunks.len() > 2, "a picture this size is more than one chunk");
         assert!(chunks.iter().all(|chunk| chunk.len() <= 4096));
@@ -755,31 +783,53 @@ mod tests {
     fn a_picture_of_the_same_size_is_not_encoded_twice() {
         let image = rgb(20, 20);
         let mut slot = PaneKitty::new().unwrap();
-        slot.encode(&image);
+        slot.encode(&image, (2, 1));
         slot.place(Rect::new(0, 0, 2, 1), &mut Buffer::empty(Rect::new(0, 0, 4, 4)), (2, 1));
         assert!(!slot.pending, "placing it means the host now has it");
-        slot.encode(&image);
+        slot.encode(&image, (2, 1));
         assert!(!slot.pending, "the same placement's picture is already there");
         slot.adopt();
-        slot.encode(&image);
+        slot.encode(&image, (2, 1));
         assert!(slot.pending, "a new placement's picture has to be sent again");
     }
 
+    /// The cell box travels inside the transmission, so a pane resized around a picture that
+    /// has not changed a pixel is a picture the host must be given again — otherwise it goes on
+    /// scaling it into the box it was told about the first time.
     #[test]
-    fn only_whole_cells_take_this_road() {
+    fn the_same_picture_in_a_new_box_is_sent_again() {
+        let image = rgb(20, 20);
+        let mut slot = PaneKitty::new().unwrap();
+        slot.encode(&image, (2, 1));
+        slot.place(Rect::new(0, 0, 2, 1), &mut Buffer::empty(Rect::new(0, 0, 8, 8)), (2, 1));
+        assert!(!slot.pending);
+        slot.encode(&image, (4, 2));
+        assert!(slot.pending, "a different box is a different placement");
+        assert!(slot.transmit.split(';').next().unwrap().contains("c=4,r=2"));
+    }
+
+    /// What this road refuses now, and what it no longer does. The size refusals are gone with
+    /// the resize they existed for: the host is told the box and scales into it, so a picture
+    /// that lands short of the cell grid, or well over it, is placed just the same.
+    #[test]
+    fn only_a_layout_the_protocol_cannot_carry_is_refused() {
         let area = Rect::new(0, 0, 10, 10);
-        assert_eq!(placement(&rgb(20, 40), FONT, area), Some((2, 2)));
-        // A height that stops short of the cell grid, which is what `padded_to` is for.
-        assert_eq!(placement(&rgb(20, 35), FONT, area), None);
-        // Bigger than the rectangle it was given.
-        assert_eq!(placement(&rgb(200, 40), FONT, area), None);
+        assert_eq!(placement(&rgb(20, 40), area), Some((10, 10)), "the box is the rectangle");
+        // A height that stops short of the cell grid — nearly every frame of a film that
+        // honours its aspect ratio, and the case that used to send the whole road home.
+        assert_eq!(placement(&rgb(580, 435), area), Some((10, 10)));
+        // Bigger in pixels than the rectangle, which the host shrinks.
+        assert_eq!(placement(&rgb(2000, 40), area), Some((10, 10)));
         // Greyscale would have to be converted before it could be sent.
-        assert_eq!(
-            placement(&DynamicImage::ImageLuma8(image::GrayImage::new(20, 40)), FONT, area),
-            None
-        );
-        // No cell size at all, which is a terminal that never answered.
-        assert_eq!(placement(&rgb(20, 40), FontSize { width: 0, height: 0 }, area), None);
+        assert_eq!(placement(&DynamicImage::ImageLuma8(image::GrayImage::new(20, 40)), area), None);
+        // Nothing to transmit: `s=0,v=0` is not a picture.
+        assert_eq!(placement(&rgb(0, 0), area), None);
+        // No cells to place it in.
+        assert_eq!(placement(&rgb(20, 40), Rect::new(0, 0, 0, 5)), None);
+        // A box taller than the diacritics that name rows is clamped to them, so that what is
+        // asked for is what is drawn.
+        let tall = Rect::new(0, 0, 4, 400);
+        assert_eq!(placement(&rgb(20, 40), tall), Some((4, DIACRITICS.len() as u16)));
     }
 
     #[test]
@@ -828,18 +878,24 @@ mod tests {
     }
 
     /// The size a pane hands over for a film, straight out of the profiler's own run: a 120x40
-    /// pty, a four-by-three clip, and `padded_to` having made up the five rows `mpv` left short.
+    /// pty, a four-by-three clip, and the 580x435 `mpv` produces for a 580x440 hole — five rows
+    /// short of the grid, which is the shape that used to be padded here and is now stretched by
+    /// the host instead.
     #[test]
-    fn a_film_frame_is_placed_as_the_whole_rectangle() {
+    fn a_film_frame_is_placed_as_the_whole_rectangle_at_the_size_it_arrived() {
         let area = Rect::new(0, 3, 58, 22);
-        let image = rgb(580, 440);
-        let cells = placement(&image, FONT, area).unwrap();
+        let image = rgb(580, 435);
+        let cells = placement(&image, area).unwrap();
         assert_eq!(cells, (58, 22));
         let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: 120, height: 40 });
         let mut slot = PaneKitty::new().unwrap();
         slot.draw(&image, area, &mut buf, cells);
         assert_eq!(Size::from(buf.area), Size::new(120, 40));
-        // Three bytes a pixel on the wire, not four: the whole point of the road.
-        assert_eq!(decoded(&slot.transmit).len(), 580 * 440 * 3);
+        // Three bytes a pixel on the wire, not four, and the pixels are the ones that arrived:
+        // nothing between the player and the host resampled the frame.
+        assert_eq!(decoded(&slot.transmit).len(), 580 * 435 * 3);
+        let header = slot.transmit.split(';').next().unwrap();
+        assert!(header.contains("s=580,v=435"), "{header}");
+        assert!(header.contains("c=58,r=22"), "{header}");
     }
 }

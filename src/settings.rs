@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// newest settings — where plots open, the mouse, the language — were drawn off the bottom of a
 /// box sized from this number and skipped by a cursor that wrapped on it. A setting nobody can
 /// see is a setting that does not exist.
-pub const SETTINGS_COUNT: usize = 19;
+pub const SETTINGS_COUNT: usize = 20;
 
 pub const SIDEBAR_WIDTH_RANGE: (u16, u16) = (15, 60);
 /// How tall the sidebar's shell half may be dragged, borders included. The floor is a border, a
@@ -211,6 +211,23 @@ pub struct Settings {
     // the shells opened afterwards, not the ones already running.
     #[serde(default = "default_terminal_scrollback")]
     pub terminal_scrollback: usize,
+    /// How many pixels a program running in a pane is told one cell holds, as a percentage of
+    /// how many it really holds. A hundred is the truth and is the default; anything less is a
+    /// deliberate trade of resolution for bytes.
+    ///
+    /// The number a pane reports on its pty is what decides the size of every picture drawn in
+    /// it: `mpv` multiplies it by the cells it was given and hands over a frame that big — in a
+    /// 178-column pane that was 1392x1044 for a clip whose source is 640x480, an upscale of
+    /// nearly five times the pixels, shipped to the host at 5.9 MB a frame. Nobody chose that;
+    /// it followed from the cell size being honest. Reporting half of it makes the frames a
+    /// quarter of the size, and the host scales them back to the cells they are placed across,
+    /// so what is lost is resolution and what is saved is every byte of the difference.
+    ///
+    /// Only what a *pane* is told. The placement keeps the real cell geometry, because the
+    /// picture still has to cover the cells it is meant to cover — see
+    /// `preview::pane_cell_pixel_size`, which is the one place the percentage is applied.
+    #[serde(default = "default_pane_pixel_pct")]
+    pub pane_pixel_pct: u16,
     // Whether documents are shown inverted — a light page turned dark. A preference about how
     // you read rather than about one file, so it belongs here and outlives the tab: turning it
     // on for one PDF and having the next one open bright again is exactly the annoyance a dark
@@ -528,6 +545,31 @@ fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
 
+fn default_pane_pixel_pct() -> u16 {
+    PANE_PIXEL_PCT_STEPS[0]
+}
+
+/// The steps the settings row walks through, from the truth downwards.
+///
+/// Three of them rather than a slider because the thing being chosen is visible and coarse: a
+/// film at three quarters is hard to tell from a film, at a half it is softer, and the sizes in
+/// between are not different enough from their neighbours to be worth a keystroke each. A
+/// settings.toml written by hand may say any number in `PANE_PIXEL_PCT_RANGE`, and picking the
+/// row then walks down to the next step below whatever it says.
+pub const PANE_PIXEL_PCT_STEPS: [u16; 3] = [100, 75, 50];
+
+/// What a hand-edited value is held to. The ceiling is the truth — asking a program for more
+/// pixels than the screen can show them in buys nothing and costs the whole upscale — and the
+/// floor is where a cell is still several pixels across on any font, which is what keeps a
+/// scaled-down cell size from being read as "this terminal never said".
+pub const PANE_PIXEL_PCT_RANGE: (u16, u16) = (25, 100);
+
+/// The next step down, wrapping back to the truth at the bottom, which is what picking the row
+/// does. A value that is not one of the steps lands on the first one below it.
+pub fn next_pane_pixel_pct(pct: u16) -> u16 {
+    PANE_PIXEL_PCT_STEPS.iter().copied().find(|step| *step < pct).unwrap_or(PANE_PIXEL_PCT_STEPS[0])
+}
+
 /// Octave's plot windows only live as long as the interpreter does, so a plain
 /// `octave script.m` draws the figures and closes them the instant the script ends.
 /// `--persist` stays in the interactive prompt afterwards, leaving the plots on screen and
@@ -631,6 +673,7 @@ impl Default for Settings {
             preview_dark_markdown: false,
             preview_markdown_text: false,
             terminal_scrollback: default_terminal_scrollback(),
+            pane_pixel_pct: default_pane_pixel_pct(),
             auto_pairs: true,
             completion: true,
             language_server: true,
@@ -1103,6 +1146,31 @@ mod tests {
         assert_eq!(settings.menu_highlight, "carousel", "three states, a ring");
     }
 
+    /// The pane resolution row walks down the steps and wraps, and it starts at the truth: a
+    /// default that asked for anything less than every pixel would be a picture quietly made
+    /// worse on a machine nobody had measured. Found by its label, like the rows above, so the
+    /// test fails if the row and the arm in `activate` ever come apart.
+    #[test]
+    fn the_pane_resolution_row_walks_down_the_steps_and_wraps() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.pane_pixel_pct, 100, "the default is the real cell size");
+        let label = i18n::t(settings.lang, Key::SettingPanePixels);
+        let idx =
+            settings.rows().iter().position(|r| r.label == label).expect("pane pixels has a row");
+        for expected in [75, 50, 100] {
+            settings.activate(idx);
+            assert_eq!(settings.pane_pixel_pct, expected);
+        }
+        // A number typed into settings.toml by hand is not thrown away: it is where the walk
+        // starts from, and the next step below it is where it goes.
+        settings.pane_pixel_pct = 60;
+        settings.activate(idx);
+        assert_eq!(settings.pane_pixel_pct, 50);
+        settings.pane_pixel_pct = 30;
+        settings.activate(idx);
+        assert_eq!(settings.pane_pixel_pct, 100, "below the last step the ring comes round");
+    }
+
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
     /// scalar emitted after a table) would silently stop settings from persisting at all.
     /// The modal is sized from `SETTINGS_COUNT` and the cursor wraps on it, so a row past that
@@ -1572,6 +1640,10 @@ impl Settings {
                 value: i18n::t(lang, MenuHighlight::of(&self.menu_highlight).label()).to_string(),
             },
             SettingRow {
+                label: i18n::t(lang, Key::SettingPanePixels),
+                value: format!("{}%", self.pane_pixel_pct),
+            },
+            SettingRow {
                 label: i18n::t(lang, Key::SettingLanguage),
                 value: self.lang.label().to_string(),
             },
@@ -1617,7 +1689,12 @@ impl Settings {
                 self.menu_highlight =
                     MenuHighlight::of(&self.menu_highlight).next().word().to_string()
             }
-            18 => self.lang = self.lang.next(),
+            // Three steps, so picking the row walks down them and round. See
+            // `next_pane_pixel_pct`, and `preview::pane_cell_pixel_size` for what the number
+            // does — it is the only setting here that changes what a *program in a pane* draws
+            // rather than what CleeCode draws.
+            18 => self.pane_pixel_pct = next_pane_pixel_pct(self.pane_pixel_pct),
+            19 => self.lang = self.lang.next(),
             _ => {}
         }
     }

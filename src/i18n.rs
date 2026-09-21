@@ -203,6 +203,10 @@ pub enum Key {
     SettingMenuHighlightCarousel,
     SettingMenuHighlightAccent,
     SettingMenuHighlightClassic,
+    /// How many pixels a program in a pane is told a cell holds, as a percentage of how many it
+    /// really holds. Named for what it decides — the size of the pictures drawn in a pane — and
+    /// not for the mechanism, which is a number on a pty that almost nobody has heard of.
+    SettingPanePixels,
     SettingLanguage,
     On,
     Off,
@@ -786,6 +790,9 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::It, SettingMenuHighlightAccent) => "Accento",
         (Lang::En, SettingMenuHighlightClassic) => "Classic",
         (Lang::It, SettingMenuHighlightClassic) => "Classica",
+
+        (Lang::En, SettingPanePixels) => "Picture resolution in panes",
+        (Lang::It, SettingPanePixels) => "Risoluzione immagini nei pannelli",
 
         (Lang::En, SettingLanguage) => "Language",
         (Lang::It, SettingLanguage) => "Lingua",

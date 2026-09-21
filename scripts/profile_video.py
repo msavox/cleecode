@@ -93,7 +93,12 @@ def write_settings(root):
 
     The editor's own default gives the pane 35% of the width and the picture that follows is
     300x220 — small enough that every per-pixel stage looks free. The profile is about what a
-    film costs, so the pane is made the size somebody watching one would make it."""
+    film costs, so the pane is made the size somebody watching one would make it.
+
+    `CLEE_PROFILE_SETTINGS` is appended to the file as it stands, for measuring a setting that
+    changes what the pipeline is handed rather than what it does with it — `pane_pixel_pct` is
+    the one it was added for. Empty unless somebody set it, so a run taken without it is the same
+    run it always was: the instrument has to stay the same instrument between two measurements."""
     config = os.path.join(root, ".config", "cleecode")
     os.makedirs(config, exist_ok=True)
     with open(os.path.join(config, "settings.toml"), "w") as handle:
@@ -104,6 +109,9 @@ def write_settings(root):
             "terminal_on_right = false\n"
             "language_server = false\n"
         )
+        extra = os.environ.get("CLEE_PROFILE_SETTINGS", "").strip()
+        if extra:
+            handle.write(extra + "\n")
 
 
 def focus_terminal(session):

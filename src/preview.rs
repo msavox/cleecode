@@ -741,6 +741,61 @@ pub fn cell_pixel_size() -> Option<(u16, u16)> {
     (size.width > 0 && size.height > 0).then_some((size.width, size.height))
 }
 
+/// A percentage of the true cell size, and the only thing it is ever applied to is what a *pane*
+/// is told. See [`pane_cell_pixel_size`] for why the two answers have to be different ones.
+///
+/// A static rather than a field read off the settings, for the reason `wsnap`'s plot destination
+/// is one and the scrollback length is another: both the places that read it — the `TIOCGWINSZ`
+/// a pty is created with and the reply to a `CSI 16 t` — run where nothing holds the settings,
+/// one on a pane's reader thread and the other several constructors away from the app.
+static PANE_PIXEL_PCT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(100);
+
+/// Tells the panes how many pixels of a cell they may have, as a percentage.
+///
+/// Clamped to the range the settings row offers, because the value arrives from a file a person
+/// is invited to edit by hand: a zero would say a cell is no pixels wide, which is the spelling
+/// of "unknown" and would undo the answer `cell_pixel_size` exists to give, and anything above a
+/// hundred would have a program draw more pixels than the screen can show them in.
+///
+/// Reaches a pane the next time it is resized, which is the same moment any other change to its
+/// geometry reaches it. A film already playing keeps the size it negotiated with `mpv` at the
+/// start, because that is a decision `mpv` made once.
+pub fn set_pane_pixel_pct(pct: u16) {
+    let (low, high) = crate::settings::PANE_PIXEL_PCT_RANGE;
+    PANE_PIXEL_PCT.store(pct.clamp(low, high), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How big a cell is as far as a program *inside a pane* is concerned.
+///
+/// The separation this function exists for is worth stating plainly, because getting it the
+/// wrong way round is a quarter-sized picture in the corner of the pane rather than an error.
+/// There are two questions about cell geometry and they now have two different answers. Where
+/// the picture is *placed* — how many columns and rows of the host's terminal it covers — the
+/// real cell size is the only honest answer, and `cell_pixel_size` above is what answers it.
+/// How many pixels a program should *draw into* one of those cells is a different question, and
+/// it is the one that decides the size of every frame `mpv` hands over: the number goes out on
+/// the pane's pty, the player multiplies it by the cells it was given, and draws that.
+///
+/// So telling a pane its cells are half as wide and half as tall makes it draw a picture a
+/// quarter the size, and placing that picture across the same real cells makes the host scale it
+/// back up on the way to the screen. A quarter of the bytes, base64-encoded, written, read and
+/// uploaded as a texture — for a resample the host's GPU does for nothing. What it costs is
+/// resolution: at fifty per cent, a film is genuinely half a film, scaled up by a filter. The
+/// setting is a percentage rather than a switch because that is a judgement about a particular
+/// screen and a particular film, and nobody here can make it for the user.
+pub fn pane_cell_pixel_size() -> Option<(u16, u16)> {
+    let (width, height) = cell_pixel_size()?;
+    let pct = u32::from(PANE_PIXEL_PCT.load(std::sync::atomic::Ordering::Relaxed));
+    if pct >= 100 {
+        return Some((width, height));
+    }
+    // Never to zero. A cell of no pixels is how `TIOCGWINSZ` spells "the terminal never said",
+    // and a program reading it would go back to guessing — which is the squashed-picture bug
+    // `cell_pixel_size` was written to end.
+    let scaled = |size: u16| ((u32::from(size) * pct / 100).max(1)) as u16;
+    Some((scaled(width), scaled(height)))
+}
+
 /// The picker the panes draw their pictures with — the same one the tabs use, because a
 /// picture written by a program in a pane and a picture opened in a tab are the same picture
 /// as far as the host terminal is concerned.

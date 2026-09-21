@@ -3907,6 +3907,9 @@ impl App {
         let (keymap, key_warnings) = crate::keymap::Keymap::build(&settings.keys, settings.lang);
         crate::terminal_panel::set_scrollback_len(settings.terminal_scrollback);
         crate::wsnap::set_plots_in_tabs(settings.plots_in_tabs);
+        // Before the first pane exists, because a pane is told how big its cells are when its
+        // pty is created and a program in it reads that number once.
+        crate::preview::set_pane_pixel_pct(settings.pane_pixel_pct);
         // Before the first shell is spawned, because a shell inherits `CLEE_SESSION` and an agent
         // started in it would otherwise be pointed at a directory that does not exist yet.
         let mcp = crate::mcp::Session::start();
@@ -16694,6 +16697,10 @@ impl App {
     /// The menu's own toggle has always done both; these are the same settings.
     fn settings_changed(&mut self) {
         crate::wsnap::set_plots_in_tabs(self.settings.plots_in_tabs);
+        // The same shape, and for the same reason: what a pane tells the program inside it about
+        // its cells is read on the pane's own threads, so the row has to put the number where
+        // they will find it. It reaches a pane at its next resize.
+        crate::preview::set_pane_pixel_pct(self.settings.pane_pixel_pct);
         self.settings.save();
         self.editor_mut().syntax_dirty = true;
     }

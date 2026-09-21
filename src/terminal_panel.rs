@@ -460,8 +460,14 @@ pub fn bracketed_paste(text: &str, bracketed: bool) -> Vec<u8> {
 /// the host's own cell size, which is the right answer — a pane's cell is the host's cell —
 /// and left at zero on a host that never said, because zero is what "unknown" is spelled as
 /// and a made-up number would be believed.
+///
+/// `pane_cell_pixel_size` rather than `cell_pixel_size`, which is the same number until the user
+/// has asked for less: this is one of the two places a pane is *told* how big its cells are, and
+/// the other is the reply to `CSI 16 t` further down. Both have to say the same thing, so both
+/// go through the one function that applies the percentage. Nothing else does — least of all the
+/// placement of a picture on the host's own grid, which needs the truth.
 fn pty_size(rows: u16, cols: u16) -> PtySize {
-    let (width, height) = crate::preview::cell_pixel_size().unwrap_or((0, 0));
+    let (width, height) = crate::preview::pane_cell_pixel_size().unwrap_or((0, 0));
     PtySize {
         rows,
         cols,
@@ -516,10 +522,17 @@ fn take_graphics(
     };
 
     // How many cells the picture covers. The program usually says (`c` and `r`); when it does
-    // not, the host's cell size answers, and where even that is unknown the picture is measured
+    // not, the cell size answers, and where even that is unknown the picture is measured
     // against a plausible cell rather than refused — being roughly the right size is worth more
     // than being absent.
-    let (cell_w, cell_h) = crate::preview::cell_pixel_size().unwrap_or((10, 20));
+    //
+    // The *pane's* cell size, which is the one the program was told and therefore the one it
+    // sized its picture against. At a hundred per cent the two are the same number; below it
+    // they are not, and using the host's real cell here would read a picture drawn for twenty
+    // columns as covering ten — the picture would land at half its width with the placeholders
+    // agreeing that it should. The rule is the one `pane_cell_pixel_size` states: pixels a
+    // program drew are measured in the cells that program was told about.
+    let (cell_w, cell_h) = crate::preview::pane_cell_pixel_size().unwrap_or((10, 20));
     let in_cells = |pixels: u32, cell: u16| -> u16 {
         let cell = u32::from(cell.max(1));
         pixels.div_ceil(cell).clamp(1, u32::from(u16::MAX)) as u16
@@ -1262,7 +1275,10 @@ impl TerminalPanel {
                                 PaneMetrics {
                                     cursor: p.screen().cursor_position(),
                                     size: p.screen().size(),
-                                    cell: crate::preview::cell_pixel_size(),
+                                    // The same answer `pty_size` puts in `TIOCGWINSZ`, and it
+                                    // has to be: a program that asks both ways and is told two
+                                    // different things believes whichever it asked last.
+                                    cell: crate::preview::pane_cell_pixel_size(),
                                 }
                             };
                             // Queued like anything else the pane sends, and queued as one
@@ -2076,10 +2092,12 @@ impl TerminalPanel {
             self.kitty_spare = spare_kitty;
             return;
         };
-        // The two sizes the resampling question turns on, and the size of the frame itself, all
-        // read before the picture is lent to the protocol below. A player asked for `c` columns
-        // by `r` rows should already have scaled to exactly the rectangle it is drawn into, and
-        // where it has, the `Fit` further down is a resample that changes nothing.
+        // The two sizes the resampling question turns on, read before the picture is lent to the
+        // protocol below: what arrived, and how many pixels the rectangle it goes in really
+        // holds. The second is the *host's* cell size and not the smaller one a pane may have
+        // been told about — the picture has to cover the cells it is placed across, whatever the
+        // program drawing it was told a cell was. Both are wanted here for the profile, and the
+        // destination again for the padding on the fallback road further down.
         let font = picker.font_size();
         let source = (held.placement.image.width(), held.placement.image.height());
         let destination = (
@@ -2087,31 +2105,28 @@ impl TerminalPanel {
             u32::from(rect.height) * u32::from(font.height),
         );
         crate::graphics_profile::drew(source, destination);
-        // Padded here, where it is whole rows, rather than there, where it is pixels. See
-        // `padded_to`. Done after the measurement above so that the profile still reports the
-        // size the picture *arrived* at, which is the thing worth watching.
-        if let Some(padded) = padded_to(
-            &held.placement.image,
-            destination,
-            spare.as_ref().and_then(|s| s.background_color()),
-        ) {
-            held.placement.image = padded;
-        }
-        let bytes = held.placement.image.as_bytes().len() as u64;
 
         // The road that writes the kitty protocol itself, taken where the host speaks it and the
-        // picture is already in a shape the protocol will carry as it stands — which, for a film,
-        // is every frame. It is a road beside the one below rather than a replacement for it:
+        // picture is in a layout the protocol will carry as it stands — which, for a film, is
+        // every frame. It is a road beside the one below rather than a replacement for it:
         // half-blocks, sixel, iTerm2 and a terminal that draws no pictures at all still go the
         // way they always have, and so does a picture this encoder cannot take, because a
         // terminal without graphics is a supported terminal and must not notice any of this.
         //
-        // What it buys is three things the call below pays for every frame: the frame is not
-        // cloned, because the encoder borrows it; it is not hashed, because the slot is *told*
+        // What it buys is four things the call below pays for every frame: the frame is not
+        // resized, because the transmission names the cell box and the host scales into it; it is
+        // not cloned, because the encoder borrows it; it is not hashed, because the slot is *told*
         // when the picture changed rather than working it out; and it is not converted to RGBA,
         // which is both a pass over the whole picture and a quarter more bytes on the wire.
+        //
+        // Asked before the padding below rather than after it, which is the order that matters
+        // now: `padded_to` exists to make a frame the exact pixel size of its rectangle, and this
+        // road no longer wants that — the picture goes out at whatever size it arrived and the
+        // host fits it. Padding it first would be an allocation and a copy of a megabyte to add
+        // rows the host is about to scale away.
         if matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Kitty) {
-            if let Some(cells) = crate::pane_kitty::placement(&held.placement.image, font, rect) {
+            if let Some(cells) = crate::pane_kitty::placement(&held.placement.image, rect) {
+                let bytes = held.placement.image.as_bytes().len() as u64;
                 if held.kitty.is_none() {
                     // The name the picture before this one was known by, or a new one. The same
                     // handover `spare` makes, and it matters for the same reason: see `spare`.
@@ -2141,6 +2156,24 @@ impl TerminalPanel {
         // Nothing above wanted it, so the name goes back where it came from rather than being
         // dropped — dropping it would hand the id back and leave the next picture to start again.
         self.kitty_spare = spare_kitty;
+
+        // Padded here, where it is whole rows, rather than there, where it is pixels. See
+        // `padded_to`. Only on this road, and that is the one thing to know about it: the road
+        // above hands the frame over at the size it arrived at and lets the host scale it, so it
+        // has nothing to pad; `ratatui-image` below resizes every picture to the pixel size of
+        // its rectangle itself, and where the picture falls short it fills the difference with
+        // `imageops::overlay`, a pixel at a time. So this is not dead code kept for tidiness —
+        // it is what a sixel or iTerm2 host, and a kitty host whose picture this encoder cannot
+        // take, still pay for and still save. Done after the measurement above so that the
+        // profile reports the size the picture *arrived* at, which is the thing worth watching.
+        if let Some(padded) = padded_to(
+            &held.placement.image,
+            destination,
+            spare.as_ref().and_then(|s| s.background_color()),
+        ) {
+            held.placement.image = padded;
+        }
+        let bytes = held.placement.image.as_bytes().len() as u64;
 
         if held.drawn.is_none() {
             let copy = crate::graphics_profile::Span::open(crate::graphics_profile::Stage::Clone);
