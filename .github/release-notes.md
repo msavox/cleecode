@@ -1,3 +1,44 @@
+## What's new in 0.29.0
+
+**A film in a pane now costs less than it did and plays at twice the rate.** Measured in a real
+terminal with both processes on the clock: the same clip that took forty-five per cent of a core
+and reached fourteen frames a second now takes forty-three and reaches thirty. CleeCode's own
+share of that fell from eighteen per cent to eight.
+
+Three changes get there, and one of them will change how pictures look.
+
+**The frame is handed over by name instead of by value.** A picture drawn by a program in a pane
+used to travel to the terminal inside the escape sequence itself, base64-encoded — better than
+two megabytes for a single frame of video, thirty times a second. It now goes into a
+shared-memory segment and the escape carries its name: some seven hundred bytes. This is the road
+`mpv` already uses to hand frames *to* CleeCode, and it is used only where the terminal says at
+startup that it can read one — asked once, with a device-attributes request riding along so that
+a terminal which cannot answers as quickly as one which can. Anywhere else, and over `ssh`,
+nothing changes.
+
+**The terminal is asked to do the scaling.** The kitty protocol lets a placement state how many
+cells it occupies, and a host given that will fit the picture to them — on its GPU. CleeCode used
+to resize every frame itself, and because a player that honours the aspect ratio can almost never
+land exactly on the cell grid, it also padded every frame a pixel at a time. Both are gone.
+
+**Panes now ask for fewer pixels than the screen can show, and this one is visible.** A pane
+tells the programs running in it how large its cells are, and that is what a player scales to. In
+a window of a hundred and seventy-eight columns the truth asks for a picture of 1392x1044 — for a
+clip that is 640x480, so most of those pixels carry nothing that was in the film — and the player
+is charged for every one of them. The default is now thirty-five per cent of the true cell size,
+which is what makes the arithmetic at the top of this section come out: the same film, cheaper,
+at thirty frames a second instead of fourteen.
+
+What it costs is sharpness, on a picture the terminal then scales back up. If you would rather
+have the pixels, the setting is **Picture resolution in panes** and it walks 100 → 75 → 50 → 35;
+a number written into `settings.toml` by hand is honoured, anywhere from 25 to 100.
+
+**Cmd+C in a pane no longer types a `c`.** The Command key reaches CleeCode because the keyboard
+protocol reports it, and a chord holding it that nothing claims used to fall through to the pane
+as the bare letter underneath — so pressing Cmd+C to copy put a `c` into whatever was running
+there, most visibly in an agent's prompt. Command now produces nothing, which is what every
+terminal on this platform does with it.
+
 ## What's new in 0.28.5
 
 **Nothing, if you are running it.** No behaviour changed, no key moved, no bug was fixed: this
