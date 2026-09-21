@@ -1,3 +1,32 @@
+## What's new in 0.29.1
+
+**`clee -e` on a name that is not there now starts the file instead of refusing it.** Opening a
+file that does not exist gave a buffer you could not type in: the read that failed was treated as
+a file that could not be decoded, which is what the read-only rule is for — a binary opened as an
+empty buffer would be saved back over itself. A file that is simply not there yet is the opposite
+case, and it now opens as an empty buffer under that name, writable, with the status line saying
+the file will be created when you save.
+
+Nothing is written before that save. Opening the wrong name and quitting leaves the folder exactly
+as it was found — there is no `touch` on the way in, and the buffer does not count as unsaved work
+until something is typed into it.
+
+The folder is a different matter and is refused. `clee -e notes/2026/today.md` with no `notes/2026`
+says which folder to create and stops, on the command line, before the screen is taken over:
+building a path nobody asked for is a larger decision than creating the file that was named, and a
+refusal after the work is typed would be the worst moment for it.
+
+This also reaches the file tree, the quick-open and the files an agent hands over: every one of
+them opens through the same door.
+
+**A quick edit stops rewriting your layout.** `clee -e` hides the sidebar, the terminals and the
+menu bar by writing those three into the settings, and the exit path already knew not to save
+them. The fifteen places that write the settings *during* a session did not — so picking a theme
+or changing a row in the settings modal inside a `clee -e` saved that stripped layout over the
+real one, and the next ordinary launch, or the launcher in the Dock, came up with everything
+switched off. A minimal session now writes nothing to the settings file at all, which is what its
+own help text has always promised.
+
 ## What's new in 0.29.0
 
 **A film in a pane now costs less than it did and plays at twice the rate.** Measured in a real
