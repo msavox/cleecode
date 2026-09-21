@@ -268,6 +268,20 @@ impl Editor {
         Editor::open_with_limit(path, LARGE_FILE)
     }
 
+    /// The folder this name would be written into, when that folder is not there.
+    ///
+    /// `None` means the name can be saved: either the file already exists, or the directory
+    /// around it does. A bare name — `clee -e notes.txt` — counts as the directory we were
+    /// started in, because `Path::new("notes.txt").parent()` is the *empty* path, which is a
+    /// directory nowhere and would make every file typed by name alone look homeless.
+    pub fn missing_dir(path: &std::path::Path) -> Option<PathBuf> {
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        (!dir.is_dir()).then_some(dir)
+    }
+
     /// `open` with the large-file line passed in, which is the only reason this seam exists:
     /// a test can reach the mode with a file it can afford to write, rather than fifty
     /// megabytes of fixture per assertion. Nothing in the app calls it with anything but
@@ -305,6 +319,26 @@ impl Editor {
                         }
                         Err(_) => editor.read_only = true,
                     }
+                }
+            }
+            // A name that is not on disk yet is how a file is started, not a file that failed to
+            // open: `clee -e notes.txt` means write that. It opens as an empty buffer under that
+            // name, writable, and nothing is created until the first save — no `touch` here, so
+            // opening the wrong name and quitting leaves the directory exactly as it was. The
+            // buffer is deliberately not dirty: there is nothing in it to lose, and the quit
+            // prompt has nothing to ask about.
+            //
+            // Every *other* read error keeps the read-only treatment below, and that separation
+            // is the whole point: an unreadable file opened as an empty buffer would be saved
+            // back over its own contents, which is what the guard below exists to prevent.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The folder is a different question from the file. Creating a file in a
+                // directory that exists is what the user asked for by naming one; building a
+                // path that does not exist is a larger decision they did not make. Refused here
+                // rather than at the save, where the work would already be typed and the only
+                // way out would be a name they did not want.
+                if let Some(dir) = Editor::missing_dir(&path) {
+                    anyhow::bail!("no such directory: {}", dir.display());
                 }
             }
             Err(_) => editor.read_only = true,
@@ -3320,6 +3354,48 @@ mod tests {
         assert!(ed.save().is_err());
         // Original bytes are untouched.
         assert_eq!(std::fs::read(&path).unwrap(), vec![0u8, 1, 2, 3, 0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The other half of the read-only rule above, and the reason it has to be told apart from a
+    /// read error: a file that is not there yet is a file being started. It opens writable and
+    /// empty, and — the part worth pinning — it is still not on disk when the buffer is open.
+    /// `clee -e` on a mistyped name must leave the directory as it found it.
+    #[test]
+    fn a_name_not_on_disk_opens_writable_and_creates_nothing_until_saved() {
+        let dir = std::env::temp_dir().join(format!("clicode_new_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+
+        let mut ed = Editor::open(path.clone()).unwrap();
+        assert!(!ed.is_read_only(), "a file that does not exist yet is not a file we cannot read");
+        assert!(!ed.dirty, "nothing has been typed, so there is nothing to lose on quit");
+        assert_eq!(ed.rope.to_string(), "");
+        assert!(!path.exists(), "opening a name must not create the file");
+
+        ed.insert_str("ciao");
+        ed.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ciao");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Creating a file in a folder that exists is what naming one asks for; creating the folder
+    /// is not, so the name is refused at the open — while the work is still untyped — and the
+    /// folder is left alone.
+    #[test]
+    fn a_name_under_a_missing_folder_is_refused_and_builds_nothing() {
+        let dir = std::env::temp_dir().join(format!("clicode_nodir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does_not_exist");
+
+        assert!(Editor::open(missing.join("notes.txt")).is_err());
+        assert!(!missing.exists(), "a refused open must not build the path it refused");
+        assert_eq!(Editor::missing_dir(&missing.join("notes.txt")), Some(missing.clone()));
+
+        // A bare name belongs to the directory we were started in, which is always there.
+        assert_eq!(Editor::missing_dir(std::path::Path::new("notes.txt")), None);
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

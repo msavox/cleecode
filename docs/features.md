@@ -225,7 +225,9 @@ long-lived server reached over `ssh` is exactly where a terminal editor earns it
 also where the newer commands are missing.
 
 For a one-off edit there is `clee -e FILE`: the editor and nothing else, leaving your saved
-layout and session untouched.
+layout and session untouched. The file does not have to exist — a name that is not there yet opens
+as an empty buffer and is created by the first save, so `clee -e notes.md` is how a file is
+started as well as how one is changed.
 
 ![Split editor view](screenshots/split.png)
 

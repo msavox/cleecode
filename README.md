@@ -186,6 +186,7 @@ cargo build --release
 ./target/release/clee -w work      # open the saved workspace called "work"
 ./target/release/clee -w           # list the saved workspaces
 ./target/release/clee -e notes.md  # just that file, everything else hidden
+./target/release/clee -e new.md    # a name that is not there yet: created when you save
 ./target/release/clee --help       # usage, --version, --install-font, --install-app
 ```
 

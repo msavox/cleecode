@@ -147,6 +147,18 @@ pub struct Settings {
     // power users can hide it (Ctrl+B / View menu) and still reach menus via Ctrl+Shift+B.
     #[serde(default = "default_true")]
     pub show_menubar: bool,
+    /// Set for a session that must not be remembered — `clee -e`, whose whole promise is that a
+    /// quick edit is not the state you come back to. While it is on, `save` writes nothing.
+    ///
+    /// Not in the file, and it could not be: it describes how this process was started, not a
+    /// preference. Kept here rather than on the app because `save` is the thing that has to
+    /// honour it, and a rule enforced at fifteen call sites is a rule with fifteen ways to be
+    /// forgotten — the exit path remembered it, and every mid-session write did not. Which was
+    /// the bug: minimal mode hides the sidebar, the terminals and the menu bar *in the settings*,
+    /// so one theme change during a `clee -e` wrote that stripped layout to disk and the next
+    /// ordinary launch came up with everything switched off.
+    #[serde(skip)]
+    pub ephemeral: bool,
     /// The one-row markdown formatting bar over the editor. Defaults on; hide it
     /// from the View menu once the syntax is in your fingers.
     #[serde(default = "default_true")]
@@ -679,6 +691,7 @@ impl Default for Settings {
             agent_mcp: true,
             agent_edits: default_agent_edits(),
             show_menubar: true,
+            ephemeral: false,
             show_md_toolbar: true,
             run_commands: default_run_commands(),
             active_venv: None,
@@ -870,7 +883,19 @@ impl Settings {
     }
 
     /// Best-effort save; silently does nothing if the config dir can't be created/written.
+    /// Whether this session is one whose settings are allowed to reach the disk.
+    ///
+    /// A method rather than a bare `!self.ephemeral` inside `save`, so the rule can be read —
+    /// and tested — without writing over the settings of whoever is running the test suite.
+    pub fn persists(&self) -> bool {
+        !self.ephemeral
+    }
+
     pub fn save(&self) {
+        // A session that leaves no trace leaves none from here either. See `ephemeral`.
+        if !self.persists() {
+            return;
+        }
         let Some(path) = config_path() else { return };
         if let Some(parent) = path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
@@ -985,6 +1010,29 @@ mod tests {
         // And an empty file is every default, rather than an error.
         let empty: Settings = toml::from_str("").expect("an empty file loads");
         assert_eq!(empty.theme, fresh.theme);
+    }
+
+    /// `clee -e` hides the sidebar, the terminals and the menu bar by writing those three into
+    /// the settings, which is why it must never write the settings out: one theme picked during
+    /// a quick edit used to save that stripped layout over the real one, and the next ordinary
+    /// launch came up with everything switched off.
+    ///
+    /// The flag is also not a preference, and a settings file that somehow carried one must not
+    /// be able to turn a normal session into one that silently forgets everything.
+    #[test]
+    fn a_minimal_session_never_writes_its_stripped_layout_to_disk() {
+        let mut minimal = Settings::default();
+        minimal.ephemeral = true;
+        minimal.show_sidebar = false;
+        minimal.show_terminal = false;
+        minimal.show_menubar = false;
+        assert!(!minimal.persists(), "a `clee -e` session must leave the settings file alone");
+
+        assert!(Settings::default().persists(), "every other session still saves");
+
+        let hand_edited: Settings =
+            toml::from_str("ephemeral = true").expect("an unknown key does not break the file");
+        assert!(hand_edited.persists(), "the flag describes the launch, never the file");
     }
 
     /// `auto` is a theme name like any other as far as the file is concerned: it loads on top of

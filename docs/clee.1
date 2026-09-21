@@ -1,7 +1,7 @@
 .\" Man page for CleeCode. Rendered with: man docs/clee.1
 .\" Kept in roff by hand rather than generated: it is short, and a generator would be one more
 .\" thing to keep in step with the key bindings.
-.TH CLEE 1 "September 2026" "CleeCode 0.29.0" "User Commands"
+.TH CLEE 1 "September 2026" "CleeCode 0.29.1" "User Commands"
 .SH NAME
 clee \- terminal IDE with a file tree, embedded terminals and syntax highlighting
 .SH SYNOPSIS
@@ -47,6 +47,11 @@ or the Workspace menu.
 Open just that file: the editor and nothing else, with no sidebar, terminals or menu bar. Leaves
 your saved layout and session untouched, so a quick edit does not become the state you come back
 to.
+.IP
+A name that is not on disk yet opens as an empty buffer to write into, and the file is created by
+the first save \(em nothing is written before that, so opening the wrong name leaves the folder
+as it was. The folder itself has to exist: a name under one that does not is refused, and says
+which folder to create.
 .TP
 .BR \-w " " \fINAME\fR ", " \-\-workspace " " \fINAME\fR
 Open a saved workspace: its project root, open files, frame sizes and terminals, with each

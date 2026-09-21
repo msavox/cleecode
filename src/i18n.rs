@@ -3183,6 +3183,30 @@ pub fn msg_opened_large(lang: Lang, name: &str, megabytes: u64, undo_depth: usiz
     }
 }
 
+/// Said when a name that is not on disk opens as an empty buffer to write into.
+///
+/// It names the consequence rather than the state — "created when you save" and not "new file"
+/// — because the one thing that is surprising here is *when* the file appears: quitting without
+/// saving leaves nothing behind, and somebody who opened the wrong name deserves to know that
+/// before they go looking for it.
+pub fn msg_opened_new(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::En => format!("New file {name} — not on disk yet, created when you save"),
+        Lang::It => format!("Nuovo file {name} — non ancora sul disco, creato al salvataggio"),
+    }
+}
+
+/// Said instead of opening, when the name is under a folder that is not there.
+///
+/// The folder is quoted because it is the part that has to be fixed, and it is often the part
+/// that was mistyped.
+pub fn msg_open_missing_dir(lang: Lang, dir: &str) -> String {
+    match lang {
+        Lang::En => format!("No folder {dir}: create it first, then open the file"),
+        Lang::It => format!("La cartella {dir} non esiste: creala prima di aprire il file"),
+    }
+}
+
 pub fn msg_opened(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("Opened: {name}"),

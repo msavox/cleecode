@@ -11135,8 +11135,12 @@ impl App {
         // emptied the buffer — and left you to work out that ▶ Run was the way to see it.
         // Handled here rather than at the double click, so the tree's Enter and the quick-open
         // take the same route: one way in, one behaviour.
+        // A name that is not on disk yet is a file to start, and it takes the text route below
+        // whatever it is called: there is no picture to decode in a `.png` that does not exist,
+        // and a preview tab of nothing would be a blank pane where a new buffer was asked for.
+        let exists = path.exists();
         let ext = file_ext(&path);
-        if crate::preview::is_previewable(&ext) || crate::preview::is_document(&ext) {
+        if exists && (crate::preview::is_previewable(&ext) || crate::preview::is_document(&ext)) {
             self.open_preview_tab(path, crate::preview::is_document(&ext));
             return;
         }
@@ -11158,6 +11162,13 @@ impl App {
             self.status_message = i18n::msg_opened(lang, &self.editors[idx].title(lang));
             return;
         }
+        // `Editor::open` refuses this too, for every caller it has. Asked again here only to say
+        // it in the user's language: the sentence names the folder to create, which is the one
+        // piece of the refusal that helps.
+        if !exists && let Some(dir) = Editor::missing_dir(&path) {
+            self.status_message = i18n::msg_open_missing_dir(lang, &dir.display().to_string());
+            return;
+        }
         match Editor::open(path) {
             Ok(editor) => {
                 // Into the focused pane, leaving the other one on whatever it was showing.
@@ -11172,7 +11183,11 @@ impl App {
                 // the large-file fact on screen after this sentence is gone.
                 let said = {
                     let editor = self.editor();
-                    if editor.is_read_only() {
+                    // First of the three: a buffer being started is never read-only and never
+                    // large, and it is the only one of them where the *file* is not there yet.
+                    if !exists {
+                        i18n::msg_opened_new(lang, &editor.title(lang))
+                    } else if editor.is_read_only() {
                         i18n::msg_opened_read_only(lang, &editor.title(lang))
                     } else if editor.is_large() {
                         i18n::msg_opened_large(

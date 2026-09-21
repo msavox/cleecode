@@ -141,7 +141,9 @@ USAGE:
 OPTIONS:
     -e, --edit FILE       Editor only: no sidebar, no terminals, no menu bar. Your saved
                           layout and session are left alone, so a quick edit does not
-                          become the state you come back to.
+                          become the state you come back to. A FILE that does not exist
+                          yet opens as an empty buffer and is created by the first save;
+                          the folder it goes in has to be there already.
     -w, --workspace NAME  Open a workspace: its root, files, frame sizes and terminals,
                           each shell running the command it was given. With no NAME,
                           lists the ones you have. A directory on the same line — in
@@ -334,6 +336,17 @@ fn main() -> Result<()> {
                 eprintln!("clee -e needs a file to edit");
                 return Ok(());
             }
+        }
+        // A file that is not there yet opens as a buffer to write into — that is the point of
+        // naming one. A *folder* that is not there is a refusal, and it is said here, before the
+        // screen is taken over: minimal mode would otherwise answer a mistyped path with one
+        // line in a status bar, under an empty editor that looked like it had opened the file.
+        if let Some(file) = &edit_file
+            && !file.exists()
+            && let Some(dir) = editor::Editor::missing_dir(file)
+        {
+            eprintln!("clee -e: no folder {} — create it first", dir.display());
+            std::process::exit(2);
         }
     }
     // `clee -w` with no name is a question, not a mistake: list what there is and stop, while
@@ -612,6 +625,13 @@ fn run(
     // nothing to keep. The splash goes too: this is meant to feel like `micro`, and a title card
     // is not what you want when you opened a file to change one line.
     if let Some(path) = &edit_file {
+        // Set before the three below, and that order is the point: hiding the frames *is* writing
+        // to the settings, and from here on nothing in this session may reach the file. The exit
+        // path already knew to skip it; the fifteen writes that happen mid-session — a theme
+        // picked, a row changed in the settings modal, a run command typed — did not, and any one
+        // of them saved the stripped layout over the real one. The next plain `clee`, or the
+        // launcher in the Dock, then came up with no sidebar, no terminals and no menu bar.
+        app.settings.ephemeral = true;
         app.settings.show_sidebar = false;
         app.settings.show_terminal = false;
         app.settings.show_menubar = false;
