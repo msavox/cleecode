@@ -36,9 +36,9 @@
 //! else there is touched.
 
 use std::io::Write;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// The stages of the road, in the order a frame walks them.
 ///
@@ -158,6 +158,8 @@ struct Fit {
 struct Profile {
     path: std::path::PathBuf,
     started: Instant,
+    /// When the report was last written out. See `frame_drawn`.
+    flushed: Mutex<Instant>,
     /// User and system seconds at startup, subtracted from the same pair at exit. Not zero: the
     /// process has already loaded a workspace by the time this is taken.
     rusage_start: (f64, f64),
@@ -186,6 +188,7 @@ pub fn init() {
     let profile = path.map(|path| Profile {
         path: std::path::PathBuf::from(path),
         started: Instant::now(),
+        flushed: Mutex::new(Instant::now()),
         rusage_start: rusage(),
         stages: (0..STAGES).map(|_| Totals::default()).collect(),
         decoded: AtomicU64::new(0),
@@ -327,6 +330,35 @@ pub fn frame_drawn(pictures: u32) {
             rows.push(FrameRow { bytes: total.saturating_sub(previous), pictures });
         }
     }
+    // And written out every so often, not only on the way out of `main`.
+    //
+    // The report used to exist only if the editor was quit the ordinary way, which made every
+    // measurement depend on a human pressing the right keys in the right order and cost several
+    // real runs to a session that was killed instead. It also rules out driving a measurement
+    // from outside, where the only way to end a session running in somebody else's terminal is
+    // to kill it. Written from here because this is the one place already called once a frame
+    // and never from a stage's hot path; the cost is a clock read and a comparison, and the
+    // write itself happens once every few seconds against a file nobody is reading yet.
+    if let Ok(mut flushed) = profile.flushed.try_lock() {
+        if flushed.elapsed() >= FLUSH_EVERY {
+            *flushed = Instant::now();
+            write_report(profile);
+        }
+    }
+}
+
+/// How often the report is written while the session is still running. Long enough that a
+/// twelve-second run writes it a handful of times, short enough that a session ended by a
+/// signal loses only the tail.
+const FLUSH_EVERY: Duration = Duration::from_secs(2);
+
+/// Renders the report and puts it where it was asked for, creating the directory if need be.
+fn write_report(profile: &Profile) {
+    let report = render_report(profile);
+    if let Some(parent) = profile.path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&profile.path, report);
 }
 
 /// How many pictures have been rendered in total, so a caller can tell how many went into one
@@ -442,11 +474,7 @@ pub fn finish() {
     // total that has already been printed, and a thread is still draining its pane at this
     // point.
     ON.store(false, Ordering::Relaxed);
-    let report = render_report(profile);
-    if let Some(parent) = profile.path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&profile.path, report);
+    write_report(profile);
 }
 
 /// The p95 and the mean of a stage's sample ring, in nanoseconds.
