@@ -453,6 +453,12 @@ fn main() -> Result<()> {
     // caught is exactly the one whose numbers are worth having, and the teardown below has not
     // yet begun to write to the terminal on its own account.
     graphics_profile::finish();
+    // The segments a pane's video handed the host by name. A terminal that read one has already
+    // unlinked it — that is the protocol's own division of labour — so on an ordinary exit this
+    // finds nothing to remove; what it is here for is the host that read nothing, which would
+    // otherwise leave a few megabytes in the kernel for as long as the machine is up. See
+    // `pane_kitty::release_frames`.
+    pane_kitty::release_frames();
     let _ = write!(stdout(), "\x1b[23;2t");
     // Popped before anything else is undone: leaving the flags pushed would hand the shell back
     // a terminal that reports keys in a mode it never asked for.

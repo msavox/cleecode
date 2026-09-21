@@ -775,8 +775,15 @@ unsafe fn shm_open_read(name: *const libc::c_char) -> libc::c_int {
 /// spelled either way, so on Linux nobody has ever noticed; macOS does not, and answers
 /// `ENOENT` to every frame — which is sound with no picture. So the name is tried as it was
 /// sent and then again with the slash put back, and the film plays on both.
+///
+/// Not private, and the reason is worth saying. `pane_kitty` now *creates* segments as well, and
+/// its tests have to check that what it wrote is what a host would read — so they read it back
+/// through this, which both reads and unlinks. That is not a convenience: unlinking is precisely
+/// what the protocol asks of the receiving side, so a test that reads a frame this way has also
+/// played the host's part of the contract, and the encoder's next turn of the ring then meets
+/// the world a real terminal leaves behind rather than a tidier one.
 #[cfg(unix)]
-fn read_shared(name: &[u8], offset: u64, want: usize) -> Option<Vec<u8>> {
+pub(crate) fn read_shared(name: &[u8], offset: u64, want: usize) -> Option<Vec<u8>> {
     let mut spellings = vec![name.to_vec()];
     if !name.starts_with(b"/") {
         let mut slashed = vec![b'/'];

@@ -354,7 +354,60 @@ fn probe() -> HostAbilities {
     ) {
         return HostAbilities::default();
     }
+    if let Some(forced) = forced_medium() {
+        return forced;
+    }
     ask_host(&PROBES)
+}
+
+/// The road a driver insists on, when the host it is running in cannot be asked.
+///
+/// The sibling of `CLEE_GRAPHICS_PROTOCOL` above, and it exists because that hook alone is not
+/// enough any more. A bare pty answers no graphics query, so `ask_host` reads silence, silence
+/// resolves to `Direct` like every other doubt here, and the code that hands a frame over by
+/// name is then never the code under test — not in `scripts/pty_drive.py`, not in
+/// `scripts/profile_video.py`, not in any driven session there will ever be. Forcing the
+/// protocol got the kitty encoder under measurement; forcing the medium is what gets the road
+/// inside it under measurement.
+///
+/// Named values only, and a name that is not one of them is ignored rather than guessed at:
+///
+///     CLEE_GRAPHICS_MEDIUM=shared python3 scripts/profile_video.py --tag RELAY
+///
+/// **What a forced run proves, and what it does not.** The harness's host is a python loop that
+/// reads the pty and throws the bytes away: it never opens the segment, never reads a pixel out
+/// of it and never unlinks it. So a forced run measures the *writing* side truthfully — the
+/// segment is really created, really mapped, really copied into, and the escape that leaves
+/// really is sixty bytes instead of two million — and it proves exactly nothing about the
+/// picture appearing on a screen. It also exercises the arm of the ring that the protocol says
+/// should be rare, since a host that never unlinks is a host whose slots are always reused; the
+/// arm where the host *has* unlinked is only ever walked against a real terminal. That the film
+/// plays is a thing to see in Ghostty and nowhere else.
+///
+/// The two hard gates above are deliberately left standing in front of this. Over `ssh` the
+/// segment would be created on this machine and looked up on the one the user is sitting at,
+/// which is the false yes the note on `decide` calls the worst outcome available here; and
+/// forcing a medium onto a host that is not drawing with the kitty protocol at all names a road
+/// that has no `t=` key to travel down. Neither is something a measurement should be allowed to
+/// switch off.
+fn forced_medium() -> Option<HostAbilities> {
+    medium_named(&std::env::var("CLEE_GRAPHICS_MEDIUM").ok()?)
+}
+
+/// The parsing of the value above, split out so it can be pinned by a test that does not have to
+/// set an environment variable — which, with tests running in threads of one process, is a thing
+/// one test does to every other test at once.
+///
+/// `Format::Rgb` throughout, and it is not a guess: it is the format a decoded frame already is,
+/// so it is the one the real probe prefers and the one a forced run should therefore measure.
+fn medium_named(value: &str) -> Option<HostAbilities> {
+    let medium = match value {
+        "shared" => Medium::Shared,
+        "file" => Medium::File,
+        "direct" => Medium::Direct,
+        _ => return None,
+    };
+    Some(HostAbilities { medium, format: Format::Rgb })
 }
 
 /// Writes the ladder of queries, waits for the replies, and cleans up after itself.
@@ -680,10 +733,15 @@ fn fill_mapping(fd: libc::c_int, bytes: usize) -> bool {
 /// which is exactly when it is read — and `0600` is the answer, because a picture of the user's
 /// screen is the user's.
 ///
+/// Reached from `pane_kitty` as well as from here, which is why it is not private. There are two
+/// creating sides in the tree now — the probe's one-pixel fixture and the encoder's ring of
+/// frames — and they are the same system call with the same two spellings, so there is one of it
+/// rather than two that drift apart the first time somebody builds for the other platform.
+///
 /// # Safety
 /// `name` must point at a nul-terminated string.
 #[cfg(all(unix, target_os = "macos"))]
-unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
+pub(crate) unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
     unsafe {
         libc::shm_open(name, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600 as libc::c_uint)
     }
@@ -694,7 +752,7 @@ unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
 /// # Safety
 /// `name` must point at a nul-terminated string.
 #[cfg(all(unix, not(target_os = "macos")))]
-unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
+pub(crate) unsafe fn shm_open_create(name: *const libc::c_char) -> libc::c_int {
     unsafe {
         libc::shm_open(name, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600 as libc::mode_t)
     }
@@ -2603,6 +2661,23 @@ mod tests {
                 let name = format!("/clee-probe-{pid}-{id}");
                 assert!(name.len() <= 31, "{name:?} is {} characters", name.len());
             }
+        }
+    }
+
+    /// The measuring hook, read as a value rather than out of the environment — see
+    /// `medium_named` for why the parsing is a function of its own. Named values only: a name
+    /// that is not one of them is `None`, which leaves the probe to ask the host as it always
+    /// does, and is the same refusal-to-guess `forced_protocol` makes one screen above.
+    #[test]
+    fn the_medium_override_takes_named_values_and_ignores_anything_else() {
+        assert_eq!(medium_named("shared").map(|a| a.medium), Some(Medium::Shared));
+        assert_eq!(medium_named("file").map(|a| a.medium), Some(Medium::File));
+        assert_eq!(medium_named("direct").map(|a| a.medium), Some(Medium::Direct));
+        // The format is not a preference being offered here: a decoded frame is already RGB, so
+        // that is what a forced run should be measuring.
+        assert_eq!(medium_named("shared").map(|a| a.format), Some(Format::Rgb));
+        for nonsense in ["", "yes", "1", "Shared", "shm", "shared "] {
+            assert_eq!(medium_named(nonsense), None, "{nonsense:?}");
         }
     }
 

@@ -36,6 +36,20 @@
 //! borrows the frame and is told when it changed, so both of those go: per frame, two full
 //! passes over a megabyte that produced nothing.
 //!
+//! Since then the frame has stopped travelling by value at all, where the host will have it the
+//! other way. Measured in a real Ghostty at thirty frames a second, a pane playing a film handed
+//! over 2.1 MB an escape and spent 66.8 % of everything CleeCode's CPU went on inside one
+//! `write`; another 27.6 % was ratatui diffing a cell whose symbol was that same two megabytes,
+//! which moves with the same number. So the picture now goes into a POSIX shared-memory segment
+//! CleeCode owns and the escape carries only its name — `t=s`, sixty bytes rather than two
+//! million — which is the same road `mpv` already uses to hand frames *to* a pane. See `stage`
+//! for the ring of segments and who owns one after it has been read, `by_name` for the single
+//! question that decides whether the road is taken, and the note on `encode_by` for the shape of
+//! the command. Where anything at all stands in the way — a host that never said it could, a
+//! picture in a layout that would need converting, Windows, a create or a map that failed on
+//! this one frame — what goes out is the `t=d` below, unchanged, and nobody can tell but the
+//! clock.
+//!
 //! What it measured, said plainly, because half of it is not what was expected. On the profiler's
 //! film (`scripts/profile_video.py`, four runs of each binary, interleaved) a frame that draws a
 //! picture leaves as 1,014,000 bytes instead of 1,358,000 — a quarter less, exactly the alpha
@@ -145,6 +159,236 @@ fn raw(image: &DynamicImage) -> Option<(&[u8], u32)> {
         DynamicImage::ImageRgb8(buffer) => Some((buffer.as_raw(), 24)),
         DynamicImage::ImageRgba8(buffer) => Some((buffer.as_raw(), 32)),
         _ => None,
+    }
+}
+
+/// Whether the frame may be handed to the host by *name* rather than by value.
+///
+/// One question and it has already been answered: `detect_host_abilities` asked the terminal at
+/// startup whether it would take a picture out of a POSIX shared-memory segment, and recorded
+/// what it said. Asking again here would be asking a terminal that no longer has stdin to
+/// itself — the trap the probe's own note spends a paragraph on — so this is a read of a fact,
+/// not a question, and every doubt has already resolved in the direction of `Direct`.
+///
+/// `Medium::File` is a road the probe can report and this does not take. It would be a write
+/// through the filesystem per frame where `Shared` is a copy into a mapping, so it is a
+/// different trade with a different answer and it deserves its own measurement rather than
+/// being folded in here on the grounds that both are "by name". It falls through to `t=d` for
+/// now, which is what it did before any of this existed.
+fn by_name() -> bool {
+    matches!(crate::preview::host_abilities().medium, crate::preview::Medium::Shared)
+}
+
+/// How many segments the ring holds.
+///
+/// Four, and the number is the answer to two different questions at once. The first is how many
+/// frames may be in flight: the escape naming a segment is written into a cell, the cell reaches
+/// the host when ratatui flushes, and the host reads it some unknown moment later — so a ring of
+/// one would be CleeCode writing frame N+1 into the pages the host is reading frame N out of,
+/// which is tearing, intermittently, in exactly the way no test catches. The second is how many
+/// pictures may be on screen: the ring is the process's and not the pane's, so two panes each
+/// playing a film take two slots of every editor frame, and four leaves each of them a full
+/// frame of slack at thirty frames a second.
+///
+/// It does not want to be larger. A segment is as big as the picture — a megabyte for a film in
+/// a reasonable pane — so the ring is the resident cost of having played a video at all, and
+/// eight would be eight megabytes bought to insure against a host that is further behind than a
+/// host that is still drawing has any business being. It does not want to be smaller either:
+/// three would leave two simultaneous films half an editor frame apart, which is the shape of a
+/// bug nobody would find until they had two films open.
+#[cfg(unix)]
+const FRAMES: usize = 4;
+
+/// One slot of the ring: where its segment is mapped, and how long it is.
+///
+/// The address is an integer rather than a pointer, and that is not squeamishness. The ring is a
+/// `static` behind a `Mutex` so that the whole of it is one thing rather than one per pane, and
+/// a raw pointer is not `Send`; what actually crosses between threads is an address that is only
+/// ever turned back into a pointer by the thread holding the lock, over a mapping that lives
+/// until this slot is next rebuilt. A length of zero means the slot has never been used.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct Frame {
+    addr: usize,
+    len: usize,
+}
+
+/// The ring, and which slot the next frame takes.
+#[cfg(unix)]
+struct Ring {
+    next: usize,
+    slots: [Frame; FRAMES],
+}
+
+#[cfg(unix)]
+static RING: Mutex<Ring> = Mutex::new(Ring { next: 0, slots: [Frame { addr: 0, len: 0 }; FRAMES] });
+
+/// What one slot of the ring is called.
+///
+/// The hard limit is macOS's and it is not generous: `PSHMNAMLEN` is **31 characters including
+/// the leading slash**, and `shm_open` answers `ENAMETOOLONG` past it — which arrives here as a
+/// segment that was never created, and reads exactly like a host that said no. `preview.rs` has
+/// the same note over its probe fixtures and the same arithmetic. This name is
+/// `/clee-frame-` (twelve) plus a pid (seven at the very widest anything writes one) plus a dash
+/// and one digit of slot: twenty-one, with ten to spare, and there is a test that says so.
+///
+/// The leading slash is part of the name and stays part of what is transmitted. `mpv` strips it
+/// and gets away with it because glibc looks a name up spelled either way; macOS does not, and
+/// the note on `read_shared` in `pane_graphics.rs` is the story of finding that out from the
+/// receiving end. Sent whole, both hosts look up the same thing.
+#[cfg(unix)]
+fn frame_name(slot: usize) -> String {
+    format!("/clee-frame-{}-{slot}", std::process::id())
+}
+
+/// Puts a frame in the next segment of the ring and returns the name to send, or `None` when
+/// anything at all went wrong — which the caller reads as "send this one frame by value".
+///
+/// This is the mirror of `read_shared` and `read_mapping` in `pane_graphics.rs` and is written
+/// to look like them, because between them they are the whole of the road: one side creates,
+/// truncates, maps and copies in, the other opens, maps, copies out and unlinks.
+///
+/// **The receiver owns the segment**, which is the one thing about this that is not obvious. The
+/// protocol makes the terminal responsible for the object the moment it has read it, and a host
+/// doing its job unlinks — so by the time the ring comes round again the name is usually *gone*,
+/// and a slot that assumed otherwise would transmit a name resolving to nothing and show a black
+/// pane. So the name is created afresh every turn, with `O_CREAT | O_EXCL`, and the interesting
+/// case is the one where that *fails*: `EEXIST` means the host did not unlink, the object under
+/// that name is still the one this slot holds mapped, and the frame is written straight into it.
+/// Bounded either way, which is the whole point of a ring rather than a fresh segment per frame
+/// — a host that unlinks costs one create and one map per frame, a host that does not costs
+/// neither, and neither of them costs a segment that nobody ever removes.
+///
+/// The one copy left on this road is the one at the bottom. It could go: the frame arrives from
+/// `mpv` in a segment of its own, and reading that segment straight into this one would put the
+/// pixels in the right place once instead of twice. It is not done here because the fallback
+/// roads — `t=d`, and every terminal that draws with half-blocks or sixel or nothing at all —
+/// need the decoded picture in memory, so removing the copy means knowing which road the frame
+/// will take before it has been read. That is the next thing available to anyone who comes
+/// looking, and `shm_read` says what it is worth: 188 µs a frame, 2.7 % of CPU.
+#[cfg(unix)]
+fn stage(bytes: &[u8]) -> Option<String> {
+    let want = bytes.len();
+    if want == 0 {
+        return None;
+    }
+    let mut ring = RING.lock().ok()?;
+    let slot = ring.next;
+    ring.next = (ring.next + 1) % FRAMES;
+    let name = frame_name(slot);
+    let spelling = std::ffi::CString::new(name.as_str()).ok()?;
+    let held = ring.slots[slot];
+
+    // SAFETY: a nul-terminated name, which is all `shm_open_create` reads.
+    let mut fd = unsafe { crate::preview::shm_open_create(spelling.as_ptr()) };
+    if fd < 0 {
+        let taken = std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST);
+        // The name is still there and this slot's mapping is still the right size for the
+        // picture, so the object under that name is the one already mapped here and the host
+        // simply has not unlinked it. Nothing to create and nothing to map: the frame goes
+        // straight into the pages, and the name that was sent last time is sent again.
+        if taken && held.len == want {
+            // SAFETY: `held.len == want` bytes were mapped writable at this address by a turn of
+            // this ring that has not been undone, and nothing unmaps a slot except the code
+            // below, which holds the same lock this does.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), held.addr as *mut u8, want) };
+            return Some(name);
+        }
+        // Either the name is held at the wrong length — a pane resized around a film — or
+        // something is there that should not be, such as a segment left behind by a previous
+        // CleeCode killed on the same pid. Removing it is removing our own name and nobody
+        // else's, since the pid in it is this process's.
+        // SAFETY: a nul-terminated name.
+        unsafe { libc::shm_unlink(spelling.as_ptr()) };
+        // SAFETY: as above.
+        fd = unsafe { crate::preview::shm_open_create(spelling.as_ptr()) };
+    }
+    if fd < 0 {
+        return None;
+    }
+    // A fresh object under this name, so whatever this slot used to hold is neither wanted nor
+    // reachable any more. Dropped before the new mapping is made rather than after, so that a
+    // film playing for an hour holds `FRAMES` mappings and not one per frame.
+    if held.len != 0 {
+        // SAFETY: the address and length a previous turn of this ring mapped, unmapped once; the
+        // slot is cleared in the same breath so no later turn can unmap it again.
+        unsafe { libc::munmap(held.addr as *mut libc::c_void, held.len) };
+        ring.slots[slot] = Frame { addr: 0, len: 0 };
+    }
+    // SAFETY: `fd` came back from `shm_open_create` above.
+    let sized = unsafe { libc::ftruncate(fd, want as libc::off_t) } == 0;
+    // SAFETY: a writable shared mapping of exactly the length just truncated to.
+    let map = match sized {
+        true => unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                want,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        },
+        false => libc::MAP_FAILED,
+    };
+    // The descriptor has done its work: a mapping outlives the descriptor it was made from, and
+    // an unlink later on does not disturb it either.
+    // SAFETY: the same descriptor, closed exactly once.
+    unsafe { libc::close(fd) };
+    if map == libc::MAP_FAILED {
+        // Nothing is mapped, so the name would be one the host could not read anything useful
+        // out of. Taken away again rather than left for the next turn to trip over.
+        // SAFETY: a nul-terminated name, and nothing of ours is mapped under it.
+        unsafe { libc::shm_unlink(spelling.as_ptr()) };
+        return None;
+    }
+    // SAFETY: `want` bytes were just mapped writable at this address, and `bytes` is at least
+    // that long because `want` is its length.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), map.cast::<u8>(), want) };
+    ring.slots[slot] = Frame { addr: map as usize, len: want };
+    Some(name)
+}
+
+/// Windows has no POSIX shared memory, so a frame there goes the way it always has.
+///
+/// The same single refusal `load_medium` makes on the receiving side rather than half a feature:
+/// `t=d` is not a degraded road, it is the road every terminal in existence understands.
+#[cfg(not(unix))]
+fn stage(_bytes: &[u8]) -> Option<String> {
+    None
+}
+
+/// Unmaps and unlinks the whole ring, on the way out of the process.
+///
+/// Called from `main`'s teardown, beside `graphics_profile::finish`, and it exists for the host
+/// that did not do its half. A terminal that reads a segment unlinks it, and after that this
+/// finds nothing to remove — which is the good outcome and not an error. A host that read
+/// nothing, though, leaves `FRAMES` segments of a megabyte each sitting in the kernel for as
+/// long as the machine is up, and "as long as the machine is up" is the part that matters: a
+/// driven session with the medium forced, which is a host that never reads by construction,
+/// would otherwise cost four megabytes a run forever.
+///
+/// A session that is killed rather than closed still leaks them. That is the same hole
+/// `preview.rs` leaves behind its probe fixtures and it is bounded the same way — `FRAMES`
+/// names, all carrying this pid, all of which the next CleeCode on that pid removes on its first
+/// turn of the ring.
+pub fn release_frames() {
+    #[cfg(unix)]
+    {
+        let Ok(mut ring) = RING.lock() else { return };
+        for slot in 0..FRAMES {
+            let held = ring.slots[slot];
+            if held.len != 0 {
+                // SAFETY: the address and length this ring mapped, unmapped exactly once — the
+                // slot is cleared below so nothing can reach it again.
+                unsafe { libc::munmap(held.addr as *mut libc::c_void, held.len) };
+                ring.slots[slot] = Frame { addr: 0, len: 0 };
+            }
+            if let Ok(spelling) = std::ffi::CString::new(frame_name(slot)) {
+                // SAFETY: a nul-terminated name, and nothing of ours is mapped under it now.
+                unsafe { libc::shm_unlink(spelling.as_ptr()) };
+            }
+        }
     }
 }
 
@@ -277,6 +521,34 @@ impl PaneKitty {
     /// corner, which is what a real kitty terminal does with the same escape sequence and what a
     /// program that asked for `c` columns and `r` rows was asking for.
     fn encode(&mut self, image: &DynamicImage, cells: (u16, u16)) {
+        self.encode_by(image, cells, by_name());
+    }
+
+    /// The encoding itself, with the road it takes handed in rather than asked for.
+    ///
+    /// Split from `encode` for one reason, and it is a test's: the gate is a fact about the
+    /// session recorded in a `OnceLock` at startup, which under `cargo test` is never set and
+    /// always reads `Direct`. A test that wanted to see the other road would have to reach into
+    /// a global every other test in the process shares. So the question is asked once, at the
+    /// top, and everything below it is a function of the answer.
+    ///
+    /// **`t=s`: the frame by name.** The picture goes into a segment of CleeCode's own and the
+    /// escape carries the name of it — which is some sixty bytes where the same frame by value
+    /// is two million, and the whole of why any of this was written. Two things about the shape
+    /// of that command are not arbitrary. The payload is the base64 of the *name*, not the name,
+    /// because that is what the protocol says and what CleeCode's own receiving side decodes
+    /// before it opens anything. And there is no `m` key at all: `m` is the protocol's chunking
+    /// and chunking is a thing a direct transmission does, so a command carrying a name is
+    /// complete by arriving — `pane_graphics` says the same thing from the other end, where
+    /// reading `m` on this road would gather every frame of a film into one transmission that
+    /// never ends, because `mpv` marks every single frame `m=1` and never closes one.
+    ///
+    /// **A failure here costs one frame and not the pane.** `stage` answers `None` for anything
+    /// that went wrong — the ring's lock poisoned, a name the platform will not take, a create
+    /// or a map that failed — and `None` falls through to the road below, which works on every
+    /// terminal there is. Nothing is remembered about the failure and nothing is switched off:
+    /// the next frame asks again.
+    fn encode_by(&mut self, image: &DynamicImage, cells: (u16, u16), by_name: bool) {
         let size = (image.width(), image.height(), cells.0, cells.1);
         if self.encoded == Some(size) {
             return;
@@ -285,6 +557,27 @@ impl PaneKitty {
         let (id, (columns, rows)) = (self.id, cells);
         let (width, height) = (image.width(), image.height());
         let (start, escape, end) = tmux_wrapping();
+        let keys = format!("i={id},a=T,U=1,f={format}");
+        let box_ = format!("s={width},v={height},c={columns},r={rows}");
+
+        let data = &mut self.transmit;
+        data.clear();
+        // Asked only where the host said it could take one, so a terminal that answered nothing
+        // — which is most of them, and every one reached over `ssh` — never creates a segment at
+        // all. The copy into it is charged to the `Render` stage along with everything else this
+        // function does, which keeps a profile taken before this existed comparable with one
+        // taken after.
+        if let Some(name) = by_name.then(|| stage(bytes)).flatten() {
+            data.reserve(name.len() * 2 + keys.len() + box_.len() + 32);
+            data.push_str(start);
+            write!(data, "{escape}_Gq=2,{keys},t=s,{box_};").unwrap();
+            base64_simd::STANDARD.encode_append(name.as_bytes(), data);
+            write!(data, "{escape}\\").unwrap();
+            data.push_str(end);
+            self.encoded = Some(size);
+            self.pending = true;
+            return;
+        }
 
         // 4096 base64 characters is the protocol's limit for one command, and four characters
         // carry three bytes.
@@ -293,8 +586,6 @@ impl PaneKitty {
 
         let chunks = bytes.chunks(CHUNK);
         let count = chunks.len();
-        let data = &mut self.transmit;
-        data.clear();
         // The keys of the first chunk and the per-chunk framing, so that a frame's worth of
         // base64 lands in one allocation that is then kept for the next frame.
         data.reserve(count * (CHARS_PER_CHUNK + 16 + escape.len() * 2 + end.len()) + 64);
@@ -302,11 +593,7 @@ impl PaneKitty {
             data.push_str(start);
             write!(data, "{escape}_Gq=2,").unwrap();
             if index == 0 {
-                write!(
-                    data,
-                    "i={id},a=T,U=1,f={format},t=d,s={width},v={height},c={columns},r={rows},"
-                )
-                .unwrap();
+                write!(data, "{keys},t=d,{box_},").unwrap();
             }
             let more = u8::from(count > index + 1);
             write!(data, "m={more};").unwrap();
@@ -854,6 +1141,198 @@ mod tests {
         let mut next = Buffer::empty(Rect { x: 0, y: 0, width: 4, height: 4 });
         slot.draw(&image, area, &mut next, (2, 2));
         assert!(!next[(1, 1)].symbol().contains("\x1b_G"));
+    }
+
+    /// A picture of a given size with a given colouring, so that two frames the same shape are
+    /// still two different pictures — which is the only way to tell a segment that was rewritten
+    /// from one that merely still holds what it held.
+    #[cfg(unix)]
+    fn tinted(width: u32, height: u32, tint: u8) -> DynamicImage {
+        let bytes: Vec<u8> = (0..width * height * 3).map(|i| (i % 251) as u8 ^ tint).collect();
+        DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, bytes).unwrap())
+    }
+
+    /// The ring is one thing for the whole process, and `cargo test` runs its tests in threads
+    /// of one process — so two tests rotating it at once would each see the other's turns, and
+    /// "the slot four frames from now" would be nobody's slot. The tests that care which segment
+    /// comes up next take this first. Poison is stepped over rather than unwrapped: a test that
+    /// panicked while holding it has already failed, and taking the rest down with it would
+    /// report the wrong name.
+    #[cfg(unix)]
+    static ROTATING: Mutex<()> = Mutex::new(());
+
+    /// The name the host is given for a frame, out of a sequence built with `t=s`.
+    #[cfg(unix)]
+    fn named(sequence: &str) -> String {
+        let payload = payloads(sequence);
+        assert_eq!(payload.len(), 1, "a picture by name is one command, never chunked");
+        let name = base64::engine::general_purpose::STANDARD.decode(payload[0]).unwrap();
+        String::from_utf8(name).unwrap()
+    }
+
+    /// The whole of the change, in one measurement: the same frame that costs two million bytes
+    /// of escape by value costs sixty by name, and the pixels the host would find under that
+    /// name are the ones that went in.
+    ///
+    /// Read back through `pane_graphics::read_shared`, which is the receiving side of this exact
+    /// protocol and which unlinks what it reads — so this test also plays the host's part of the
+    /// contract, and leaves the slot in the state a real terminal leaves it in.
+    #[cfg(unix)]
+    #[test]
+    fn a_frame_the_host_will_take_by_name_travels_as_a_name() {
+        let _rotating = ROTATING.lock().unwrap_or_else(|held| held.into_inner());
+        let image = rgb(200, 100);
+        let mut slot = PaneKitty::new().unwrap();
+        slot.encode_by(&image, (20, 10), true);
+
+        let header = slot.transmit.split(';').next().unwrap();
+        assert!(header.contains("t=s"), "{header}");
+        assert!(!header.contains("t=d"), "{header}");
+        // Everything the road by value already said about the picture is still said here: the
+        // format, the size, the cell box the host scales it into, and the id it replaces.
+        assert!(header.contains("f=24"), "{header}");
+        assert!(header.contains("a=T,U=1"), "{header}");
+        assert!(header.contains("s=200,v=100"), "{header}");
+        assert!(header.contains("c=20,r=10"), "{header}");
+        assert!(header.contains(&format!("i={}", slot.id)), "{header}");
+        // `m` is the protocol's chunking, and chunking belongs to a transmission that carries
+        // the picture. A command carrying a name is complete by arriving.
+        assert!(!header.contains("m="), "{header}");
+
+        let name = named(&slot.transmit);
+        assert!(name.starts_with("/clee-frame-"), "{name}");
+        // The escape is now a name and its framing, where the same frame by value is 80,000
+        // bytes of base64 — and that ratio is the whole feature.
+        assert!(slot.transmit.len() < 128, "{} bytes of escape", slot.transmit.len());
+
+        let want = image.as_bytes().len();
+        let read = crate::pane_graphics::read_shared(name.as_bytes(), 0, want);
+        assert_eq!(read.as_deref(), Some(image.as_bytes()), "the host would find the frame");
+        release_frames();
+    }
+
+    /// A picture the host cannot take by name, or one this was not asked to send that way, goes
+    /// out exactly as it always did — which is the promise the whole road rests on.
+    #[test]
+    fn a_frame_that_cannot_go_by_name_still_goes_by_value() {
+        let image = rgb(20, 20);
+        let mut slot = PaneKitty::new().unwrap();
+        slot.encode_by(&image, (2, 1), false);
+        let header = slot.transmit.split(';').next().unwrap();
+        assert!(header.contains("t=d"), "{header}");
+        assert_eq!(decoded(&slot.transmit), image.as_bytes());
+    }
+
+    /// Why the ring is a ring. The host reads a segment some unknown moment after the escape
+    /// naming it was written, so consecutive frames must not be written into the same pages —
+    /// and `FRAMES` of them later the names come round again, which is what bounds the whole
+    /// thing to four segments rather than one per frame of a film.
+    #[cfg(unix)]
+    #[test]
+    fn consecutive_frames_take_different_segments_and_the_ring_comes_round() {
+        let _rotating = ROTATING.lock().unwrap_or_else(|held| held.into_inner());
+        let mut slot = PaneKitty::new().unwrap();
+        let mut names = Vec::new();
+        for frame in 0..FRAMES + 1 {
+            // A different size each time, so the encoder treats each as a new picture rather
+            // than as the one it already carries.
+            let image = rgb(20, 20 + frame as u32);
+            slot.encode_by(&image, (2, 1), true);
+            names.push(named(&slot.transmit));
+        }
+        let ring: std::collections::BTreeSet<&String> = names[..FRAMES].iter().collect();
+        assert_eq!(ring.len(), FRAMES, "no two frames in flight share a segment: {names:?}");
+        assert_eq!(names[FRAMES], names[0], "and then the ring comes round");
+        for name in ring {
+            let _ = crate::pane_graphics::read_shared(name.as_bytes(), 0, 0);
+        }
+        release_frames();
+    }
+
+    /// What happens when the host does its half. The protocol makes the terminal the owner of
+    /// the segment once it has read it, so by the time the ring comes round the name is gone —
+    /// and the slot must build it again rather than transmit a name that resolves to nothing,
+    /// which on screen is a pane that has stopped.
+    #[cfg(unix)]
+    #[test]
+    fn a_segment_the_host_unlinked_is_made_again() {
+        let _rotating = ROTATING.lock().unwrap_or_else(|held| held.into_inner());
+        let image = tinted(30, 30, 0);
+        let mut slot = PaneKitty::new().unwrap();
+        slot.encode_by(&image, (3, 3), true);
+        let name = named(&slot.transmit);
+        // The host reading it, unlink and all.
+        assert!(crate::pane_graphics::read_shared(name.as_bytes(), 0, 0).is_some());
+        assert!(
+            crate::pane_graphics::read_shared(name.as_bytes(), 0, 0).is_none(),
+            "the read above is also the unlink the protocol asks for"
+        );
+
+        // Round the ring until that slot comes up again. The pictures are the same shape and
+        // differently coloured, so the segment is the right size to be reused and the only thing
+        // that can tell a rebuilt one from a stale one is what is in it.
+        let mut found = None;
+        for frame in 0..FRAMES {
+            let next = tinted(30, 30, frame as u8 + 1);
+            slot.encode_by(&next, (3, 4 + frame as u16), true);
+            if named(&slot.transmit) == name {
+                found = Some(next);
+                break;
+            }
+        }
+        let expected = found.expect("the ring never came back to that slot");
+        let read = crate::pane_graphics::read_shared(name.as_bytes(), 0, expected.as_bytes().len());
+        assert_eq!(read.as_deref(), Some(expected.as_bytes()), "the segment was made again");
+        // Nothing in the kernel outlives the test that made it. Safe to call with the
+        // rotation lock held, which is the only thing that could be part-way through a turn.
+        release_frames();
+    }
+
+    /// And what happens when the host does *not* do its half — a terminal that reads the frame
+    /// and leaves the object behind, or the driven harness, whose host never reads at all. The
+    /// slot is reused rather than recreated: the name is the same, the pages are the same, and
+    /// what the host would find there is the newest frame. Bounded either way, which is the
+    /// point of a ring.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_that_never_unlinks_has_its_slot_reused() {
+        let _rotating = ROTATING.lock().unwrap_or_else(|held| held.into_inner());
+        let first = tinted(40, 40, 0);
+        let mut slot = PaneKitty::new().unwrap();
+        slot.encode_by(&first, (4, 4), true);
+        let name = named(&slot.transmit);
+
+        // Nothing reads and nothing unlinks, which is the harness's host and a terminal that
+        // does not keep its half of the bargain. The same pixel count every time, so the slot's
+        // mapping is still the right length and the create that comes round again finds the name
+        // taken — the arm that writes straight into the pages it already holds.
+        let mut latest = None;
+        for frame in 0..FRAMES {
+            let next = tinted(40, 40, frame as u8 + 1);
+            slot.encode_by(&next, (4, 5 + frame as u16), true);
+            if named(&slot.transmit) == name {
+                latest = Some(next);
+                break;
+            }
+        }
+        let expected = latest.expect("the ring never came back to that slot");
+        let read = crate::pane_graphics::read_shared(name.as_bytes(), 0, expected.as_bytes().len());
+        assert_eq!(read.as_deref(), Some(expected.as_bytes()));
+        // Nothing in the kernel outlives the test that made it. Safe to call with the
+        // rotation lock held, which is the only thing that could be part-way through a turn.
+        release_frames();
+    }
+
+    /// macOS caps a shared-memory name at 31 characters including the leading slash and answers
+    /// `ENAMETOOLONG` past it — a failure that arrives as a segment that was never created and
+    /// reads exactly like a host saying no. The same arithmetic `preview.rs` pins for its probe
+    /// fixtures, here for the ring, at the widest a pid is ever written.
+    #[cfg(unix)]
+    #[test]
+    fn a_segment_name_fits_what_the_platform_will_take() {
+        let widest = format!("/clee-frame-{}-{}", u32::MAX, FRAMES - 1);
+        assert!(widest.len() <= 31, "{widest} is {} characters", widest.len());
+        assert!(frame_name(0).starts_with("/clee-frame-"));
     }
 
     #[test]
