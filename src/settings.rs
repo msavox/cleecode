@@ -545,18 +545,37 @@ fn default_terminal_scrollback() -> usize {
     crate::terminal_panel::DEFAULT_SCROLLBACK
 }
 
+/// How many pixels a pane tells the programs in it that one of its cells holds, as a percentage
+/// of the truth — and it is deliberately not the truth.
+///
+/// The reasoning here used to be that anything below a hundred was a picture quietly made worse
+/// on a machine nobody had measured. The machine has now been measured, in a real terminal,
+/// with both processes on the clock, and the honest reading is the other way round. What a pane
+/// asks for is what the player must scale to, and a player's cost is very nearly proportional
+/// to the pixels it hands over: in a window of a hundred and seventy-eight columns the truth
+/// asks `mpv` for 1392x1044 — for a clip that is 640x480, so most of those pixels carry nothing
+/// that was in the film — and the two processes together come to some sixty-five per cent of a
+/// core, of which five sixths is the player. At this fraction they come to forty-three, which is
+/// *less than the same film cost before any of this work*, and it plays at thirty frames a
+/// second instead of fourteen.
+///
+/// So the number buys fluency rather than spending it, and what it costs is sharpness on a
+/// picture the host then scales back up on its GPU. Anyone who would rather have the pixels can
+/// say so: the row walks, and a hand-written `settings.toml` is honoured.
 fn default_pane_pixel_pct() -> u16 {
-    PANE_PIXEL_PCT_STEPS[0]
+    35
 }
 
 /// The steps the settings row walks through, from the truth downwards.
 ///
-/// Three of them rather than a slider because the thing being chosen is visible and coarse: a
+/// Four of them rather than a slider because the thing being chosen is visible and coarse: a
 /// film at three quarters is hard to tell from a film, at a half it is softer, and the sizes in
-/// between are not different enough from their neighbours to be worth a keystroke each. A
-/// settings.toml written by hand may say any number in `PANE_PIXEL_PCT_RANGE`, and picking the
-/// row then walks down to the next step below whatever it says.
-pub const PANE_PIXEL_PCT_STEPS: [u16; 3] = [100, 75, 50];
+/// between are not different enough from their neighbours to be worth a keystroke each. The
+/// last step is the default and the one that was measured; the first is the truth, for anyone
+/// who wants every pixel and is willing to pay the player for them. A settings.toml written by
+/// hand may say any number in `PANE_PIXEL_PCT_RANGE`, and picking the row then walks down to
+/// the next step below whatever it says.
+pub const PANE_PIXEL_PCT_STEPS: [u16; 4] = [100, 75, 50, 35];
 
 /// What a hand-edited value is held to. The ceiling is the truth — asking a program for more
 /// pixels than the screen can show them in buys nothing and costs the whole upscale — and the
@@ -1153,11 +1172,11 @@ mod tests {
     #[test]
     fn the_pane_resolution_row_walks_down_the_steps_and_wraps() {
         let mut settings = Settings::default();
-        assert_eq!(settings.pane_pixel_pct, 100, "the default is the real cell size");
+        assert_eq!(settings.pane_pixel_pct, 35, "the default is the measured one, not the truth");
         let label = i18n::t(settings.lang, Key::SettingPanePixels);
         let idx =
             settings.rows().iter().position(|r| r.label == label).expect("pane pixels has a row");
-        for expected in [75, 50, 100] {
+        for expected in [100, 75, 50, 35] {
             settings.activate(idx);
             assert_eq!(settings.pane_pixel_pct, expected);
         }
@@ -1169,6 +1188,11 @@ mod tests {
         settings.pane_pixel_pct = 30;
         settings.activate(idx);
         assert_eq!(settings.pane_pixel_pct, 100, "below the last step the ring comes round");
+        // And the default is on the ring rather than beside it, so a first pick from a fresh
+        // install goes somewhere a second pick can come back from.
+        settings.pane_pixel_pct = default_pane_pixel_pct();
+        settings.activate(idx);
+        assert_eq!(settings.pane_pixel_pct, 100);
     }
 
     /// `save()` swallows serialization errors, so a field ordering that TOML rejects (a
