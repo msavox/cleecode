@@ -2294,6 +2294,24 @@ impl Drop for TerminalPanel {
 pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Vec<u8> {
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    // Command is not a modifier a terminal program has ever been able to receive, so a chord
+    // holding it has nothing to be encoded *as* — and the one thing it must not become is the
+    // letter underneath it. That is what used to happen: Cmd+C, which reaches CleeCode because
+    // the kitty keyboard protocol reports it and which the keymap only claims in its
+    // `Ctrl+Super` form, fell through everything below and was sent to the pane as a plain `c`.
+    // It appeared as a stray letter in whatever was running there — most visibly in an agent's
+    // prompt, where the user is in the habit of pressing Cmd+C to copy and got a `c` typed into
+    // the line instead, two of them for two presses.
+    //
+    // The fix is the one three lines down, arrived at years late: the `meta` below exists
+    // because an unclaimed Alt chord used to reach the shell as a bare letter and `Alt+D` in
+    // readline typed a "d" rather than deleting a word. Same mistake, same shape, a modifier
+    // that was never taught. Alt has a traditional encoding and so gets one; Command has none
+    // and so gets silence, which is what every terminal on this platform does with it.
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        return Vec::new();
+    }
+
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     // Meta is sent the way terminals have always sent it: ESC, then the key. Without this an
     // Alt chord that CleeCode does not claim reached the shell as a bare letter, so Alt+D in
@@ -3225,6 +3243,17 @@ mod tests {
     fn keys_reach_the_shell_the_way_a_terminal_sends_them() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let press = |code, mods| key_to_bytes(KeyEvent::new(code, mods));
+        // Command reaches a pane and must leave nothing behind. Cmd+C is the one that was
+        // reported: pressed to copy, it arrived in an agent's prompt as a letter.
+        assert!(press(KeyCode::Char('c'), KeyModifiers::SUPER).is_empty());
+        assert!(press(KeyCode::Char('v'), KeyModifiers::SUPER).is_empty());
+        assert!(press(KeyCode::Left, KeyModifiers::SUPER).is_empty());
+        assert!(
+            press(KeyCode::Char('c'), KeyModifiers::SUPER | KeyModifiers::CONTROL).is_empty(),
+            "the structural layer is the keymap's, and never the shell's"
+        );
+        // And the letter still gets through when nobody is holding Command.
+        assert_eq!(press(KeyCode::Char('c'), KeyModifiers::NONE), b"c".to_vec());
 
         // Ctrl+J is LF and Ctrl+I is Tab — the two the editor used to swallow.
         assert_eq!(press(KeyCode::Char('j'), KeyModifiers::CONTROL), vec![0x0a]);
