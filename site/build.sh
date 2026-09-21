@@ -37,6 +37,7 @@ screenshots/pylab-ide.png     pylab-ide.png
 screenshots/debug.png         debug.png
 screenshots/gitpanel.png      gitpanel.png
 screenshots/themes.png        themes.png
+screenshots/minimal.png       minimal.png
 '
 
 # The header typefaces, vendored under site/fonts/ (see OFL-NOTICE.txt there).
