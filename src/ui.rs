@@ -5270,7 +5270,18 @@ fn draw_editor_pane(
     let top_line = app.editors[idx].top_line;
     let left_col = app.editors[idx].left_col;
     let cursor_line = app.editors[idx].cursor_line;
-    let visible_rows = app.editors[idx].visible_rows_from(top_line, viewport_height);
+    let wrap = app.settings.word_wrap;
+    // Wrapped, the screen is laid out in rows rather than lines, and the lines to draw are the
+    // ones those rows come from: fewer than fit unwrapped, since a long line takes several.
+    let layout =
+        if wrap { app.editors[idx].screen_rows(viewport_height, text_width) } else { Vec::new() };
+    let visible_rows = if wrap {
+        let mut lines: Vec<usize> = layout.iter().map(|r| r.line).collect();
+        lines.dedup();
+        lines
+    } else {
+        app.editors[idx].visible_rows_from(top_line, viewport_height)
+    };
     let cursor_row = visible_rows.iter().position(|&l| l == cursor_line).unwrap_or(0);
 
     // Only as far down as this frame can see, plus a screen for the scroll that follows.
@@ -5296,8 +5307,6 @@ fn draw_editor_pane(
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    // Only filled in wrap mode, where it is the raw material for the caret's row.
-    let mut wrapped_widths: Vec<usize> = Vec::new();
     for line_idx in visible_rows.iter().copied() {
         let mut spans: Vec<Span> = Vec::new();
         let on_line: Vec<&crate::lsp::Mark> = marks.iter().filter(|m| m.line == line_idx).collect();
@@ -5394,26 +5403,28 @@ fn draw_editor_pane(
             None => raw_spans,
         };
 
-        if app.settings.word_wrap {
-            let mut width = 0usize;
-            for (style, text) in raw_spans {
-                width += text.chars().count();
-                spans.push(Span::styled(text, style));
+        if wrap {
+            // The number and the fold mark ride the line's first row; a continuation gets a
+            // blank gutter instead, so the text of a paragraph stands in one column.
+            for row in layout.iter().filter(|r| r.line == line_idx) {
+                let mut row_spans = if row.start == 0 {
+                    spans.clone()
+                } else {
+                    vec![Span::raw(" ".repeat(gutter as usize))]
+                };
+                // The last row takes whatever follows the text too: a block caret past the end
+                // of a short line is drawn as a cell after it.
+                let take = if row.last { usize::MAX } else { row.end - row.start };
+                row_spans.extend(clip_line_spans(&raw_spans, row.start, take));
+                lines.push(Line::from(row_spans));
             }
-            // Kept so the caret can be put on the row the text actually landed on: how many
-            // rows a line takes is only knowable from how long it is, and that is known here.
-            wrapped_widths.push(width);
         } else {
             spans.extend(clip_line_spans(&raw_spans, left_col, text_width.max(1)));
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
     }
 
-    let mut paragraph = Paragraph::new(lines).block(block);
-    if app.settings.word_wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
-    f.render_widget(paragraph, content_area);
+    f.render_widget(Paragraph::new(lines).block(block), content_area);
 
     // After the paragraph, so the bars sit over the frame it drew rather than under it.
     app.editors[idx].observe_scroll();
@@ -5421,21 +5432,18 @@ fn draw_editor_pane(
 
     if focused {
         let cursor_col = app.editors[idx].cursor_col;
-        let cell = if app.settings.word_wrap {
-            wrapped_cursor_offset(
-                &wrapped_widths,
-                cursor_row,
-                cursor_col,
-                text_width,
-                viewport_height,
-            )
+        let cell = if wrap {
+            let caret = app.editors[idx].caret_row(text_width);
+            layout
+                .iter()
+                .position(|r| r.line == cursor_line && r.start == caret.start)
+                .map(|y| (caret.x as u16, y as u16))
         } else {
             Some((cursor_col.saturating_sub(left_col) as u16, cursor_row as u16))
         };
-        // Nothing is drawn when the caret's row falls off the bottom. Under-scrolling in wrap
-        // mode is `follow_cursor`'s business and it counts logical lines, so this can happen;
-        // a caret parked on the wrong line would say the edit is going somewhere it is not,
-        // and no caret at least says "you cannot see where you are".
+        // Nothing is drawn when the caret's row is off screen, as it is after the wheel has
+        // scrolled the view away from it: a caret parked on the wrong row would say the edit is
+        // going somewhere it is not, and no caret at least says "you cannot see where you are".
         if let Some((dx, dy)) = cell {
             let cursor_x = inner.x + gutter + dx;
             let cursor_y = inner.y + dy;
@@ -5446,36 +5454,6 @@ fn draw_editor_pane(
             app.completion_anchor = (cursor_x, cursor_y);
         }
     }
-}
-
-/// Which cell of the viewport the caret is in once `Paragraph` has wrapped the lines above it,
-/// as an offset from the text area's top-left corner. `None` when that cell is below the
-/// viewport.
-///
-/// In wrap mode a line longer than the pane occupies several rows, so the caret's logical row is
-/// not its screen row: every wrapped line above it pushes the caret one row further down, and
-/// the caret's own column restarts from the left edge on each continuation row. Counting logical
-/// rows instead — which is what the unwrapped path does, correctly — drew the caret above where
-/// the text it belongs to had ended up.
-///
-/// Two approximations remain, both deliberate. Rows are counted as `ceil(width / text_width)`,
-/// which is where a line of solid text breaks; `Wrap { trim: false }` breaks at word boundaries
-/// and so can break earlier, putting the caret a row high inside a paragraph of long words. And
-/// the gutter rides the first row of each line rather than every one of them, so with line
-/// numbers on a continuation row is a few columns out. Both are far smaller errors than the
-/// whole-line one they replace, and closing them means re-implementing the wrapper here.
-fn wrapped_cursor_offset(
-    line_widths: &[usize],
-    cursor_row: usize,
-    cursor_col: usize,
-    text_width: usize,
-    viewport_height: usize,
-) -> Option<(u16, u16)> {
-    let width = text_width.max(1);
-    // `max(1)`: an empty line still occupies a row of its own.
-    let above: usize = line_widths.iter().take(cursor_row).map(|w| w.div_ceil(width).max(1)).sum();
-    let y = above + cursor_col / width;
-    (y < viewport_height).then(|| ((cursor_col % width) as u16, y as u16))
 }
 
 /// The rows and text columns a pane's buffer gets, worked out from the pane's own rectangle.
@@ -8427,38 +8405,6 @@ mod tests {
         // drawn rather than a close button with no tab attached to it.
         assert!(tab_strip_layout(&W, 2, 0).tabs.is_empty());
         assert!(tab_strip_layout(&[], 50, 0).tabs.is_empty());
-    }
-
-    /// In wrap mode the caret used to be put on its *logical* row, so every long line above it
-    /// shifted the text down and left the caret behind — typing appeared to happen on somebody
-    /// else's line.
-    #[test]
-    fn the_caret_follows_the_text_down_the_rows_a_wrapped_line_takes() {
-        // Ten columns of text. The first line takes three rows, the second one, the third two.
-        let widths = [25usize, 4, 11];
-        // On the first line, second row, fifth column.
-        assert_eq!(wrapped_cursor_offset(&widths, 0, 14, 10, 24), Some((4, 1)));
-        // The short line under it starts on row 3, not on row 1.
-        assert_eq!(wrapped_cursor_offset(&widths, 1, 2, 10, 24), Some((2, 3)));
-        // And the one after that on row 4 — the short line still takes a row of its own.
-        assert_eq!(wrapped_cursor_offset(&widths, 2, 0, 10, 24), Some((0, 4)));
-        // Past the wrap on that line: second row of it.
-        assert_eq!(wrapped_cursor_offset(&widths, 2, 10, 10, 24), Some((0, 5)));
-        // An empty line above still occupies a row.
-        assert_eq!(wrapped_cursor_offset(&[0, 0], 2, 0, 10, 24), Some((0, 2)));
-        // Nothing above: unwrapped behaviour, which is the same answer.
-        assert_eq!(wrapped_cursor_offset(&[7], 0, 3, 10, 24), Some((3, 0)));
-    }
-
-    /// Scrolling in wrap mode counts logical lines, so the caret can genuinely be below the
-    /// viewport. Drawn at the nearest row it would claim an edit is landing somewhere it is not.
-    #[test]
-    fn a_caret_wrapped_off_the_bottom_is_not_drawn_at_all() {
-        let widths = [30usize, 30, 30];
-        assert_eq!(wrapped_cursor_offset(&widths, 2, 0, 10, 24), Some((0, 6)));
-        assert_eq!(wrapped_cursor_offset(&widths, 2, 0, 10, 6), None);
-        // A zero-width pane must answer rather than divide by it.
-        assert_eq!(wrapped_cursor_offset(&widths, 0, 0, 0, 24), Some((0, 0)));
     }
 
     /// The bar is drawn from the left, so on a narrow window the last titles run past the edge.

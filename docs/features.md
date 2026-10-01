@@ -30,6 +30,12 @@ be **rectangular** — `Alt`+drag for a column selection over ragged text. A rec
 a comment marker goes down twenty lines as fast as you can type it. Lines too short to reach the
 column are left alone rather than padded out to it, and `Esc` drops the block.
 
+**Word wrap** (View ▸ Word wrap) folds a line too long for the pane onto the rows below it,
+breaking between words, for reading prose. Only the screen changes — the file keeps the lines you
+typed. The line number stands on the first row and the continuations line up under the text;
+`↑`/`↓` move one screen row at a time, a click on a continuation lands where it points, and the
+wheel scrolls a paragraph taller than the pane row by row.
+
 `Ctrl+L` splits the editor into two independent editors sharing one pool of buffers: each half
 has its own tabs, no file is in both strips at once, and closing the last tab of a half closes
 the split rather than leaving it empty. Closing the last tab of all leaves nothing open — an

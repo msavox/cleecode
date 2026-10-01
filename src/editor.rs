@@ -71,6 +71,15 @@ pub struct Editor {
     pub cursor_col: usize,
     pub top_line: usize,
     pub left_col: usize,
+    /// How far into its own line the view starts when lines wrap: `(line, row)` skips the first
+    /// `row` screen rows of `line`, and only while `line` is still `top_line`.
+    ///
+    /// Keyed by the line rather than kept as a bare count, so the dozen places that set
+    /// `top_line` — the wheel, Go to line, an agent's edit — need not know it exists: move the
+    /// top anywhere else and the offset stops applying by itself. Without it a paragraph taller
+    /// than the pane could never be read past its first screenful, since the view could only
+    /// ever start at the top of a line.
+    pub top_wrap: (usize, usize),
     /// Where the view was as of the last frame, and when it last moved, so the scrollbars can
     /// show while it is moving and fade out once it settles.
     ///
@@ -197,6 +206,7 @@ impl Editor {
             cursor_col: 0,
             top_line: 0,
             left_col: 0,
+            top_wrap: (0, 0),
             scroll_seen: (0, 0),
             scroll_moved: None,
             cursor_seen: (0, 0),
@@ -2323,50 +2333,224 @@ impl Editor {
         }
     }
 
-    /// Where the view has to start for the cursor's line to be drawn, in a pane that wraps.
+    /// Where the view has to start for the caret's row to be on screen, in a pane that wraps.
     ///
-    /// Counting logical lines is what the unwrapped case does, and here it is simply wrong: a
-    /// line twice the pane's width takes two rows, so `viewport_height` lines can be far more
-    /// than `viewport_height` rows. Putting the cursor's line last among them — which is what
-    /// `top_line = cursor_line + 1 - viewport_height` does — pushes it past the bottom edge,
-    /// where the renderer clips it.
-    ///
-    /// That is how an agent's edit could arrive highlighted and invisible: the view *did* scroll,
-    /// just not far enough, and from the outside those two look exactly alike.
-    ///
-    /// Folded lines are counted as though they were drawn, the way the unwrapped case counts
-    /// them. It errs towards scrolling less far up, which leaves the cursor on screen with room
-    /// to spare rather than off it.
+    /// Counted in screen rows, not lines: a line twice the pane's width takes two rows, so
+    /// `viewport_height` lines can be far more than `viewport_height` rows, and a paragraph can
+    /// be taller than the pane on its own. Above the view, the caret's row becomes the first one;
+    /// below it, the last one. Lines inside a collapsed fold take no rows, as on screen.
     fn scroll_to_cursor_wrapped(&mut self, viewport_height: usize, text_width: usize) {
-        if self.cursor_line < self.top_line {
+        let caret = self.caret_row(text_width);
+        let view = (self.top_line, self.top_skip());
+        if (self.cursor_line, caret.row) < view {
             self.top_line = self.cursor_line;
+            self.top_wrap = (self.cursor_line, caret.row);
             return;
         }
-        // Walked up from the cursor's own line, taking whole lines while they fit. Where it stops
-        // is the highest line that can be on screen with the cursor's line still whole — and when
-        // that is at or below where the view already starts, the walk simply arrives there and
-        // nothing moves.
-        let mut used = self.wrapped_rows(self.cursor_line, text_width);
-        let mut top = self.cursor_line;
-        while top > self.top_line {
-            let above = self.wrapped_rows(top - 1, text_width);
-            if used + above > viewport_height {
-                break;
+        // Walked up from the caret's row, spending the rows above it until the pane is full:
+        // where the walk stops is the highest start that keeps the caret on the bottom row.
+        let mut room = viewport_height - 1;
+        let start = if caret.row >= room {
+            (self.cursor_line, caret.row - room)
+        } else {
+            room -= caret.row;
+            let mut line = self.cursor_line;
+            loop {
+                let Some(prev) = self.prev_visible_line(line) else { break (line, 0) };
+                let rows = self.wrapped_rows(prev, text_width);
+                if rows >= room {
+                    break (prev, rows - room);
+                }
+                room -= rows;
+                line = prev;
             }
-            used += above;
-            top -= 1;
+        };
+        if view < start {
+            self.top_line = start.0;
+            self.top_wrap = start;
         }
-        self.top_line = top;
+    }
+
+    /// How many screen rows the view skips at the top of `top_line`. Zero once the top has
+    /// moved to another line: see `top_wrap`.
+    pub fn top_skip(&self) -> usize {
+        if self.top_wrap.0 == self.top_line { self.top_wrap.1 } else { 0 }
+    }
+
+    /// The line drawn just above `line`, stepping over a collapsed fold to its first line.
+    fn prev_visible_line(&self, line: usize) -> Option<usize> {
+        let prev = line.checked_sub(1)?;
+        Some(self.folds.iter().find(|&&(s, e)| prev > s && prev <= e).map_or(prev, |&(s, _)| s))
+    }
+
+    /// The column each screen row of `line` starts at, when the pane is `text_width` wide.
+    /// Always at least one row, starting at zero. See [`wrap_starts`].
+    pub fn wrap_starts(&self, line: usize, text_width: usize) -> Vec<usize> {
+        if text_width == 0 || line >= self.rope.len_lines() {
+            return vec![0];
+        }
+        let chars: Vec<char> =
+            self.rope.line(line).chars().take(self.line_char_len(line)).collect();
+        wrap_starts(&chars, text_width)
     }
 
     /// How many rows one line takes at this width — never fewer than one, since an empty line
-    /// still occupies a row. The same arithmetic the renderer does to place the caret.
+    /// still occupies a row.
     fn wrapped_rows(&self, line: usize, text_width: usize) -> usize {
-        if text_width == 0 || line >= self.rope.len_lines() {
-            return 1;
-        }
-        self.line_char_len(line).div_ceil(text_width).max(1)
+        self.wrap_starts(line, text_width).len()
     }
+
+    /// Which screen row of its line the caret is on, and where in that row.
+    pub fn caret_row(&self, text_width: usize) -> CaretRow {
+        let starts = self.wrap_starts(self.cursor_line, text_width);
+        let col = self.cursor_col.min(self.line_char_len(self.cursor_line));
+        let row = starts.partition_point(|&s| s <= col) - 1;
+        CaretRow { row, start: starts[row], x: col - starts[row] }
+    }
+
+    /// The rows a wrapped pane shows, top to bottom: the one layout the renderer draws, the
+    /// caret is placed in and a click is read against, so the three cannot disagree.
+    pub fn screen_rows(&self, viewport_height: usize, text_width: usize) -> Vec<ScreenRow> {
+        let mut rows = Vec::new();
+        let mut skip = self.top_skip();
+        for line in self.visible_rows_from(self.top_line, viewport_height) {
+            let starts = self.wrap_starts(line, text_width);
+            let len = self.line_char_len(line);
+            // A width that changed under the offset can leave it past the line's last row.
+            let first = skip.min(starts.len() - 1);
+            for (i, &start) in starts.iter().enumerate().skip(first) {
+                if rows.len() == viewport_height {
+                    return rows;
+                }
+                let end = starts.get(i + 1).copied().unwrap_or(len);
+                rows.push(ScreenRow { line, start, end, last: i + 1 == starts.len() });
+            }
+            skip = 0;
+        }
+        rows
+    }
+
+    /// Up one screen row in a pane that wraps: within the line while there is a row above,
+    /// then onto the last row of the line before. The caret keeps its place across the row,
+    /// as far as the row it lands on reaches.
+    ///
+    /// A rectangle moves by lines: its columns are columns of the file, and a screen row is
+    /// not one.
+    pub fn move_up_visual(&mut self, text_width: usize) {
+        if text_width == 0 || self.selection_block {
+            return self.move_up();
+        }
+        let starts = self.wrap_starts(self.cursor_line, text_width);
+        let caret = self.caret_row(text_width);
+        if caret.row > 0 {
+            let above = starts[caret.row - 1];
+            self.cursor_col = above + caret.x.min(caret.start - above - 1);
+            return;
+        }
+        let from = self.cursor_line;
+        self.move_up();
+        if self.cursor_line != from {
+            let last = *self.wrap_starts(self.cursor_line, text_width).last().unwrap_or(&0);
+            self.cursor_col = last + caret.x.min(self.line_char_len(self.cursor_line) - last);
+        }
+    }
+
+    /// Down one screen row: the mirror of [`Self::move_up_visual`].
+    pub fn move_down_visual(&mut self, text_width: usize) {
+        if text_width == 0 || self.selection_block {
+            return self.move_down();
+        }
+        let starts = self.wrap_starts(self.cursor_line, text_width);
+        let caret = self.caret_row(text_width);
+        if caret.row + 1 < starts.len() {
+            let below = starts[caret.row + 1];
+            let reach = match starts.get(caret.row + 2) {
+                Some(&next) => next - below - 1,
+                None => self.line_char_len(self.cursor_line) - below,
+            };
+            self.cursor_col = below + caret.x.min(reach);
+            return;
+        }
+        let from = self.cursor_line;
+        self.move_down();
+        if self.cursor_line != from {
+            let starts = self.wrap_starts(self.cursor_line, text_width);
+            let reach = match starts.get(1) {
+                Some(&next) => next - 1,
+                None => self.line_char_len(self.cursor_line),
+            };
+            self.cursor_col = caret.x.min(reach);
+        }
+    }
+
+    /// Moves the view by `by` screen rows in a pane that wraps — the wheel's step there, so a
+    /// long paragraph scrolls through rather than jumping past in one notch. Never past
+    /// `max_top`, the last line allowed at the top.
+    pub fn scroll_rows(&mut self, by: isize, text_width: usize, max_top: usize) {
+        for _ in 0..by.unsigned_abs() {
+            let skip = self.top_skip();
+            if by > 0 {
+                if skip + 1 < self.wrapped_rows(self.top_line, text_width) {
+                    self.top_wrap = (self.top_line, skip + 1);
+                } else if let Some(&next) = self.visible_rows_from(self.top_line, 2).get(1) {
+                    if next > max_top {
+                        break;
+                    }
+                    self.top_line = next;
+                } else {
+                    break;
+                }
+            } else if skip > 0 {
+                self.top_wrap = (self.top_line, skip - 1);
+            } else if let Some(prev) = self.prev_visible_line(self.top_line) {
+                self.top_line = prev;
+                self.top_wrap = (prev, self.wrapped_rows(prev, text_width) - 1);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// One screen row of a wrapped pane: the columns `start..end` of `line`. `last` marks the
+/// line's final row, the only one the caret may stand at the very end of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenRow {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub last: bool,
+}
+
+/// Where the caret sits in a wrapped line: its `row`, the column that row `start`s at, and how
+/// far along the row it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaretRow {
+    pub row: usize,
+    pub start: usize,
+    pub x: usize,
+}
+
+/// Where each screen row of a line starts when it is folded to `width` columns.
+///
+/// A row breaks after the last whitespace that fits, so words stay whole and the space that
+/// separated them hangs at the end of the row it follows; a word longer than the row is cut
+/// where the row ends. Only the display changes — the line in the file stays one line.
+///
+/// The last row is never left full. A caret at the end of a line stands one cell past its last
+/// character, and on a full row that cell is in the border, so a line that would fill its last
+/// row exactly breaks once more instead.
+pub fn wrap_starts(chars: &[char], width: usize) -> Vec<usize> {
+    let width = width.max(1);
+    let mut starts = vec![0];
+    let mut start = 0;
+    while chars.len() - start >= width {
+        let limit = start + width;
+        let at = (start + 1..=limit).rev().find(|&b| chars[b - 1].is_whitespace()).unwrap_or(limit);
+        starts.push(at);
+        start = at;
+    }
+    starts
 }
 
 /// Text with every line ending spelled as a bare '\n', the way the buffer holds them.
@@ -4012,15 +4196,12 @@ mod tests {
         ed.cursor_line = 50;
 
         ed.follow_cursor(ROWS, WIDTH, true);
-        // Three lines of three rows is nine, and a fourth would be twelve: the view starts as far
-        // up as it can with the cursor's line still whole.
-        assert_eq!(ed.top_line, 48);
-        let rows_above: usize =
-            (ed.top_line..ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
-        assert!(
-            rows_above + ed.wrapped_rows(ed.cursor_line, WIDTH) <= ROWS,
-            "the cursor's line has to fit inside the pane, not merely be near it"
-        );
+        // Three lines of three rows above the caret's row make nine, and the caret's own row is
+        // the tenth: the view starts as far up as it can with the caret on the bottom row.
+        assert_eq!((ed.top_line, ed.top_skip()), (47, 0));
+        let screen = ed.screen_rows(ROWS, WIDTH);
+        assert_eq!(screen.len(), ROWS);
+        assert_eq!(screen.last().map(|r| (r.line, r.start)), Some((50, 0)));
 
         // What the unwrapped arithmetic would have answered for the same buffer, which is the
         // defect stated as a number: line 41 at the top, and by the time the renderer reaches
@@ -4056,18 +4237,117 @@ mod tests {
         ed.cursor_line = 30;
         ed.follow_cursor(ROWS, WIDTH, true);
 
-        let used: usize = (ed.top_line..=ed.cursor_line).map(|l| ed.wrapped_rows(l, WIDTH)).sum();
-        assert!(used <= ROWS, "what is drawn from the top to the cursor has to fit: {used} rows");
-        // And it is the *highest* such line: taking one more would not fit.
-        if ed.top_line > 0 {
-            let with_one_more = used + ed.wrapped_rows(ed.top_line - 1, WIDTH);
-            assert!(with_one_more > ROWS, "the view must not sit lower than it has to");
-        }
+        // The caret's row is the bottom one, and the pane above it is full: the view sits no
+        // lower than it has to.
+        let screen = ed.screen_rows(ROWS, WIDTH);
+        assert_eq!(screen.len(), ROWS);
+        assert_eq!(screen.last().map(|r| r.line), Some(30));
 
         // Scrolling up is unchanged: a cursor above the view brings the view to it.
         ed.cursor_line = 3;
         ed.follow_cursor(ROWS, WIDTH, true);
-        assert_eq!(ed.top_line, 3);
+        assert_eq!((ed.top_line, ed.top_skip()), (3, 0));
+    }
+
+    fn chars(text: &str) -> Vec<char> {
+        text.chars().collect()
+    }
+
+    /// Words stay whole: a row breaks after the last space that fits, and the space hangs at the
+    /// end of the row it follows rather than opening the next one.
+    #[test]
+    fn a_line_wraps_between_words() {
+        assert_eq!(wrap_starts(&chars("the quick brown fox"), 10), vec![0, 10]);
+        assert_eq!(wrap_starts(&chars("the quick brown fox jumps"), 10), vec![0, 10, 20]);
+        // Short enough: one row.
+        assert_eq!(wrap_starts(&chars("short"), 10), vec![0]);
+        assert_eq!(wrap_starts(&[], 10), vec![0]);
+    }
+
+    /// A word longer than the row is cut where the row ends, since there is nowhere else to put it.
+    #[test]
+    fn a_word_longer_than_the_row_is_cut() {
+        assert_eq!(wrap_starts(&chars("abcdefghijklmnopqrstuvwxy"), 10), vec![0, 10, 20]);
+    }
+
+    /// A caret at the end of a line stands one cell past the text, so the last row must leave
+    /// that cell free: a line that would fill its last row exactly breaks once more.
+    #[test]
+    fn the_last_row_always_has_room_for_the_caret() {
+        assert_eq!(wrap_starts(&chars("abcdefghij"), 10), vec![0, 10]);
+        assert_eq!(wrap_starts(&chars("hello world"), 11), vec![0, 6]);
+    }
+
+    fn prose(lines: &[&str]) -> Editor {
+        let mut ed = Editor::empty();
+        ed.rope = Rope::from_str(&lines.join("\n"));
+        ed
+    }
+
+    /// The point of wrapping prose: ↑ and ↓ move through a paragraph row by row, keeping their
+    /// place along the row, and only leave the line from its first or last row.
+    #[test]
+    fn up_and_down_move_by_screen_rows_in_a_wrapped_line() {
+        // At width 10: "aaaa bbbb " "cccc dddd " "eeee".
+        let mut ed = prose(&["top", "aaaa bbbb cccc dddd eeee", "end"]);
+        ed.cursor_line = 1;
+        ed.cursor_col = 2;
+        ed.move_down_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 12));
+        ed.move_down_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 22));
+        // Off the last row, onto the next line.
+        ed.move_down_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (2, 2));
+        // And back: onto the paragraph's last row, not its first.
+        ed.move_up_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 22));
+        ed.move_up_visual(10);
+        ed.move_up_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 2));
+        ed.move_up_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (0, 2));
+    }
+
+    /// A row that does not reach as far as the caret's place stops it at its own end — on that
+    /// row, not at the start of the next one.
+    #[test]
+    fn a_short_row_stops_the_caret_on_itself() {
+        let mut ed = prose(&["aaaa bbbb cc", "x"]);
+        ed.cursor_line = 0;
+        ed.cursor_col = 8;
+        ed.move_down_visual(10);
+        // The last row, "cc", ends at 12: the caret stands after it.
+        assert_eq!((ed.cursor_line, ed.cursor_col), (0, 12));
+        ed.move_down_visual(10);
+        assert_eq!((ed.cursor_line, ed.cursor_col), (1, 1));
+        // Up from the line below, onto the first row of a line: the row ends before its hanging
+        // space's successor, so the caret stays on that row.
+        let mut ed = prose(&["aaaa bbbb cc"]);
+        ed.cursor_col = 12;
+        ed.move_up_visual(10);
+        assert_eq!(ed.caret_row(10).row, 0);
+    }
+
+    /// A paragraph taller than the pane can still be read to its end: the view can start part
+    /// way down a line, and the wheel walks it row by row.
+    #[test]
+    fn a_paragraph_taller_than_the_pane_scrolls_through() {
+        let long = "word ".repeat(40); // two hundred columns, twenty rows at width 10
+        let mut ed = prose(&[&long, "after"]);
+        ed.cursor_col = 150;
+        ed.follow_cursor(5, 10, true);
+        assert_eq!(ed.top_line, 0);
+        let screen = ed.screen_rows(5, 10);
+        assert_eq!(screen.last().map(|r| r.start), Some(150));
+        assert_eq!(ed.top_skip(), 11);
+
+        ed.scroll_rows(3, 10, 1);
+        assert_eq!((ed.top_line, ed.top_skip()), (0, 14));
+        ed.scroll_rows(100, 10, 1);
+        assert_eq!(ed.top_line, 1, "past the last row of the paragraph, onto the next line");
+        ed.scroll_rows(-1, 10, 1);
+        assert_eq!((ed.top_line, ed.top_skip()), (0, 20));
     }
 
     #[test]

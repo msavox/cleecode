@@ -4184,6 +4184,7 @@ impl App {
         crate::menu::MenuStates {
             plots_in_tabs: self.settings.plots_in_tabs || !crate::wsnap::can_open_a_window(),
             md_toolbar: self.settings.show_md_toolbar,
+            word_wrap: self.settings.word_wrap,
             follow_agent_edits: self.settings.follow_agent_edits,
             drawer_open: self.drawer_is_open(),
         }
@@ -15586,6 +15587,15 @@ impl App {
             MenuAction::ToggleMdToolbar => {
                 self.settings.show_md_toolbar = !self.settings.show_md_toolbar
             }
+            // Saved on the way out with the rest. The view is brought back to the caret at once:
+            // the same top line shows far less text wrapped than not, and the caret it was
+            // showing could be left below the pane until something moved it.
+            MenuAction::ToggleWordWrap => {
+                self.settings.word_wrap = !self.settings.word_wrap;
+                let (height, width) = self.editor_viewport;
+                let wrap = self.settings.word_wrap;
+                self.editor_mut().adjust_scroll(height, width, wrap);
+            }
             MenuAction::ToggleFollowAgentEdits => {
                 let was = self.settings.follow_agent_edits;
                 self.settings.follow_agent_edits = !was;
@@ -17035,8 +17045,15 @@ impl App {
             KeyCode::Delete => self.editor_mut().delete_forward(),
             KeyCode::Left => self.move_with_selection(shift, |e| e.move_left()),
             KeyCode::Right => self.move_with_selection(shift, |e| e.move_right()),
-            KeyCode::Up => self.move_with_selection(shift, |e| e.move_up()),
-            KeyCode::Down => self.move_with_selection(shift, |e| e.move_down()),
+            // By screen row when lines wrap, which is what the eye follows down a paragraph.
+            KeyCode::Up => {
+                let width = self.wrap_width();
+                self.move_with_selection(shift, |e| e.move_up_visual(width))
+            }
+            KeyCode::Down => {
+                let width = self.wrap_width();
+                self.move_with_selection(shift, |e| e.move_down_visual(width))
+            }
             KeyCode::Home => self.move_with_selection(shift, |e| e.move_home()),
             KeyCode::End => self.move_with_selection(shift, |e| e.move_end()),
             KeyCode::PageUp => {
@@ -18238,11 +18255,21 @@ impl App {
                 let idx = self.pane_editor_index(pane);
                 // A rendered preview holds no rope, so its length comes from the lines drawn.
                 let rendered = self.rendered_len(idx);
+                let wrap_width = match self.settings.word_wrap && rendered.is_none() {
+                    true => ui::editor_viewport(self, idx, *pane_rect).2,
+                    false => 0,
+                };
                 let Some(editor) = self.editors.get_mut(idx) else { return };
                 let max_top = match rendered {
                     Some(len) => len.saturating_sub(1),
                     None => editor.rope.len_lines().saturating_sub(1),
                 };
+                // Wrapped, the wheel moves the view by rows, so a paragraph taller than the pane
+                // scrolls through instead of being stepped over a line at a time.
+                if wrap_width > 0 {
+                    editor.scroll_rows(delta, wrap_width, max_top);
+                    return;
+                }
                 editor.top_line = if delta < 0 {
                     editor.top_line.saturating_sub((-delta) as usize)
                 } else {
@@ -18632,6 +18659,12 @@ impl App {
         content
     }
 
+    /// The width rows wrap at in the focused pane, or zero when lines do not wrap — which the
+    /// row-wise motions take to mean "move by lines".
+    fn wrap_width(&self) -> usize {
+        if self.settings.word_wrap { self.editor_viewport.1 } else { 0 }
+    }
+
     /// The document position a click on the editor body points at, or `None` for a press above
     /// or left of the content. Split from [`Self::position_cursor_from_click`] so the click
     /// ladder can ask *where* a press landed without moving anything: a fourth click has to
@@ -18645,6 +18678,22 @@ impl App {
             ui::gutter_width(self.editor().rope.len_lines(), self.settings.show_line_numbers);
         let rel_row = (row - inner.y) as usize;
         let rel_col = (col - inner.x) as i32 - gutter as i32;
+        if self.settings.word_wrap {
+            // Read against the same rows the renderer drew, so a click on a continuation lands
+            // in the line it continues. Below the last row means the end of the text.
+            let width = inner.width.saturating_sub(gutter) as usize;
+            let rows = self.editor().screen_rows(rel_row + 1, width);
+            let hit = rows.get(rel_row).copied();
+            let Some(r) = hit.or(rows.last().copied()) else { return Some((0, 0)) };
+            if hit.is_none() {
+                return Some((r.line, r.end));
+            }
+            // A row that is not its line's last ends where the next begins, and a caret there
+            // would be drawn at the start of that next row: the last cell of this one is as far
+            // as a click on it reaches.
+            let reach = if r.last { r.end - r.start } else { r.end - r.start - 1 };
+            return Some((r.line, r.start + (rel_col.max(0) as usize).min(reach)));
+        }
         let top_line = self.editor().top_line;
         let rows = self.editor().visible_rows_from(top_line, rel_row + 1);
         let target_line = *rows.last().unwrap_or(&top_line);

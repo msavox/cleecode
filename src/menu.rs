@@ -133,6 +133,7 @@ pub enum MenuAction {
     MdLink,
     MdQuote,
     MdFence,
+    ToggleWordWrap,
     ToggleMdToolbar,
     ToggleFollowAgentEdits,
 }
@@ -268,6 +269,7 @@ impl MenuAction {
         MenuAction::MdLink,
         MenuAction::MdQuote,
         MenuAction::MdFence,
+        MenuAction::ToggleWordWrap,
         MenuAction::ToggleMdToolbar,
         MenuAction::ToggleFollowAgentEdits,
     ];
@@ -314,6 +316,8 @@ pub struct MenuStates {
     /// this instant: over a Rust file there is no bar either way, and the menu is answering "is
     /// it switched on", which is the question you turn it off with.
     pub md_toolbar: bool,
+    /// Whether long lines are folded onto the next row of the screen.
+    pub word_wrap: bool,
     /// Whether files touched from outside open themselves beside your work. The setting, again:
     /// outside a repository it is on and does nothing, and the status line is where that is
     /// said — a menu that read "off" there would be answering a different question.
@@ -334,6 +338,9 @@ pub fn item_value(lang: Lang, action: MenuAction, states: MenuStates) -> Option<
         )),
         MenuAction::ToggleMdToolbar => {
             Some(i18n::t(lang, if states.md_toolbar { Key::On } else { Key::Off }))
+        }
+        MenuAction::ToggleWordWrap => {
+            Some(i18n::t(lang, if states.word_wrap { Key::On } else { Key::Off }))
         }
         MenuAction::ToggleFollowAgentEdits => {
             Some(i18n::t(lang, if states.follow_agent_edits { Key::On } else { Key::Off }))
@@ -359,12 +366,15 @@ pub fn item_value_width(lang: Lang, action: MenuAction) -> usize {
         .into_iter()
         .flat_map(|plots_in_tabs| {
             [true, false].into_iter().flat_map(move |md_toolbar| {
-                [true, false].into_iter().flat_map(move |follow_agent_edits| {
-                    [true, false].into_iter().map(move |drawer_open| MenuStates {
-                        plots_in_tabs,
-                        md_toolbar,
-                        follow_agent_edits,
-                        drawer_open,
+                [true, false].into_iter().flat_map(move |word_wrap| {
+                    [true, false].into_iter().flat_map(move |follow_agent_edits| {
+                        [true, false].into_iter().map(move |drawer_open| MenuStates {
+                            plots_in_tabs,
+                            md_toolbar,
+                            word_wrap,
+                            follow_agent_edits,
+                            drawer_open,
+                        })
                     })
                 })
             })
@@ -582,6 +592,10 @@ pub fn menu_defs() -> Vec<MenuDef> {
                 // The bar teaches the syntax it writes, so it is meant to be switched off once
                 // it has: this row reads out which way it is set, because "is it me or is it
                 // this file" is the question somebody who cannot see it arrives with.
+                // A switch for reading: prose wants it on, code mostly off, and the same person
+                // goes from one to the other in an afternoon — so it is a row here, and reads out
+                // which way it is set, rather than a line buried in the settings.
+                item(Key::ItemToggleWordWrap, MenuAction::ToggleWordWrap, None),
                 item(Key::ItemToggleMdToolbar, MenuAction::ToggleMdToolbar, None),
                 // Reads out its own state for the same reason the bar above it does: it is a
                 // switch whose effect is that something appears by itself, and "is this on"
@@ -1079,6 +1093,7 @@ mod tests {
                 MenuStates {
                     plots_in_tabs: true,
                     md_toolbar: true,
+                    word_wrap: false,
                     follow_agent_edits: false,
                     drawer_open: false,
                 },
@@ -1089,6 +1104,7 @@ mod tests {
                 MenuStates {
                     plots_in_tabs: false,
                     md_toolbar: true,
+                    word_wrap: false,
                     follow_agent_edits: false,
                     drawer_open: false,
                 },
@@ -1117,6 +1133,7 @@ mod tests {
                             MenuStates {
                                 plots_in_tabs: true,
                                 md_toolbar: true,
+                                word_wrap: false,
                                 follow_agent_edits: false,
                                 drawer_open: false
                             }
