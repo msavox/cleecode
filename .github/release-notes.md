@@ -1,3 +1,20 @@
+## What's new in 0.30.0
+
+**Word wrap, for reading prose.** A line too long for the pane now folds onto the rows below it,
+breaking between words, and switches on and off from **View ▸ Word wrap** — which also says which
+way it is set. Only the screen changes: the file keeps exactly the lines you typed.
+
+The switch was there before, hidden in the settings and only half built: the text was wrapped by
+the drawing library, so continuations started under the line numbers, the caret counted characters
+while the text broke between words and in a paragraph landed a row too high, a click on a
+continuation went to the wrong line, and the arrows jumped a whole paragraph at once.
+
+Now there is one layout of screen rows that the drawing, the caret, the mouse and the scrolling
+all read from. The line number stands on the first row and the continuations line up under the
+text. `↑` and `↓` move one screen row at a time, keeping their place along it. A click on a
+continuation lands where it points. And the view can start part way down a line, so a paragraph
+taller than the pane can be read to its end, with the wheel scrolling it row by row.
+
 ## What's new in 0.29.1
 
 **`clee -e` on a name that is not there now starts the file instead of refusing it.** Opening a
