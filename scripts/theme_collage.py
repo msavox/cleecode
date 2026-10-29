@@ -22,6 +22,7 @@ THEMES = [
     ("theme-solarized-dark.png", "Solarized Dark"),
     ("theme-eighties.png", "Eighties"),
     ("theme-mocha.png", "Mocha"),
+    ("theme-typist.png", "Typist"),
     ("theme-cleecode-light.png", "CleeCode Light"),
     ("theme-solarized-light.png", "Solarized Light"),
     ("theme-ocean-light.png", "Ocean Light"),

@@ -315,7 +315,7 @@ gutter, in any file now — and stopping marks the line and opens a panel with t
 frame's variables and your watch expressions, where `c`, `n`, `s` and `o` do what gdb taught
 your fingers they do.
 
-**Nine themes, five dark and four light.** The button beside the background toggle on the menu
+**Ten themes, six dark and four light.** The button beside the background toggle on the menu
 bar opens the list, or *View → Theme…* if your hands are on the keyboard. The choice is written
 out at once, because the reason to reach for it is usually that the screen has become hard to
 read, and having to make it again next session would be its own small misery.

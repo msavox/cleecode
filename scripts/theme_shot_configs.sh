@@ -18,7 +18,7 @@ set -euo pipefail
 root="${1:-${TMPDIR:-/tmp}/clee-theme-shots}"
 rm -rf "$root"
 
-for theme in cleecode turbo solarized-dark eighties mocha \
+for theme in cleecode turbo solarized-dark eighties mocha typist \
              cleecode-light solarized-light ocean-light github; do
     mkdir -p "$root/$theme/cleecode"
     # Just the theme. The retired opaque_background key used to be written here so the

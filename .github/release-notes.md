@@ -1,3 +1,14 @@
+## What's new in 0.30.1
+
+**A tenth theme: Typist.** The look of a typing test — a charcoal ground, cream text and a single
+yellow for the caret, the selected row and the keywords — with grey doing the rest of the work.
+Pick it from the theme button on the menu bar or *View → Theme…*.
+
+It is the first theme whose code colours are CleeCode's own rather than one of the stock syntax
+themes: none of those is grey and yellow, so the editor now carries a syntax theme it wrote itself,
+built into the binary like the others. Modified files are amber rather than the accent's yellow,
+so a dirty buffer never reads as the focused one.
+
 ## What's new in 0.30.0
 
 **Word wrap, for reading prose.** A line too long for the pane now folds onto the rows below it,

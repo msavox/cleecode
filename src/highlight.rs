@@ -15,6 +15,74 @@ use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 /// screenful of replay and a sixty-fourth of the memory.
 const STRIDE: usize = 64;
 
+/// The code colours of the Typist theme, which has no stock syntect theme to borrow them from
+/// because its palette is our own. Built here rather than read from a `.tmTheme`: loading one
+/// needs syntect's plist feature, and a plist parser in the binary for one table of colours is a
+/// dependency bought to avoid writing the table.
+///
+/// Almost everything is text. The yellow is kept for the tokens worth finding at a glance —
+/// keywords, literals, headings — and grey carries the structure, the way the frame does.
+fn typist_syntax() -> Theme {
+    use std::str::FromStr;
+    use syntect::highlighting::{
+        Color as Rgba, ScopeSelectors, StyleModifier, ThemeItem, ThemeSettings,
+    };
+    let rgb = |r, g, b| Rgba { r, g, b, a: 0xFF };
+    let (cream, yellow) = (rgb(209, 208, 197), rgb(226, 183, 20));
+    let (grey, comment) = (rgb(139, 140, 136), rgb(100, 102, 105));
+    let (string, faded) = (rgb(168, 167, 156), rgb(191, 189, 176));
+    let rules: [(&str, _, Option<FontStyle>); 13] = [
+        ("comment, punctuation.definition.comment", comment, Some(FontStyle::ITALIC)),
+        ("keyword, storage, variable.language, entity.name.tag", yellow, None),
+        ("keyword.operator, punctuation, meta.brace", grey, None),
+        ("constant, support.constant, string.regexp", yellow, None),
+        ("string, markup.raw", string, None),
+        ("constant.character.escape", yellow, None),
+        ("entity.name.function, support.function", cream, Some(FontStyle::BOLD)),
+        (
+            "entity.name.type, entity.name.class, support.type, support.class",
+            faded,
+            Some(FontStyle::ITALIC),
+        ),
+        (
+            "entity.other.attribute-name, variable.other.member, support.type.property-name",
+            faded,
+            None,
+        ),
+        ("markup.heading, entity.name.section", yellow, Some(FontStyle::BOLD)),
+        ("markup.underline.link, string.other.link", yellow, None),
+        ("markup.inserted", rgb(158, 192, 122), None),
+        ("markup.deleted, invalid", rgb(202, 71, 84), None),
+    ];
+    Theme {
+        name: Some("Typist".into()),
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(cream),
+            background: Some(rgb(50, 52, 55)),
+            caret: Some(yellow),
+            selection: Some(rgb(74, 76, 79)),
+            line_highlight: Some(rgb(44, 46, 49)),
+            ..ThemeSettings::default()
+        },
+        scopes: rules
+            .into_iter()
+            .map(|(scope, colour, font_style)| ThemeItem {
+                scope: ScopeSelectors::from_str(scope).expect("a scope written here parses"),
+                style: StyleModifier { foreground: Some(colour), background: None, font_style },
+            })
+            .collect(),
+    }
+}
+
+/// syntect's defaults plus the themes CleeCode writes itself. One function, so the highlighter
+/// and the test that checks every theme names a real syntax theme are reading the same set.
+pub fn theme_set() -> ThemeSet {
+    let mut set = ThemeSet::load_defaults();
+    set.themes.insert("Typist".to_string(), typist_syntax());
+    set
+}
+
 pub struct Highlighter {
     syntax_set: SyntaxSet,
     theme: Theme,
@@ -99,7 +167,7 @@ impl Highlighter {
         // a hundred-odd grammars the world actually writes — as a precompiled dump, so this
         // costs a load from a byte slice rather than parsing grammars at startup.
         let syntax_set = two_face::syntax::extra_newlines();
-        let theme_set = ThemeSet::load_defaults();
+        let theme_set = theme_set();
         let theme = theme_set
             .themes
             .get(wanted)

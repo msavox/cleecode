@@ -200,6 +200,7 @@ pub enum Theme {
     SolarizedLight,
     Eighties,
     Mocha,
+    Typist,
     OceanLight,
     #[serde(rename = "github")]
     GitHub,
@@ -208,12 +209,13 @@ pub enum Theme {
 impl Theme {
     /// Dark ones first, then light, each group in the order they were added. The picker shows
     /// them in this order and nothing sorts it, so this list *is* the menu.
-    pub const ALL: [Theme; 9] = [
+    pub const ALL: [Theme; 10] = [
         Theme::CleeCode,
         Theme::Turbo,
         Theme::SolarizedDark,
         Theme::Eighties,
         Theme::Mocha,
+        Theme::Typist,
         Theme::CleeCodeLight,
         Theme::SolarizedLight,
         Theme::OceanLight,
@@ -231,6 +233,7 @@ impl Theme {
             Theme::SolarizedLight => "Solarized Light",
             Theme::Eighties => "Eighties",
             Theme::Mocha => "Mocha",
+            Theme::Typist => "Typist",
             Theme::OceanLight => "Ocean Light",
             Theme::GitHub => "GitHub",
         }
@@ -261,6 +264,9 @@ impl Theme {
             Theme::SolarizedLight => "Solarized (light)",
             Theme::Eighties => "base16-eighties.dark",
             Theme::Mocha => "base16-mocha.dark",
+            // Not one of syntect's: the palette is our own, so the code colours are too, and
+            // they are built in beside the defaults (see `highlight::theme_set`).
+            Theme::Typist => "Typist",
             Theme::OceanLight => "base16-ocean.light",
             Theme::GitHub => "InspiredGitHub",
         }
@@ -275,6 +281,7 @@ impl Theme {
             Theme::SolarizedLight => SOLARIZED_LIGHT,
             Theme::Eighties => EIGHTIES,
             Theme::Mocha => MOCHA,
+            Theme::Typist => TYPIST,
             Theme::OceanLight => OCEAN_LIGHT,
             Theme::GitHub => GITHUB,
         }
@@ -715,6 +722,56 @@ const MOCHA: Palette = Palette {
     ],
 };
 
+/// The typing-test look: a charcoal ground, cream text and one yellow, which is the caret, the
+/// selected row and the keyword alike. Everything else is grey, and grey is doing the work — the
+/// theme is quiet on purpose, so that the one colour it has is always the thing to look at.
+///
+/// The palette is ours and so is the name, by the licensing rule in the ROADMAP: the look is a
+/// genre, and a genre is free to quote, where a scheme's name is not.
+const TYPIST: Palette = Palette {
+    background: Color::Rgb(50, 52, 55),
+    text: Color::Rgb(209, 208, 197),
+    text_muted: Color::Rgb(139, 140, 136),
+    text_dim: Color::Rgb(100, 102, 105),
+    accent: Color::Rgb(226, 183, 20),
+    on_accent: Color::Rgb(50, 52, 55),
+    bar: Color::Rgb(44, 46, 49),
+    on_bar: Color::Rgb(139, 140, 136),
+    surface: Color::Rgb(58, 60, 63),
+    surface_dim: Color::Rgb(44, 46, 49),
+    tab_inactive: Color::Rgb(44, 46, 49),
+    success: Color::Rgb(158, 192, 122),
+    // Amber rather than the accent's yellow: a modified file and the selected row are different
+    // news, and with one yellow doing both a dirty buffer would read as the focused one.
+    warning: Color::Rgb(214, 138, 52),
+    danger: Color::Rgb(202, 71, 84),
+    info: Color::Rgb(124, 159, 196),
+    special: Color::Rgb(180, 142, 173),
+    graph_extra: Color::Rgb(136, 184, 176),
+    input: Color::Rgb(226, 183, 20),
+    bright: Color::Rgb(240, 239, 230),
+    selection: Color::Rgb(74, 76, 79),
+    current_line: Color::Rgb(70, 64, 36),
+    changed_line: Color::Rgb(158, 192, 122),
+    // The ground pulled just far enough towards the green to be found, and no further: a theme
+    // this quiet would be shouted over by anything brighter spread across whole lines.
+    changed_line_bg: Color::Rgb(50, 72, 50),
+    folder: Color::Rgb(226, 183, 20),
+    accelerator: None,
+    bold_chrome: false,
+    resize_border: Color::Rgb(232, 120, 40),
+    // The theme's own colours and nothing else, warm to cool: the yellow it signs everything
+    // with first, then the ones it keeps for news.
+    handle_stripes: [
+        Color::Rgb(226, 183, 20),
+        Color::Rgb(214, 138, 52),
+        Color::Rgb(202, 71, 84),
+        Color::Rgb(180, 142, 173),
+        Color::Rgb(124, 159, 196),
+        Color::Rgb(158, 192, 122),
+    ],
+};
+
 /// base16 Ocean on paper. The scheme's accents were chosen against a near-black and are washed
 /// out on white, so the six that carry meaning are the same hues taken darker — the alternative
 /// was a status bar whose warnings and errors are the same pale wash from across the room.
@@ -913,7 +970,7 @@ mod tests {
     /// to whatever `themes.values().next()` happens to be, which is silent and wrong.
     #[test]
     fn every_theme_names_a_syntax_theme_that_exists() {
-        let set = syntect::highlighting::ThemeSet::load_defaults();
+        let set = crate::highlight::theme_set();
         for theme in Theme::ALL {
             assert!(
                 set.themes.contains_key(theme.syntax_theme()),
@@ -934,9 +991,14 @@ mod tests {
         {
             assert!(theme.paints_its_own_background(), "{} must paint", theme.name());
         }
-        for theme in
-            [Theme::CleeCode, Theme::Turbo, Theme::SolarizedDark, Theme::Eighties, Theme::Mocha]
-        {
+        for theme in [
+            Theme::CleeCode,
+            Theme::Turbo,
+            Theme::SolarizedDark,
+            Theme::Eighties,
+            Theme::Mocha,
+            Theme::Typist,
+        ] {
             assert!(
                 !theme.paints_its_own_background(),
                 "{} has light text and can be left translucent",
@@ -969,6 +1031,7 @@ mod tests {
             (Theme::SolarizedDark, "solarized-dark"),
             (Theme::Eighties, "eighties"),
             (Theme::Mocha, "mocha"),
+            (Theme::Typist, "typist"),
             (Theme::CleeCodeLight, "cleecode-light"),
             (Theme::SolarizedLight, "solarized-light"),
             (Theme::OceanLight, "ocean-light"),
