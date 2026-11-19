@@ -13,7 +13,7 @@ jobs:
   # macOS is the supported platform, so this one gates.
   test:
     name: Build and test (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -71,11 +71,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     env:
       # Every driver timeout is written for a developer's machine; the runners are not one. A
-      # fresh macos-14 image has taken over thirty seconds to execute the first command of a
+      # fresh macos image has taken over thirty seconds to execute the first command of a
       # brand-new shell (cold dyld caches, the malware scan), and ubuntu's disks have outlived
       # the large-file patience a laptop's SSD set. The waits are all conditions, so a runner
       # having a good day pays nothing for the slack.
@@ -128,7 +128,7 @@ jobs:
       # the file tree, and nothing needs to be installed to read it.
       - run: python3 scripts/drive_root.py target/debug/clee
       # Debugs a C program it compiles itself, through the real adapter: it skips with a sentence
-      # on ubuntu-22.04, whose gdb is 12 and has no DAP in it, and runs for real on macos-14, where
+      # on ubuntu-22.04, whose gdb is 12 and has no DAP in it, and runs for real on macos-15, where
       # Xcode's lldb-dap answers.
       - run: python3 scripts/drive_dap.py target/debug/clee
 
@@ -137,7 +137,7 @@ jobs:
   # rustfmt.toml, which is one line and says why.
   formatting:
     name: Formatting
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -151,7 +151,7 @@ jobs:
   lints:
     name: Lints (informational)
     continue-on-error: true
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

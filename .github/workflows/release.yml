@@ -51,13 +51,13 @@ jobs:
       matrix:
         include:
           - label: macOS arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             slug: macos-arm64
             # Runs natively on the runner, so the built binary can be smoke-checked.
             smoke: true
           - label: macOS x86_64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
             slug: macos-x86_64
             # Cross-built on an arm64 runner, which has no Rosetta: it cannot be run here.
