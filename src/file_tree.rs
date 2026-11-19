@@ -140,11 +140,57 @@ pub enum Activation {
     NavigateUp,
 }
 
+/// Which slice of a one-line-per-row list is on screen: the first row drawn and how many fit.
+///
+/// Kept across frames rather than worked out again from zero, for two reasons. A list handed a
+/// fresh offset of 0 every frame scrolls only as far as it has to to show the selection, so the
+/// selection sits pinned to the bottom edge, and the view moves whenever the selection does. And
+/// a click has to know which row is under the pointer. Reading "row on screen" as "row in the
+/// list" only holds while nothing has scrolled: once the tree had scrolled, a click on the
+/// tenth line on screen selected the tenth file from the top, and the view jumped back up to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListView {
+    pub offset: usize,
+    pub height: usize,
+}
+
+impl ListView {
+    /// Moves the view as little as it can so the selected row is on screen, and keeps it from
+    /// running past the end of the list. Returns the offset to draw from.
+    pub fn follow(&mut self, selected: usize, len: usize, height: usize) -> usize {
+        self.height = height;
+        if height == 0 || len == 0 {
+            self.offset = 0;
+            return 0;
+        }
+        if selected < self.offset {
+            self.offset = selected;
+        } else if selected >= self.offset + height {
+            self.offset = selected + 1 - height;
+        }
+        // A list that got shorter (a folder collapsed, a file deleted) shouldn't leave blank
+        // lines under its last row while rows above it are scrolled out of sight.
+        self.offset = self.offset.min(len.saturating_sub(height));
+        self.offset
+    }
+
+    /// The list row drawn on the `line`-th line of the frame's interior, if any is.
+    pub fn row_at(&self, line: usize, len: usize) -> Option<usize> {
+        if self.height != 0 && line >= self.height {
+            return None;
+        }
+        let row = self.offset + line;
+        (row < len).then_some(row)
+    }
+}
+
 pub struct FileTree {
     pub root: FileNode,
     pub selected: usize,
     pub visible: Vec<VisibleEntry>,
     pub show_hidden: bool,
+    /// What the last frame drew. See `ListView`.
+    pub view: ListView,
 }
 
 impl FileTree {
@@ -156,7 +202,13 @@ impl FileTree {
         let mut root = FileNode::new(root_path);
         root.load_children();
         root.expanded = true;
-        let mut tree = FileTree { root, selected: 0, visible: Vec::new(), show_hidden };
+        let mut tree = FileTree {
+            root,
+            selected: 0,
+            visible: Vec::new(),
+            show_hidden,
+            view: ListView::default(),
+        };
         tree.rebuild_visible();
         tree
     }
@@ -468,6 +520,8 @@ pub struct ShellList {
     /// How many names the folder held beyond the ones listed. See `SHELL_LIST_MAX`.
     pub overflow: usize,
     show_hidden: bool,
+    /// What the last frame drew. See `ListView`.
+    pub view: ListView,
 }
 
 impl ShellList {
@@ -475,7 +529,14 @@ impl ShellList {
     /// requires it: the preference is one thing, and two panes disagreeing about it is a bug
     /// that looks like a missing file.
     pub fn new(show_hidden: bool) -> Self {
-        ShellList { dir: None, rows: Vec::new(), selected: 0, overflow: 0, show_hidden }
+        ShellList {
+            dir: None,
+            rows: Vec::new(),
+            selected: 0,
+            overflow: 0,
+            show_hidden,
+            view: ListView::default(),
+        }
     }
 
     /// Shows another folder, from the top. The selection does not travel: it belonged to the
@@ -726,6 +787,26 @@ mod tests {
         assert!(names(&tree).contains(&".hidden_file".to_string()));
         tree.set_show_hidden(false);
         assert!(!names(&tree).contains(&".hidden_file".to_string()));
+    }
+
+    /// A click on a scrolled list lands on the row drawn under it, not on the row that would be
+    /// there if the list started at the top.
+    #[test]
+    fn list_view_maps_clicks_through_the_scroll() {
+        let mut view = ListView::default();
+        // 100 rows, 10 on screen, selection moved down to 50: the view follows it.
+        assert_eq!(view.follow(50, 100, 10), 41);
+        assert_eq!(view.row_at(0, 100), Some(41));
+        assert_eq!(view.row_at(3, 100), Some(44));
+        // A click inside the view moves the selection without moving the view.
+        assert_eq!(view.follow(44, 100, 10), 41);
+        assert_eq!(view.row_at(10, 100), None, "past the frame's last line");
+        // Scrolling back above the view brings its top to the selection.
+        assert_eq!(view.follow(5, 100, 10), 5);
+        // A list that shrank doesn't leave the view scrolled past its end.
+        view.offset = 90;
+        assert_eq!(view.follow(95, 96, 10), 86);
+        assert_eq!(view.follow(0, 0, 10), 0);
     }
 
     fn up_row_offset(tree: &FileTree) -> usize {

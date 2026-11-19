@@ -16828,10 +16828,10 @@ impl App {
         if row < inner.y {
             return;
         }
-        let idx = (row - inner.y) as usize;
-        if idx >= self.shell_list.rows.len() {
+        let line = (row - inner.y) as usize;
+        let Some(idx) = self.shell_list.view.row_at(line, self.shell_list.rows.len()) else {
             return;
-        }
+        };
         let double = matches!(
             self.last_shell_click,
             Some((last, at)) if last == idx && at.elapsed() < DOUBLE_CLICK_THRESHOLD
@@ -17829,8 +17829,9 @@ impl App {
                         self.focus_tree();
                         let inner = ui::inner_rect(sidebar);
                         if row >= inner.y {
-                            let idx = (row - inner.y) as usize;
-                            if idx < self.file_tree.visible.len() {
+                            let line = (row - inner.y) as usize;
+                            let len = self.file_tree.visible.len();
+                            if let Some(idx) = self.file_tree.view.row_at(line, len) {
                                 let is_double_click = matches!(
                                     self.last_tree_click,
                                     Some((last_idx, t)) if last_idx == idx && t.elapsed() < DOUBLE_CLICK_THRESHOLD
@@ -18811,8 +18812,8 @@ impl App {
             self.sidebar_pane_focus = SidebarPane::Shell;
             let inner = ui::inner_rect(shell);
             if row >= inner.y {
-                let idx = (row - inner.y) as usize;
-                if idx < self.shell_list.rows.len() {
+                let line = (row - inner.y) as usize;
+                if let Some(idx) = self.shell_list.view.row_at(line, self.shell_list.rows.len()) {
                     self.shell_list.selected = idx;
                 }
             }
@@ -18824,8 +18825,10 @@ impl App {
                 self.focus_tree();
                 let inner = ui::inner_rect(sidebar);
                 if row >= inner.y {
-                    let idx = (row - inner.y) as usize;
-                    if idx < self.file_tree.visible.len() {
+                    let line = (row - inner.y) as usize;
+                    if let Some(idx) =
+                        self.file_tree.view.row_at(line, self.file_tree.visible.len())
+                    {
                         self.file_tree.selected = idx;
                     }
                 }

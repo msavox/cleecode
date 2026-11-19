@@ -4211,8 +4211,11 @@ fn draw_file_tree(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let mut state = ListState::default();
-    if !app.file_tree.visible.is_empty() {
+    let height = inner_rect(area).height as usize;
+    let len = app.file_tree.visible.len();
+    let offset = app.file_tree.view.follow(app.file_tree.selected, len, height);
+    let mut state = ListState::default().with_offset(offset);
+    if len > 0 {
         state.select(Some(app.file_tree.selected));
     }
 
@@ -4315,8 +4318,13 @@ fn draw_shell_list(f: &mut Frame, app: &mut App, area: Rect) {
         ))));
     }
 
-    let mut state = ListState::default();
-    if !app.shell_list.rows.is_empty() {
+    // The rows only: the trailing notes are drawn when there is room for them, and never
+    // selected, so the view follows the listing and nothing else.
+    let height = inner_rect(area).height as usize;
+    let len = app.shell_list.rows.len();
+    let offset = app.shell_list.view.follow(app.shell_list.selected, len, height);
+    let mut state = ListState::default().with_offset(offset);
+    if len > 0 {
         state.select(Some(app.shell_list.selected));
     }
     let list = List::new(items)

@@ -1,3 +1,12 @@
+## What's new in 0.30.2
+
+**Clicking a scrolled file tree no longer jumps back to the top.** Once the tree was long enough
+to scroll, a click landed on the row that would have been under the pointer had the list started
+at the top — so it selected a file near the beginning and the view leapt up to it. Clicks now pick
+the row actually drawn there, and the view stays put instead of keeping the selection pinned to
+its bottom edge. The shell pane's listing had the same fault and is fixed with it, for left and
+right clicks alike.
+
 ## What's new in 0.30.1
 
 **A tenth theme: Typist.** The look of a typing test — a charcoal ground, cream text and a single
